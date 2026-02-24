@@ -1,0 +1,9 @@
+name: adjustment-engine
+channels:
+  - snowflake
+dependencies:
+  - python=3.11
+  - streamlit=1.35.0
+  - snowflake-snowpark-python=1.21.0
+  - snowflake-ml-python=1.6.0
+  - pandas=2.2.0

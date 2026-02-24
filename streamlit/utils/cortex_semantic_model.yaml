@@ -1,0 +1,147 @@
+# Cortex Analyst Semantic Model for Adjustment Engine
+# Upload to: @ADJUSTMENT_DB.APP.AI_STAGE/adjustment_semantic_model.yaml
+
+name: adjustment_engine
+description: >
+  Semantic model for querying fact table adjustments.
+  Covers adjustment headers, line items, and adjusted fact data.
+
+tables:
+  - name: adjustment_headers
+    base_table:
+      database: ADJUSTMENT_DB
+      schema: CORE
+      table: ADJ_HEADER
+    description: Adjustment request metadata including type, status, and audit fields.
+    columns:
+      - name: ADJ_ID
+        description: Unique adjustment identifier
+        data_type: NUMBER
+      - name: ADJ_TYPE
+        description: "Type of adjustment: FLATTEN (zero out), SCALE (multiply), or ROLL (copy from previous day)"
+        data_type: VARCHAR
+      - name: ADJ_STATUS
+        description: "Current status: DRAFT, PENDING_APPROVAL, APPROVED, REJECTED, APPLIED, REVERSED"
+        data_type: VARCHAR
+      - name: TARGET_DATE
+        description: The business date being adjusted
+        data_type: DATE
+      - name: SCALE_FACTOR
+        description: Multiplication factor (for SCALE and ROLL types)
+        data_type: NUMBER
+      - name: ROLL_SOURCE_DATE
+        description: Source date to copy from (ROLL type only)
+        data_type: DATE
+      - name: AFFECTED_ROWS
+        description: Number of fact rows affected by this adjustment
+        data_type: NUMBER
+      - name: BUSINESS_REASON
+        description: Business justification for the adjustment
+        data_type: VARCHAR
+      - name: TICKET_REFERENCE
+        description: Reference to external ticket (JIRA, ServiceNow, etc.)
+        data_type: VARCHAR
+      - name: CREATED_BY
+        description: User who created the adjustment
+        data_type: VARCHAR
+      - name: CREATED_AT
+        description: When the adjustment was created
+        data_type: TIMESTAMP_NTZ
+      - name: APPROVED_BY
+        description: User who approved the adjustment
+        data_type: VARCHAR
+      - name: APPLIED_AT
+        description: When the adjustment was applied
+        data_type: TIMESTAMP_NTZ
+
+  - name: adjustment_line_items
+    base_table:
+      database: ADJUSTMENT_DB
+      schema: CORE
+      table: ADJ_LINE_ITEM
+    description: Individual delta values per fact row per adjustment.
+    columns:
+      - name: LINE_ID
+        description: Line item identifier
+        data_type: NUMBER
+      - name: ADJ_ID
+        description: Parent adjustment ID
+        data_type: NUMBER
+      - name: BUSINESS_DATE
+        description: Business date of the adjusted row
+        data_type: DATE
+      - name: ENTITY_KEY
+        description: Entity dimension (e.g., US_BANK, EU_BANK)
+        data_type: VARCHAR
+      - name: PRODUCT_KEY
+        description: Product dimension (e.g., FX_SPOT, IR_SWAP)
+        data_type: VARCHAR
+      - name: ACCOUNT_KEY
+        description: Account dimension
+        data_type: VARCHAR
+      - name: CURRENCY_KEY
+        description: Currency dimension
+        data_type: VARCHAR
+      - name: AMOUNT_DELTA
+        description: The delta/offset for the amount measure
+        data_type: NUMBER
+      - name: AMOUNT_ORIGINAL
+        description: The original amount before adjustment
+        data_type: NUMBER
+
+  - name: adjusted_fact
+    base_table:
+      database: ADJUSTMENT_DB
+      schema: MART
+      table: FACT_ADJUSTED
+    description: >
+      Auto-materialized view combining original fact data with applied adjustments.
+      This is the primary reporting table.
+    columns:
+      - name: BUSINESS_DATE
+        data_type: DATE
+      - name: ENTITY_KEY
+        data_type: VARCHAR
+      - name: PRODUCT_KEY
+        data_type: VARCHAR
+      - name: ACCOUNT_KEY
+        data_type: VARCHAR
+      - name: CURRENCY_KEY
+        data_type: VARCHAR
+      - name: AMOUNT
+        description: Adjusted amount (original + all applied deltas)
+        data_type: NUMBER
+      - name: IS_ADJUSTED
+        description: Whether this row was modified by an adjustment
+        data_type: BOOLEAN
+
+verified_queries:
+  - question: How many adjustments were applied this week?
+    sql: >
+      SELECT COUNT(*) AS applied_count
+      FROM ADJUSTMENT_DB.CORE.ADJ_HEADER
+      WHERE ADJ_STATUS = 'APPLIED'
+        AND APPLIED_AT >= DATE_TRUNC('WEEK', CURRENT_DATE())
+
+  - question: What is the total impact of all applied adjustments?
+    sql: >
+      SELECT SUM(AMOUNT_DELTA) AS total_delta,
+             SUM(ABS(AMOUNT_DELTA)) AS total_abs_delta
+      FROM ADJUSTMENT_DB.CORE.ADJ_LINE_ITEM li
+      JOIN ADJUSTMENT_DB.CORE.ADJ_HEADER h ON li.ADJ_ID = h.ADJ_ID
+      WHERE h.ADJ_STATUS = 'APPLIED'
+
+  - question: Show me all pending adjustments
+    sql: >
+      SELECT ADJ_ID, ADJ_TYPE, TARGET_DATE, AFFECTED_ROWS,
+             BUSINESS_REASON, CREATED_BY, CREATED_AT
+      FROM ADJUSTMENT_DB.CORE.ADJ_HEADER
+      WHERE ADJ_STATUS = 'PENDING_APPROVAL'
+      ORDER BY CREATED_AT DESC
+
+  - question: Who created the most adjustments?
+    sql: >
+      SELECT CREATED_BY, COUNT(*) AS adj_count
+      FROM ADJUSTMENT_DB.CORE.ADJ_HEADER
+      GROUP BY CREATED_BY
+      ORDER BY adj_count DESC
