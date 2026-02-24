@@ -106,20 +106,26 @@ if step == 1:
     filters = {}
     all_cobs = sorted(fact["AS_OF_DATE"].unique())
 
-    # COB selectors
+    # COB selectors (multiselect with max_selections=1 for type-to-search)
     if adj_type == "ROLL":
         cob_col1, cob_col2 = st.columns(2)
         with cob_col1:
-            target_cob = st.selectbox("**Target COB** (date to adjust)", all_cobs,
-                                      index=len(all_cobs) - 1, key="filter_target_cob")
+            target_sel = st.multiselect("**Target COB** (date to adjust)", all_cobs,
+                                        default=[all_cobs[-1]], max_selections=1,
+                                        key="filter_target_cob")
         with cob_col2:
+            target_cob = target_sel[0] if target_sel else all_cobs[-1]
             source_cobs = [d for d in all_cobs if d != target_cob]
-            source_cob = st.selectbox("**Source COB** (date to copy from)", source_cobs,
-                                      key="filter_source_cob")
+            source_sel = st.multiselect("**Source COB** (date to copy from)", source_cobs,
+                                        max_selections=1, key="filter_source_cob")
+        target_cob = target_sel[0] if target_sel else all_cobs[-1]
+        source_cob = source_sel[0] if source_sel else (source_cobs[0] if source_cobs else None)
         st.session_state["adj_params"]["source_date"] = source_cob
     else:
-        target_cob = st.selectbox("**Target COB** (date to adjust)", all_cobs,
-                                  index=len(all_cobs) - 1, key="filter_target_cob")
+        target_sel = st.multiselect("**Target COB** (date to adjust)", all_cobs,
+                                    default=[all_cobs[-1]], max_selections=1,
+                                    key="filter_target_cob")
+        target_cob = target_sel[0] if target_sel else all_cobs[-1]
 
     filters["AS_OF_DATE"] = target_cob
     st.session_state["adj_biz_date"] = target_cob
