@@ -7,23 +7,24 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from data.state_manager import (init_state, get_fact_table, get_headers, get_lines,
                                  get_fact_adjusted, current_scope_cfg)
-from data.styles import inject_css, section_header, scope_selector_sidebar, metric_card, format_number
+from data.styles import inject_css, section_header, top_navbar, scope_and_user_controls, metric_card, format_number
 from data.mock_data import SCOPES
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="Dashboard", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Dashboard", page_icon="📊", layout="wide", initial_sidebar_state="collapsed")
 inject_css()
 init_state()
-scope_id = scope_selector_sidebar()
+top_navbar(active_page="Dashboard")
+scope_id = scope_and_user_controls()
 cfg = current_scope_cfg()
 
 st.markdown(f"""
 <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
     <span style="font-size:2rem">📊</span>
-    <h1 style="margin:0;font-size:1.6rem;color:#0D47A1">Dashboard</h1>
+    <h1 style="margin:0;font-size:1.6rem;color:#2D2D2D">Dashboard</h1>
 </div>
-<span style="color:#607D8B;font-size:.88rem">Scope: <strong>{cfg['icon']} {cfg['name']}</strong></span>
+<span style="color:#6B6B6B;font-size:.88rem">Scope: <strong>{cfg['icon']} {cfg['name']}</strong></span>
 """, unsafe_allow_html=True)
 st.markdown("---")
 
@@ -78,7 +79,7 @@ if HAS_PLOTLY and not headers.empty:
         type_counts.columns = ["Type", "Count"]
         fig = px.bar(type_counts, x="Type", y="Count",
                      color="Type",
-                     color_discrete_map={"FLATTEN": "#EF5350", "SCALE": "#29B6F6", "ROLL": "#66BB6A"},
+                     color_discrete_map={"FLATTEN": "#D50032", "SCALE": "#58595B", "ROLL": "#00875A"},
                      template="plotly_white")
         fig.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10), height=280)
         st.plotly_chart(fig, use_container_width=True)
@@ -110,9 +111,9 @@ if HAS_PLOTLY and not headers.empty:
 
         fig = go.Figure()
         fig.add_trace(go.Bar(name="Original", x=merged[first_dim], y=merged["Original"],
-                             marker_color="#90CAF9"))
+                             marker_color="#C4C5C7"))
         fig.add_trace(go.Bar(name="Adjusted", x=merged[first_dim], y=merged["Adjusted"],
-                             marker_color="#0D47A1"))
+                             marker_color="#D50032"))
         fig.update_layout(barmode="group", template="plotly_white",
                          margin=dict(t=10, b=10, l=10, r=10), height=320,
                          legend=dict(orientation="h", y=-0.15))
@@ -130,9 +131,9 @@ if HAS_PLOTLY and not headers.empty:
 
         fig = go.Figure()
         fig.add_trace(go.Scatter(name="Original", x=ts["Date"], y=ts["Original"],
-                                 mode="lines+markers", line=dict(color="#90CAF9", width=2)))
+                                 mode="lines+markers", line=dict(color="#C4C5C7", width=2)))
         fig.add_trace(go.Scatter(name="Adjusted", x=ts["Date"], y=ts["Adjusted"],
-                                 mode="lines+markers", line=dict(color="#0D47A1", width=2)))
+                                 mode="lines+markers", line=dict(color="#D50032", width=2)))
         fig.update_layout(template="plotly_white",
                          margin=dict(t=10, b=10, l=10, r=10), height=300,
                          legend=dict(orientation="h", y=-0.2))

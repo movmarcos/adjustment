@@ -8,20 +8,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from data.state_manager import (init_state, get_headers, get_lines, get_history,
                                  update_status, reverse_adjustment, current_scope_cfg,
                                  VALID_TRANSITIONS, STATUS_COLORS)
-from data.styles import inject_css, section_header, status_badge, scope_selector_sidebar, format_number
+from data.styles import inject_css, section_header, status_badge, top_navbar, scope_and_user_controls, format_number
 
-st.set_page_config(page_title="Audit Trail", page_icon="📋", layout="wide")
+st.set_page_config(page_title="Audit Trail", page_icon="📋", layout="wide", initial_sidebar_state="collapsed")
 inject_css()
 init_state()
-scope_id = scope_selector_sidebar()
+top_navbar(active_page="Audit Trail")
+scope_id = scope_and_user_controls()
 cfg = current_scope_cfg()
 
 st.markdown(f"""
 <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
     <span style="font-size:2rem">📋</span>
-    <h1 style="margin:0;font-size:1.6rem;color:#0D47A1">Audit Trail</h1>
+    <h1 style="margin:0;font-size:1.6rem;color:#2D2D2D">Audit Trail</h1>
 </div>
-<span style="color:#607D8B;font-size:.88rem">Scope: <strong>{cfg['icon']} {cfg['name']}</strong></span>
+<span style="color:#6B6B6B;font-size:.88rem">Scope: <strong>{cfg['icon']} {cfg['name']}</strong></span>
 """, unsafe_allow_html=True)
 st.markdown("---")
 

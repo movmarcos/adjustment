@@ -6,13 +6,14 @@ import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from data.state_manager import init_state, get_fact_table, get_headers, get_lines, get_fact_adjusted, current_scope_cfg, STATUS_COLORS
-from data.styles import inject_css, metric_card, status_badge, section_header, scope_selector_sidebar, format_number
+from data.styles import inject_css, metric_card, status_badge, section_header, top_navbar, scope_and_user_controls, format_number
 from data.mock_data import SCOPES
 
-st.set_page_config(page_title="Adjustment Engine", page_icon="⚙️", layout="wide")
+st.set_page_config(page_title="MUFG Adjustment Engine", page_icon="⚙️", layout="wide", initial_sidebar_state="collapsed")
 inject_css()
 init_state()
-scope_id = scope_selector_sidebar()
+top_navbar(active_page="Home")
+scope_id = scope_and_user_controls()
 cfg = current_scope_cfg()
 
 # ── Header ──────────────────────────────────────────────────────────
@@ -20,10 +21,10 @@ st.markdown(f"""
 <div style="display:flex;align-items:center;gap:14px;margin-bottom:6px">
     <span style="font-size:2.4rem">{cfg['icon']}</span>
     <div>
-        <h1 style="margin:0;padding:0;font-size:1.8rem;color:#0D47A1">
+        <h1 style="margin:0;padding:0;font-size:1.8rem;color:#2D2D2D">
             {cfg['name']} Adjustments
         </h1>
-        <span style="color:#607D8B;font-size:.9rem">{cfg['table']} &nbsp;·&nbsp; {cfg['description']}</span>
+        <span style="color:#6B6B6B;font-size:.9rem">{cfg['table']} &nbsp;·&nbsp; {cfg['description']}</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -65,13 +66,13 @@ else:
             <div style="display:flex;align-items:center;gap:12px">
                 <span style="font-size:1.5rem">{icon}</span>
                 <div>
-                    <strong style="color:#0D47A1">{row['ADJ_ID']}</strong>
+                    <strong style="color:#D50032">{row['ADJ_ID']}</strong>
                     &nbsp;{badge}&nbsp;
-                    <span style="color:#607D8B;font-size:.82rem">{row['ADJ_TYPE']}</span>
-                    <div style="font-size:.8rem;color:#607D8B;margin-top:2px">{row['JUSTIFICATION']}</div>
+                    <span style="color:#6B6B6B;font-size:.82rem">{row['ADJ_TYPE']}</span>
+                    <div style="font-size:.8rem;color:#6B6B6B;margin-top:2px">{row['JUSTIFICATION']}</div>
                 </div>
             </div>
-            <div style="text-align:right;font-size:.78rem;color:#607D8B">
+            <div style="text-align:right;font-size:.78rem;color:#6B6B6B">
                 {row['BUSINESS_DATE']}<br/>
                 by <strong>{row['CREATED_BY']}</strong>
             </div>
@@ -88,12 +89,14 @@ with tab_adj:
     adj_fact = get_fact_adjusted()
     st.dataframe(adj_fact.head(30), use_container_width=True, hide_index=True)
 
-# ── Scope info sidebar ──────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("---")
-    st.markdown("### 📋 Dimensions")
-    for d in cfg["dimensions"]:
-        st.markdown(f"**{d['label']}** — {len(d['values'])} values")
-    st.markdown("### 📏 Measures")
-    for m in cfg["measures"]:
-        st.markdown(f"**{m['label']}** ({m['unit']})")
+# ── Scope info ──────────────────────────────────────────────────────
+with st.expander("📋 Scope details"):
+    d_cols = st.columns(2)
+    with d_cols[0]:
+        st.markdown("**Dimensions**")
+        for d in cfg["dimensions"]:
+            st.markdown(f"- **{d['label']}** — {len(d['values'])} values")
+    with d_cols[1]:
+        st.markdown("**Measures**")
+        for m in cfg["measures"]:
+            st.markdown(f"- **{m['label']}** ({m['unit']})")

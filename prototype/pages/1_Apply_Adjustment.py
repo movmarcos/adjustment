@@ -7,21 +7,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from data.state_manager import (init_state, get_fact_table, preview_adjustment,
                                  create_adjustment, current_scope_cfg)
-from data.styles import inject_css, section_header, scope_selector_sidebar, metric_card, format_number
+from data.styles import inject_css, section_header, top_navbar, scope_and_user_controls, metric_card, format_number
 from data.mock_data import SCOPES
 
-st.set_page_config(page_title="Apply Adjustment", page_icon="📝", layout="wide")
+st.set_page_config(page_title="Apply Adjustment", page_icon="📝", layout="wide", initial_sidebar_state="collapsed")
 inject_css()
 init_state()
-scope_id = scope_selector_sidebar()
+top_navbar(active_page="Apply Adjustment")
+scope_id = scope_and_user_controls()
 cfg = current_scope_cfg()
 
 st.markdown(f"""
 <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
     <span style="font-size:2rem">📝</span>
-    <h1 style="margin:0;font-size:1.6rem;color:#0D47A1">Apply Adjustment</h1>
+    <h1 style="margin:0;font-size:1.6rem;color:#2D2D2D">Apply Adjustment</h1>
 </div>
-<span style="color:#607D8B;font-size:.88rem">Scope: <strong>{cfg['icon']} {cfg['name']}</strong></span>
+<span style="color:#6B6B6B;font-size:.88rem">Scope: <strong>{cfg['icon']} {cfg['name']}</strong></span>
 """, unsafe_allow_html=True)
 
 st.markdown("---")
@@ -36,11 +37,11 @@ step = st.session_state["adj_step"]
 cols = st.columns(len(steps))
 for i, (col, label) in enumerate(zip(cols, steps), 1):
     if i < step:
-        col.markdown(f'<div style="text-align:center"><span style="background:#66BB6A;color:#fff;border-radius:50%;padding:4px 10px;font-weight:700">{i}</span><br/><span style="font-size:.75rem;color:#66BB6A">{label}</span></div>', unsafe_allow_html=True)
+        col.markdown(f'<div style="text-align:center"><span style="background:#00875A;color:#fff;border-radius:50%;padding:4px 10px;font-weight:700">{i}</span><br/><span style="font-size:.75rem;color:#00875A">{label}</span></div>', unsafe_allow_html=True)
     elif i == step:
-        col.markdown(f'<div style="text-align:center"><span style="background:#0D47A1;color:#fff;border-radius:50%;padding:4px 10px;font-weight:700">{i}</span><br/><span style="font-size:.75rem;font-weight:700;color:#0D47A1">{label}</span></div>', unsafe_allow_html=True)
+        col.markdown(f'<div style="text-align:center"><span style="background:#D50032;color:#fff;border-radius:50%;padding:4px 10px;font-weight:700">{i}</span><br/><span style="font-size:.75rem;font-weight:700;color:#D50032">{label}</span></div>', unsafe_allow_html=True)
     else:
-        col.markdown(f'<div style="text-align:center"><span style="background:#E0E4EA;color:#607D8B;border-radius:50%;padding:4px 10px;font-weight:700">{i}</span><br/><span style="font-size:.75rem;color:#607D8B">{label}</span></div>', unsafe_allow_html=True)
+        col.markdown(f'<div style="text-align:center"><span style="background:#E5E5E7;color:#6B6B6B;border-radius:50%;padding:4px 10px;font-weight:700">{i}</span><br/><span style="font-size:.75rem;color:#6B6B6B">{label}</span></div>', unsafe_allow_html=True)
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -64,7 +65,7 @@ if step == 1:
     adj_type = st.session_state.get("adj_type", "FLATTEN")
 
     for col, (t, ico, short, desc) in zip(type_cols, types):
-        active = "border-color:#0D47A1;background:#E3F2FD" if adj_type == t else ""
+        active = "border-color:#D50032;background:#FFF5F7" if adj_type == t else ""
         with col:
             st.markdown(f"""
             <div class="card" style="text-align:center;cursor:pointer;{active}">
@@ -152,8 +153,8 @@ if step == 1:
     n_match = mask.sum()
 
     st.markdown(f"""
-    <div class="card" style="background:#E3F2FD;border-color:#90CAF9;margin-top:12px">
-        <strong style="color:#0D47A1">🎯 {n_match} rows</strong> match your filters
+    <div class="card" style="background:#FFF5F7;border-color:#F5C6CE;margin-top:12px">
+        <strong style="color:#D50032">🎯 {n_match} rows</strong> match your filters
     </div>
     """, unsafe_allow_html=True)
 
@@ -232,11 +233,11 @@ elif step == 3:
     st.markdown(f"""
     <div class="card">
         <table style="width:100%;font-size:.9rem">
-        <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Scope</td><td><strong>{cfg['icon']} {cfg['name']}</strong></td></tr>
-        <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Type</td><td><strong>{adj_type}</strong></td></tr>
-        <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Target COB</td><td>{biz_date}</td></tr>
-        <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Justification</td><td>{justification}</td></tr>
-        <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Filters</td><td><code>{json.dumps(filters, default=str)}</code></td></tr>
+        <tr><td style="color:#6B6B6B;padding:4px 12px 4px 0">Scope</td><td><strong>{cfg['icon']} {cfg['name']}</strong></td></tr>
+        <tr><td style="color:#6B6B6B;padding:4px 12px 4px 0">Type</td><td><strong>{adj_type}</strong></td></tr>
+        <tr><td style="color:#6B6B6B;padding:4px 12px 4px 0">Target COB</td><td>{biz_date}</td></tr>
+        <tr><td style="color:#6B6B6B;padding:4px 12px 4px 0">Justification</td><td>{justification}</td></tr>
+        <tr><td style="color:#6B6B6B;padding:4px 12px 4px 0">Filters</td><td><code>{json.dumps(filters, default=str)}</code></td></tr>
         <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Parameters</td><td><code>{json.dumps(params, default=str)}</code></td></tr>
         </table>
     </div>
@@ -252,4 +253,3 @@ elif step == 3:
             adj_id = create_adjustment(filters, adj_type, params, justification, biz_date)
             st.session_state["adj_step"] = 1
             st.success(f"Adjustment **{adj_id}** created successfully!")
-            st.balloons()

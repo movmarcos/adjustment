@@ -7,23 +7,24 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from data.state_manager import (init_state, get_fact_table, get_headers, get_lines,
                                  get_fact_adjusted, current_scope_cfg)
-from data.styles import inject_css, section_header, scope_selector_sidebar, metric_card, format_number, status_badge
+from data.styles import inject_css, section_header, top_navbar, scope_and_user_controls, metric_card, format_number, status_badge
 from data.mock_data import SCOPES
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="AI Assistant", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="AI Assistant", page_icon="🤖", layout="wide", initial_sidebar_state="collapsed")
 inject_css()
 init_state()
-scope_id = scope_selector_sidebar()
+top_navbar(active_page="AI Assistant")
+scope_id = scope_and_user_controls()
 cfg = current_scope_cfg()
 
 st.markdown(f"""
 <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
     <span style="font-size:2rem">🤖</span>
-    <h1 style="margin:0;font-size:1.6rem;color:#0D47A1">AI Assistant</h1>
+    <h1 style="margin:0;font-size:1.6rem;color:#2D2D2D">AI Assistant</h1>
 </div>
-<span style="color:#607D8B;font-size:.88rem">Scope: <strong>{cfg['icon']} {cfg['name']}</strong>
+<span style="color:#6B6B6B;font-size:.88rem">Scope: <strong>{cfg['icon']} {cfg['name']}</strong>
 &nbsp;·&nbsp; Ask questions in plain English</span>
 """, unsafe_allow_html=True)
 st.markdown("---")
