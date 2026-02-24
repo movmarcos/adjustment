@@ -30,7 +30,7 @@ st.markdown("---")
 if "adj_step" not in st.session_state:
     st.session_state["adj_step"] = 1
 
-steps = ["Filter", "Type & Params", "Justification", "Preview", "Submit"]
+steps = ["Configure", "Preview", "Submit"]
 step = st.session_state["adj_step"]
 
 cols = st.columns(len(steps))
@@ -44,67 +44,22 @@ for i, (col, label) in enumerate(zip(cols, steps), 1):
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
+import pandas as pd
+
 # ─────────────────────────────────────────────────────────────────────
-# STEP 1 — FILTERS
+# STEP 1 — CONFIGURE (Type → Justification → Filters)
 # ─────────────────────────────────────────────────────────────────────
 if step == 1:
-    section_header("Step 1 · Select Filters")
-    st.caption("Choose which rows to adjust. Leave blank to select all.")
-
     fact = get_fact_table()
-    filters = {}
 
-    cols = st.columns(2)
-    for i, dim in enumerate(cfg["dimensions"]):
-        with cols[i % 2]:
-            selected = st.multiselect(
-                f"**{dim['label']}** (`{dim['key']}`)",
-                options=dim["values"],
-                key=f"filter_{dim['key']}",
-            )
-            if selected:
-                filters[dim["key"]] = selected
-
-    # Date filter
-    dates = sorted(fact["AS_OF_DATE"].unique())
-    sel_date = st.selectbox("**Business Date**", dates, key="filter_date")
-    if sel_date:
-        filters["AS_OF_DATE"] = sel_date
-
-    st.session_state["adj_filters"] = filters
-
-    # Preview count
-    mask = fact.index >= 0  # all true
-    import pandas as pd
-    mask = pd.Series(True, index=fact.index)
-    for k, v in filters.items():
-        if k in fact.columns:
-            mask &= fact[k].isin(v) if isinstance(v, list) else fact[k] == v
-    n_match = mask.sum()
-
-    st.markdown(f"""
-    <div class="card" style="background:#E3F2FD;border-color:#90CAF9;margin-top:12px">
-        <strong style="color:#0D47A1">🎯 {n_match} rows</strong> match your filters
-    </div>
-    """, unsafe_allow_html=True)
-
-    col1, col2 = st.columns([6, 1])
-    with col2:
-        if st.button("Next →", type="primary", use_container_width=True):
-            st.session_state["adj_step"] = 2
-            st.rerun()
-
-# ─────────────────────────────────────────────────────────────────────
-# STEP 2 — ADJUSTMENT TYPE
-# ─────────────────────────────────────────────────────────────────────
-elif step == 2:
-    section_header("Step 2 · Adjustment Type & Parameters")
+    # ── 1A  Adjustment Type & Parameters ─────────────────────────────
+    section_header("Adjustment Type & Parameters")
 
     type_cols = st.columns(3)
     types = [
-        ("FLATTEN", "📉", "Set all values to zero", "Applies a delta equal to the negative of the current value."),
-        ("SCALE",   "📐", "Multiply by a factor", "Applies a delta = value × (factor − 1)."),
-        ("ROLL",    "🔄", "Copy from another date", "Copies values from a source date, optionally scaled."),
+        ("FLATTEN", "📉", "Set all values to zero", "Delta = −current value"),
+        ("SCALE",   "📐", "Multiply by a factor",   "Delta = value × (factor − 1)"),
+        ("ROLL",    "🔄", "Copy from another date",  "Copies values, optionally scaled"),
     ]
     adj_type = st.session_state.get("adj_type", "FLATTEN")
 
@@ -115,7 +70,8 @@ elif step == 2:
             <div class="card" style="text-align:center;cursor:pointer;{active}">
                 <span style="font-size:2rem">{ico}</span>
                 <div style="font-weight:700;margin:6px 0">{t}</div>
-                <div style="font-size:.8rem;color:#607D8B">{short}</div>
+                <div style="font-size:.78rem;color:#607D8B">{short}</div>
+                <div style="font-size:.7rem;color:#90A4AE;margin-top:2px">{desc}</div>
             </div>
             """, unsafe_allow_html=True)
 
@@ -128,51 +84,88 @@ elif step == 2:
     if adj_type == "SCALE":
         params["factor"] = st.slider("Scale factor", 0.0, 5.0, 1.1, 0.05)
     elif adj_type == "ROLL":
-        fact = get_fact_table()
-        dates = sorted(fact["AS_OF_DATE"].unique())
-        params["source_date"] = st.selectbox("Source date to copy from", dates)
         params["scale"] = st.slider("Scale after roll", 0.0, 5.0, 1.0, 0.05)
     st.session_state["adj_params"] = params
 
-    c1, c2, c3 = st.columns([1, 5, 1])
-    with c1:
-        if st.button("← Back", use_container_width=True):
-            st.session_state["adj_step"] = 1
-            st.rerun()
-    with c3:
-        if st.button("Next →", type="primary", use_container_width=True):
-            st.session_state["adj_step"] = 3
-            st.rerun()
+    st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────────────
-# STEP 3 — JUSTIFICATION
-# ─────────────────────────────────────────────────────────────────────
-elif step == 3:
-    section_header("Step 3 · Justification & Business Date")
+    # ── 1B  Justification ────────────────────────────────────────────
+    section_header("Justification")
 
-    justification = st.text_area("**Justification** (required)", height=100,
+    justification = st.text_area("**Justification** (required)", height=80,
                                  placeholder="Explain why this adjustment is needed…",
                                  key="adj_justification_input")
-    biz_date = st.date_input("**Business Date**", key="adj_biz_date_input")
-
     st.session_state["adj_justification"] = justification
-    st.session_state["adj_biz_date"] = str(biz_date)
 
-    c1, c2, c3 = st.columns([1, 5, 1])
-    with c1:
-        if st.button("← Back", use_container_width=True):
+    st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
+
+    # ── 1C  Filters ──────────────────────────────────────────────────
+    section_header("Filters")
+    st.caption("Select the COB date to adjust and narrow which rows to include.")
+
+    filters = {}
+    all_cobs = sorted(fact["AS_OF_DATE"].unique())
+
+    # COB selectors
+    if adj_type == "ROLL":
+        cob_col1, cob_col2 = st.columns(2)
+        with cob_col1:
+            target_cob = st.selectbox("**Target COB** (date to adjust)", all_cobs,
+                                      index=len(all_cobs) - 1, key="filter_target_cob")
+        with cob_col2:
+            source_cobs = [d for d in all_cobs if d != target_cob]
+            source_cob = st.selectbox("**Source COB** (date to copy from)", source_cobs,
+                                      key="filter_source_cob")
+        st.session_state["adj_params"]["source_date"] = source_cob
+    else:
+        target_cob = st.selectbox("**Target COB** (date to adjust)", all_cobs,
+                                  index=len(all_cobs) - 1, key="filter_target_cob")
+
+    filters["AS_OF_DATE"] = target_cob
+    st.session_state["adj_biz_date"] = target_cob
+
+    # Dimension filters
+    filter_cols = st.columns(2)
+    for i, dim in enumerate(cfg["dimensions"]):
+        with filter_cols[i % 2]:
+            selected = st.multiselect(
+                f"**{dim['label']}** (`{dim['key']}`)",
+                options=dim["values"],
+                key=f"filter_{dim['key']}",
+            )
+            if selected:
+                filters[dim["key"]] = selected
+
+    st.session_state["adj_filters"] = filters
+
+    # Preview match count
+    mask = pd.Series(True, index=fact.index)
+    for k, v in filters.items():
+        if k in fact.columns:
+            mask &= fact[k].isin(v) if isinstance(v, list) else fact[k] == v
+    n_match = mask.sum()
+
+    st.markdown(f"""
+    <div class="card" style="background:#E3F2FD;border-color:#90CAF9;margin-top:12px">
+        <strong style="color:#0D47A1">🎯 {n_match} rows</strong> match your filters
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Next button ──────────────────────────────────────────────────
+    col1, col2 = st.columns([6, 1])
+    with col2:
+        if st.button("Preview →", type="primary", use_container_width=True,
+                     disabled=not justification):
             st.session_state["adj_step"] = 2
             st.rerun()
-    with c3:
-        if st.button("Next →", type="primary", use_container_width=True, disabled=not justification):
-            st.session_state["adj_step"] = 4
-            st.rerun()
+    if not justification:
+        st.caption("⚠️ Justification is required before you can proceed.")
 
 # ─────────────────────────────────────────────────────────────────────
-# STEP 4 — PREVIEW
+# STEP 2 — PREVIEW
 # ─────────────────────────────────────────────────────────────────────
-elif step == 4:
-    section_header("Step 4 · Preview Changes")
+elif step == 2:
+    section_header("Step 2 · Preview Changes")
 
     filters = st.session_state.get("adj_filters", {})
     adj_type = st.session_state.get("adj_type", "FLATTEN")
@@ -211,18 +204,18 @@ elif step == 4:
     c1, c2, c3 = st.columns([1, 5, 1])
     with c1:
         if st.button("← Back", use_container_width=True):
-            st.session_state["adj_step"] = 3
+            st.session_state["adj_step"] = 1
             st.rerun()
     with c3:
         if st.button("Next →", type="primary", use_container_width=True, disabled=preview.empty):
-            st.session_state["adj_step"] = 5
+            st.session_state["adj_step"] = 3
             st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────
-# STEP 5 — SUBMIT
+# STEP 3 — SUBMIT
 # ─────────────────────────────────────────────────────────────────────
-elif step == 5:
-    section_header("Step 5 · Confirm & Submit")
+elif step == 3:
+    section_header("Step 3 · Confirm & Submit")
 
     filters = st.session_state.get("adj_filters", {})
     adj_type = st.session_state.get("adj_type", "FLATTEN")
@@ -235,7 +228,7 @@ elif step == 5:
         <table style="width:100%;font-size:.9rem">
         <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Scope</td><td><strong>{cfg['icon']} {cfg['name']}</strong></td></tr>
         <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Type</td><td><strong>{adj_type}</strong></td></tr>
-        <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Business Date</td><td>{biz_date}</td></tr>
+        <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Target COB</td><td>{biz_date}</td></tr>
         <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Justification</td><td>{justification}</td></tr>
         <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Filters</td><td><code>{json.dumps(filters, default=str)}</code></td></tr>
         <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Parameters</td><td><code>{json.dumps(params, default=str)}</code></td></tr>
@@ -246,7 +239,7 @@ elif step == 5:
     c1, c2, c3 = st.columns([1, 4, 2])
     with c1:
         if st.button("← Back", use_container_width=True):
-            st.session_state["adj_step"] = 4
+            st.session_state["adj_step"] = 2
             st.rerun()
     with c3:
         if st.button("✅ Create Adjustment", type="primary", use_container_width=True):
