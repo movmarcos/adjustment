@@ -1,269 +1,256 @@
 """
-Page 1 — Apply Adjustment
-Five-step workflow: Filter → Type → Justification → Preview → Submit
+📝 Apply Adjustment — guided workflow
 """
-
-import sys, os
+import streamlit as st
+import sys, os, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import streamlit as st
-import pandas as pd
-from datetime import date, timedelta
-from data.state_manager import (
-    init_state, get_fact_table, get_dim_config,
-    preview_adjustment, create_adjustment, get_current_user,
-)
+from data.state_manager import (init_state, get_fact_table, preview_adjustment,
+                                 create_adjustment, current_scope_cfg)
+from data.styles import inject_css, section_header, scope_selector_sidebar, metric_card, format_number
+from data.mock_data import SCOPES
 
+st.set_page_config(page_title="Apply Adjustment", page_icon="📝", layout="wide")
+inject_css()
 init_state()
+scope_id = scope_selector_sidebar()
+cfg = current_scope_cfg()
 
-st.title("📝 Apply Adjustment")
+st.markdown(f"""
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+    <span style="font-size:2rem">📝</span>
+    <h1 style="margin:0;font-size:1.6rem;color:#0D47A1">Apply Adjustment</h1>
+</div>
+<span style="color:#607D8B;font-size:.88rem">Scope: <strong>{cfg['icon']} {cfg['name']}</strong></span>
+""", unsafe_allow_html=True)
 
-# ── Step 1: Filters ──────────────────────────────────────────────────
-st.header("Step 1 — Select Data to Adjust", divider="blue")
+st.markdown("---")
 
-fact = get_fact_table()
-dim_config = get_dim_config().sort_values("DISPLAY_ORDER")
+# ── Step indicator ──────────────────────────────────────────────────
+if "adj_step" not in st.session_state:
+    st.session_state["adj_step"] = 1
 
-col_date, col_spacer = st.columns([1, 2])
-with col_date:
-    available_dates = sorted(fact["BUSINESS_DATE"].unique())
-    target_date = st.date_input(
-        "📅 Business Date",
-        value=date(2026, 2, 23),
-        min_value=min(available_dates),
-        max_value=max(available_dates),
-    )
+steps = ["Filter", "Type & Params", "Justification", "Preview", "Submit"]
+step = st.session_state["adj_step"]
 
-# Dynamic filter controls from dimension config
-filters = {}
-filter_cols = st.columns(3)
-for i, (_, dim) in enumerate(dim_config.iterrows()):
-    col_name = dim["DIM_COLUMN"]
-    display_name = dim["DIM_NAME"]
-    required = dim["IS_REQUIRED"]
+cols = st.columns(len(steps))
+for i, (col, label) in enumerate(zip(cols, steps), 1):
+    if i < step:
+        col.markdown(f'<div style="text-align:center"><span style="background:#66BB6A;color:#fff;border-radius:50%;padding:4px 10px;font-weight:700">{i}</span><br/><span style="font-size:.75rem;color:#66BB6A">{label}</span></div>', unsafe_allow_html=True)
+    elif i == step:
+        col.markdown(f'<div style="text-align:center"><span style="background:#0D47A1;color:#fff;border-radius:50%;padding:4px 10px;font-weight:700">{i}</span><br/><span style="font-size:.75rem;font-weight:700;color:#0D47A1">{label}</span></div>', unsafe_allow_html=True)
+    else:
+        col.markdown(f'<div style="text-align:center"><span style="background:#E0E4EA;color:#607D8B;border-radius:50%;padding:4px 10px;font-weight:700">{i}</span><br/><span style="font-size:.75rem;color:#607D8B">{label}</span></div>', unsafe_allow_html=True)
 
-    with filter_cols[i % 3]:
-        unique_vals = sorted(fact[col_name].unique())
-        options = ["(All)"] + list(unique_vals)
-        default = 0
+st.markdown("<br/>", unsafe_allow_html=True)
 
-        selected = st.selectbox(
-            f"{'🔴' if required else '⚪'} {display_name}",
-            options,
-            index=default,
-            key=f"filter_{col_name}",
-        )
-        filters[col_name] = None if selected == "(All)" else selected
+# ─────────────────────────────────────────────────────────────────────
+# STEP 1 — FILTERS
+# ─────────────────────────────────────────────────────────────────────
+if step == 1:
+    section_header("Step 1 · Select Filters")
+    st.caption("Choose which rows to adjust. Leave blank to select all.")
 
-# Show matching row count
-mask = fact["BUSINESS_DATE"] == pd.Timestamp(target_date)
-for col, val in filters.items():
-    if val:
-        mask = mask & (fact[col] == val)
-matching_count = len(fact[mask])
+    fact = get_fact_table()
+    filters = {}
 
-if matching_count > 0:
-    st.success(f"**{matching_count}** rows match your filter criteria.")
-else:
-    st.warning("No rows match. Adjust your filters.")
+    cols = st.columns(2)
+    for i, dim in enumerate(cfg["dimensions"]):
+        with cols[i % 2]:
+            selected = st.multiselect(
+                f"**{dim['label']}** (`{dim['key']}`)",
+                options=dim["values"],
+                key=f"filter_{dim['key']}",
+            )
+            if selected:
+                filters[dim["key"]] = selected
 
-# ── Step 2: Adjustment Type ──────────────────────────────────────────
-st.header("Step 2 — Choose Adjustment Type", divider="blue")
+    # Date filter
+    dates = sorted(fact["AS_OF_DATE"].unique())
+    sel_date = st.selectbox("**Business Date**", dates, key="filter_date")
+    if sel_date:
+        filters["AS_OF_DATE"] = sel_date
 
-col_type, col_params = st.columns(2)
+    st.session_state["adj_filters"] = filters
 
-with col_type:
-    adj_type = st.radio(
-        "Adjustment Type",
-        ["FLATTEN", "SCALE", "ROLL"],
-        captions=[
-            "Zero out all selected values (delta = -current)",
-            "Multiply by a factor (delta = current × (factor-1))",
-            "Copy from a previous day (delta = source × scale - current)",
-        ],
-    )
+    # Preview count
+    mask = fact.index >= 0  # all true
+    import pandas as pd
+    mask = pd.Series(True, index=fact.index)
+    for k, v in filters.items():
+        if k in fact.columns:
+            mask &= fact[k].isin(v) if isinstance(v, list) else fact[k] == v
+    n_match = mask.sum()
 
-scale_factor = 1.0
-roll_source_date = None
+    st.markdown(f"""
+    <div class="card" style="background:#E3F2FD;border-color:#90CAF9;margin-top:12px">
+        <strong style="color:#0D47A1">🎯 {n_match} rows</strong> match your filters
+    </div>
+    """, unsafe_allow_html=True)
 
-with col_params:
-    if adj_type == "FLATTEN":
-        st.info("**Flatten** will set all selected measure values to **zero**.")
+    col1, col2 = st.columns([6, 1])
+    with col2:
+        if st.button("Next →", type="primary", use_container_width=True):
+            st.session_state["adj_step"] = 2
+            st.rerun()
 
-    elif adj_type == "SCALE":
-        scale_factor = st.number_input(
-            "Scale Factor",
-            min_value=0.01,
-            max_value=100.0,
-            value=1.10,
-            step=0.01,
-            format="%.2f",
-        )
-        st.info(f"Values will be multiplied by **{scale_factor}** (delta = current × {scale_factor - 1:.2f})")
+# ─────────────────────────────────────────────────────────────────────
+# STEP 2 — ADJUSTMENT TYPE
+# ─────────────────────────────────────────────────────────────────────
+elif step == 2:
+    section_header("Step 2 · Adjustment Type & Parameters")
 
+    type_cols = st.columns(3)
+    types = [
+        ("FLATTEN", "📉", "Set all values to zero", "Applies a delta equal to the negative of the current value."),
+        ("SCALE",   "📐", "Multiply by a factor", "Applies a delta = value × (factor − 1)."),
+        ("ROLL",    "🔄", "Copy from another date", "Copies values from a source date, optionally scaled."),
+    ]
+    adj_type = st.session_state.get("adj_type", "FLATTEN")
+
+    for col, (t, ico, short, desc) in zip(type_cols, types):
+        active = "border-color:#0D47A1;background:#E3F2FD" if adj_type == t else ""
+        with col:
+            st.markdown(f"""
+            <div class="card" style="text-align:center;cursor:pointer;{active}">
+                <span style="font-size:2rem">{ico}</span>
+                <div style="font-weight:700;margin:6px 0">{t}</div>
+                <div style="font-size:.8rem;color:#607D8B">{short}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    adj_type = st.radio("Select type", ["FLATTEN", "SCALE", "ROLL"], horizontal=True,
+                        index=["FLATTEN", "SCALE", "ROLL"].index(adj_type),
+                        label_visibility="collapsed")
+    st.session_state["adj_type"] = adj_type
+
+    params = {}
+    if adj_type == "SCALE":
+        params["factor"] = st.slider("Scale factor", 0.0, 5.0, 1.1, 0.05)
     elif adj_type == "ROLL":
-        roll_source_date = st.date_input(
-            "📅 Roll Source Date",
-            value=target_date - timedelta(days=1),
-            max_value=target_date - timedelta(days=1),
-        )
-        scale_factor = st.number_input(
-            "Roll Scale Factor",
-            min_value=0.01,
-            max_value=100.0,
-            value=1.0,
-            step=0.01,
-            format="%.2f",
-            help="Default 1.0 copies as-is; use other values to scale while rolling.",
-        )
+        fact = get_fact_table()
+        dates = sorted(fact["AS_OF_DATE"].unique())
+        params["source_date"] = st.selectbox("Source date to copy from", dates)
+        params["scale"] = st.slider("Scale after roll", 0.0, 5.0, 1.0, 0.05)
+    st.session_state["adj_params"] = params
 
-# ── Step 3: Justification ───────────────────────────────────────────
-st.header("Step 3 — Business Justification", divider="blue")
+    c1, c2, c3 = st.columns([1, 5, 1])
+    with c1:
+        if st.button("← Back", use_container_width=True):
+            st.session_state["adj_step"] = 1
+            st.rerun()
+    with c3:
+        if st.button("Next →", type="primary", use_container_width=True):
+            st.session_state["adj_step"] = 3
+            st.rerun()
 
-col_reason, col_ticket = st.columns(2)
-with col_reason:
-    business_reason = st.text_area(
-        "Business Reason *",
-        placeholder="Explain why this adjustment is needed...",
-        height=100,
-    )
-with col_ticket:
-    ticket_reference = st.text_input(
-        "Ticket Reference",
-        placeholder="e.g. JIRA-1234, INC-5678",
-    )
+# ─────────────────────────────────────────────────────────────────────
+# STEP 3 — JUSTIFICATION
+# ─────────────────────────────────────────────────────────────────────
+elif step == 3:
+    section_header("Step 3 · Justification & Business Date")
 
-# ── Step 4: Preview ─────────────────────────────────────────────────
-st.header("Step 4 — Preview Impact", divider="blue")
+    justification = st.text_area("**Justification** (required)", height=100,
+                                 placeholder="Explain why this adjustment is needed…",
+                                 key="adj_justification_input")
+    biz_date = st.date_input("**Business Date**", key="adj_biz_date_input")
 
-if matching_count == 0:
-    st.warning("No rows to preview. Adjust your filters above.")
-elif st.button("🔍 Generate Preview", type="primary", use_container_width=True):
-    with st.spinner("Computing deltas..."):
-        preview_df = preview_adjustment(
-            adj_type=adj_type,
-            target_date=target_date,
-            filters=filters,
-            scale_factor=scale_factor,
-            roll_source_date=roll_source_date,
-        )
+    st.session_state["adj_justification"] = justification
+    st.session_state["adj_biz_date"] = str(biz_date)
 
-    if preview_df.empty:
-        st.error("No matching data found for preview.")
+    c1, c2, c3 = st.columns([1, 5, 1])
+    with c1:
+        if st.button("← Back", use_container_width=True):
+            st.session_state["adj_step"] = 2
+            st.rerun()
+    with c3:
+        if st.button("Next →", type="primary", use_container_width=True, disabled=not justification):
+            st.session_state["adj_step"] = 4
+            st.rerun()
+
+# ─────────────────────────────────────────────────────────────────────
+# STEP 4 — PREVIEW
+# ─────────────────────────────────────────────────────────────────────
+elif step == 4:
+    section_header("Step 4 · Preview Changes")
+
+    filters = st.session_state.get("adj_filters", {})
+    adj_type = st.session_state.get("adj_type", "FLATTEN")
+    params = st.session_state.get("adj_params", {})
+
+    preview = preview_adjustment(filters, adj_type, params)
+    meas_keys = [m["key"] for m in cfg["measures"]]
+
+    if preview.empty:
+        st.warning("No rows matched. Go back and adjust filters.")
     else:
-        st.session_state["preview_result"] = preview_df
-        st.success(f"Preview computed for **{len(preview_df)}** rows.")
+        # Summary metrics
+        m_cols = st.columns(len(meas_keys))
+        for col, m in zip(m_cols, meas_keys):
+            orig_sum = preview[f"ORIG_{m}"].sum() if f"ORIG_{m}" in preview.columns else 0
+            new_sum = preview[f"NEW_{m}"].sum() if f"NEW_{m}" in preview.columns else 0
+            delta = new_sum - orig_sum
+            delta_str = f"+{format_number(delta)}" if delta >= 0 else format_number(delta)
+            col.markdown(metric_card(m, format_number(new_sum), delta_str), unsafe_allow_html=True)
 
-# Display preview if available
-if "preview_result" in st.session_state and st.session_state["preview_result"] is not None:
-    preview_df = st.session_state["preview_result"]
+        # Detail table
+        show_cols = []
+        for d in cfg["dimensions"]:
+            if d["key"] in preview.columns:
+                show_cols.append(d["key"])
+        show_cols.append("AS_OF_DATE")
+        for m in meas_keys:
+            for suffix in ["ORIG_", "DELTA_", "NEW_"]:
+                c = f"{suffix}{m}"
+                if c in preview.columns:
+                    show_cols.append(c)
 
-    tab_comparison, tab_detail, tab_chart = st.tabs(
-        ["📊 Comparison", "📋 Detail", "📈 Chart"]
-    )
+        st.dataframe(preview[[c for c in show_cols if c in preview.columns]].head(50),
+                     use_container_width=True, hide_index=True)
 
-    with tab_comparison:
-        # Summary comparison
-        summary = pd.DataFrame({
-            "Measure": ["AMOUNT", "QUANTITY", "NOTIONAL"],
-            "Original Total": [
-                preview_df["AMOUNT"].sum(),
-                preview_df["QUANTITY"].sum(),
-                preview_df["NOTIONAL"].sum(),
-            ],
-            "Delta Total": [
-                preview_df["AMOUNT_DELTA"].sum(),
-                preview_df["QUANTITY_DELTA"].sum(),
-                preview_df["NOTIONAL_DELTA"].sum(),
-            ],
-            "New Total": [
-                preview_df["AMOUNT_NEW"].sum(),
-                preview_df["QUANTITY_NEW"].sum(),
-                preview_df["NOTIONAL_NEW"].sum(),
-            ],
-        })
-        summary["Change %"] = summary.apply(
-            lambda r: f"{(r['Delta Total'] / r['Original Total'] * 100):+.1f}%"
-            if r["Original Total"] != 0 else "N/A",
-            axis=1,
-        )
+    c1, c2, c3 = st.columns([1, 5, 1])
+    with c1:
+        if st.button("← Back", use_container_width=True):
+            st.session_state["adj_step"] = 3
+            st.rerun()
+    with c3:
+        if st.button("Next →", type="primary", use_container_width=True, disabled=preview.empty):
+            st.session_state["adj_step"] = 5
+            st.rerun()
 
-        for col in ["Original Total", "Delta Total", "New Total"]:
-            summary[col] = summary[col].apply(lambda x: f"${x:,.2f}")
+# ─────────────────────────────────────────────────────────────────────
+# STEP 5 — SUBMIT
+# ─────────────────────────────────────────────────────────────────────
+elif step == 5:
+    section_header("Step 5 · Confirm & Submit")
 
-        st.dataframe(summary, use_container_width=True, hide_index=True)
+    filters = st.session_state.get("adj_filters", {})
+    adj_type = st.session_state.get("adj_type", "FLATTEN")
+    params = st.session_state.get("adj_params", {})
+    justification = st.session_state.get("adj_justification", "")
+    biz_date = st.session_state.get("adj_biz_date", "")
 
-    with tab_detail:
-        display_cols = [
-            "ENTITY_KEY", "PRODUCT_KEY", "ACCOUNT_KEY", "CURRENCY_KEY",
-            "AMOUNT", "AMOUNT_DELTA", "AMOUNT_NEW",
-        ]
-        available_cols = [c for c in display_cols if c in preview_df.columns]
-        detail = preview_df[available_cols].copy()
+    st.markdown(f"""
+    <div class="card">
+        <table style="width:100%;font-size:.9rem">
+        <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Scope</td><td><strong>{cfg['icon']} {cfg['name']}</strong></td></tr>
+        <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Type</td><td><strong>{adj_type}</strong></td></tr>
+        <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Business Date</td><td>{biz_date}</td></tr>
+        <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Justification</td><td>{justification}</td></tr>
+        <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Filters</td><td><code>{json.dumps(filters, default=str)}</code></td></tr>
+        <tr><td style="color:#607D8B;padding:4px 12px 4px 0">Parameters</td><td><code>{json.dumps(params, default=str)}</code></td></tr>
+        </table>
+    </div>
+    """, unsafe_allow_html=True)
 
-        for c in ["AMOUNT", "AMOUNT_DELTA", "AMOUNT_NEW"]:
-            if c in detail.columns:
-                detail[c] = detail[c].apply(lambda x: f"${x:,.2f}")
-
-        st.dataframe(detail, use_container_width=True, hide_index=True)
-
-    with tab_chart:
-        chart_data = preview_df[["ENTITY_KEY", "AMOUNT", "AMOUNT_NEW"]].copy()
-        chart_data.columns = ["Entity", "Before", "After"]
-        chart_agg = chart_data.groupby("Entity")[["Before", "After"]].sum().reset_index()
-        st.bar_chart(chart_agg.set_index("Entity"), height=350)
-
-# ── Step 5: Submit ───────────────────────────────────────────────────
-st.header("Step 5 — Submit", divider="blue")
-
-if "preview_result" not in st.session_state or st.session_state.get("preview_result") is None:
-    st.info("Generate a preview first to enable submission.")
-else:
-    if not business_reason.strip():
-        st.warning("Please enter a business reason before submitting.")
-    else:
-        col_draft, col_submit = st.columns(2)
-
-        with col_draft:
-            if st.button("💾 Save as Draft", use_container_width=True):
-                adj_id = create_adjustment(
-                    adj_type=adj_type,
-                    target_date=target_date,
-                    filters=filters,
-                    scale_factor=scale_factor,
-                    roll_source_date=roll_source_date,
-                    business_reason=business_reason,
-                    ticket_reference=ticket_reference,
-                    submit_for_approval=False,
-                )
-                st.session_state["preview_result"] = None
-                st.success(f"✅ Draft saved as **ADJ-{adj_id}**")
-                st.balloons()
-
-        with col_submit:
-            if st.button("🚀 Submit for Approval", use_container_width=True, type="primary"):
-                adj_id = create_adjustment(
-                    adj_type=adj_type,
-                    target_date=target_date,
-                    filters=filters,
-                    scale_factor=scale_factor,
-                    roll_source_date=roll_source_date,
-                    business_reason=business_reason,
-                    ticket_reference=ticket_reference,
-                    submit_for_approval=True,
-                )
-                st.session_state["preview_result"] = None
-                st.success(f"✅ **ADJ-{adj_id}** submitted for approval!")
-                st.balloons()
-
-# ── Snowflake feature reference ──────────────────────────────────────
-with st.expander("🔗 Snowflake Features Used in This Page"):
-    st.markdown("""
-    | Action | Snowflake Feature |
-    |--------|-------------------|
-    | Dynamic filter controls | **Hybrid Table** read from `ADJ_DIMENSION_CONFIG` |
-    | Row count display | `SELECT COUNT(*)` on `FACT_TABLE` with **Row Access Policy** |
-    | Preview computation | **Snowpark Python SP** `SP_PREVIEW_ADJUSTMENT` (returns TABLE) |
-    | Save / Submit | **Snowpark Python SP** `SP_CREATE_ADJUSTMENT` writes to **Hybrid Tables** |
-    | Filter criteria storage | **VARIANT column** (JSON) in `ADJ_HEADER` |
-    """)
+    c1, c2, c3 = st.columns([1, 4, 2])
+    with c1:
+        if st.button("← Back", use_container_width=True):
+            st.session_state["adj_step"] = 4
+            st.rerun()
+    with c3:
+        if st.button("✅ Create Adjustment", type="primary", use_container_width=True):
+            adj_id = create_adjustment(filters, adj_type, params, justification, biz_date)
+            st.session_state["adj_step"] = 1
+            st.success(f"Adjustment **{adj_id}** created successfully!")
+            st.balloons()

@@ -1,304 +1,182 @@
 """
-Mock data generator — creates realistic sample DataFrames
-that mirror the Snowflake tables so the prototype feels real.
+Scope Configuration & Mock Data Generator
+==========================================
+Each scope represents a different fact source table with its own
+dimension keys and measures.
 """
 
 import pandas as pd
 import numpy as np
-from datetime import datetime, date, timedelta
+from datetime import datetime, timedelta
+
+# ─────────────────────────────────────────────────────────────────────
+# SCOPE DEFINITIONS
+# ─────────────────────────────────────────────────────────────────────
+SCOPES = {
+    "pnl": {
+        "id": "pnl",
+        "name": "Profit & Loss",
+        "icon": "💰",
+        "table": "FACT_PNL",
+        "description": "Daily P&L by entity, desk and product",
+        "dimensions": [
+            {"key": "ENTITY_KEY",   "label": "Entity",   "values": ["ENT_US", "ENT_UK", "ENT_JP", "ENT_SG"]},
+            {"key": "DESK_KEY",     "label": "Desk",     "values": ["RATES", "FX", "CREDIT", "EQUITY"]},
+            {"key": "PRODUCT_KEY",  "label": "Product",  "values": ["SWAP", "OPTION", "FUTURE", "BOND", "FRA"]},
+            {"key": "BOOK_KEY",     "label": "Book",     "values": ["BOOK_A", "BOOK_B", "BOOK_C"]},
+        ],
+        "measures": [
+            {"key": "MTM",       "label": "Mark-to-Market", "unit": "USD"},
+            {"key": "DELTA_PNL", "label": "Delta P&L",      "unit": "USD"},
+            {"key": "VEGA_PNL",  "label": "Vega P&L",       "unit": "USD"},
+        ],
+    },
+    "risk": {
+        "id": "risk",
+        "name": "Risk Sensitivities",
+        "icon": "📊",
+        "table": "FACT_RISK",
+        "description": "Daily risk sensitivities by entity and risk type",
+        "dimensions": [
+            {"key": "ENTITY_KEY",    "label": "Entity",    "values": ["ENT_US", "ENT_UK", "ENT_JP"]},
+            {"key": "RISK_TYPE_KEY", "label": "Risk Type", "values": ["IR_DELTA", "IR_VEGA", "FX_DELTA", "EQ_DELTA", "CR_SPREAD"]},
+            {"key": "TENOR_KEY",     "label": "Tenor",     "values": ["1M", "3M", "6M", "1Y", "2Y", "5Y", "10Y"]},
+            {"key": "SCENARIO_KEY",  "label": "Scenario",  "values": ["BASE", "STRESS_UP", "STRESS_DOWN"]},
+        ],
+        "measures": [
+            {"key": "SENSITIVITY",  "label": "Sensitivity",  "unit": "USD"},
+            {"key": "VAR_99",       "label": "VaR 99%",      "unit": "USD"},
+        ],
+    },
+    "fx_position": {
+        "id": "fx_position",
+        "name": "FX Positions",
+        "icon": "💱",
+        "table": "FACT_FX_POSITION",
+        "description": "FX positions by currency pair and settlement",
+        "dimensions": [
+            {"key": "ENTITY_KEY",     "label": "Entity",        "values": ["ENT_US", "ENT_UK", "ENT_JP", "ENT_SG"]},
+            {"key": "CCY_PAIR_KEY",   "label": "Currency Pair",  "values": ["USD/JPY", "EUR/USD", "GBP/USD", "USD/SGD", "EUR/GBP"]},
+            {"key": "SETTLE_KEY",     "label": "Settlement",     "values": ["SPOT", "1W", "1M", "3M"]},
+        ],
+        "measures": [
+            {"key": "NOTIONAL",   "label": "Notional",   "unit": "USD"},
+            {"key": "LOCAL_AMT",  "label": "Local Amt",  "unit": "LCL"},
+        ],
+    },
+}
+
+DEFAULT_SCOPE = "pnl"
 
 
-def generate_fact_table() -> pd.DataFrame:
-    """Generate ~60 rows of realistic fact data across 3 days."""
-    np.random.seed(42)
+# ─────────────────────────────────────────────────────────────────────
+# DATA GENERATORS
+# ─────────────────────────────────────────────────────────────────────
+def _random_rows(scope_cfg: dict, n_days: int = 5, seed: int = 42) -> pd.DataFrame:
+    """Generate random fact rows for a scope."""
+    rng = np.random.default_rng(seed)
+    base_date = datetime(2025, 3, 15)
+    dates = [base_date + timedelta(days=i) for i in range(n_days)]
 
-    entities = ["US_BANK", "EU_BANK", "APAC_BANK"]
-    products = ["FX_SPOT", "FX_FORWARD", "IR_SWAP", "CREDIT_DEFAULT_SWAP"]
-    accounts = ["TRADING_BOOK", "BANKING_BOOK"]
-    currencies = ["USD", "EUR", "GBP", "JPY"]
-    counterparties = [
-        "CP_ALPHA", "CP_BETA", "CP_GAMMA", "CP_DELTA",
-        "CP_EPSILON", "CP_ZETA", "CP_ETA", "CP_THETA",
-    ]
-    cost_centers = ["CC_100", "CC_200", "CC_300"]
+    dim_keys = [d["key"] for d in scope_cfg["dimensions"]]
+    meas_keys = [m["key"] for m in scope_cfg["measures"]]
 
-    dates = [date(2026, 2, 22), date(2026, 2, 23), date(2026, 2, 24)]
+    # Build all combos (subset for manageability)
+    from itertools import product as cartprod
+    dim_vals = [d["values"] for d in scope_cfg["dimensions"]]
+    combos = list(cartprod(*dim_vals))
+    # Sample a subset
+    n_combos = min(len(combos), 30)
+    idx = rng.choice(len(combos), size=n_combos, replace=False)
+    combos = [combos[i] for i in sorted(idx)]
 
     rows = []
-    fact_id = 1
-    for bdate in dates:
-        for entity in entities:
-            for product in np.random.choice(products, size=3, replace=False):
-                for account in np.random.choice(accounts, size=1):
-                    ccy = np.random.choice(currencies)
-                    cp = np.random.choice(counterparties)
-                    cc = np.random.choice(cost_centers)
-
-                    amount = round(np.random.uniform(100_000, 5_000_000), 2)
-                    quantity = round(np.random.uniform(100, 10_000), 0)
-                    notional = round(amount * np.random.uniform(1.5, 3.0), 2)
-
-                    rows.append({
-                        "FACT_ID": fact_id,
-                        "BUSINESS_DATE": bdate,
-                        "ENTITY_KEY": entity,
-                        "PRODUCT_KEY": product,
-                        "ACCOUNT_KEY": account,
-                        "CURRENCY_KEY": ccy,
-                        "COUNTERPARTY_KEY": cp,
-                        "COST_CENTER_KEY": cc,
-                        "AMOUNT": amount,
-                        "QUANTITY": quantity,
-                        "NOTIONAL": notional,
-                    })
-                    fact_id += 1
-
+    row_id = 1
+    for dt in dates:
+        for combo in combos:
+            row = {"ROW_ID": row_id, "AS_OF_DATE": dt.strftime("%Y-%m-%d")}
+            for k, v in zip(dim_keys, combo):
+                row[k] = v
+            for mk in meas_keys:
+                row[mk] = round(rng.normal(0, 5_000_000), 2)
+            rows.append(row)
+            row_id += 1
     return pd.DataFrame(rows)
 
 
-def generate_dimension_config() -> pd.DataFrame:
-    """Configuration table driving the filter UI."""
-    return pd.DataFrame([
-        {"DIM_NAME": "Entity", "DIM_COLUMN": "ENTITY_KEY", "DISPLAY_ORDER": 1, "IS_REQUIRED": True},
-        {"DIM_NAME": "Product", "DIM_COLUMN": "PRODUCT_KEY", "DISPLAY_ORDER": 2, "IS_REQUIRED": False},
-        {"DIM_NAME": "Account", "DIM_COLUMN": "ACCOUNT_KEY", "DISPLAY_ORDER": 3, "IS_REQUIRED": False},
-        {"DIM_NAME": "Currency", "DIM_COLUMN": "CURRENCY_KEY", "DISPLAY_ORDER": 4, "IS_REQUIRED": False},
-        {"DIM_NAME": "Counterparty", "DIM_COLUMN": "COUNTERPARTY_KEY", "DISPLAY_ORDER": 5, "IS_REQUIRED": False},
-        {"DIM_NAME": "Cost Center", "DIM_COLUMN": "COST_CENTER_KEY", "DISPLAY_ORDER": 6, "IS_REQUIRED": False},
-    ])
+def generate_fact_table(scope_id: str) -> pd.DataFrame:
+    """Return fact DataFrame for the given scope."""
+    cfg = SCOPES[scope_id]
+    return _random_rows(cfg)
 
 
-def generate_measure_config() -> pd.DataFrame:
-    """Configuration table for which measures can be adjusted."""
-    return pd.DataFrame([
-        {"MEASURE_NAME": "Amount", "MEASURE_COLUMN": "AMOUNT", "DISPLAY_ORDER": 1, "IS_ADJUSTABLE": True},
-        {"MEASURE_NAME": "Quantity", "MEASURE_COLUMN": "QUANTITY", "DISPLAY_ORDER": 2, "IS_ADJUSTABLE": True},
-        {"MEASURE_NAME": "Notional", "MEASURE_COLUMN": "NOTIONAL", "DISPLAY_ORDER": 3, "IS_ADJUSTABLE": True},
-    ])
-
-
-def empty_adj_header() -> pd.DataFrame:
-    """Empty adjustment header table schema."""
-    return pd.DataFrame(columns=[
-        "ADJ_ID", "ADJ_TYPE", "ADJ_STATUS", "TARGET_DATE",
-        "SCALE_FACTOR", "ROLL_SOURCE_DATE", "FILTER_CRITERIA",
-        "AFFECTED_ROWS", "TOTAL_DELTA_AMOUNT", "BUSINESS_REASON",
-        "TICKET_REFERENCE", "CREATED_BY", "CREATED_AT",
-        "APPROVED_BY", "APPROVED_AT", "APPLIED_AT",
-        "AI_SUMMARY",
-    ])
-
-
-def empty_adj_line_items() -> pd.DataFrame:
-    """Empty line item table schema."""
-    return pd.DataFrame(columns=[
-        "LINE_ID", "ADJ_ID", "FACT_ID", "BUSINESS_DATE",
-        "ENTITY_KEY", "PRODUCT_KEY", "ACCOUNT_KEY",
-        "CURRENCY_KEY", "COUNTERPARTY_KEY", "COST_CENTER_KEY",
-        "AMOUNT_DELTA", "QUANTITY_DELTA", "NOTIONAL_DELTA",
-        "AMOUNT_ORIGINAL", "QUANTITY_ORIGINAL", "NOTIONAL_ORIGINAL",
-    ])
-
-
-def empty_status_history() -> pd.DataFrame:
-    """Empty status history table schema."""
-    return pd.DataFrame(columns=[
-        "HISTORY_ID", "ADJ_ID", "OLD_STATUS", "NEW_STATUS",
-        "CHANGED_BY", "CHANGED_AT", "COMMENT",
-    ])
-
-
-# --------------- Pre-built adjustments for demo ---------------
-
-def generate_sample_adjustments(fact_df: pd.DataFrame):
-    """Create 3 sample adjustments so the prototype feels populated."""
+def generate_sample_adjustments(scope_id: str):
+    """Return (headers, lines, history) with ready-made sample adjustments."""
+    cfg = SCOPES[scope_id]
+    dim_keys = [d["key"] for d in cfg["dimensions"]]
+    meas_keys = [m["key"] for m in cfg["measures"]]
+    first_dim = dim_keys[0]
+    first_meas = meas_keys[0]
     now = datetime.now()
 
-    # --- Adjustment 1: Flatten on US_BANK / FX_SPOT, 2026-02-23 (APPLIED) ---
-    mask1 = (
-        (fact_df["ENTITY_KEY"] == "US_BANK")
-        & (fact_df["PRODUCT_KEY"] == "FX_SPOT")
-        & (fact_df["BUSINESS_DATE"] == date(2026, 2, 23))
-    )
-    rows1 = fact_df[mask1].copy()
+    headers = pd.DataFrame([
+        {
+            "ADJ_ID": "ADJ-001",
+            "SCOPE": scope_id,
+            "ADJ_TYPE": "FLATTEN",
+            "STATUS": "APPLIED",
+            "JUSTIFICATION": "Month-end P&L reset",
+            "BUSINESS_DATE": "2025-03-15",
+            "CREATED_BY": "Sarah",
+            "CREATED_AT": (now - timedelta(hours=5)).isoformat(),
+            "FILTER_JSON": f'{{{first_dim}: "{cfg["dimensions"][0]["values"][0]}"}}',
+        },
+        {
+            "ADJ_ID": "ADJ-002",
+            "SCOPE": scope_id,
+            "ADJ_TYPE": "SCALE",
+            "STATUS": "PENDING_APPROVAL",
+            "JUSTIFICATION": "Quarterly rebalance",
+            "BUSINESS_DATE": "2025-03-16",
+            "CREATED_BY": "James",
+            "CREATED_AT": (now - timedelta(hours=2)).isoformat(),
+            "FILTER_JSON": f'{{{first_dim}: "{cfg["dimensions"][0]["values"][1]}"}}',
+        },
+        {
+            "ADJ_ID": "ADJ-003",
+            "SCOPE": scope_id,
+            "ADJ_TYPE": "ROLL",
+            "STATUS": "DRAFT",
+            "JUSTIFICATION": "Forward fill missing day",
+            "BUSINESS_DATE": "2025-03-17",
+            "CREATED_BY": "Sarah",
+            "CREATED_AT": now.isoformat(),
+            "FILTER_JSON": "{}",
+        },
+    ])
 
-    lines1 = []
-    for i, (_, r) in enumerate(rows1.iterrows(), start=1):
-        lines1.append({
-            "LINE_ID": i,
-            "ADJ_ID": 1,
-            "FACT_ID": r["FACT_ID"],
-            "BUSINESS_DATE": r["BUSINESS_DATE"],
-            "ENTITY_KEY": r["ENTITY_KEY"],
-            "PRODUCT_KEY": r["PRODUCT_KEY"],
-            "ACCOUNT_KEY": r["ACCOUNT_KEY"],
-            "CURRENCY_KEY": r["CURRENCY_KEY"],
-            "COUNTERPARTY_KEY": r["COUNTERPARTY_KEY"],
-            "COST_CENTER_KEY": r["COST_CENTER_KEY"],
-            "AMOUNT_DELTA": -r["AMOUNT"],
-            "QUANTITY_DELTA": -r["QUANTITY"],
-            "NOTIONAL_DELTA": -r["NOTIONAL"],
-            "AMOUNT_ORIGINAL": r["AMOUNT"],
-            "QUANTITY_ORIGINAL": r["QUANTITY"],
-            "NOTIONAL_ORIGINAL": r["NOTIONAL"],
-        })
+    lines = pd.DataFrame([
+        {"ADJ_ID": "ADJ-001", "LINE_ID": 1, first_dim: cfg["dimensions"][0]["values"][0],
+         "MEASURE": first_meas, "ORIGINAL_VALUE": 1_000_000, "DELTA_VALUE": -1_000_000, "NEW_VALUE": 0},
+        {"ADJ_ID": "ADJ-001", "LINE_ID": 2, first_dim: cfg["dimensions"][0]["values"][0],
+         "MEASURE": meas_keys[-1], "ORIGINAL_VALUE": 500_000, "DELTA_VALUE": -500_000, "NEW_VALUE": 0},
+        {"ADJ_ID": "ADJ-002", "LINE_ID": 1, first_dim: cfg["dimensions"][0]["values"][1],
+         "MEASURE": first_meas, "ORIGINAL_VALUE": 2_000_000, "DELTA_VALUE": 200_000, "NEW_VALUE": 2_200_000},
+        {"ADJ_ID": "ADJ-003", "LINE_ID": 1, first_dim: cfg["dimensions"][0]["values"][0],
+         "MEASURE": first_meas, "ORIGINAL_VALUE": 0, "DELTA_VALUE": 800_000, "NEW_VALUE": 800_000},
+    ])
 
-    header1 = {
-        "ADJ_ID": 1,
-        "ADJ_TYPE": "FLATTEN",
-        "ADJ_STATUS": "APPLIED",
-        "TARGET_DATE": date(2026, 2, 23),
-        "SCALE_FACTOR": None,
-        "ROLL_SOURCE_DATE": None,
-        "FILTER_CRITERIA": '{"ENTITY_KEY": "US_BANK", "PRODUCT_KEY": "FX_SPOT"}',
-        "AFFECTED_ROWS": len(rows1),
-        "TOTAL_DELTA_AMOUNT": round(-rows1["AMOUNT"].sum(), 2),
-        "BUSINESS_REASON": "Erroneous FX bookings on 2/23 — ticket FX-4521",
-        "TICKET_REFERENCE": "FX-4521",
-        "CREATED_BY": "sarah.chen",
-        "CREATED_AT": now - timedelta(hours=6),
-        "APPROVED_BY": "james.kirk",
-        "APPROVED_AT": now - timedelta(hours=5),
-        "APPLIED_AT": now - timedelta(hours=4, minutes=30),
-        "AI_SUMMARY": "Flatten adjustment zeroing out FX_SPOT positions for US_BANK on Feb 23 due to erroneous bookings. Total impact: -$"
-                      + f"{abs(rows1['AMOUNT'].sum()):,.0f}. Ticket FX-4521.",
-    }
+    history = pd.DataFrame([
+        {"ADJ_ID": "ADJ-001", "FROM_STATUS": "DRAFT",            "TO_STATUS": "PENDING_APPROVAL", "CHANGED_BY": "Sarah", "CHANGED_AT": (now - timedelta(hours=4)).isoformat(), "COMMENT": "Ready for review"},
+        {"ADJ_ID": "ADJ-001", "FROM_STATUS": "PENDING_APPROVAL", "TO_STATUS": "APPROVED",          "CHANGED_BY": "Manager", "CHANGED_AT": (now - timedelta(hours=3)).isoformat(), "COMMENT": "Approved"},
+        {"ADJ_ID": "ADJ-001", "FROM_STATUS": "APPROVED",          "TO_STATUS": "APPLIED",           "CHANGED_BY": "System", "CHANGED_AT": (now - timedelta(hours=2)).isoformat(), "COMMENT": "Auto-applied"},
+        {"ADJ_ID": "ADJ-002", "FROM_STATUS": "DRAFT",            "TO_STATUS": "PENDING_APPROVAL", "CHANGED_BY": "James", "CHANGED_AT": (now - timedelta(hours=1)).isoformat(), "COMMENT": "Submitted"},
+    ])
 
-    # --- Adjustment 2: Scale 1.1 on EU_BANK, 2026-02-24 (PENDING_APPROVAL) ---
-    mask2 = (
-        (fact_df["ENTITY_KEY"] == "EU_BANK")
-        & (fact_df["BUSINESS_DATE"] == date(2026, 2, 24))
-    )
-    rows2 = fact_df[mask2].copy()
+    return headers, lines, history
 
-    lines2 = []
-    line_id = len(lines1) + 1
-    for _, r in rows2.iterrows():
-        factor = 1.10
-        lines2.append({
-            "LINE_ID": line_id,
-            "ADJ_ID": 2,
-            "FACT_ID": r["FACT_ID"],
-            "BUSINESS_DATE": r["BUSINESS_DATE"],
-            "ENTITY_KEY": r["ENTITY_KEY"],
-            "PRODUCT_KEY": r["PRODUCT_KEY"],
-            "ACCOUNT_KEY": r["ACCOUNT_KEY"],
-            "CURRENCY_KEY": r["CURRENCY_KEY"],
-            "COUNTERPARTY_KEY": r["COUNTERPARTY_KEY"],
-            "COST_CENTER_KEY": r["COST_CENTER_KEY"],
-            "AMOUNT_DELTA": round(r["AMOUNT"] * (factor - 1), 2),
-            "QUANTITY_DELTA": round(r["QUANTITY"] * (factor - 1), 2),
-            "NOTIONAL_DELTA": round(r["NOTIONAL"] * (factor - 1), 2),
-            "AMOUNT_ORIGINAL": r["AMOUNT"],
-            "QUANTITY_ORIGINAL": r["QUANTITY"],
-            "NOTIONAL_ORIGINAL": r["NOTIONAL"],
-        })
-        line_id += 1
 
-    total_delta2 = round(sum(l["AMOUNT_DELTA"] for l in lines2), 2)
-    header2 = {
-        "ADJ_ID": 2,
-        "ADJ_TYPE": "SCALE",
-        "ADJ_STATUS": "PENDING_APPROVAL",
-        "TARGET_DATE": date(2026, 2, 24),
-        "SCALE_FACTOR": 1.10,
-        "ROLL_SOURCE_DATE": None,
-        "FILTER_CRITERIA": '{"ENTITY_KEY": "EU_BANK"}',
-        "AFFECTED_ROWS": len(rows2),
-        "TOTAL_DELTA_AMOUNT": total_delta2,
-        "BUSINESS_REASON": "Correction for FX rate mismark — 10% uplift on EU_BANK",
-        "TICKET_REFERENCE": "MKT-1122",
-        "CREATED_BY": "john.doe",
-        "CREATED_AT": now - timedelta(hours=2),
-        "APPROVED_BY": None,
-        "APPROVED_AT": None,
-        "APPLIED_AT": None,
-        "AI_SUMMARY": None,
-    }
-
-    # --- Adjustment 3: Roll from 2/23 → 2/24 on APAC_BANK (DRAFT) ---
-    mask3_src = (
-        (fact_df["ENTITY_KEY"] == "APAC_BANK")
-        & (fact_df["PRODUCT_KEY"] == "IR_SWAP")
-        & (fact_df["BUSINESS_DATE"] == date(2026, 2, 23))
-    )
-    mask3_tgt = (
-        (fact_df["ENTITY_KEY"] == "APAC_BANK")
-        & (fact_df["PRODUCT_KEY"] == "IR_SWAP")
-        & (fact_df["BUSINESS_DATE"] == date(2026, 2, 24))
-    )
-    rows3_src = fact_df[mask3_src].copy()
-    rows3_tgt = fact_df[mask3_tgt].copy()
-
-    lines3 = []
-    for _, tgt in rows3_tgt.iterrows():
-        # Find matching source row (same entity/product/account)
-        src_match = rows3_src[
-            (rows3_src["ACCOUNT_KEY"] == tgt["ACCOUNT_KEY"])
-        ]
-        if len(src_match) > 0:
-            src = src_match.iloc[0]
-            lines3.append({
-                "LINE_ID": line_id,
-                "ADJ_ID": 3,
-                "FACT_ID": tgt["FACT_ID"],
-                "BUSINESS_DATE": tgt["BUSINESS_DATE"],
-                "ENTITY_KEY": tgt["ENTITY_KEY"],
-                "PRODUCT_KEY": tgt["PRODUCT_KEY"],
-                "ACCOUNT_KEY": tgt["ACCOUNT_KEY"],
-                "CURRENCY_KEY": tgt["CURRENCY_KEY"],
-                "COUNTERPARTY_KEY": tgt["COUNTERPARTY_KEY"],
-                "COST_CENTER_KEY": tgt["COST_CENTER_KEY"],
-                "AMOUNT_DELTA": round(src["AMOUNT"] - tgt["AMOUNT"], 2),
-                "QUANTITY_DELTA": round(src["QUANTITY"] - tgt["QUANTITY"], 2),
-                "NOTIONAL_DELTA": round(src["NOTIONAL"] - tgt["NOTIONAL"], 2),
-                "AMOUNT_ORIGINAL": tgt["AMOUNT"],
-                "QUANTITY_ORIGINAL": tgt["QUANTITY"],
-                "NOTIONAL_ORIGINAL": tgt["NOTIONAL"],
-            })
-            line_id += 1
-
-    total_delta3 = round(sum(l["AMOUNT_DELTA"] for l in lines3), 2) if lines3 else 0
-    header3 = {
-        "ADJ_ID": 3,
-        "ADJ_TYPE": "ROLL",
-        "ADJ_STATUS": "DRAFT",
-        "TARGET_DATE": date(2026, 2, 24),
-        "SCALE_FACTOR": 1.0,
-        "ROLL_SOURCE_DATE": date(2026, 2, 23),
-        "FILTER_CRITERIA": '{"ENTITY_KEY": "APAC_BANK", "PRODUCT_KEY": "IR_SWAP"}',
-        "AFFECTED_ROWS": len(lines3),
-        "TOTAL_DELTA_AMOUNT": total_delta3,
-        "BUSINESS_REASON": "Roll IR_SWAP positions from 2/23 to 2/24 — systems outage",
-        "TICKET_REFERENCE": "INC-9900",
-        "CREATED_BY": "maria.santos",
-        "CREATED_AT": now - timedelta(minutes=45),
-        "APPROVED_BY": None,
-        "APPROVED_AT": None,
-        "APPLIED_AT": None,
-        "AI_SUMMARY": None,
-    }
-
-    headers_df = pd.DataFrame([header1, header2, header3])
-    lines_df = pd.DataFrame(lines1 + lines2 + lines3)
-
-    # Status history
-    history = [
-        {"HISTORY_ID": 1, "ADJ_ID": 1, "OLD_STATUS": None, "NEW_STATUS": "DRAFT",
-         "CHANGED_BY": "sarah.chen", "CHANGED_AT": now - timedelta(hours=6), "COMMENT": "Created"},
-        {"HISTORY_ID": 2, "ADJ_ID": 1, "OLD_STATUS": "DRAFT", "NEW_STATUS": "PENDING_APPROVAL",
-         "CHANGED_BY": "sarah.chen", "CHANGED_AT": now - timedelta(hours=5, minutes=50), "COMMENT": "Submitted for approval"},
-        {"HISTORY_ID": 3, "ADJ_ID": 1, "OLD_STATUS": "PENDING_APPROVAL", "NEW_STATUS": "APPROVED",
-         "CHANGED_BY": "james.kirk", "CHANGED_AT": now - timedelta(hours=5), "COMMENT": "Approved"},
-        {"HISTORY_ID": 4, "ADJ_ID": 1, "OLD_STATUS": "APPROVED", "NEW_STATUS": "APPLIED",
-         "CHANGED_BY": "james.kirk", "CHANGED_AT": now - timedelta(hours=4, minutes=30), "COMMENT": "Applied to fact table"},
-        {"HISTORY_ID": 5, "ADJ_ID": 2, "OLD_STATUS": None, "NEW_STATUS": "DRAFT",
-         "CHANGED_BY": "john.doe", "CHANGED_AT": now - timedelta(hours=2, minutes=5), "COMMENT": "Created"},
-        {"HISTORY_ID": 6, "ADJ_ID": 2, "OLD_STATUS": "DRAFT", "NEW_STATUS": "PENDING_APPROVAL",
-         "CHANGED_BY": "john.doe", "CHANGED_AT": now - timedelta(hours=2), "COMMENT": "Submitted for approval"},
-        {"HISTORY_ID": 7, "ADJ_ID": 3, "OLD_STATUS": None, "NEW_STATUS": "DRAFT",
-         "CHANGED_BY": "maria.santos", "CHANGED_AT": now - timedelta(minutes=45), "COMMENT": "Created"},
-    ]
-    history_df = pd.DataFrame(history)
-
-    return headers_df, lines_df, history_df
+def get_scope_choices() -> list[dict]:
+    """Return list of scope dicts for UI selectors."""
+    return [{"id": s["id"], "name": s["name"], "icon": s["icon"], "desc": s["description"]}
+            for s in SCOPES.values()]

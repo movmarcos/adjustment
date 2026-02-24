@@ -1,240 +1,117 @@
 """
-Page 2 — Audit Trail
-Full history of adjustments with detail views and action buttons.
+📋 Audit Trail — review and manage adjustments
 """
-
+import streamlit as st
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import streamlit as st
-import pandas as pd
-import json
-from data.state_manager import (
-    init_state, get_adj_headers, get_adj_line_items,
-    get_status_history, update_status, reverse_adjustment,
-    get_current_user,
-)
+from data.state_manager import (init_state, get_headers, get_lines, get_history,
+                                 update_status, reverse_adjustment, current_scope_cfg,
+                                 VALID_TRANSITIONS, STATUS_COLORS)
+from data.styles import inject_css, section_header, status_badge, scope_selector_sidebar, format_number
 
+st.set_page_config(page_title="Audit Trail", page_icon="📋", layout="wide")
+inject_css()
 init_state()
+scope_id = scope_selector_sidebar()
+cfg = current_scope_cfg()
 
-st.title("📋 Audit Trail")
+st.markdown(f"""
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+    <span style="font-size:2rem">📋</span>
+    <h1 style="margin:0;font-size:1.6rem;color:#0D47A1">Audit Trail</h1>
+</div>
+<span style="color:#607D8B;font-size:.88rem">Scope: <strong>{cfg['icon']} {cfg['name']}</strong></span>
+""", unsafe_allow_html=True)
+st.markdown("---")
 
-headers = get_adj_headers()
+headers = get_headers()
+lines   = get_lines()
+history = get_history()
 
 if headers.empty:
-    st.info("No adjustments yet. Create one on the **Apply Adjustment** page.")
+    st.info("No adjustments found for this scope.")
     st.stop()
 
-# ── Filters ──────────────────────────────────────────────────────────
-st.subheader("Filter Adjustments")
+# ── Filters ─────────────────────────────────────────────────────────
+f1, f2, f3 = st.columns(3)
+with f1:
+    status_filter = st.multiselect("Status", list(STATUS_COLORS.keys()), key="audit_status")
+with f2:
+    type_filter = st.multiselect("Type", ["FLATTEN", "SCALE", "ROLL"], key="audit_type")
+with f3:
+    user_filter = st.multiselect("Created By", headers["CREATED_BY"].unique().tolist(), key="audit_user")
 
-col_f1, col_f2, col_f3, col_f4 = st.columns(4)
-
-with col_f1:
-    status_filter = st.multiselect(
-        "Status",
-        ["DRAFT", "PENDING_APPROVAL", "APPROVED", "REJECTED", "APPLIED", "REVERSED"],
-        default=[],
-        placeholder="All statuses",
-    )
-with col_f2:
-    type_filter = st.multiselect(
-        "Type",
-        ["FLATTEN", "SCALE", "ROLL"],
-        default=[],
-        placeholder="All types",
-    )
-with col_f3:
-    user_filter = st.selectbox(
-        "Created By",
-        ["(All)"] + sorted(headers["CREATED_BY"].unique().tolist()),
-    )
-with col_f4:
-    sort_order = st.selectbox("Sort By", ["Newest First", "Oldest First"])
-
-# Apply filters
 filtered = headers.copy()
 if status_filter:
-    filtered = filtered[filtered["ADJ_STATUS"].isin(status_filter)]
+    filtered = filtered[filtered["STATUS"].isin(status_filter)]
 if type_filter:
     filtered = filtered[filtered["ADJ_TYPE"].isin(type_filter)]
-if user_filter != "(All)":
-    filtered = filtered[filtered["CREATED_BY"] == user_filter]
+if user_filter:
+    filtered = filtered[filtered["CREATED_BY"].isin(user_filter)]
 
-ascending = sort_order == "Oldest First"
-filtered = filtered.sort_values("CREATED_AT", ascending=ascending)
+st.caption(f"Showing {len(filtered)} of {len(headers)} adjustments")
 
-st.divider()
+# ── Adjustment cards ────────────────────────────────────────────────
+for _, row in filtered.sort_values("CREATED_AT", ascending=False).iterrows():
+    adj_id = row["ADJ_ID"]
+    badge = status_badge(row["STATUS"])
+    type_icons = {"FLATTEN": "📉", "SCALE": "📐", "ROLL": "🔄"}
+    icon = type_icons.get(row["ADJ_TYPE"], "📝")
 
-# ── Adjustment List ──────────────────────────────────────────────────
-st.subheader(f"Adjustments ({len(filtered)})")
+    with st.expander(f"{icon}  **{adj_id}** — {row['ADJ_TYPE']}  |  {row['JUSTIFICATION'][:50]}"):
+        # Header info
+        ic1, ic2, ic3, ic4 = st.columns(4)
+        ic1.markdown(f"**Status** {badge}", unsafe_allow_html=True)
+        ic2.markdown(f"**Date** {row['BUSINESS_DATE']}")
+        ic3.markdown(f"**Created by** {row['CREATED_BY']}")
+        ic4.markdown(f"**Type** {row['ADJ_TYPE']}")
 
-for _, row in filtered.iterrows():
-    adj_id = int(row["ADJ_ID"])
-    status = row["ADJ_STATUS"]
-    adj_type = row["ADJ_TYPE"]
+        st.markdown(f"**Justification:** {row['JUSTIFICATION']}")
 
-    # Status badge colors
-    status_emoji = {
-        "DRAFT": "📝", "PENDING_APPROVAL": "⏳", "APPROVED": "✅",
-        "REJECTED": "❌", "APPLIED": "🟢", "REVERSED": "↩️",
-    }
-    emoji = status_emoji.get(status, "❓")
+        # Lines
+        adj_lines = lines[lines["ADJ_ID"] == adj_id]
+        if not adj_lines.empty:
+            section_header("Line Items")
+            display_cols = [c for c in adj_lines.columns if c != "ADJ_ID"]
+            st.dataframe(adj_lines[display_cols], use_container_width=True, hide_index=True)
 
-    with st.expander(
-        f"{emoji} **ADJ-{adj_id}** | {adj_type} | {status} | "
-        f"{row['TARGET_DATE']} | by {row['CREATED_BY']}",
-        expanded=False,
-    ):
-        # ── Metrics row ──
-        m1, m2, m3, m4 = st.columns(4)
-        with m1:
-            st.metric("Type", adj_type)
-        with m2:
-            st.metric("Status", status)
-        with m3:
-            st.metric("Affected Rows", int(row["AFFECTED_ROWS"]))
-        with m4:
-            delta_val = row["TOTAL_DELTA_AMOUNT"]
-            st.metric("Total Delta", f"${delta_val:,.2f}")
+        # History timeline
+        adj_hist = history[history["ADJ_ID"] == adj_id].sort_values("CHANGED_AT")
+        if not adj_hist.empty:
+            section_header("Status History")
+            for _, h in adj_hist.iterrows():
+                from_b = status_badge(h["FROM_STATUS"]) if h["FROM_STATUS"] else ""
+                to_b = status_badge(h["TO_STATUS"])
+                ts = h["CHANGED_AT"][:16].replace("T", " ")
+                st.markdown(f"""
+                <div class="tl-item">
+                    <div class="tl-time">{ts} · {h['CHANGED_BY']}</div>
+                    <div class="tl-text">{from_b} → {to_b} &nbsp; {h.get('COMMENT','')}</div>
+                </div>
+                """, unsafe_allow_html=True)
 
-        # ── AI Summary ──
-        if row.get("AI_SUMMARY") and pd.notna(row["AI_SUMMARY"]):
-            st.info(f"🤖 **AI Summary:** {row['AI_SUMMARY']}")
-
-        # ── Details tabs ──
-        tab_info, tab_lines, tab_history = st.tabs(
-            ["📄 Details", "📊 Line Items", "📅 Status Timeline"]
-        )
-
-        with tab_info:
-            info_cols = st.columns(2)
-            with info_cols[0]:
-                st.markdown(f"**Business Reason:** {row['BUSINESS_REASON']}")
-                st.markdown(f"**Ticket:** {row['TICKET_REFERENCE'] or 'N/A'}")
-                st.markdown(f"**Target Date:** {row['TARGET_DATE']}")
-                if row.get("SCALE_FACTOR") and pd.notna(row["SCALE_FACTOR"]):
-                    st.markdown(f"**Scale Factor:** {row['SCALE_FACTOR']}")
-                if row.get("ROLL_SOURCE_DATE") and pd.notna(row["ROLL_SOURCE_DATE"]):
-                    st.markdown(f"**Roll Source Date:** {row['ROLL_SOURCE_DATE']}")
-
-            with info_cols[1]:
-                st.markdown(f"**Created by:** {row['CREATED_BY']}")
-                st.markdown(f"**Created at:** {row['CREATED_AT']}")
-                if pd.notna(row.get("APPROVED_BY")):
-                    st.markdown(f"**Approved by:** {row['APPROVED_BY']}")
-                    st.markdown(f"**Approved at:** {row['APPROVED_AT']}")
-                if pd.notna(row.get("APPLIED_AT")):
-                    st.markdown(f"**Applied at:** {row['APPLIED_AT']}")
-
-                # Show filter criteria
-                try:
-                    fc = json.loads(row["FILTER_CRITERIA"]) if row["FILTER_CRITERIA"] else {}
-                    if fc:
-                        st.markdown("**Filter Criteria:**")
-                        for k, v in fc.items():
-                            st.markdown(f"  - {k}: `{v}`")
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-        with tab_lines:
-            lines = get_adj_line_items()
-            adj_lines = lines[lines["ADJ_ID"] == adj_id]
-            if adj_lines.empty:
-                st.info("No line items.")
-            else:
-                display = adj_lines[[
-                    "ENTITY_KEY", "PRODUCT_KEY", "ACCOUNT_KEY", "CURRENCY_KEY",
-                    "AMOUNT_ORIGINAL", "AMOUNT_DELTA",
-                ]].copy()
-                display["AMOUNT_NEW"] = display["AMOUNT_ORIGINAL"] + display["AMOUNT_DELTA"]
-
-                for c in ["AMOUNT_ORIGINAL", "AMOUNT_DELTA", "AMOUNT_NEW"]:
-                    display[c] = display[c].apply(lambda x: f"${x:,.2f}")
-
-                st.dataframe(display, use_container_width=True, hide_index=True)
-
-        with tab_history:
-            hist = get_status_history()
-            adj_hist = hist[hist["ADJ_ID"] == adj_id].sort_values("CHANGED_AT")
-            if adj_hist.empty:
-                st.info("No history recorded.")
-            else:
-                for _, h in adj_hist.iterrows():
-                    old = h["OLD_STATUS"] or "—"
-                    new = h["NEW_STATUS"]
-                    st.markdown(
-                        f"**{h['CHANGED_AT']}** — `{old}` → `{new}` "
-                        f"by *{h['CHANGED_BY']}*"
-                        + (f" — _{h['COMMENT']}_" if h.get("COMMENT") else "")
-                    )
-
-        # ── Action buttons ──
-        st.divider()
-        current_user = get_current_user()
-
-        action_cols = st.columns(5)
-
-        with action_cols[0]:
-            if status == "DRAFT":
-                if st.button("🚀 Submit", key=f"submit_{adj_id}", use_container_width=True):
-                    ok, msg = update_status(adj_id, "PENDING_APPROVAL", "Submitted for approval")
-                    if ok:
-                        st.success(msg)
-                        st.rerun()
-                    else:
-                        st.error(msg)
-
-        with action_cols[1]:
-            if status == "PENDING_APPROVAL":
-                if st.button("✅ Approve", key=f"approve_{adj_id}", use_container_width=True, type="primary"):
-                    ok, msg = update_status(adj_id, "APPROVED", f"Approved by {current_user}")
-                    if ok:
-                        st.success(msg)
-                        st.rerun()
-                    else:
-                        st.error(msg)
-
-        with action_cols[2]:
-            if status == "PENDING_APPROVAL":
-                if st.button("❌ Reject", key=f"reject_{adj_id}", use_container_width=True):
-                    ok, msg = update_status(adj_id, "REJECTED", f"Rejected by {current_user}")
-                    if ok:
-                        st.warning(msg)
-                        st.rerun()
-                    else:
-                        st.error(msg)
-
-        with action_cols[3]:
-            if status == "APPROVED":
-                if st.button("⚡ Apply", key=f"apply_{adj_id}", use_container_width=True, type="primary"):
-                    ok, msg = update_status(adj_id, "APPLIED", f"Applied by {current_user}")
-                    if ok:
-                        st.success(msg)
-                        st.rerun()
-                    else:
-                        st.error(msg)
-
-        with action_cols[4]:
-            if status == "APPLIED":
-                if st.button("↩️ Reverse", key=f"reverse_{adj_id}", use_container_width=True):
-                    ok, msg = reverse_adjustment(adj_id)
-                    if ok:
-                        st.success(msg)
-                        st.rerun()
-                    else:
-                        st.error(msg)
-
-# ── Snowflake feature reference ──────────────────────────────────────
-with st.expander("🔗 Snowflake Features Used in This Page"):
-    st.markdown("""
-    | Action | Snowflake Feature |
-    |--------|-------------------|
-    | Adjustment list with filters | **Hybrid Table** reads on `ADJ_HEADER` |
-    | Line item detail | **Hybrid Table** join `ADJ_LINE_ITEM` → `ADJ_HEADER` (FK + INDEX) |
-    | Status timeline | **ADJ_STATUS_HISTORY** table (populated by **Stream** + **Task**) |
-    | AI Summary display | **Cortex COMPLETE** auto-generated summary |
-    | Approve / Reject | **Snowpark Python SP** `SP_UPDATE_ADJUSTMENT_STATUS` |
-    | Self-approval guard | Validation logic inside the stored procedure |
-    | Reverse | **Snowpark Python SP** `SP_REVERSE_ADJUSTMENT` |
-    """)
+        # Action buttons
+        current_status = row["STATUS"]
+        valid_next = VALID_TRANSITIONS.get(current_status, [])
+        if valid_next:
+            st.markdown("<br/>", unsafe_allow_html=True)
+            btn_cols = st.columns(len(valid_next) + 2)
+            for i, ns in enumerate(valid_next):
+                color_map = {
+                    "PENDING_APPROVAL": "primary",
+                    "APPROVED": "primary",
+                    "APPLIED": "primary",
+                    "REJECTED": "secondary",
+                    "REVERSED": "secondary",
+                }
+                with btn_cols[i]:
+                    if st.button(f"→ {ns.replace('_',' ')}", key=f"btn_{adj_id}_{ns}",
+                                 type=color_map.get(ns, "secondary"), use_container_width=True):
+                        comment = st.session_state.get(f"comment_{adj_id}", "")
+                        ok = update_status(adj_id, ns, comment)
+                        if ok:
+                            st.success(f"Moved to {ns}")
+                            st.rerun()
+                        else:
+                            st.error("Transition failed")

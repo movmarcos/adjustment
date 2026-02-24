@@ -1,301 +1,201 @@
 """
-Page 3 — AI Assistant (Mock)
-Simulates Cortex AI features with local logic.
+🤖 AI Assistant — NL queries, summaries, anomaly detection
 """
-
+import streamlit as st
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import streamlit as st
+from data.state_manager import (init_state, get_fact_table, get_headers, get_lines,
+                                 get_fact_adjusted, current_scope_cfg)
+from data.styles import inject_css, section_header, scope_selector_sidebar, metric_card, format_number, status_badge
+from data.mock_data import SCOPES
 import pandas as pd
-import re
-from datetime import datetime
-from data.state_manager import (
-    init_state, get_adj_headers, get_adj_line_items,
-    get_fact_table, get_fact_adjusted,
-)
+import numpy as np
 
+st.set_page_config(page_title="AI Assistant", page_icon="🤖", layout="wide")
+inject_css()
 init_state()
+scope_id = scope_selector_sidebar()
+cfg = current_scope_cfg()
 
-st.title("🤖 AI Assistant")
-st.caption(
-    "In production, these features are powered by **Snowflake Cortex** (LLM, NL-to-SQL, Anomaly Detection). "
-    "This prototype uses simple local logic to simulate the behaviour."
-)
+st.markdown(f"""
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+    <span style="font-size:2rem">🤖</span>
+    <h1 style="margin:0;font-size:1.6rem;color:#0D47A1">AI Assistant</h1>
+</div>
+<span style="color:#607D8B;font-size:.88rem">Scope: <strong>{cfg['icon']} {cfg['name']}</strong>
+&nbsp;·&nbsp; Ask questions in plain English</span>
+""", unsafe_allow_html=True)
+st.markdown("---")
 
-tab_chat, tab_summary, tab_anomaly, tab_risk = st.tabs(
-    ["💬 Chat", "📝 Summaries", "🔍 Anomaly Detection", "⚠️ Risk Classification"]
-)
+def _process_query(query: str, scope_cfg: dict) -> str:
+    q = query.lower()
+    headers = get_headers()
+    fact = get_fact_table()
+    meas_keys = [m["key"] for m in scope_cfg["measures"]]
 
-# ══════════════════════════════════════════════════════════════════════
-#  TAB 1: Chat (simulated NL-to-SQL)
-# ══════════════════════════════════════════════════════════════════════
+    if any(w in q for w in ["how many", "count", "total"]):
+        if "adjustment" in q:
+            n = len(headers)
+            return f"There are **{n} adjustments** in the {scope_cfg['name']} scope."
+        if "row" in q or "record" in q:
+            return f"The fact table has **{len(fact):,} rows**."
+
+    if any(w in q for w in ["pending", "approval"]):
+        n = len(headers[headers["STATUS"] == "PENDING_APPROVAL"])
+        return f"There are **{n}** adjustments pending approval."
+
+    if any(w in q for w in ["largest", "biggest", "max"]):
+        m = meas_keys[0]
+        mx = fact[m].max()
+        return f"The largest **{m}** value is **{format_number(mx)}**."
+
+    if any(w in q for w in ["average", "mean"]):
+        m = meas_keys[0]
+        avg = fact[m].mean()
+        return f"The average **{m}** is **{format_number(avg)}**."
+
+    if any(w in q for w in ["scope", "table"]):
+        scopes = ", ".join([f"{s['icon']} {s['name']}" for s in SCOPES.values()])
+        return f"Available scopes: {scopes}. Currently viewing **{scope_cfg['name']}**."
+
+    return ("I can help with questions about adjustments, row counts, pending items, "
+            "and data statistics. Try: *'How many pending adjustments?'* or *'What is the largest MTM?'*")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# TABS
+# ─────────────────────────────────────────────────────────────────────
+tab_chat, tab_summary, tab_anomaly, tab_risk = st.tabs([
+    "💬 Chat", "📊 Summary", "🔍 Anomaly Detection", "⚠️ Risk Classification"
+])
+
+# ─────────────────────────────────────────────────────────────────────
+# CHAT TAB
+# ─────────────────────────────────────────────────────────────────────
 with tab_chat:
-    st.subheader("Natural Language Query")
-    st.info(
-        "In Snowflake, this uses **Cortex COMPLETE** to translate your question to SQL. "
-        "The prototype matches common patterns locally.",
-        icon="❄️",
-    )
-
-    # Chat history
     if "chat_history" not in st.session_state:
         st.session_state["chat_history"] = []
 
-    # Display chat
     for msg in st.session_state["chat_history"]:
         with st.chat_message(msg["role"]):
-            if msg.get("dataframe") is not None:
-                st.markdown(msg["content"])
-                st.dataframe(msg["dataframe"], use_container_width=True, hide_index=True)
-            else:
-                st.markdown(msg["content"])
+            st.markdown(msg["content"], unsafe_allow_html=True)
 
-    # Input
-    user_input = st.chat_input("Ask about adjustments... (e.g., 'show all pending adjustments')")
+    prompt = st.chat_input("Ask about adjustments, data, or patterns…")
+    if prompt:
+        st.session_state["chat_history"].append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-    if user_input:
-        st.session_state["chat_history"].append({"role": "user", "content": user_input, "dataframe": None})
+        response = _process_query(prompt, cfg)
+        st.session_state["chat_history"].append({"role": "assistant", "content": response})
+        with st.chat_message("assistant"):
+            st.markdown(response, unsafe_allow_html=True)
 
-        # Simple pattern matching to simulate NL-to-SQL
-        headers = get_adj_headers()
-        response_text = ""
-        response_df = None
-        query = user_input.lower()
-
-        if "pending" in query:
-            result = headers[headers["ADJ_STATUS"] == "PENDING_APPROVAL"]
-            response_text = f"Found **{len(result)}** pending adjustment(s):"
-            response_df = result[["ADJ_ID", "ADJ_TYPE", "TARGET_DATE", "CREATED_BY", "TOTAL_DELTA_AMOUNT"]].copy()
-
-        elif "applied" in query or "active" in query:
-            result = headers[headers["ADJ_STATUS"] == "APPLIED"]
-            response_text = f"Found **{len(result)}** applied adjustment(s):"
-            response_df = result[["ADJ_ID", "ADJ_TYPE", "TARGET_DATE", "TOTAL_DELTA_AMOUNT", "APPLIED_AT"]].copy()
-
-        elif "total impact" in query or "total delta" in query:
-            applied = headers[headers["ADJ_STATUS"] == "APPLIED"]
-            total = applied["TOTAL_DELTA_AMOUNT"].sum()
-            response_text = f"Total impact of all applied adjustments: **${total:,.2f}**"
-
-        elif "who" in query and ("most" in query or "created" in query):
-            counts = headers["CREATED_BY"].value_counts().reset_index()
-            counts.columns = ["User", "Adjustments"]
-            response_text = "Adjustments by user:"
-            response_df = counts
-
-        elif "flatten" in query:
-            result = headers[headers["ADJ_TYPE"] == "FLATTEN"]
-            response_text = f"Found **{len(result)}** FLATTEN adjustment(s):"
-            response_df = result[["ADJ_ID", "ADJ_STATUS", "TARGET_DATE", "TOTAL_DELTA_AMOUNT", "CREATED_BY"]].copy()
-
-        elif "scale" in query:
-            result = headers[headers["ADJ_TYPE"] == "SCALE"]
-            response_text = f"Found **{len(result)}** SCALE adjustment(s):"
-            response_df = result[["ADJ_ID", "ADJ_STATUS", "TARGET_DATE", "SCALE_FACTOR", "TOTAL_DELTA_AMOUNT"]].copy()
-
-        elif "roll" in query:
-            result = headers[headers["ADJ_TYPE"] == "ROLL"]
-            response_text = f"Found **{len(result)}** ROLL adjustment(s):"
-            response_df = result[["ADJ_ID", "ADJ_STATUS", "TARGET_DATE", "ROLL_SOURCE_DATE", "TOTAL_DELTA_AMOUNT"]].copy()
-
-        elif re.search(r"adj[- ]?(\d+)", query):
-            m = re.search(r"adj[- ]?(\d+)", query)
-            aid = int(m.group(1))
-            result = headers[headers["ADJ_ID"] == aid]
-            if result.empty:
-                response_text = f"Adjustment ADJ-{aid} not found."
-            else:
-                r = result.iloc[0]
-                response_text = (
-                    f"**ADJ-{aid}** — {r['ADJ_TYPE']} | Status: {r['ADJ_STATUS']}\n\n"
-                    f"- Target Date: {r['TARGET_DATE']}\n"
-                    f"- Affected Rows: {int(r['AFFECTED_ROWS'])}\n"
-                    f"- Total Delta: ${r['TOTAL_DELTA_AMOUNT']:,.2f}\n"
-                    f"- Created by: {r['CREATED_BY']}\n"
-                    f"- Reason: {r['BUSINESS_REASON']}"
-                )
-
-        elif "summary" in query or "summarize" in query or "overview" in query:
-            status_counts = headers["ADJ_STATUS"].value_counts()
-            total = len(headers)
-            response_text = f"**Adjustment Overview** — {total} total adjustments:\n\n"
-            for status, count in status_counts.items():
-                response_text += f"- {status}: {count}\n"
-
-        else:
-            response_text = (
-                "I can answer questions like:\n"
-                "- *Show all pending adjustments*\n"
-                "- *What is the total impact?*\n"
-                "- *Who created the most adjustments?*\n"
-                "- *Tell me about ADJ-1*\n"
-                "- *Show all flatten adjustments*\n"
-                "- *Give me a summary*\n\n"
-                "In production, **Cortex COMPLETE** handles arbitrary natural language queries."
-            )
-
-        st.session_state["chat_history"].append({
-            "role": "assistant", "content": response_text, "dataframe": response_df
-        })
-        st.rerun()
-
-    if st.button("🗑️ Clear Chat", key="clear_chat"):
-        st.session_state["chat_history"] = []
-        st.rerun()
-
-# ══════════════════════════════════════════════════════════════════════
-#  TAB 2: Auto Summaries
-# ══════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────
+# SUMMARY TAB
+# ─────────────────────────────────────────────────────────────────────
 with tab_summary:
-    st.subheader("AI-Generated Summaries")
-    st.info(
-        "In Snowflake, the **Task DAG** auto-generates summaries via **Cortex COMPLETE** "
-        "whenever an adjustment changes status.",
-        icon="❄️",
-    )
+    section_header("Scope Summary")
+    fact = get_fact_table()
+    headers = get_headers()
+    meas_keys = [m["key"] for m in cfg["measures"]]
 
-    headers = get_adj_headers()
-    with_summary = headers[headers["AI_SUMMARY"].notna() & (headers["AI_SUMMARY"] != "")]
+    cols = st.columns(3)
+    cols[0].markdown(metric_card("Fact Rows", f"{len(fact):,}"), unsafe_allow_html=True)
+    cols[1].markdown(metric_card("Adjustments", len(headers)), unsafe_allow_html=True)
+    cols[2].markdown(metric_card("Dimensions", len(cfg["dimensions"])), unsafe_allow_html=True)
 
-    if with_summary.empty:
-        st.info("No AI summaries generated yet. Approve or apply an adjustment to trigger generation.")
-    else:
-        for _, row in with_summary.iterrows():
-            with st.container(border=True):
-                col1, col2 = st.columns([1, 3])
-                with col1:
-                    st.markdown(f"**ADJ-{int(row['ADJ_ID'])}**")
-                    st.caption(f"{row['ADJ_TYPE']} | {row['ADJ_STATUS']}")
-                with col2:
-                    st.markdown(f"🤖 {row['AI_SUMMARY']}")
+    section_header("Measure Statistics")
+    stats = fact[meas_keys].describe().T
+    stats.columns = ["Count", "Mean", "Std", "Min", "25%", "50%", "75%", "Max"]
+    st.dataframe(stats.style.format("{:,.0f}"), use_container_width=True)
 
-# ══════════════════════════════════════════════════════════════════════
-#  TAB 3: Anomaly Detection
-# ══════════════════════════════════════════════════════════════════════
+    section_header("Adjustments by Status")
+    if not headers.empty:
+        status_counts = headers["STATUS"].value_counts()
+        for status, count in status_counts.items():
+            badge = status_badge(status)
+            st.markdown(f"{badge} &nbsp; **{count}**", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────────────
+# ANOMALY DETECTION TAB
+# ─────────────────────────────────────────────────────────────────────
 with tab_anomaly:
-    st.subheader("Anomaly Detection")
-    st.info(
-        "In Snowflake, the **TASK_ANOMALY_CHECK** runs daily via CRON and calls "
-        "**SP_DETECT_ADJUSTMENT_ANOMALIES**. This prototype runs a simplified check.",
-        icon="❄️",
-    )
+    section_header("Statistical Anomaly Detection")
+    st.caption("Identifies values beyond 2 standard deviations from the mean.")
 
-    if st.button("🔍 Run Anomaly Check", type="primary"):
-        headers = get_adj_headers()
+    fact = get_fact_table()
+    meas_keys = [m["key"] for m in cfg["measures"]]
 
-        anomalies = []
+    anomalies_found = False
+    for m in meas_keys:
+        mean = fact[m].mean()
+        std = fact[m].std()
+        threshold = 2.0
+        mask = (fact[m] - mean).abs() > threshold * std
+        outliers = fact[mask]
+        if not outliers.empty:
+            anomalies_found = True
+            st.markdown(f"""
+            <div class="card" style="border-left:4px solid #FFA726">
+                <strong style="color:#E65100">⚠️ {len(outliers)} anomalies</strong> in <strong>{m}</strong>
+                <div style="font-size:.82rem;color:#607D8B;margin-top:4px">
+                    Mean: {format_number(mean)} · Std: {format_number(std)} · Threshold: ±{threshold}σ
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            with st.expander(f"View {m} outlier rows"):
+                dim_cols = [d["key"] for d in cfg["dimensions"]]
+                show = ["AS_OF_DATE"] + dim_cols + [m]
+                st.dataframe(outliers[[c for c in show if c in outliers.columns]],
+                            use_container_width=True, hide_index=True)
+    if not anomalies_found:
+        st.success("No statistical anomalies detected in the current data.")
 
-        # Check 1: Large adjustments (> $1M absolute delta)
-        large = headers[headers["TOTAL_DELTA_AMOUNT"].abs() > 1_000_000]
-        for _, r in large.iterrows():
-            anomalies.append({
-                "Adjustment": f"ADJ-{int(r['ADJ_ID'])}",
-                "Check": "Large Adjustment",
-                "Detail": f"${r['TOTAL_DELTA_AMOUNT']:,.2f} exceeds $1M threshold",
-                "Severity": "HIGH",
-            })
-
-        # Check 2: Multiple adjustments by same user on same date
-        user_date = headers.groupby(["CREATED_BY", "TARGET_DATE"]).size().reset_index(name="count")
-        multi = user_date[user_date["count"] > 1]
-        for _, r in multi.iterrows():
-            anomalies.append({
-                "Adjustment": f"Multiple ({r['count']})",
-                "Check": "Concentration Risk",
-                "Detail": f"{r['CREATED_BY']} made {r['count']} adjustments on {r['TARGET_DATE']}",
-                "Severity": "MEDIUM",
-            })
-
-        # Check 3: Self-approved (shouldn't happen but check historical)
-        self_approved = headers[
-            (headers["APPROVED_BY"].notna())
-            & (headers["CREATED_BY"] == headers["APPROVED_BY"])
-        ]
-        for _, r in self_approved.iterrows():
-            anomalies.append({
-                "Adjustment": f"ADJ-{int(r['ADJ_ID'])}",
-                "Check": "Self-Approval",
-                "Detail": f"Created and approved by {r['CREATED_BY']}",
-                "Severity": "CRITICAL",
-            })
-
-        if anomalies:
-            st.warning(f"Found **{len(anomalies)}** potential anomalies.")
-            anomaly_df = pd.DataFrame(anomalies)
-
-            def color_severity(val):
-                colors = {
-                    "LOW": "color: green",
-                    "MEDIUM": "color: orange",
-                    "HIGH": "color: red",
-                    "CRITICAL": "color: white; background-color: red; font-weight: bold",
-                }
-                return colors.get(val, "")
-
-            st.dataframe(
-                anomaly_df.style.applymap(color_severity, subset=["Severity"]),
-                use_container_width=True,
-                hide_index=True,
-            )
-        else:
-            st.success("✅ No anomalies detected.")
-
-# ══════════════════════════════════════════════════════════════════════
-#  TAB 4: Risk Classification
-# ══════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────
+# RISK CLASSIFICATION TAB
+# ─────────────────────────────────────────────────────────────────────
 with tab_risk:
-    st.subheader("Risk Classification")
-    st.info(
-        "In Snowflake, the UDF **CLASSIFY_ADJUSTMENT_RISK** uses **Cortex COMPLETE** "
-        "to assign a risk label. This prototype uses simple threshold rules.",
-        icon="❄️",
-    )
+    section_header("Adjustment Risk Classification")
+    st.caption("Classifies adjustments by potential risk based on impact magnitude.")
 
-    headers = get_adj_headers()
+    headers = get_headers()
+    adj_lines = get_lines()
 
-    def classify_risk(row):
-        delta = abs(row["TOTAL_DELTA_AMOUNT"])
-        rows = row["AFFECTED_ROWS"]
+    if headers.empty:
+        st.info("No adjustments to classify.")
+    else:
+        for _, row in headers.iterrows():
+            adj_id = row["ADJ_ID"]
+            adj_l = adj_lines[adj_lines["ADJ_ID"] == adj_id]
+            total_delta = adj_l["DELTA_VALUE"].abs().sum() if "DELTA_VALUE" in adj_l.columns and not adj_l.empty else 0
 
-        if delta > 5_000_000 or rows > 50:
-            return "CRITICAL"
-        elif delta > 1_000_000 or rows > 20:
-            return "HIGH"
-        elif delta > 100_000 or rows > 5:
-            return "MEDIUM"
-        else:
-            return "LOW"
+            if total_delta > 2_000_000:
+                risk = "HIGH"
+                risk_color = "#EF5350"
+                risk_icon = "🔴"
+            elif total_delta > 500_000:
+                risk = "MEDIUM"
+                risk_color = "#FFA726"
+                risk_icon = "🟡"
+            else:
+                risk = "LOW"
+                risk_color = "#66BB6A"
+                risk_icon = "🟢"
 
-    risk_df = headers[["ADJ_ID", "ADJ_TYPE", "ADJ_STATUS", "TARGET_DATE",
-                        "AFFECTED_ROWS", "TOTAL_DELTA_AMOUNT", "CREATED_BY"]].copy()
-    risk_df["RISK_LEVEL"] = headers.apply(classify_risk, axis=1)
-    risk_df["ADJ_ID"] = risk_df["ADJ_ID"].apply(lambda x: f"ADJ-{int(x)}")
-    risk_df["TOTAL_DELTA_AMOUNT"] = risk_df["TOTAL_DELTA_AMOUNT"].apply(lambda x: f"${x:,.2f}")
-
-    def color_risk(val):
-        colors = {
-            "LOW": "background-color: #c8e6c9",
-            "MEDIUM": "background-color: #fff9c4",
-            "HIGH": "background-color: #ffccbc",
-            "CRITICAL": "background-color: #ef9a9a; font-weight: bold",
-        }
-        return colors.get(val, "")
-
-    st.dataframe(
-        risk_df.style.applymap(color_risk, subset=["RISK_LEVEL"]),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-# ── Snowflake Feature Reference ─────────────────────────────────────
-with st.expander("🔗 Snowflake Features Used in This Page"):
-    st.markdown("""
-    | Feature | Snowflake Implementation |
-    |---------|--------------------------|
-    | Chat (NL-to-SQL) | **Cortex COMPLETE** (`mistral-large2`) with SQL generation prompt |
-    | Auto Summaries | **Task DAG** → **Cortex COMPLETE** after status change |
-    | Anomaly Detection | **Scheduled Task** (CRON) → **SP_DETECT_ADJUSTMENT_ANOMALIES** |
-    | Risk Classification | **UDF CLASSIFY_ADJUSTMENT_RISK** using **Cortex COMPLETE** |
-    | Search | **Cortex Search Service** (Enterprise feature) |
-    """)
+            st.markdown(f"""
+            <div class="card" style="display:flex;justify-content:space-between;align-items:center;
+                         border-left:4px solid {risk_color}">
+                <div>
+                    <strong style="color:#0D47A1">{adj_id}</strong> · {row['ADJ_TYPE']}
+                    &nbsp; {status_badge(row['STATUS'])}
+                    <div style="font-size:.8rem;color:#607D8B;margin-top:2px">{row['JUSTIFICATION']}</div>
+                </div>
+                <div style="text-align:right">
+                    <span style="font-size:1.3rem">{risk_icon}</span>
+                    <div style="font-size:.8rem;font-weight:700;color:{risk_color}">{risk} RISK</div>
+                    <div style="font-size:.75rem;color:#607D8B">Δ {format_number(total_delta)}</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)

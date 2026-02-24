@@ -1,160 +1,139 @@
 """
-Page 4 — Dashboard
-Visual impact analysis with charts, KPIs, and before/after comparison.
+📊 Dashboard — visual analytics
 """
-
+import streamlit as st
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import streamlit as st
+from data.state_manager import (init_state, get_fact_table, get_headers, get_lines,
+                                 get_fact_adjusted, current_scope_cfg)
+from data.styles import inject_css, section_header, scope_selector_sidebar, metric_card, format_number
+from data.mock_data import SCOPES
 import pandas as pd
-from data.state_manager import (
-    init_state, get_adj_headers, get_adj_line_items,
-    get_fact_table, get_fact_adjusted,
-)
+import numpy as np
 
+st.set_page_config(page_title="Dashboard", page_icon="📊", layout="wide")
+inject_css()
 init_state()
+scope_id = scope_selector_sidebar()
+cfg = current_scope_cfg()
 
-st.title("📊 Impact Dashboard")
+st.markdown(f"""
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+    <span style="font-size:2rem">📊</span>
+    <h1 style="margin:0;font-size:1.6rem;color:#0D47A1">Dashboard</h1>
+</div>
+<span style="color:#607D8B;font-size:.88rem">Scope: <strong>{cfg['icon']} {cfg['name']}</strong></span>
+""", unsafe_allow_html=True)
+st.markdown("---")
 
-headers = get_adj_headers()
-lines = get_adj_line_items()
-fact_orig = get_fact_table()
-fact_adj = get_fact_adjusted()
+fact = get_fact_table()
+adjusted = get_fact_adjusted()
+headers = get_headers()
+adj_lines = get_lines()
+meas_keys = [m["key"] for m in cfg["measures"]]
+dim_keys = [d["key"] for d in cfg["dimensions"]]
 
-# ── KPI Section ──────────────────────────────────────────────────────
-st.subheader("Key Metrics")
+# ── KPI row ─────────────────────────────────────────────────────────
+section_header("Key Metrics")
+kpi_cols = st.columns(4)
 
-applied = headers[headers["ADJ_STATUS"] == "APPLIED"]
-adjusted_rows = fact_adj[fact_adj["IS_ADJUSTED"] == True]
+total_original = fact[meas_keys[0]].sum() if meas_keys else 0
+total_adjusted = adjusted[meas_keys[0]].sum() if meas_keys else 0
+impact = total_adjusted - total_original
+impact_pct = (impact / total_original * 100) if total_original != 0 else 0
 
-k1, k2, k3, k4, k5 = st.columns(5)
-with k1:
-    st.metric("Total Adjustments", len(headers))
-with k2:
-    st.metric("Applied", len(applied))
-with k3:
-    st.metric("Pending", len(headers[headers["ADJ_STATUS"] == "PENDING_APPROVAL"]))
-with k4:
-    total_impact = applied["TOTAL_DELTA_AMOUNT"].sum() if not applied.empty else 0
-    st.metric("Net Impact", f"${total_impact:,.0f}")
-with k5:
-    st.metric("Rows Modified", len(adjusted_rows))
+kpi_cols[0].markdown(metric_card("Original Total", format_number(total_original)), unsafe_allow_html=True)
+kpi_cols[1].markdown(metric_card("Adjusted Total", format_number(total_adjusted)), unsafe_allow_html=True)
+delta_str = f"{impact_pct:+.1f}%"
+kpi_cols[2].markdown(metric_card("Net Impact", format_number(impact), delta_str), unsafe_allow_html=True)
+kpi_cols[3].markdown(metric_card("Adjustments", len(headers)), unsafe_allow_html=True)
 
-st.divider()
+# ── Charts ──────────────────────────────────────────────────────────
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+    HAS_PLOTLY = True
+except ImportError:
+    HAS_PLOTLY = False
 
-# ── Impact by Type ───────────────────────────────────────────────────
-col_chart1, col_chart2 = st.columns(2)
+if HAS_PLOTLY and not headers.empty:
+    c1, c2 = st.columns(2)
 
-with col_chart1:
-    st.subheader("Impact by Adjustment Type")
-    if not applied.empty:
-        by_type = applied.groupby("ADJ_TYPE").agg(
-            Count=("ADJ_ID", "count"),
-            Total_Delta=("TOTAL_DELTA_AMOUNT", "sum"),
-            Avg_Rows=("AFFECTED_ROWS", "mean"),
-        ).reset_index()
-        by_type["Total_Delta"] = by_type["Total_Delta"].round(2)
-        by_type["Avg_Rows"] = by_type["Avg_Rows"].round(0)
+    # Adjustments by type
+    with c1:
+        section_header("By Adjustment Type")
+        type_counts = headers["ADJ_TYPE"].value_counts().reset_index()
+        type_counts.columns = ["Type", "Count"]
+        fig = px.bar(type_counts, x="Type", y="Count",
+                     color="Type",
+                     color_discrete_map={"FLATTEN": "#EF5350", "SCALE": "#29B6F6", "ROLL": "#66BB6A"},
+                     template="plotly_white")
+        fig.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10), height=280)
+        st.plotly_chart(fig, use_container_width=True)
 
-        st.bar_chart(
-            by_type.set_index("ADJ_TYPE")["Total_Delta"],
-            height=300,
-        )
-        st.dataframe(by_type, use_container_width=True, hide_index=True)
-    else:
-        st.info("No applied adjustments yet.")
+    # Adjustments by status
+    with c2:
+        section_header("By Status")
+        from data.state_manager import STATUS_COLORS
+        status_counts = headers["STATUS"].value_counts().reset_index()
+        status_counts.columns = ["Status", "Count"]
+        colors = [STATUS_COLORS.get(s, "#78909C") for s in status_counts["Status"]]
+        fig = px.pie(status_counts, names="Status", values="Count",
+                     color_discrete_sequence=colors,
+                     template="plotly_white")
+        fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=280)
+        st.plotly_chart(fig, use_container_width=True)
 
-with col_chart2:
-    st.subheader("Impact by Entity")
-    applied_ids = applied["ADJ_ID"].tolist() if not applied.empty else []
-    applied_lines = lines[lines["ADJ_ID"].isin(applied_ids)]
+    # Measure comparison by first dimension
+    if dim_keys and meas_keys:
+        section_header(f"{meas_keys[0]} by {cfg['dimensions'][0]['label']}")
+        first_dim = dim_keys[0]
+        first_meas = meas_keys[0]
 
-    if not applied_lines.empty:
-        by_entity = applied_lines.groupby("ENTITY_KEY").agg(
-            Rows=("LINE_ID", "count"),
-            Amount_Delta=("AMOUNT_DELTA", "sum"),
-        ).reset_index()
-        by_entity["Amount_Delta"] = by_entity["Amount_Delta"].round(2)
+        orig_by_dim = fact.groupby(first_dim)[first_meas].sum().reset_index()
+        orig_by_dim.columns = [first_dim, "Original"]
+        adj_by_dim = adjusted.groupby(first_dim)[first_meas].sum().reset_index()
+        adj_by_dim.columns = [first_dim, "Adjusted"]
+        merged = orig_by_dim.merge(adj_by_dim, on=first_dim, how="outer").fillna(0)
 
-        st.bar_chart(
-            by_entity.set_index("ENTITY_KEY")["Amount_Delta"],
-            height=300,
-        )
-        st.dataframe(by_entity, use_container_width=True, hide_index=True)
-    else:
-        st.info("No applied line items.")
+        fig = go.Figure()
+        fig.add_trace(go.Bar(name="Original", x=merged[first_dim], y=merged["Original"],
+                             marker_color="#90CAF9"))
+        fig.add_trace(go.Bar(name="Adjusted", x=merged[first_dim], y=merged["Adjusted"],
+                             marker_color="#0D47A1"))
+        fig.update_layout(barmode="group", template="plotly_white",
+                         margin=dict(t=10, b=10, l=10, r=10), height=320,
+                         legend=dict(orientation="h", y=-0.15))
+        st.plotly_chart(fig, use_container_width=True)
 
-st.divider()
+    # Time series
+    if "AS_OF_DATE" in fact.columns and meas_keys:
+        section_header(f"{meas_keys[0]} Over Time")
+        first_meas = meas_keys[0]
+        ts_orig = fact.groupby("AS_OF_DATE")[first_meas].sum().reset_index()
+        ts_orig.columns = ["Date", "Original"]
+        ts_adj = adjusted.groupby("AS_OF_DATE")[first_meas].sum().reset_index()
+        ts_adj.columns = ["Date", "Adjusted"]
+        ts = ts_orig.merge(ts_adj, on="Date", how="outer").fillna(0)
 
-# ── Before / After Comparison ────────────────────────────────────────
-st.subheader("Before vs. After Comparison")
-st.caption("This mirrors what the **Dynamic Table** MART.FACT_ADJUSTED provides in Snowflake.")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(name="Original", x=ts["Date"], y=ts["Original"],
+                                 mode="lines+markers", line=dict(color="#90CAF9", width=2)))
+        fig.add_trace(go.Scatter(name="Adjusted", x=ts["Date"], y=ts["Adjusted"],
+                                 mode="lines+markers", line=dict(color="#0D47A1", width=2)))
+        fig.update_layout(template="plotly_white",
+                         margin=dict(t=10, b=10, l=10, r=10), height=300,
+                         legend=dict(orientation="h", y=-0.2))
+        st.plotly_chart(fig, use_container_width=True)
 
-if len(adjusted_rows) > 0:
-    # Merge original and adjusted
-    compare = fact_orig[["FACT_ID", "ENTITY_KEY", "PRODUCT_KEY", "BUSINESS_DATE",
-                          "AMOUNT", "QUANTITY", "NOTIONAL"]].merge(
-        fact_adj[fact_adj["IS_ADJUSTED"] == True][
-            ["FACT_ID", "AMOUNT", "QUANTITY", "NOTIONAL"]
-        ],
-        on="FACT_ID",
-        suffixes=("_BEFORE", "_AFTER"),
-    )
-    compare["AMOUNT_DELTA"] = compare["AMOUNT_AFTER"] - compare["AMOUNT_BEFORE"]
+elif not HAS_PLOTLY:
+    st.warning("Install `plotly` for interactive charts: `pip install plotly`")
 
-    # Display
-    tab_table, tab_chart_ba = st.tabs(["📋 Table", "📈 Chart"])
-
-    with tab_table:
-        display = compare.copy()
-        for c in ["AMOUNT_BEFORE", "AMOUNT_AFTER", "AMOUNT_DELTA"]:
-            display[c] = display[c].apply(lambda x: f"${x:,.2f}")
-        st.dataframe(display, use_container_width=True, hide_index=True)
-
-    with tab_chart_ba:
-        chart_data = compare.groupby("ENTITY_KEY")[["AMOUNT_BEFORE", "AMOUNT_AFTER"]].sum().reset_index()
-        chart_data.columns = ["Entity", "Before", "After"]
-        st.bar_chart(chart_data.set_index("Entity"), height=400)
-else:
-    st.info("No adjusted rows. Apply an adjustment to see before/after comparison.")
-
-st.divider()
-
-# ── Adjustment Activity ──────────────────────────────────────────────
-st.subheader("Adjustment Activity")
-
-col_act1, col_act2 = st.columns(2)
-
-with col_act1:
-    st.markdown("**Status Distribution**")
-    status_counts = headers["ADJ_STATUS"].value_counts().reset_index()
-    status_counts.columns = ["Status", "Count"]
-    st.bar_chart(status_counts.set_index("Status"), height=250)
-
-with col_act2:
-    st.markdown("**Top Adjusters**")
-    user_counts = headers["CREATED_BY"].value_counts().reset_index()
-    user_counts.columns = ["User", "Adjustments"]
-    st.dataframe(user_counts, use_container_width=True, hide_index=True)
-
-st.divider()
-
-# ── Activity by Date ─────────────────────────────────────────────────
-st.subheader("Adjustments by Target Date")
-if not headers.empty:
-    by_date_type = headers.groupby(["TARGET_DATE", "ADJ_TYPE"]).size().reset_index(name="Count")
-    pivot = by_date_type.pivot(index="TARGET_DATE", columns="ADJ_TYPE", values="Count").fillna(0)
-    st.bar_chart(pivot, height=300)
-
-# ── Snowflake Feature Reference ─────────────────────────────────────
-with st.expander("🔗 Snowflake Features Used in This Page"):
-    st.markdown("""
-    | Dashboard Component | Snowflake Feature |
-    |---------------------|-------------------|
-    | KPI metrics | Queries against **Dynamic Tables** (pre-materialized, fast) |
-    | Before/After comparison | **Dynamic Table** `MART.FACT_ADJUSTED` with `IS_ADJUSTED` flag |
-    | Impact by type/entity | **Dynamic Table** `MART.ADJUSTMENT_IMPACT_SUMMARY` (DOWNSTREAM lag) |
-    | Activity over time | **Dynamic Table** `MART.DAILY_ADJUSTMENT_ACTIVITY` |
-    | User masking | **Masking Policy** hides `CREATED_BY` for viewer roles |
-    """)
+# ── Raw data toggle ─────────────────────────────────────────────────
+with st.expander("📄 View Raw Data"):
+    tab_o, tab_a = st.tabs(["Original", "Adjusted"])
+    with tab_o:
+        st.dataframe(fact, use_container_width=True, hide_index=True)
+    with tab_a:
+        st.dataframe(adjusted, use_container_width=True, hide_index=True)
