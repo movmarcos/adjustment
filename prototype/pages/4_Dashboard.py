@@ -27,12 +27,23 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 st.markdown("---")
 
-fact = get_fact_table()
-adjusted = get_fact_adjusted()
+fact_all = get_fact_table()
+adjusted_all = get_fact_adjusted()
 headers = get_headers()
 adj_lines = get_lines()
 meas_keys = [m["key"] for m in cfg["measures"]]
 dim_keys = [d["key"] for d in cfg["dimensions"]]
+
+# ── COB Filter ──────────────────────────────────────────────────────
+all_cobs = sorted(fact_all["AS_OF_DATE"].unique().tolist())
+cob_selection = st.multiselect("**Filter by COB**", all_cobs, key="dash_cob_filter")
+
+if cob_selection:
+    fact = fact_all[fact_all["AS_OF_DATE"].isin(cob_selection)]
+    adjusted = adjusted_all[adjusted_all["AS_OF_DATE"].isin(cob_selection)]
+else:
+    fact = fact_all
+    adjusted = adjusted_all
 
 # ── KPI row ─────────────────────────────────────────────────────────
 section_header("Key Metrics")

@@ -34,15 +34,20 @@ if headers.empty:
     st.stop()
 
 # ── Filters ─────────────────────────────────────────────────────────
-f1, f2, f3 = st.columns(3)
+f1, f2, f3, f4 = st.columns(4)
 with f1:
-    status_filter = st.multiselect("Status", list(STATUS_COLORS.keys()), key="audit_status")
+    all_cobs = sorted(headers["BUSINESS_DATE"].dropna().unique().tolist())
+    cob_filter = st.multiselect("COB", all_cobs, key="audit_cob")
 with f2:
-    type_filter = st.multiselect("Type", ["FLATTEN", "SCALE", "ROLL"], key="audit_type")
+    status_filter = st.multiselect("Status", list(STATUS_COLORS.keys()), key="audit_status")
 with f3:
+    type_filter = st.multiselect("Type", ["FLATTEN", "SCALE", "ROLL"], key="audit_type")
+with f4:
     user_filter = st.multiselect("Created By", headers["CREATED_BY"].unique().tolist(), key="audit_user")
 
 filtered = headers.copy()
+if cob_filter:
+    filtered = filtered[filtered["BUSINESS_DATE"].isin(cob_filter)]
 if status_filter:
     filtered = filtered[filtered["STATUS"].isin(status_filter)]
 if type_filter:
