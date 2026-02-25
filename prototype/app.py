@@ -5,7 +5,7 @@ import streamlit as st
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 
-from data.state_manager import init_state, get_fact_table, get_headers, get_lines, get_fact_adjusted, current_scope_cfg, STATUS_COLORS
+from data.state_manager import init_state, get_fact_table, get_headers, get_lines, current_scope_cfg, STATUS_COLORS
 from data.styles import inject_css, metric_card, status_badge, section_header, top_navbar, scope_and_user_controls, format_number
 from data.mock_data import SCOPES
 
@@ -78,16 +78,6 @@ else:
             </div>
         </div>
         """, unsafe_allow_html=True)
-
-# ── Quick data preview ──────────────────────────────────────────────
-section_header("Data Preview")
-
-tab_orig, tab_adj = st.tabs(["📄 Original Fact", "✅ Adjusted View"])
-with tab_orig:
-    st.dataframe(fact.head(30), use_container_width=True, hide_index=True)
-with tab_adj:
-    adj_fact = get_fact_adjusted()
-    st.dataframe(adj_fact.head(30), use_container_width=True, hide_index=True)
 
 # ── Scope info ──────────────────────────────────────────────────────
 with st.expander("📋 Scope details"):
