@@ -147,7 +147,8 @@ def preview_adjustment(filters: dict, adj_type: str, params: dict) -> pd.DataFra
     return preview
 
 
-def create_adjustment(filters: dict, adj_type: str, params: dict, justification: str, business_date: str) -> str:
+def create_adjustment(filters: dict, adj_type: str, params: dict, justification: str, business_date: str,
+                      frequency: str = "ADHOC", start_cob: str = "", end_cob: str = "") -> str:
     """Create a new adjustment and return its ID."""
     scope_id = st.session_state["current_scope"]
     user = st.session_state["current_user"]
@@ -185,6 +186,9 @@ def create_adjustment(filters: dict, adj_type: str, params: dict, justification:
         "SCOPE": scope_id,
         "ADJ_TYPE": adj_type,
         "STATUS": "DRAFT",
+        "FREQUENCY": frequency,
+        "START_COB": start_cob,
+        "END_COB": end_cob,
         "JUSTIFICATION": justification,
         "BUSINESS_DATE": business_date,
         "CREATED_BY": user,

@@ -52,6 +52,7 @@ import pandas as pd
 # ─────────────────────────────────────────────────────────────────────
 if step == 1:
     fact = get_fact_table()
+    all_cobs = sorted(fact["AS_OF_DATE"].unique())
 
     # ── 1A  Adjustment Type & Parameters ─────────────────────────────
     section_header("Adjustment Type & Parameters")
@@ -90,7 +91,48 @@ if step == 1:
 
     st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
 
-    # ── 1B  Justification ────────────────────────────────────────────
+    # ── 1B  Frequency ────────────────────────────────────────────────
+    section_header("Frequency")
+
+    freq_cols = st.columns(2)
+    freq_options = ["ADHOC", "RECURRING"]
+    frequency = st.session_state.get("adj_frequency", "ADHOC")
+    with freq_cols[0]:
+        for f_opt in freq_options:
+            f_ico = "🔹" if f_opt == "ADHOC" else "🔁"
+            f_desc = "One-time adjustment" if f_opt == "ADHOC" else "Repeats across a COB range"
+            active_style = "border-color:#D50032;background:#FFF5F7" if frequency == f_opt else ""
+            st.markdown(f"""
+            <div class="card" style="text-align:center;cursor:pointer;padding:10px;{active_style}">
+                <span style="font-size:1.4rem">{f_ico}</span>
+                <div style="font-weight:700;margin:4px 0;font-size:.9rem">{f_opt}</div>
+                <div style="font-size:.75rem;color:#607D8B">{f_desc}</div>
+            </div>
+            """, unsafe_allow_html=True)
+    with freq_cols[1]:
+        frequency = st.radio("Select frequency", freq_options, horizontal=True,
+                             index=freq_options.index(frequency),
+                             label_visibility="collapsed", key="freq_radio")
+        st.session_state["adj_frequency"] = frequency
+
+        if frequency == "RECURRING":
+            rc1, rc2 = st.columns(2)
+            with rc1:
+                start_cob_sel = st.multiselect("**Start COB**", all_cobs,
+                                                default=[all_cobs[0]] if all_cobs else [],
+                                                max_selections=1, key="freq_start_cob")
+            with rc2:
+                end_cob_sel = st.multiselect("**End COB** (optional — leave empty for open-ended)",
+                                              all_cobs, max_selections=1, key="freq_end_cob")
+            st.session_state["adj_start_cob"] = start_cob_sel[0] if start_cob_sel else ""
+            st.session_state["adj_end_cob"] = end_cob_sel[0] if end_cob_sel else ""
+        else:
+            st.session_state["adj_start_cob"] = ""
+            st.session_state["adj_end_cob"] = ""
+
+    st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
+
+    # ── 1C  Justification ────────────────────────────────────────────
     section_header("Justification")
 
     justification = st.text_area("**Justification** (required)", height=80,
@@ -100,12 +142,11 @@ if step == 1:
 
     st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
 
-    # ── 1C  Filters ──────────────────────────────────────────────────
+    # ── 1D  Filters ──────────────────────────────────────────────────
     section_header("Filters")
     st.caption("Select the COB date to adjust and narrow which rows to include.")
 
     filters = {}
-    all_cobs = sorted(fact["AS_OF_DATE"].unique())
 
     # COB selectors (multiselect with max_selections=1 for type-to-search)
     if adj_type == "ROLL":
@@ -231,11 +272,20 @@ elif step == 3:
     justification = st.session_state.get("adj_justification", "")
     biz_date = st.session_state.get("adj_biz_date", "")
 
+    frequency = st.session_state.get("adj_frequency", "ADHOC")
+    start_cob = st.session_state.get("adj_start_cob", "")
+    end_cob = st.session_state.get("adj_end_cob", "")
+    freq_display = frequency
+    if frequency == "RECURRING":
+        end_label = end_cob if end_cob else "open-ended"
+        freq_display = f"RECURRING ({start_cob} → {end_label})"
+
     st.markdown(f"""
     <div class="card">
         <table style="width:100%;font-size:.9rem">
         <tr><td style="color:#6B6B6B;padding:4px 12px 4px 0">Scope</td><td><strong>{cfg['icon']} {cfg['name']}</strong></td></tr>
         <tr><td style="color:#6B6B6B;padding:4px 12px 4px 0">Type</td><td><strong>{adj_type}</strong></td></tr>
+        <tr><td style="color:#6B6B6B;padding:4px 12px 4px 0">Frequency</td><td><strong>{freq_display}</strong></td></tr>
         <tr><td style="color:#6B6B6B;padding:4px 12px 4px 0">Target COB</td><td>{biz_date}</td></tr>
         <tr><td style="color:#6B6B6B;padding:4px 12px 4px 0">Justification</td><td>{justification}</td></tr>
         <tr><td style="color:#6B6B6B;padding:4px 12px 4px 0">Filters</td><td><code>{json.dumps(filters, default=str)}</code></td></tr>
@@ -251,6 +301,7 @@ elif step == 3:
             st.rerun()
     with c3:
         if st.button("✅ Create Adjustment", type="primary", use_container_width=True):
-            adj_id = create_adjustment(filters, adj_type, params, justification, biz_date)
+            adj_id = create_adjustment(filters, adj_type, params, justification, biz_date,
+                                       frequency=frequency, start_cob=start_cob, end_cob=end_cob)
             st.session_state["adj_step"] = 1
             st.success(f"Adjustment **{adj_id}** created successfully!")

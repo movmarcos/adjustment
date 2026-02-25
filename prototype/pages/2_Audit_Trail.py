@@ -73,6 +73,14 @@ for _, row in filtered.sort_values("CREATED_AT", ascending=False).iterrows():
         ic3.markdown(f"**Created by** {row['CREATED_BY']}")
         ic4.markdown(f"**Type** {row['ADJ_TYPE']}")
 
+        freq = row.get("FREQUENCY", "ADHOC")
+        if freq == "RECURRING":
+            s_cob = row.get("START_COB", "")
+            e_cob = row.get("END_COB", "") or "open-ended"
+            st.markdown(f"**Frequency:** 🔁 RECURRING &nbsp;({s_cob} → {e_cob})")
+        else:
+            st.markdown("**Frequency:** 🔹 ADHOC")
+
         st.markdown(f"**Justification:** {row['JUSTIFICATION']}")
 
         # Lines
