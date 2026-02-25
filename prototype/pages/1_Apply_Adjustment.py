@@ -55,32 +55,28 @@ if step == 1:
     all_cobs = sorted(fact["AS_OF_DATE"].unique())
 
     # ── 1A  Adjustment Type & Parameters ─────────────────────────────
-    section_header("Adjustment Type & Parameters")
+    section_header("Adjustment Type")
 
-    type_cols = st.columns(3)
-    types = [
-        ("FLATTEN", "📉", "Set all values to zero", "Delta = −current value"),
-        ("SCALE",   "📐", "Multiply by a factor",   "Delta = value × (factor − 1)"),
-        ("ROLL",    "🔄", "Copy from another date",  "Copies values, optionally scaled"),
-    ]
-    adj_type = st.session_state.get("adj_type", "FLATTEN")
+    TYPE_INFO = {
+        "FLATTEN": ("📉", "Set all matched values to **zero**", "Delta = −current value"),
+        "SCALE":   ("📐", "Multiply matched values by a **factor**", "Delta = value × (factor − 1)"),
+        "ROLL":    ("🔄", "Copy values from a **source COB**, optionally scaled", "Delta = source × scale − current"),
+    }
 
-    for col, (t, ico, short, desc) in zip(type_cols, types):
-        active = "border-color:#D50032;background:#FFF5F7" if adj_type == t else ""
-        with col:
-            st.markdown(f"""
-            <div class="card" style="text-align:center;cursor:pointer;{active}">
-                <span style="font-size:2rem">{ico}</span>
-                <div style="font-weight:700;margin:6px 0">{t}</div>
-                <div style="font-size:.78rem;color:#607D8B">{short}</div>
-                <div style="font-size:.7rem;color:#90A4AE;margin-top:2px">{desc}</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    adj_type = st.radio("Select type", ["FLATTEN", "SCALE", "ROLL"], horizontal=True,
-                        index=["FLATTEN", "SCALE", "ROLL"].index(adj_type),
-                        label_visibility="collapsed")
+    adj_type = st.segmented_control("Type", list(TYPE_INFO.keys()),
+                                     default=st.session_state.get("adj_type", "FLATTEN"),
+                                     key="adj_type_seg")
+    if adj_type is None:
+        adj_type = "FLATTEN"
     st.session_state["adj_type"] = adj_type
+
+    ico, desc, formula = TYPE_INFO[adj_type]
+    st.markdown(f"""
+    <div style="background:#FFF5F7;border-left:4px solid #D50032;padding:10px 14px;border-radius:6px;margin:4px 0 12px 0">
+        <span style="font-size:1.2rem">{ico}</span> &nbsp;{desc}<br/>
+        <span style="font-size:.78rem;color:#90A4AE">{formula}</span>
+    </div>
+    """, unsafe_allow_html=True)
 
     params = {}
     if adj_type == "SCALE":
@@ -89,48 +85,42 @@ if step == 1:
         params["scale"] = st.slider("Scale after roll", 0.0, 5.0, 1.0, 0.05)
     st.session_state["adj_params"] = params
 
-    st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
-
     # ── 1B  Frequency ────────────────────────────────────────────────
     section_header("Frequency")
 
-    freq_cols = st.columns(2)
-    freq_options = ["ADHOC", "RECURRING"]
-    frequency = st.session_state.get("adj_frequency", "ADHOC")
-    with freq_cols[0]:
-        for f_opt in freq_options:
-            f_ico = "🔹" if f_opt == "ADHOC" else "🔁"
-            f_desc = "One-time adjustment" if f_opt == "ADHOC" else "Repeats across a COB range"
-            active_style = "border-color:#D50032;background:#FFF5F7" if frequency == f_opt else ""
-            st.markdown(f"""
-            <div class="card" style="text-align:center;cursor:pointer;padding:10px;{active_style}">
-                <span style="font-size:1.4rem">{f_ico}</span>
-                <div style="font-weight:700;margin:4px 0;font-size:.9rem">{f_opt}</div>
-                <div style="font-size:.75rem;color:#607D8B">{f_desc}</div>
-            </div>
-            """, unsafe_allow_html=True)
-    with freq_cols[1]:
-        frequency = st.radio("Select frequency", freq_options, horizontal=True,
-                             index=freq_options.index(frequency),
-                             label_visibility="collapsed", key="freq_radio")
-        st.session_state["adj_frequency"] = frequency
+    FREQ_INFO = {
+        "ADHOC":     ("🔹", "One-time adjustment for a single COB"),
+        "RECURRING": ("🔁", "Repeats across a COB range (start → end)"),
+    }
 
-        if frequency == "RECURRING":
-            rc1, rc2 = st.columns(2)
-            with rc1:
-                start_cob_sel = st.multiselect("**Start COB**", all_cobs,
-                                                default=[all_cobs[0]] if all_cobs else [],
-                                                max_selections=1, key="freq_start_cob")
-            with rc2:
-                end_cob_sel = st.multiselect("**End COB** (optional — leave empty for open-ended)",
-                                              all_cobs, max_selections=1, key="freq_end_cob")
-            st.session_state["adj_start_cob"] = start_cob_sel[0] if start_cob_sel else ""
-            st.session_state["adj_end_cob"] = end_cob_sel[0] if end_cob_sel else ""
-        else:
-            st.session_state["adj_start_cob"] = ""
-            st.session_state["adj_end_cob"] = ""
+    frequency = st.segmented_control("Frequency", list(FREQ_INFO.keys()),
+                                      default=st.session_state.get("adj_frequency", "ADHOC"),
+                                      key="adj_freq_seg")
+    if frequency is None:
+        frequency = "ADHOC"
+    st.session_state["adj_frequency"] = frequency
 
-    st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
+    freq_ico, freq_desc = FREQ_INFO[frequency]
+    st.markdown(f"""
+    <div style="background:#FFF5F7;border-left:4px solid #D50032;padding:10px 14px;border-radius:6px;margin:4px 0 12px 0">
+        <span style="font-size:1.2rem">{freq_ico}</span> &nbsp;{freq_desc}
+    </div>
+    """, unsafe_allow_html=True)
+
+    if frequency == "RECURRING":
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            start_cob_sel = st.multiselect("**Start COB**", all_cobs,
+                                            default=[all_cobs[0]] if all_cobs else [],
+                                            max_selections=1, key="freq_start_cob")
+        with rc2:
+            end_cob_sel = st.multiselect("**End COB** (optional — leave empty for open-ended)",
+                                          all_cobs, max_selections=1, key="freq_end_cob")
+        st.session_state["adj_start_cob"] = start_cob_sel[0] if start_cob_sel else ""
+        st.session_state["adj_end_cob"] = end_cob_sel[0] if end_cob_sel else ""
+    else:
+        st.session_state["adj_start_cob"] = ""
+        st.session_state["adj_end_cob"] = ""
 
     # ── 1C  Justification ────────────────────────────────────────────
     section_header("Justification")
