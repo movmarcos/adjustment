@@ -54,73 +54,70 @@ if step == 1:
     fact = get_fact_table()
     all_cobs = sorted(fact["AS_OF_DATE"].unique())
 
-    # ── 1A  Adjustment Type & Parameters ─────────────────────────────
-    section_header("Adjustment Type")
-
+    # ── 1A  Adjustment Type & Frequency (side by side) ──────────────
     TYPE_INFO = {
         "FLATTEN": ("📉", "Set all matched values to <strong>zero</strong>", "Delta = −current value"),
         "SCALE":   ("📐", "Multiply matched values by a <strong>factor</strong>", "Delta = value × (factor − 1)"),
         "ROLL":    ("🔄", "Copy values from a <strong>source COB</strong>, optionally scaled", "Delta = source × scale − current"),
     }
-
-    adj_type = st.segmented_control("Type", list(TYPE_INFO.keys()),
-                                     default=st.session_state.get("adj_type", "FLATTEN"),
-                                     key="adj_type_seg")
-    if adj_type is None:
-        adj_type = "FLATTEN"
-    st.session_state["adj_type"] = adj_type
-
-    ico, desc, formula = TYPE_INFO[adj_type]
-    st.markdown(f"""
-    <div style="background:#FFF5F7;border-left:4px solid #D50032;padding:10px 14px;border-radius:6px;margin:4px 0 12px 0">
-        <span style="font-size:1.2rem">{ico}</span> &nbsp;{desc}<br/>
-        <span style="font-size:.78rem;color:#90A4AE">{formula}</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    params = {}
-    if adj_type == "SCALE":
-        params["factor"] = st.slider("Scale factor", 0.0, 5.0, 1.1, 0.05)
-    elif adj_type == "ROLL":
-        params["scale"] = st.slider("Scale after roll", 0.0, 5.0, 1.0, 0.05)
-    st.session_state["adj_params"] = params
-
-    # ── 1B  Frequency ────────────────────────────────────────────────
-    section_header("Frequency")
-
     FREQ_INFO = {
         "ADHOC":     ("🔹", "One-time adjustment for a single COB"),
         "RECURRING": ("🔁", "Repeats across a COB range (start → end)"),
     }
 
-    frequency = st.segmented_control("Frequency", list(FREQ_INFO.keys()),
-                                      default=st.session_state.get("adj_frequency", "ADHOC"),
-                                      key="adj_freq_seg")
-    if frequency is None:
-        frequency = "ADHOC"
-    st.session_state["adj_frequency"] = frequency
+    col_type, col_freq = st.columns(2)
 
-    freq_ico, freq_desc = FREQ_INFO[frequency]
-    st.markdown(f"""
-    <div style="background:#FFF5F7;border-left:4px solid #D50032;padding:10px 14px;border-radius:6px;margin:4px 0 12px 0">
-        <span style="font-size:1.2rem">{freq_ico}</span> &nbsp;{freq_desc}
-    </div>
-    """, unsafe_allow_html=True)
+    with col_type:
+        section_header("Adjustment Type")
+        adj_type = st.segmented_control("Type", list(TYPE_INFO.keys()),
+                                         default=st.session_state.get("adj_type", "FLATTEN"),
+                                         key="adj_type_seg")
+        if adj_type is None:
+            adj_type = "FLATTEN"
+        st.session_state["adj_type"] = adj_type
 
-    if frequency == "RECURRING":
-        rc1, rc2 = st.columns(2)
-        with rc1:
+        ico, desc, formula = TYPE_INFO[adj_type]
+        st.markdown(f"""
+        <div style="background:#FFF5F7;border-left:4px solid #D50032;padding:10px 14px;border-radius:6px;margin:4px 0 12px 0">
+            <span style="font-size:1.2rem">{ico}</span> &nbsp;{desc}<br/>
+            <span style="font-size:.78rem;color:#90A4AE">{formula}</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        params = {}
+        if adj_type == "SCALE":
+            params["factor"] = st.slider("Scale factor", 0.0, 5.0, 1.1, 0.05)
+        elif adj_type == "ROLL":
+            params["scale"] = st.slider("Scale after roll", 0.0, 5.0, 1.0, 0.05)
+        st.session_state["adj_params"] = params
+
+    with col_freq:
+        section_header("Frequency")
+        frequency = st.segmented_control("Frequency", list(FREQ_INFO.keys()),
+                                          default=st.session_state.get("adj_frequency", "ADHOC"),
+                                          key="adj_freq_seg")
+        if frequency is None:
+            frequency = "ADHOC"
+        st.session_state["adj_frequency"] = frequency
+
+        freq_ico, freq_desc = FREQ_INFO[frequency]
+        st.markdown(f"""
+        <div style="background:#FFF5F7;border-left:4px solid #D50032;padding:10px 14px;border-radius:6px;margin:4px 0 12px 0">
+            <span style="font-size:1.2rem">{freq_ico}</span> &nbsp;{freq_desc}
+        </div>
+        """, unsafe_allow_html=True)
+
+        if frequency == "RECURRING":
             start_cob_sel = st.multiselect("**Start COB**", all_cobs,
                                             default=[all_cobs[0]] if all_cobs else [],
                                             max_selections=1, key="freq_start_cob")
-        with rc2:
             end_cob_sel = st.multiselect("**End COB** (optional — leave empty for open-ended)",
                                           all_cobs, max_selections=1, key="freq_end_cob")
-        st.session_state["adj_start_cob"] = start_cob_sel[0] if start_cob_sel else ""
-        st.session_state["adj_end_cob"] = end_cob_sel[0] if end_cob_sel else ""
-    else:
-        st.session_state["adj_start_cob"] = ""
-        st.session_state["adj_end_cob"] = ""
+            st.session_state["adj_start_cob"] = start_cob_sel[0] if start_cob_sel else ""
+            st.session_state["adj_end_cob"] = end_cob_sel[0] if end_cob_sel else ""
+        else:
+            st.session_state["adj_start_cob"] = ""
+            st.session_state["adj_end_cob"] = ""
 
     # ── 1C  Justification ────────────────────────────────────────────
     section_header("Justification")
