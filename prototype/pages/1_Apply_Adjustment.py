@@ -131,17 +131,18 @@ if step == 1:
     filters["AS_OF_DATE"] = target_cob
     st.session_state["adj_biz_date"] = target_cob
 
-    # Dimension filters
+    # Dimension filters — single-select for Apply Adjustment
     filter_cols = st.columns(2)
     for i, dim in enumerate(cfg["dimensions"]):
         with filter_cols[i % 2]:
             selected = st.multiselect(
                 f"**{dim['label']}** (`{dim['key']}`)",
                 options=dim["values"],
+                max_selections=1,
                 key=f"filter_{dim['key']}",
             )
             if selected:
-                filters[dim["key"]] = selected
+                filters[dim["key"]] = selected[0]
 
     st.session_state["adj_filters"] = filters
 
