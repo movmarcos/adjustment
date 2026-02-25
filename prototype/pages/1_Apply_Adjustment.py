@@ -58,9 +58,9 @@ if step == 1:
     section_header("Adjustment Type")
 
     TYPE_INFO = {
-        "FLATTEN": ("📉", "Set all matched values to **zero**", "Delta = −current value"),
-        "SCALE":   ("📐", "Multiply matched values by a **factor**", "Delta = value × (factor − 1)"),
-        "ROLL":    ("🔄", "Copy values from a **source COB**, optionally scaled", "Delta = source × scale − current"),
+        "FLATTEN": ("📉", "Set all matched values to <strong>zero</strong>", "Delta = −current value"),
+        "SCALE":   ("📐", "Multiply matched values by a <strong>factor</strong>", "Delta = value × (factor − 1)"),
+        "ROLL":    ("🔄", "Copy values from a <strong>source COB</strong>, optionally scaled", "Delta = source × scale − current"),
     }
 
     adj_type = st.segmented_control("Type", list(TYPE_INFO.keys()),
