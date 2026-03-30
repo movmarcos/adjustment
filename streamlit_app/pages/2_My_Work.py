@@ -203,10 +203,11 @@ def render_adj_card(row):
                 if st.button("🗑️ Delete", key=f"del_{adj_id}", use_container_width=True):
                     try:
                         process_type = str(row.get("PROCESS_TYPE", ""))
-                        # Soft-delete header
+                        # Soft-delete header and mark status as Deleted
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                            SET IS_DELETED = TRUE
+                            SET IS_DELETED = TRUE,
+                                RUN_STATUS = 'Deleted'
                             WHERE ADJ_ID = {adj_id}
                         """)
                         # Soft-delete in DIMENSION.ADJUSTMENT
@@ -220,21 +221,26 @@ def render_adj_card(row):
                             """)
                         except Exception:
                             pass
-                        # Remove rows from fact adjustment table
+                        # Remove rows from fact adjustment table AND summary table
                         if process_type:
                             try:
                                 settings = run_query(f"""
-                                    SELECT ADJUSTMENTS_TABLE
+                                    SELECT ADJUSTMENTS_TABLE, ADJUSTMENTS_SUMMARY_TABLE
                                     FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
                                     WHERE UPPER(PROCESS_TYPE) = '{process_type.upper()}'
                                     LIMIT 1
                                 """)
-                                if settings and settings[0]["ADJUSTMENTS_TABLE"]:
-                                    fact_adj_tbl = settings[0]["ADJUSTMENTS_TABLE"]
-                                    run_query(f"""
-                                        DELETE FROM {fact_adj_tbl}
-                                        WHERE ADJUSTMENT_ID = {adj_id}
-                                    """)
+                                if settings:
+                                    if settings[0]["ADJUSTMENTS_TABLE"]:
+                                        run_query(f"""
+                                            DELETE FROM {settings[0]["ADJUSTMENTS_TABLE"]}
+                                            WHERE ADJUSTMENT_ID = {adj_id}
+                                        """)
+                                    if settings[0]["ADJUSTMENTS_SUMMARY_TABLE"]:
+                                        run_query(f"""
+                                            DELETE FROM {settings[0]["ADJUSTMENTS_SUMMARY_TABLE"]}
+                                            WHERE ADJUSTMENT_ID = {adj_id}
+                                        """)
                             except Exception:
                                 pass
                         st.success("Adjustment deleted.")

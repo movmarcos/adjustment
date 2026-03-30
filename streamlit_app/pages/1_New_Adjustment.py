@@ -23,10 +23,23 @@ from utils.styles import (
     inject_css, render_sidebar, render_step_bar, render_filter_chips,
     section_title, P, SCOPE_CONFIG, TYPE_CONFIG, CATEGORY_CONFIG,
 )
-from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
+from utils.snowflake_conn import run_query, run_query_df, call_sp_df, current_user_name, safe_rerun
+
+# ── Auto-navigate to Processing Queue after successful submission ─────────────
+if st.session_state.get("_nav_to_queue"):
+    del st.session_state["_nav_to_queue"]
+    try:
+        st.switch_page("pages/4_Processing_Queue.py")
+    except Exception:
+        pass  # Older Streamlit: fall through, success flash is shown instead
 
 inject_css()
 render_sidebar()
+
+# ── Success flash from previous submission ────────────────────────────────────
+if st.session_state.get("_submit_success"):
+    st.success(f"✅ {st.session_state.pop('_submit_success')}")
+    st.info("Your adjustment is in the Processing Queue. Open it from the sidebar.")
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -745,12 +758,11 @@ elif wiz["step"] == 2:
                 preview_json[key] = str(val).strip()
 
         try:
-            json_str = json.dumps(preview_json).replace("'", "\\'")
-            call_sql = f"CALL ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT('{json_str}')"
-            # Use run_query (returns Row objects) to avoid DataFrame column mismatch
-            # with tabular stored procedures in some SiS runtime versions
-            rows = run_query(call_sql)
-            df_preview = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+            # session.call() correctly handles RETURNS TABLE() procedures
+            df_preview = call_sp_df(
+                "ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                json.dumps(preview_json),
+            )
 
             if not df_preview.empty:
                 st.markdown(f"**{len(df_preview):,} rows** would be affected")
@@ -758,9 +770,8 @@ elif wiz["step"] == 2:
             else:
                 st.info("No matching rows found for this filter combination.")
 
-            with st.expander("🔍 Debug — View generated query", expanded=df_preview.empty):
+            with st.expander("🔍 Debug — View request params", expanded=df_preview.empty):
                 st.code(json.dumps(preview_json, indent=2), language="json")
-                st.code(call_sql, language="sql")
 
         except Exception as e:
             st.warning(f"Preview not available: {e}")
@@ -768,31 +779,31 @@ elif wiz["step"] == 2:
     # ── Submit section ───────────────────────────────────────────────────
     st.markdown("<hr style='margin:1rem 0;border-color:#e0e0e0'/>", unsafe_allow_html=True)
 
-    if wiz.get("result"):
-        result = wiz["result"]
-        if result.get("status") == "Error":
-            st.error(f"❌ {result.get('message', 'Submission failed')}")
-            if st.button("← Back to Edit", use_container_width=True):
-                wiz["result"] = None
-                wiz["step"] = 1
-                safe_rerun()
-        else:
-            st.success(f"✅ {result.get('message', 'Adjustment created successfully')}")
-            try:
-                st.switch_page("pages/4_Processing_Queue.py")
-            except Exception:
-                if st.button("→ Go to Processing Queue", type="primary", use_container_width=True):
-                    st.switch_page("pages/4_Processing_Queue.py")
-    else:
-        nav1, nav2 = st.columns(2)
-        with nav1:
-            if st.button("← Back", use_container_width=True):
-                wiz["step"] = 1
-                safe_rerun()
-        with nav2:
-            if st.button("🚀 Submit Adjustment", type="primary", use_container_width=True):
-                _do_submit()
-                safe_rerun()
+    nav1, nav2 = st.columns(2)
+    with nav1:
+        if st.button("← Back", use_container_width=True):
+            wiz["step"] = 1
+            safe_rerun()
+    with nav2:
+        if st.button("🚀 Submit Adjustment", type="primary", use_container_width=True):
+            _do_submit()
+            result = wiz.get("result", {})
+            if result.get("status") != "Error":
+                # Store success message, set nav flag, reset wizard so page is
+                # fresh next time, then rerun — the nav flag triggers switch_page
+                # at the very top of this file before any widgets render.
+                msg = result.get("message", "Adjustment created successfully")
+                st.session_state["_submit_success"] = msg
+                st.session_state["_nav_to_queue"] = True
+                reset_wizard()
+            safe_rerun()
+
+    if wiz.get("result", {}).get("status") == "Error":
+        st.error(f"❌ {wiz['result'].get('message', 'Submission failed')}")
+        if st.button("← Back to Edit", key="back_err", use_container_width=True):
+            wiz["result"] = None
+            wiz["step"] = 1
+            safe_rerun()
 
 
 

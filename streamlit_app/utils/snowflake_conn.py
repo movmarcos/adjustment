@@ -55,6 +55,26 @@ def call_procedure(proc_name: str, *args):
     return get_session().sql(f"CALL {proc_name}({args_str})").collect()
 
 
+def call_sp_df(proc_name: str, *args):
+    """Call a tabular stored procedure using session.call() and return a pandas DataFrame.
+
+    Uses session.call() (not session.sql("CALL ...")) which correctly handles
+    RETURNS TABLE() procedures in all Snowpark runtime versions.
+    """
+    import pandas as pd
+    try:
+        return get_session().call(proc_name, *args).to_pandas()
+    except Exception:
+        # Fallback: SQL CALL with manual Row→dict conversion
+        args_str = ", ".join(f"'{a}'" if isinstance(a, str) else str(a) for a in args)
+        rows = get_session().sql(f"CALL {proc_name}({args_str})").collect()
+        if not rows:
+            return pd.DataFrame()
+        # Build DataFrame from field names on the first row
+        fields = list(rows[0]._fields) if hasattr(rows[0], "_fields") else list(rows[0].as_dict().keys())
+        return pd.DataFrame([list(r) for r in rows], columns=fields)
+
+
 def current_user_name() -> str:
     """Get the logged-in user identity.
 

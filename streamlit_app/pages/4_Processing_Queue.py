@@ -103,7 +103,7 @@ for col, (label, val, color, icon) in zip([c1, c2, c3, c4, c5], stat_items):
     col.markdown(
         f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
         f'border-top:3px solid {color};border-radius:8px;padding:0.8rem;text-align:center">'
-        f'<div style="font-size:1.6rem;font-weight:800;color:{color}">{icon} {int(val)}</div>'
+        f'<div style="font-size:1.6rem;font-weight:800;color:{color}">{icon} {int(val) if val == val else 0}</div>'
         f'<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.06em;'
         f'color:{P["grey_700"]};margin-top:3px">{label}</div>'
         f'</div>',
