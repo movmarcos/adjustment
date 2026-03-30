@@ -210,7 +210,8 @@ def render_adj_card(row):
                         st.success("Adjustment deleted.")
                         safe_rerun()
                     except Exception as ex:
-                        st.error(str(ex))            with act_cols[1]:
+                        st.error(str(ex))
+            with act_cols[1]:
                 if st.button("🔐 Submit for Approval", key=f"approv_{adj_id}", use_container_width=True):
                     try:
                         run_query(f"""
