@@ -43,7 +43,7 @@ with f2:
         default=[], key="mw_scope")
 with f3:
     filter_type = st.multiselect(
-        "Type", ["Flatten", "Scale", "Roll", "Upload"],
+        "Type", ["Flatten", "Scale", "Roll"],
         default=[], key="mw_type")
 with f4:
     show_all = st.checkbox("Show all users' adjustments", value=False,

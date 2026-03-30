@@ -74,7 +74,7 @@ with f1:
         default=[], key="aq_scope")
 with f2:
     filter_type = st.multiselect(
-        "Filter by Type", ["Flatten", "Scale", "Roll", "Upload"],
+        "Filter by Type", ["Flatten", "Scale", "Roll"],
         default=[], key="aq_type")
 
 # ──────────────────────────────────────────────────────────────────────────────

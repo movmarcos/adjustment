@@ -62,7 +62,6 @@ STATUS_ICONS = {
 SCOPE_CONFIG = {
     "VaR":         {"icon": "📊", "color": "#D50032", "bg": "#FFF0F3", "label": "VaR"},
     "Stress":      {"icon": "⚡", "color": "#1565C0", "bg": "#E3F2FD", "label": "Stress"},
-    "ES":          {"icon": "📈", "color": "#6A1B9A", "bg": "#F3E5F5", "label": "ES"},
     "FRTB":        {"icon": "🏛️", "color": "#2E7D32", "bg": "#E8F5E9", "label": "FRTB"},
     "Sensitivity": {"icon": "🎯", "color": "#E65100", "bg": "#FFF3E0", "label": "Sensitivity"},
 }
@@ -71,7 +70,6 @@ TYPE_CONFIG = {
     "Flatten": {"icon": "🔴", "desc": "Zero out matching positions", "formula": "new = original × 0"},
     "Scale":   {"icon": "📊", "desc": "Multiply by a scale factor", "formula": "new = original × sf"},
     "Roll":    {"icon": "🔄", "desc": "Copy from prior COB and scale", "formula": "new = prior × sf"},
-    "Upload":  {"icon": "📤", "desc": "Upload explicit adjustment values", "formula": "new = uploaded values"},
 }
 
 # ── Adjustment Category — the first selection in the wizard ──────────────────
