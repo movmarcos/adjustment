@@ -5,6 +5,12 @@ Comprehensive documentation of the Adjustment Engine with interactive
 diagrams, architecture overview, and operational guides.
 """
 import streamlit as st
+import textwrap
+
+
+def _html(content: str) -> None:
+    """Render a dedented, stripped HTML block via st.markdown."""
+    st.markdown(textwrap.dedent(content).strip(), unsafe_allow_html=True)
 
 st.set_page_config(
     page_title="Documentation · MUFG",
@@ -74,13 +80,13 @@ with tab_overview:
                 f'Config-driven via<br/><code>ADJUSTMENTS_SETTINGS</code></div>'
                 f'</div>', unsafe_allow_html=True)
 
-    st.markdown(f"""
+    _html(f"""
     <div style="background:{P['info_lt']};border:1px solid #90CAF9;border-radius:8px;padding:0.8rem 1rem;font-size:0.85rem;margin-top:0.5rem">
     <strong>Adding a new scope</strong> requires <em>only</em> a new row in
     <code>ADJUSTMENTS_SETTINGS</code> — no code changes to the Streamlit app or stored procedures.
     The processing engine reads its configuration dynamically.
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
     # ── Adjustment Types ─────────────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
@@ -137,7 +143,7 @@ with tab_architecture:
     # ── End-to-End Architecture Diagram ──────────────────────────────────
     section_title("End-to-End Architecture", "🏗️")
 
-    st.markdown(f"""
+    _html(f"""
     <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:1rem 0;overflow-x:auto">
     <div style="display:flex;align-items:stretch;gap:0;min-width:900px">
 
@@ -232,21 +238,21 @@ with tab_architecture:
 
     </div>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
-    st.markdown(f"""
+    _html(f"""
     <div class="mcard" style="border-left:4px solid {P['info']};margin-top:0.5rem">
     <strong>Delta Pattern:</strong> The original <code>FACT.*_MEASURES</code> tables are
     <em>never modified</em>. Adjustments are stored as delta rows in <code>FACT.*_ADJUSTMENT</code>.
     Downstream reporting uses <code>SUM(fact) + SUM(adjustment)</code>.
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
     # ── Layer Diagram ────────────────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Snowflake Object Layers", "🗄️")
 
-    st.markdown(f"""
+    _html(f"""
     <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0">
 
     <div style="margin-bottom:1.2rem">
@@ -334,7 +340,7 @@ with tab_architecture:
     </div>
 
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -346,7 +352,7 @@ with tab_workflow:
     # ── Status State Machine ─────────────────────────────────────────────
     section_title("Adjustment Lifecycle — Status State Machine", "🔄")
 
-    st.markdown(f"""
+    _html(f"""
     <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0;overflow-x:auto">
     <div style="display:flex;flex-direction:column;gap:1.2rem;min-width:700px">
 
@@ -414,7 +420,7 @@ with tab_workflow:
 
     </div>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
     # ── Status Reference Table ───────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
@@ -453,7 +459,7 @@ with tab_workflow:
     section_title("Workflow Scenarios", "📝")
 
     with st.expander("**Scenario 1: Ad-hoc Scale**", expanded=True):
-        st.markdown(f"""
+        _html(f"""
         <div style="background:{P['grey_100']};border-radius:10px;padding:1rem;margin:0.5rem 0">
         <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:0.82rem">
             <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">👤 User opens wizard</div>
@@ -477,10 +483,10 @@ with tab_workflow:
         <strong>Key:</strong> Ad-hoc adjustments are processed immediately — SP_SUBMIT calls SP_PROCESS directly.
         The user sees the result immediately.
         </div>
-        """, unsafe_allow_html=True)
+        """)
 
     with st.expander("**Scenario 2: Recurring Adjustment**"):
-        st.markdown(f"""
+        _html(f"""
         <div style="background:{P['grey_100']};border-radius:10px;padding:1rem;margin:0.5rem 0">
         <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:0.82rem">
             <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">⚙️ Admin creates template</div>
@@ -503,10 +509,10 @@ with tab_workflow:
         <code>INSTANTIATE_RECURRING_TASK</code> checks templates every 5 minutes and creates ADJ_HEADER
         rows when dependencies are met. <code>PROCESS_PENDING_TASK</code> processes them.
         </div>
-        """, unsafe_allow_html=True)
+        """)
 
     with st.expander("**Scenario 4: Signed-Off COB Rejection**"):
-        st.markdown(f"""
+        _html(f"""
         <div style="background:{P['grey_100']};border-radius:10px;padding:1rem;margin:0.5rem 0">
         <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:0.82rem">
             <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">👤 User submits</div>
@@ -522,7 +528,7 @@ with tab_workflow:
         <strong>Key:</strong> The adjustment is still inserted into ADJ_HEADER for audit, but
         immediately set to "Rejected - SignedOff". It is never processed.
         </div>
-        """, unsafe_allow_html=True)
+        """)
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -533,7 +539,7 @@ with tab_processing:
 
     section_title("SP_PROCESS_ADJUSTMENT — Core Engine", "⚙️")
 
-    st.markdown(f"""
+    _html(f"""
     The processing engine is a **Python/Snowpark stored procedure** that reads pending adjustments
     from `ADJ_HEADER` and writes delta rows to the appropriate `FACT.*_ADJUSTMENT` table.
     It supports two paths: **Direct** (Upload) and **Scale** (Scale/Flatten/Roll).
@@ -543,7 +549,7 @@ with tab_processing:
     st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Scale Path — 3-Way UNION ALL", "📊")
 
-    st.markdown(f"""
+    _html(f"""
     <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0;overflow-x:auto">
     <div style="display:flex;flex-direction:column;gap:1rem;min-width:600px">
 
@@ -630,13 +636,13 @@ with tab_processing:
 
     </div>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
     # ── Direct Processing Flow ───────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Direct Path — Upload / Line Items", "📤")
 
-    st.markdown(f"""
+    _html(f"""
     <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0">
     <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:0.82rem">
         <div style="background:#E3F2FD;border-radius:6px;padding:6px 12px;font-weight:600">User uploads CSV</div>
@@ -658,13 +664,13 @@ with tab_processing:
     • <strong>Scale:</strong> SP reads the original fact table, multiplies by <code>scale_factor_adjusted</code>, and writes the delta.<br/>
     • <strong>Direct:</strong> SP reads <code>ADJ_LINE_ITEM</code> (user-provided values) and maps them to the fact schema columns.
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
     # ── Scale Factor Computation ─────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Scale Factor Computation", "🧮")
 
-    st.markdown(f"""
+    _html(f"""
     <table style="width:100%;border-collapse:collapse;border:1px solid {P['border']};border-radius:8px;overflow:hidden;font-size:0.85rem">
     <thead><tr style="background:{P['accent']};color:white">
         <th style="padding:10px 14px;text-align:left">Type</th>
@@ -698,9 +704,9 @@ with tab_processing:
         <td style="padding:10px 14px;color:{P['grey_700']}">User-provided values written directly</td>
     </tr>
     </tbody></table>
-    """, unsafe_allow_html=True)
+    """)
 
-    st.markdown(f"""
+    _html(f"""
     <div class="mcard" style="border-left:4px solid {P['warning']};margin-top:0.5rem">
     <strong>Why sf - 1 for same-COB?</strong><br/>
     Because the original fact data already exists. To scale by 1.05×, we only need
@@ -710,7 +716,7 @@ with tab_processing:
     For cross-COB (Roll), the original data on the target COB may be different,
     so we flatten it first (branch ③) and then add the full source amount (branch ②).
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -721,10 +727,10 @@ with tab_objects:
 
     section_title("Complete Object Inventory", "🗄️")
 
-    st.markdown(f"""
+    _html(f"""
     All objects live in database <code>DVLP_RAPTOR_NEWADJ</code>, schema <code>ADJUSTMENT</code>
     (except target FACT.* tables which are in existing schemas).
-    """, unsafe_allow_html=True)
+    """)
 
     objects = [
         # (Name, Type, Script, Description)
@@ -775,7 +781,7 @@ with tab_objects:
     st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Object Relationships", "🔗")
 
-    st.markdown(f"""
+    _html(f"""
     <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0;overflow-x:auto">
     <div style="font-family:monospace;font-size:0.78rem;line-height:2;color:{P['grey_900']};min-width:600px">
 
@@ -794,7 +800,7 @@ with tab_objects:
 
     </div>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
