@@ -302,11 +302,16 @@ def render_scaling_form():
     """The existing Scope + Type + Dimension filters form."""
 
     # ── Scope cards ───────────────────────────────────────────────────────
+    FRTB_SUBTYPES = ["FRTB", "FRTBDRC", "FRTBRRAO", "FRTBALL"]
+
     section_title("Data Scope", "🔍")
     scope_cols = st.columns(len(SCOPE_CONFIG))
     for i, (sk, cfg) in enumerate(SCOPE_CONFIG.items()):
         with scope_cols[i]:
-            is_sel = wiz["process_type"] == sk
+            if sk == "FRTB":
+                is_sel = wiz["process_type"] in FRTB_SUBTYPES
+            else:
+                is_sel = wiz["process_type"] == sk
             border = P["primary"] if is_sel else P["border"]
             bg     = cfg["bg"]    if is_sel else P["white"]
             st.markdown(
@@ -318,8 +323,38 @@ def render_scaling_form():
             if st.button(f'{"✓ " if is_sel else ""}{cfg["label"]}',
                          key=f"scope_{sk}", use_container_width=True,
                          type="primary" if is_sel else "secondary"):
-                wiz["process_type"] = sk
+                wiz["process_type"] = sk  # FRTB sets to "FRTB" as default subtype
                 safe_rerun()
+
+    # FRTB subtype selector — appears when any FRTB variant is active
+    if wiz["process_type"] in FRTB_SUBTYPES:
+        FRTB_SUBTYPE_CONFIG = {
+            "FRTB":     "Standard FRTB",
+            "FRTBDRC":  "Default Risk Charge",
+            "FRTBRRAO": "Residual Risk Add-On",
+            "FRTBALL":  "All FRTB (combined)",
+        }
+        st.markdown(
+            f'<div style="background:{P["success_lt"]};border:1px solid #A5D6A7;border-radius:8px;'
+            f'padding:0.5rem 1rem;margin:0.5rem 0 0.3rem;font-size:0.82rem;color:{P["success"]}">'
+            f'🏛️ <strong>FRTB selected</strong> — choose a sub-type</div>',
+            unsafe_allow_html=True)
+        sub_cols = st.columns(len(FRTB_SUBTYPE_CONFIG))
+        for i, (stk, stdesc) in enumerate(FRTB_SUBTYPE_CONFIG.items()):
+            with sub_cols[i]:
+                is_sub = wiz["process_type"] == stk
+                st.markdown(
+                    f'<div style="background:{P["success_lt"] if is_sub else P["white"]};'
+                    f'border:2px solid {P["success"] if is_sub else P["border"]};'
+                    f'border-radius:8px;padding:0.5rem 0.3rem;text-align:center">'
+                    f'<div style="font-weight:700;font-size:0.82rem">{stk}</div>'
+                    f'<div style="font-size:0.68rem;color:{P["grey_700"]};margin-top:2px">{stdesc}</div>'
+                    f'</div>', unsafe_allow_html=True)
+                if st.button(f'{"✓ " if is_sub else ""}{stk}',
+                             key=f"frtb_sub_{stk}", use_container_width=True,
+                             type="primary" if is_sub else "secondary"):
+                    wiz["process_type"] = stk
+                    safe_rerun()
 
     st.markdown("<hr style='margin:0.8rem 0;border-color:#e0e0e0'/>",
                 unsafe_allow_html=True)
