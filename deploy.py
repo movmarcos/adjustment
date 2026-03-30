@@ -240,6 +240,36 @@ def deploy_streamlit_app(session):
         for fpath in pages_dir.glob('*.py'):
             files_to_upload.append((fpath, 'pages'))
 
+    # ── Remove stale files from stage (files deleted locally) ────────────
+    print(f"\n  🧹 Checking for stale files on stage...")
+    try:
+        staged = session.sql(f"LIST @{stage_name}").collect()
+        # Build expected set of relative paths (lowercased, as Snowflake normalises them)
+        expected_rel_paths = set()
+        for fpath, subdir in files_to_upload:
+            rel = f"{subdir}/{fpath.name}".lower() if subdir else fpath.name.lower()
+            expected_rel_paths.add(rel)
+
+        removed = 0
+        for row in staged:
+            # LIST name format: "stage_unqualified_name/path/to/file[.gz]"
+            raw = row['name']
+            slash_idx = raw.find('/')
+            rel_path = raw[slash_idx + 1:] if slash_idx != -1 else raw  # "pages/5_documentation.py"
+            # Strip .gz suffix if auto_compress produced it
+            rel_cmp = rel_path[:-3].lower() if rel_path.lower().endswith('.gz') else rel_path.lower()
+            if rel_cmp not in expected_rel_paths:
+                try:
+                    session.sql(f"REMOVE @{stage_name}/{rel_path}").collect()
+                    print(f"     🗑️  Removed stale: {rel_path}")
+                    removed += 1
+                except Exception as rm_err:
+                    print(f"     ⚠️  Could not remove {rel_path}: {rm_err}")
+        if removed == 0:
+            print(f"     ✅ No stale files found")
+    except Exception as e:
+        print(f"     ⚠️  Stage cleanup warning: {e}")
+
     print(f"\n  📤 Uploading {len(files_to_upload)} files...")
     upload_errors = 0
 
@@ -279,7 +309,7 @@ def deploy_streamlit_app(session):
         ROOT_LOCATION  = '@{stage_name}'
         MAIN_FILE      = 'app.py'
         QUERY_WAREHOUSE = 'DVLP_RAPTOR_WH_XS'
-        COMMENT        = 'Adjustment Engine — MUFG. Unified adjustment management for VaR, Stress, ES, FRTB, Sensitivity.'
+        COMMENT        = 'Adjustment Engine — MUFG. Unified adjustment management for VaR, Stress, FRTB, Sensitivity.'
     """
     try:
         session.sql(create_sql).collect()
