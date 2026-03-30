@@ -47,17 +47,17 @@ tab_overview, tab_architecture, tab_workflow, tab_processing, tab_objects, tab_o
 with tab_overview:
 
     section_title("What is the Adjustment Engine?", "🎯")
-    st.markdown(f"""
-    The Adjustment Engine is a **Streamlit-on-Snowflake application** that provides a unified,
-    self-service interface for creating, approving, reviewing, and processing risk-related
-    adjustments across multiple scopes.
-
-    <div class="mcard" style="border-left: 4px solid {P['primary']}">
-    <strong style="color:{P['primary']}">Key Principle:</strong> Every adjustment starts as a row in
-    <code>ADJUSTMENT_APP.ADJ_HEADER</code>. The file-based interface has been removed.
-    Streamlit is the <em>only</em> entry point.
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        "The Adjustment Engine is a **Streamlit-on-Snowflake application** that provides a unified, "
+        "self-service interface for creating, approving, reviewing, and processing risk-related "
+        "adjustments across multiple scopes."
+    )
+    st.markdown(
+        f'<div class="mcard" style="border-left: 4px solid {P["primary"]}">'
+        f'<strong style="color:{P["primary"]}">Key Principle:</strong> Every adjustment starts as a row in '
+        f'<code>ADJUSTMENT_APP.ADJ_HEADER</code>. The file-based interface has been removed. '
+        f'Streamlit is the <em>only</em> entry point.</div>',
+        unsafe_allow_html=True)
 
     st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -141,7 +141,6 @@ with tab_architecture:
     <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:1rem 0;overflow-x:auto">
     <div style="display:flex;align-items:stretch;gap:0;min-width:900px">
 
-        <!-- LAYER 1: USER -->
         <div style="display:flex;flex-direction:column;align-items:center;min-width:140px">
             <div style="background:#E3F2FD;border:2px solid {P['info']};border-radius:10px;padding:1rem;text-align:center;width:140px">
                 <div style="font-size:2rem">👤</div>
@@ -155,7 +154,6 @@ with tab_architecture:
 
         <div style="display:flex;align-items:center;padding:0 4px;font-size:1.5rem;color:{P['grey_400']}">→</div>
 
-        <!-- LAYER 2: STORED PROCEDURE -->
         <div style="display:flex;flex-direction:column;align-items:center;min-width:155px">
             <div style="background:#FFF3E0;border:2px solid {P['warning']};border-radius:10px;padding:1rem;text-align:center;width:155px">
                 <div style="font-size:2rem">⚡</div>
@@ -169,7 +167,6 @@ with tab_architecture:
 
         <div style="display:flex;align-items:center;padding:0 4px;font-size:1.5rem;color:{P['grey_400']}">→</div>
 
-        <!-- LAYER 3: TABLE -->
         <div style="display:flex;flex-direction:column;align-items:center;min-width:140px">
             <div style="background:#E8F5E9;border:2px solid {P['success']};border-radius:10px;padding:1rem;text-align:center;width:140px">
                 <div style="font-size:2rem">💾</div>
@@ -183,7 +180,6 @@ with tab_architecture:
 
         <div style="display:flex;align-items:center;padding:0 4px;font-size:1.5rem;color:{P['grey_400']}">→</div>
 
-        <!-- LAYER 4: STREAM -->
         <div style="display:flex;flex-direction:column;align-items:center;min-width:130px">
             <div style="background:#E3F2FD;border:2px solid #42A5F5;border-radius:10px;padding:1rem;text-align:center;width:130px">
                 <div style="font-size:2rem">🌊</div>
@@ -197,7 +193,6 @@ with tab_architecture:
 
         <div style="display:flex;align-items:center;padding:0 4px;font-size:1.5rem;color:{P['grey_400']}">→</div>
 
-        <!-- LAYER 5: TASK -->
         <div style="display:flex;flex-direction:column;align-items:center;min-width:150px">
             <div style="background:{P['purple_lt']};border:2px solid {P['purple']};border-radius:10px;padding:1rem;text-align:center;width:150px">
                 <div style="font-size:2rem">⏰</div>
@@ -211,7 +206,6 @@ with tab_architecture:
 
         <div style="display:flex;align-items:center;padding:0 4px;font-size:1.5rem;color:{P['grey_400']}">→</div>
 
-        <!-- LAYER 6: PROCESS SP -->
         <div style="display:flex;flex-direction:column;align-items:center;min-width:155px">
             <div style="background:#FFEBEE;border:2px solid {P['primary']};border-radius:10px;padding:1rem;text-align:center;width:155px">
                 <div style="font-size:2rem">🔄</div>
@@ -225,7 +219,6 @@ with tab_architecture:
 
         <div style="display:flex;align-items:center;padding:0 4px;font-size:1.5rem;color:{P['grey_400']}">→</div>
 
-        <!-- LAYER 7: FACT TABLE -->
         <div style="display:flex;flex-direction:column;align-items:center;min-width:150px">
             <div style="background:#E8F5E9;border:2px solid {P['success']};border-radius:10px;padding:1rem;text-align:center;width:150px">
                 <div style="font-size:2rem">📊</div>
@@ -256,7 +249,6 @@ with tab_architecture:
     st.markdown(f"""
     <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0">
 
-    <!-- Layer 1: Entry -->
     <div style="margin-bottom:1.2rem">
         <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:{P['primary']};margin-bottom:0.5rem">
         ① Entry Layer — Streamlit writes here</div>
@@ -270,7 +262,6 @@ with tab_architecture:
         </div>
     </div>
 
-    <!-- Layer 2: Config -->
     <div style="margin-bottom:1.2rem">
         <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:{P['purple']};margin-bottom:0.5rem">
         ② Config Layer — Drives behaviour</div>
@@ -282,7 +273,6 @@ with tab_architecture:
         </div>
     </div>
 
-    <!-- Layer 3: CDC -->
     <div style="margin-bottom:1.2rem">
         <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:{P['info']};margin-bottom:0.5rem">
         ③ CDC Layer — Change detection</div>
@@ -294,7 +284,6 @@ with tab_architecture:
         </div>
     </div>
 
-    <!-- Layer 4: Processing -->
     <div style="margin-bottom:1.2rem">
         <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:{P['warning']};margin-bottom:0.5rem">
         ④ Processing Layer — Async execution</div>
@@ -312,7 +301,6 @@ with tab_architecture:
         </div>
     </div>
 
-    <!-- Layer 5: Materialised -->
     <div style="margin-bottom:1.2rem">
         <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:{P['success']};margin-bottom:0.5rem">
         ⑤ Materialised Layer — Auto-refresh (1 min lag)</div>
@@ -324,7 +312,6 @@ with tab_architecture:
         </div>
     </div>
 
-    <!-- Layer 6: Read -->
     <div>
         <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:{P['grey_700']};margin-bottom:0.5rem">
         ⑥ Read Layer — Real-time views for Streamlit</div>
@@ -363,7 +350,6 @@ with tab_workflow:
     <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0;overflow-x:auto">
     <div style="display:flex;flex-direction:column;gap:1.2rem;min-width:700px">
 
-    <!-- Row 1: Main happy path -->
     <div style="display:flex;align-items:center;gap:0">
         <div style="background:#FFF3E0;border:2px solid {STATUS_COLORS['Pending']};border-radius:10px;padding:0.8rem 1rem;text-align:center;min-width:120px">
             <div style="font-size:1.3rem">{STATUS_ICONS['Pending']}</div>
@@ -381,7 +367,6 @@ with tab_workflow:
         </div>
     </div>
 
-    <!-- Row 2: Approval path (optional) -->
     <div style="display:flex;align-items:center;gap:0;padding-left:0">
         <div style="background:#E3F2FD;border:2px solid {STATUS_COLORS['Pending Approval']};border-radius:10px;padding:0.8rem 1rem;text-align:center;min-width:120px">
             <div style="font-size:1.3rem">{STATUS_ICONS['Pending Approval']}</div>
@@ -404,10 +389,8 @@ with tab_workflow:
         <div style="font-size:0.82rem;font-weight:700;color:{STATUS_COLORS['Processed']}">✔ Processed</div>
     </div>
 
-    <!-- Row 3: Alternative paths -->
     <div style="display:flex;gap:2rem;flex-wrap:wrap;padding-left:2rem">
 
-        <!-- Signed-off path -->
         <div style="display:flex;align-items:center;gap:8px">
             <div style="font-size:0.72rem;color:{P['grey_700']}">Submit (COB signed off)</div>
             <div style="font-size:1rem;color:{P['grey_400']}">→</div>
@@ -416,7 +399,6 @@ with tab_workflow:
             </div>
         </div>
 
-        <!-- Error path -->
         <div style="display:flex;align-items:center;gap:8px">
             <div style="font-size:0.72rem;color:{P['grey_700']}">SP_PROCESS fails</div>
             <div style="font-size:1rem;color:{P['grey_400']}">→</div>
@@ -565,7 +547,6 @@ with tab_processing:
     <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0;overflow-x:auto">
     <div style="display:flex;flex-direction:column;gap:1rem;min-width:600px">
 
-    <!-- Step 1: Config -->
     <div style="display:flex;align-items:center;gap:12px">
         <div style="background:{P['purple_lt']};border:2px solid {P['purple']};border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;color:{P['purple']};flex-shrink:0">1</div>
         <div style="flex:1">
@@ -577,7 +558,6 @@ with tab_processing:
         </div>
     </div>
 
-    <!-- Step 2: Filter -->
     <div style="display:flex;align-items:center;gap:12px">
         <div style="background:{P['info_lt']};border:2px solid {P['info']};border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;color:{P['info']};flex-shrink:0">2</div>
         <div style="flex:1">
@@ -589,7 +569,6 @@ with tab_processing:
         </div>
     </div>
 
-    <!-- Step 3: 3-way UNION ALL -->
     <div style="display:flex;align-items:center;gap:12px">
         <div style="background:#FFEBEE;border:2px solid {P['primary']};border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;color:{P['primary']};flex-shrink:0">3</div>
         <div style="flex:1">
@@ -614,7 +593,6 @@ with tab_processing:
         </div>
     </div>
 
-    <!-- Step 4: Overlap resolution -->
     <div style="display:flex;align-items:center;gap:12px">
         <div style="background:#FFF3E0;border:2px solid {P['warning']};border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;color:{P['warning']};flex-shrink:0">4</div>
         <div style="flex:1">
@@ -626,7 +604,6 @@ with tab_processing:
         </div>
     </div>
 
-    <!-- Step 5: SCD2 Fix -->
     <div style="display:flex;align-items:center;gap:12px">
         <div style="background:{P['purple_lt']};border:2px solid {P['purple']};border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;color:{P['purple']};flex-shrink:0">5</div>
         <div style="flex:1">
@@ -639,7 +616,6 @@ with tab_processing:
         </div>
     </div>
 
-    <!-- Step 6: Insert & Update -->
     <div style="display:flex;align-items:center;gap:12px">
         <div style="background:#E8F5E9;border:2px solid {P['success']};border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;color:{P['success']};flex-shrink:0">6</div>
         <div style="flex:1">
@@ -830,19 +806,20 @@ with tab_ops:
     section_title("Common Operations", "🛠️")
 
     with st.expander("**How to: Retry a failed adjustment**", expanded=True):
-        st.markdown(f"""
+        st.markdown("""
         1. Go to **📋 My Work** → **❌ Errors / Rejected** tab
         2. Find the failed adjustment and expand it
         3. Review the error message in the red box
         4. Fix the underlying issue (e.g., missing data, dimension misconfig)
         5. Click **🔄 Retry** — this resets the status to `Pending`
         6. The processing task will pick it up within 60 seconds
-
-        <div class="mcard" style="border-left:4px solid {P['info']};margin-top:0.5rem;font-size:0.85rem">
-        <strong>SQL equivalent:</strong><br/>
-        <code>UPDATE ADJUSTMENT_APP.ADJ_HEADER SET RUN_STATUS = 'Pending', ERRORMESSAGE = NULL WHERE ADJ_ID = &lt;id&gt;;</code>
-        </div>
-        """, unsafe_allow_html=True)
+        """)
+        st.markdown(
+            f'<div class="mcard" style="border-left:4px solid {P["info"]};margin-top:0.5rem;font-size:0.85rem">'
+            f'<strong>SQL equivalent:</strong><br/>'
+            f'<code>UPDATE ADJUSTMENT_APP.ADJ_HEADER SET RUN_STATUS = \'Pending\', ERRORMESSAGE = NULL WHERE ADJ_ID = &lt;id&gt;;</code>'
+            f'</div>',
+            unsafe_allow_html=True)
 
     with st.expander("**How to: Add a new scope**"):
         st.markdown(f"""
