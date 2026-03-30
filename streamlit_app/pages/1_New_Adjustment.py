@@ -782,11 +782,14 @@ elif wiz["step"] == 2:
                 sum_del = df_preview[col_del].sum() if col_del else None
                 sum_pv  = df_preview[col_pv].sum()  if col_pv  else None
 
-                m1, m2, m3, m4 = st.columns(4)
+                nonzero_rows = int((df_preview[col_cv] != 0).sum()) if col_cv else total_rows
+
+                m1, m2, m3, m4, m5 = st.columns(5)
                 m1.metric("Rows Affected",      f"{total_rows:,}")
-                m2.metric("Total Original",     _fmt(sum_cv)  if sum_cv  is not None else "—")
-                m3.metric("Total Adjustment",   _fmt(sum_del) if sum_del is not None else "—")
-                m4.metric("Total Projected",    _fmt(sum_pv)  if sum_pv  is not None else "—")
+                m2.metric("Non-zero Rows",      f"{nonzero_rows:,}")
+                m3.metric("Total Original",     _fmt(sum_cv)  if sum_cv  is not None else "—")
+                m4.metric("Total Adjustment",   _fmt(sum_del) if sum_del is not None else "—")
+                m5.metric("Total Projected",    _fmt(sum_pv)  if sum_pv  is not None else "—")
 
                 st.markdown("<br/>", unsafe_allow_html=True)
 
