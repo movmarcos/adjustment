@@ -198,15 +198,45 @@ def render_adj_card(row):
         section_title("Actions", "⚡")
         act_cols = st.columns(4)
 
-        if run_status == "Pending":
+        if run_status in ("Pending", "Error", "Processed"):
             with act_cols[0]:
-                if st.button("�️ Delete", key=f"del_{adj_id}", use_container_width=True):
+                if st.button("🗑️ Delete", key=f"del_{adj_id}", use_container_width=True):
                     try:
+                        process_type = str(row.get("PROCESS_TYPE", ""))
+                        # Soft-delete header
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
                             SET IS_DELETED = TRUE
                             WHERE ADJ_ID = {adj_id}
                         """)
+                        # Soft-delete in DIMENSION.ADJUSTMENT
+                        try:
+                            run_query(f"""
+                                UPDATE DIMENSION.ADJUSTMENT
+                                SET IS_DELETED = TRUE,
+                                    DELETED_BY = '{user}',
+                                    DELETED_DATE = CURRENT_TIMESTAMP()
+                                WHERE ADJUSTMENT_ID = {adj_id}
+                            """)
+                        except Exception:
+                            pass
+                        # Remove rows from fact adjustment table
+                        if process_type:
+                            try:
+                                settings = run_query(f"""
+                                    SELECT ADJUSTMENTS_TABLE
+                                    FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
+                                    WHERE UPPER(PROCESS_TYPE) = '{process_type.upper()}'
+                                    LIMIT 1
+                                """)
+                                if settings and settings[0]["ADJUSTMENTS_TABLE"]:
+                                    fact_adj_tbl = settings[0]["ADJUSTMENTS_TABLE"]
+                                    run_query(f"""
+                                        DELETE FROM {fact_adj_tbl}
+                                        WHERE ADJUSTMENT_ID = {adj_id}
+                                    """)
+                            except Exception:
+                                pass
                         st.success("Adjustment deleted.")
                         safe_rerun()
                     except Exception as ex:

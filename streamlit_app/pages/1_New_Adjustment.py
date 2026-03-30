@@ -496,26 +496,6 @@ def render_scaling_form():
         "🔐 Requires Approval", value=wiz.get("requires_approval", False),
         key="wiz_requires_approval")
 
-    # Overlap check
-    if wiz.get("cobid") and wiz.get("process_type"):
-        try:
-            df_overlap = run_query_df(f"""
-                SELECT ADJ_ID_A, ADJ_ID_B, ALERT_MESSAGE
-                FROM ADJUSTMENT_APP.DT_OVERLAP_ALERTS
-                WHERE COBID = {wiz['cobid']}
-                  AND PROCESS_TYPE = '{wiz['process_type']}'
-                LIMIT 5
-            """)
-            if not df_overlap.empty:
-                st.markdown(
-                    f'<div class="overlap-box">'
-                    f'<h4>⚠️ {len(df_overlap)} Overlap Alert(s)</h4>'
-                    f'<div style="font-size:0.82rem;color:{P["grey_700"]}">'
-                    f'Existing adjustments may target the same data.</div>'
-                    f'</div>', unsafe_allow_html=True)
-        except Exception:
-            pass
-
     # Continue
     st.markdown("<br/>", unsafe_allow_html=True)
     can_continue = wiz.get("cobid") and wiz.get("adjustment_type")
@@ -618,7 +598,7 @@ def _do_submit():
 # ║  STEP 1 — MAIN ROUTER                                                     ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
-STEPS = ["Category & Details", "Preview", "Submit"]
+STEPS = ["Category & Details", "Preview & Submit"]
 render_step_bar(wiz["step"], STEPS)
 st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -767,127 +747,50 @@ elif wiz["step"] == 2:
         try:
             json_str = json.dumps(preview_json).replace("'", "\\'")
             call_sql = f"CALL ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT('{json_str}')"
-            df_preview = run_query_df(call_sql)
+            # Use run_query (returns Row objects) to avoid DataFrame column mismatch
+            # with tabular stored procedures in some SiS runtime versions
+            rows = run_query(call_sql)
+            df_preview = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
             if not df_preview.empty:
-                st.markdown(f"**{len(df_preview)} rows** would be affected")
-                st.dataframe(df_preview.head(200), use_container_width=True,
-                             height=300)
+                st.markdown(f"**{len(df_preview):,} rows** would be affected")
+                st.dataframe(df_preview.head(200), use_container_width=True, height=300)
             else:
                 st.info("No matching rows found for this filter combination.")
 
-            with st.expander("🔍 Debug — View generated query",
-                             expanded=df_preview.empty):
+            with st.expander("🔍 Debug — View generated query", expanded=df_preview.empty):
                 st.code(json.dumps(preview_json, indent=2), language="json")
                 st.code(call_sql, language="sql")
 
         except Exception as e:
             st.warning(f"Preview not available: {e}")
 
-    # Navigation
-    st.markdown("<br/>", unsafe_allow_html=True)
-    nav1, nav2 = st.columns(2)
-    with nav1:
-        if st.button("← Back", use_container_width=True):
-            wiz["step"] = 1
-            safe_rerun()
-    with nav2:
-        if st.button("Continue → Submit", type="primary", use_container_width=True):
-            wiz["step"] = 3
-            safe_rerun()
+    # ── Submit section ───────────────────────────────────────────────────
+    st.markdown("<hr style='margin:1rem 0;border-color:#e0e0e0'/>", unsafe_allow_html=True)
 
-
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  STEP 3 — SUBMIT                                                          ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
-
-elif wiz["step"] == 3:
-    section_title("Confirm & Submit", "🚀")
-
-    cat       = wiz.get("category", "Scaling Adjustment")
-    scope_cfg = SCOPE_CONFIG.get(wiz.get("process_type", ""), {})
-
-    # ── Confirmation card ────────────────────────────────────────────────
-    if cat == "Global Adjustment":
-        st.markdown(
-            f'<div class="mcard mcard-accent">'
-            f'<div style="font-weight:700;font-size:1rem;margin-bottom:0.5rem">'
-            f'🌐 Global Adjustment</div>'
-            f'<div style="font-size:0.85rem;color:{P["grey_700"]};line-height:1.8">'
-            f'COB: <strong>{wiz["cobid"]}</strong><br/>'
-            f'Entity: <strong>{wiz.get("entity_code","—")}</strong><br/>'
-            f'Type: <strong>{wiz.get("ga_adjustment_type","—")}</strong><br/>'
-            + (f'<span style="color:{P["info"]};font-weight:700">🔐 Requires Approval</span><br/>'
-               if wiz.get("requires_approval") else "")
-            + f'Reason: <em>{wiz.get("reason","—")}</em>'
-            f'</div></div>', unsafe_allow_html=True)
-
-    elif cat == "VaR Upload":
-        df_upload = wiz.get("uploaded_df")
-        row_count = len(df_upload) if df_upload is not None else 0
-        st.markdown(
-            f'<div class="mcard mcard-accent">'
-            f'<div style="font-weight:700;font-size:1rem;margin-bottom:0.5rem">'
-            f'📤 VaR Upload</div>'
-            f'<div style="font-size:0.85rem;color:{P["grey_700"]};line-height:1.8">'
-            f'File: <strong>{wiz.get("uploaded_file_name","—")}</strong><br/>'
-            f'Rows: <strong>{row_count:,}</strong><br/>'
-            f'COB: <strong>{wiz["cobid"]}</strong><br/>'
-            f'Entity: <strong>{wiz.get("entity_code","—")}</strong><br/>'
-            + (f'<span style="color:{P["info"]};font-weight:700">🔐 Requires Approval</span><br/>'
-               if wiz.get("requires_approval") else "")
-            + f'Reason: <em>{wiz.get("reason","—")}</em>'
-            f'</div></div>', unsafe_allow_html=True)
-
-    else:  # Scaling Adjustment
-        st.markdown(
-            f'<div class="mcard mcard-accent">'
-            f'<div style="font-weight:700;font-size:1rem;margin-bottom:0.5rem">'
-            f'{scope_cfg.get("icon","📊")} {wiz.get("process_type","")} — '
-            f'{wiz.get("adjustment_type","")}</div>'
-            f'<div style="font-size:0.85rem;color:{P["grey_700"]};line-height:1.8">'
-            f'COB: <strong>{wiz["cobid"]}</strong><br/>'
-            f'Mode: <strong>{wiz.get("occurrence","ADHOC")}</strong><br/>'
-            + (f'Start: <strong>{wiz.get("recurring_start_cobid")}</strong> · '
-               f'End: <strong>{wiz.get("recurring_end_cobid")}</strong><br/>'
-               if wiz.get("occurrence") == "RECURRING" else "")
-            + (f'Scale Factor: <strong>{wiz["scale_factor"]}</strong><br/>'
-               if wiz.get("adjustment_type") in ("Scale", "Roll") else "")
-            + (f'Source COB: <strong>{wiz.get("source_cobid", wiz["cobid"])}</strong><br/>'
-               if wiz.get("adjustment_type") == "Roll" else "")
-            + (f'<span style="color:{P["info"]};font-weight:700">🔐 Requires Approval</span><br/>'
-               if wiz.get("requires_approval") else "")
-            + f'Reason: <em>{wiz.get("reason","—")}</em>'
-            f'</div></div>', unsafe_allow_html=True)
-        render_filter_chips(wiz)
-
-    st.markdown("<br/>", unsafe_allow_html=True)
-
-    # ── Result / Submit ──────────────────────────────────────────────────
     if wiz.get("result"):
         result = wiz["result"]
         if result.get("status") == "Error":
             st.error(f"❌ {result.get('message', 'Submission failed')}")
-            if st.button("← Back to Preview", use_container_width=True):
+            if st.button("← Back to Edit", use_container_width=True):
                 wiz["result"] = None
-                wiz["step"] = 2
+                wiz["step"] = 1
                 safe_rerun()
         else:
             st.success(f"✅ {result.get('message', 'Adjustment created successfully')}")
-            st.balloons()
-            if st.button("✏️ Start New Adjustment", type="primary",
-                         use_container_width=True):
-                reset_wizard()
-                safe_rerun()
+            try:
+                st.switch_page("pages/4_Processing_Queue.py")
+            except Exception:
+                if st.button("→ Go to Processing Queue", type="primary", use_container_width=True):
+                    st.switch_page("pages/4_Processing_Queue.py")
     else:
         nav1, nav2 = st.columns(2)
         with nav1:
-            if st.button("← Back to Preview", use_container_width=True):
-                wiz["step"] = 2
+            if st.button("← Back", use_container_width=True):
+                wiz["step"] = 1
                 safe_rerun()
         with nav2:
-            if st.button("🚀 Submit Adjustment", type="primary",
-                         use_container_width=True):
+            if st.button("🚀 Submit Adjustment", type="primary", use_container_width=True):
                 _do_submit()
                 safe_rerun()
 

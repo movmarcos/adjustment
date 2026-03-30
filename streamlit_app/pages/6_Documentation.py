@@ -9,8 +9,14 @@ import textwrap
 
 
 def _html(content: str) -> None:
-    """Render a dedented, stripped HTML block via st.markdown."""
-    st.markdown(textwrap.dedent(content).strip(), unsafe_allow_html=True)
+    """Render an HTML block via st.markdown, stripping all line indentation.
+
+    Removes leading whitespace from every line so that no line ever starts
+    with 4+ spaces, which Markdown would treat as a code block.
+    HTML renders identically regardless of source indentation.
+    """
+    flat = "\n".join(line.lstrip() for line in content.splitlines()).strip()
+    st.markdown(flat, unsafe_allow_html=True)
 
 st.set_page_config(
     page_title="Documentation · MUFG",

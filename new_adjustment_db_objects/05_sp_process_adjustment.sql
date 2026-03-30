@@ -232,7 +232,51 @@ def main(session, process_type, adjustment_action, cobid):
             update_header_status(session, df_adj_direct, cobid, "Processed")
             log_status_history(session, adj_ids, "Pending", "Processed")
 
-            result["rows_inserted"] = len(df_pd_valid)
+            rows_count = len(df_pd_valid)
+            adj_ids_str = ', '.join(str(a) for a in adj_ids)
+            session.sql(f"""
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                SET RECORD_COUNT = {rows_count}
+                WHERE ADJ_ID IN ({adj_ids_str})
+            """).collect()
+
+            # Insert into DIMENSION.ADJUSTMENT
+            try:
+                session.sql(f"""
+                    INSERT INTO DIMENSION.ADJUSTMENT (
+                        COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, SOURCE_COBID,
+                        ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE, BOOK_CODE,
+                        TENOR_CODE, CURRENCY_CODE, CURVE_CODE, INSTRUMENT_CODE,
+                        MEASURE_TYPE_CODE, ADJUSTMENT_VALUE_IN_USD,
+                        CREATED_DATE, PROCESS_DATE, USERNAME, RUN_STATUS, REASON,
+                        MUREX_FAMILY, MUREX_GROUP, TRADE_TYPOLOGY, TRADE_CODE,
+                        SCALE_FACTOR, BATCH_REGION_AREA, SIMULATION_NAME, TRADER_CODE,
+                        VAR_COMPONENT_ID, VAR_SUB_COMPONENT_ID, SCENARIO_DATE_ID,
+                        GUARANTEED_ENTITY, STRATEGY, REGION_KEY,
+                        UNDERLYING_TENOR_CODE, PRODUCT_CATEGORY_ATTRIBUTES,
+                        ADJUSTMENT_OCCURRENCE, GLOBAL_REFERENCE, FILE_NAME,
+                        SIMULATION_SOURCE, DAY_TYPE, RECORD_COUNT
+                    )
+                    SELECT
+                        COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, SOURCE_COBID,
+                        ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE, BOOK_CODE,
+                        TENOR_CODE, CURRENCY_CODE, CURVE_CODE, INSTRUMENT_CODE,
+                        MEASURE_TYPE_CODE, ADJUSTMENT_VALUE_IN_USD,
+                        CREATED_DATE, CURRENT_TIMESTAMP(), USERNAME, 'Processed', REASON,
+                        MUREX_FAMILY, MUREX_GROUP, TRADE_TYPOLOGY, TRADE_CODE,
+                        SCALE_FACTOR, BATCH_REGION_AREA, SIMULATION_NAME, TRADER_CODE,
+                        VAR_COMPONENT_ID, VAR_SUB_COMPONENT_ID, SCENARIO_DATE_ID,
+                        GUARANTEED_ENTITY, STRATEGY, REGION_KEY,
+                        UNDERLYING_TENOR_CODE, PRODUCT_CATEGORY_ATTRIBUTES,
+                        ADJUSTMENT_OCCURRENCE, GLOBAL_REFERENCE, FILE_NAME,
+                        SIMULATION_SOURCE, DAY_TYPE, {rows_count}
+                    FROM ADJUSTMENT_APP.ADJ_HEADER
+                    WHERE ADJ_ID IN ({adj_ids_str})
+                """).collect()
+            except Exception as dim_err:
+                print(f"Warning: could not insert into DIMENSION.ADJUSTMENT: {dim_err}")
+
+            result["rows_inserted"] = rows_count
             result["message"] = "Direct adjustments processed successfully"
 
         # ═════════════════════════════════════════════════════════════════
@@ -343,9 +387,6 @@ def main(session, process_type, adjustment_action, cobid):
                 'adjust.SCALE_FACTOR_ADJUSTED', '-1'
             )
 
-            # from_where for cross-COB reads from the adjusted table
-            from_where_adj = from_where.replace(fact_tbl_name, fact_adjusted_tbl_name) if fact_adjusted_tbl_name else from_where
-
             # Build the key expression
             select_with_keys = "*" if key_name == pk_expr else f"{pk_expr}, *"
             exclude_keys = "*" if key_name == pk_expr else f"* EXCLUDE ({key_name})"
@@ -358,19 +399,19 @@ def main(session, process_type, adjustment_action, cobid):
                 RUN_LOG_ID, LOAD_TIMESTAMP
             ) AS
             WITH cte AS (
-                -- ① Scale current COB (COBID = SOURCE_COBID)
+                -- ① Scale/Flatten same COB (COBID = SOURCE_COBID)
                 {select_scale} {from_where}
                 AND fact.COBID = adjust.SOURCE_COBID
                 AND adjust.COBID = adjust.SOURCE_COBID
                 {join_cond}
                 UNION ALL
-                -- ② Scale other COB (COBID ≠ SOURCE_COBID, read from adjusted table)
-                {select_scale} {from_where_adj}
+                -- ② Roll/Scale cross-COB: always reads from original fact table at SOURCE_COBID
+                {select_scale} {from_where}
                 AND fact.COBID = adjust.SOURCE_COBID
                 AND adjust.COBID <> adjust.SOURCE_COBID
                 {join_cond}
                 UNION ALL
-                -- ③ Flatten current COB (for cross-COB: remove existing values)
+                -- ③ Flatten current COB (for cross-COB: zero out existing values at target COB)
                 {select_flatten} {from_where}
                 AND fact.COBID = adjust.COBID
                 AND adjust.COBID <> adjust.SOURCE_COBID
@@ -490,14 +531,65 @@ def main(session, process_type, adjustment_action, cobid):
                        {metric_sum_list}
                 FROM {fact_adj_tbl_name}
                 WHERE COBID = {cobid}
-                  AND IS_OFFICIAL_SOURCE = TRUE
                 GROUP BY ALL
                 """
                 session.sql(summary_insert).collect()
 
+            # ── Count rows inserted and update ADJ_HEADER.RECORD_COUNT ──
+            adj_ids_str = ', '.join(str(a) for a in adj_ids)
+            rows_count_row = session.sql(f"""
+                SELECT COUNT(*) AS CNT
+                FROM {fact_adj_tbl_name}
+                WHERE COBID = {cobid}
+                  AND ADJUSTMENT_ID IN ({adj_ids_str})
+            """).collect()
+            rows_count = rows_count_row[0]["CNT"] if rows_count_row else 0
+            session.sql(f"""
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                SET RECORD_COUNT = {rows_count}
+                WHERE ADJ_ID IN ({adj_ids_str})
+            """).collect()
+            result["rows_inserted"] = rows_count
+
             # ── Update status ────────────────────────────────────────────
             update_header_status(session, df_adj_scale, cobid, "Processed")
             log_status_history(session, adj_ids, "Pending", "Processed")
+
+            # ── Insert into DIMENSION.ADJUSTMENT ─────────────────────────
+            try:
+                session.sql(f"""
+                    INSERT INTO DIMENSION.ADJUSTMENT (
+                        COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, SOURCE_COBID,
+                        ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE, BOOK_CODE,
+                        TENOR_CODE, CURRENCY_CODE, CURVE_CODE, INSTRUMENT_CODE,
+                        MEASURE_TYPE_CODE, ADJUSTMENT_VALUE_IN_USD,
+                        CREATED_DATE, PROCESS_DATE, USERNAME, RUN_STATUS, REASON,
+                        MUREX_FAMILY, MUREX_GROUP, TRADE_TYPOLOGY, TRADE_CODE,
+                        SCALE_FACTOR, BATCH_REGION_AREA, SIMULATION_NAME, TRADER_CODE,
+                        VAR_COMPONENT_ID, VAR_SUB_COMPONENT_ID, SCENARIO_DATE_ID,
+                        GUARANTEED_ENTITY, STRATEGY, REGION_KEY,
+                        UNDERLYING_TENOR_CODE, PRODUCT_CATEGORY_ATTRIBUTES,
+                        ADJUSTMENT_OCCURRENCE, GLOBAL_REFERENCE, FILE_NAME,
+                        SIMULATION_SOURCE, DAY_TYPE, RECORD_COUNT
+                    )
+                    SELECT
+                        COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, SOURCE_COBID,
+                        ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE, BOOK_CODE,
+                        TENOR_CODE, CURRENCY_CODE, CURVE_CODE, INSTRUMENT_CODE,
+                        MEASURE_TYPE_CODE, ADJUSTMENT_VALUE_IN_USD,
+                        CREATED_DATE, CURRENT_TIMESTAMP(), USERNAME, 'Processed', REASON,
+                        MUREX_FAMILY, MUREX_GROUP, TRADE_TYPOLOGY, TRADE_CODE,
+                        SCALE_FACTOR, BATCH_REGION_AREA, SIMULATION_NAME, TRADER_CODE,
+                        VAR_COMPONENT_ID, VAR_SUB_COMPONENT_ID, SCENARIO_DATE_ID,
+                        GUARANTEED_ENTITY, STRATEGY, REGION_KEY,
+                        UNDERLYING_TENOR_CODE, PRODUCT_CATEGORY_ATTRIBUTES,
+                        ADJUSTMENT_OCCURRENCE, GLOBAL_REFERENCE, FILE_NAME,
+                        SIMULATION_SOURCE, DAY_TYPE, {rows_count}
+                    FROM ADJUSTMENT_APP.ADJ_HEADER
+                    WHERE ADJ_ID IN ({adj_ids_str})
+                """).collect()
+            except Exception as dim_err:
+                print(f"Warning: could not insert into DIMENSION.ADJUSTMENT: {dim_err}")
 
             result["message"] = "Scale adjustments processed successfully"
 
