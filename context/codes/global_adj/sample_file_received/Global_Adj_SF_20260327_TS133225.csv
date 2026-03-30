@@ -1,0 +1,4 @@
+COBId,AdjustmentId,SourceCOBId,ApprovalId,AdjustmentType,Reason,FormData,AdjustedBy,AdjustmentCreated,AdjustmentCompleted,Status,EntityCode,EntityKey,DepartmentCode,IsDeleted,DeletedBy,AdjustmentDeleted,TempId
+20260326,1869943,,-1,inserted,VaR_Upload_20260326_DCN FX VaR,,Snowflake Process,2026-03-27 13:32:23.637000,,File Moved,MUSI,1,,False,,,
+20260326,1869944,,-1,inserted,VaR_Upload_20260326_CTN FX VaR,,Snowflake Process,2026-03-27 13:32:24.433000,,File Moved,MUSI,1,,False,,,
+20260326,1869945,,-1,inserted,VaR_Upload_20260326_DSN FX VaR,,Snowflake Process,2026-03-27 13:32:25.153000,,File Moved,MUSI,1,,False,,,

@@ -1,0 +1,2 @@
+COBId,AdjustmentId,SourceCOBId,ApprovalId,AdjustmentType,Reason,FormData,AdjustedBy,AdjustmentCreated,AdjustmentCompleted,Status,EntityCode,EntityKey,DepartmentCode,IsDeleted,DeletedBy,AdjustmentDeleted,TempId
+20260326,1869942,,-1,inserted,VaR_Upload_20260326_EFE FX VaR,,Snowflake Process,2026-03-27 13:27:01.857000,,File Moved,MUSI,1,,False,,,

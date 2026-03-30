@@ -1,0 +1,306 @@
+"""
+My Work — Personal Workspace
+==============================
+All adjustments created by the current user, with full history and actions.
+Reads from: VW_MY_WORK, ADJ_STATUS_HISTORY.
+"""
+import streamlit as st
+import pandas as pd
+
+st.set_page_config(page_title="My Work · MUFG", page_icon="📋", layout="wide", initial_sidebar_state="expanded")
+
+from utils.styles import (
+    inject_css, render_sidebar, render_filter_chips, render_status_timeline,
+    status_badge, section_title, P, SCOPE_CONFIG, STATUS_COLORS, STATUS_ICONS,
+)
+from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
+
+inject_css()
+render_sidebar()
+
+user = current_user_name()
+
+st.markdown("## 📋 My Work")
+st.markdown(
+    f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
+    f"All adjustments created by you, with full history and available actions.</span>",
+    unsafe_allow_html=True)
+st.markdown("<br/>", unsafe_allow_html=True)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# FILTERS
+# ──────────────────────────────────────────────────────────────────────────────
+
+f1, f2, f3, f4 = st.columns(4)
+with f1:
+    filter_status = st.multiselect(
+        "Status",
+        list(STATUS_COLORS.keys()),
+        default=[], key="mw_status")
+with f2:
+    filter_scope = st.multiselect(
+        "Scope", list(SCOPE_CONFIG.keys()),
+        default=[], key="mw_scope")
+with f3:
+    filter_type = st.multiselect(
+        "Type", ["Flatten", "Scale", "Roll", "Upload"],
+        default=[], key="mw_type")
+with f4:
+    show_all = st.checkbox("Show all users' adjustments", value=False,
+                           help="When checked, shows all adjustments (not just yours).")
+
+st.markdown("<br/>", unsafe_allow_html=True)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LOAD DATA
+# ──────────────────────────────────────────────────────────────────────────────
+
+try:
+    where_clauses = ["IS_DELETED = FALSE"]
+    if not show_all:
+        where_clauses.append(f"SUBMITTED_BY = '{user}'")
+    if filter_status:
+        in_list = ",".join(f"'{s}'" for s in filter_status)
+        where_clauses.append(f"RUN_STATUS IN ({in_list})")
+    if filter_scope:
+        in_list = ",".join(f"'{s}'" for s in filter_scope)
+        where_clauses.append(f"PROCESS_TYPE IN ({in_list})")
+    if filter_type:
+        in_list = ",".join(f"'{s}'" for s in filter_type)
+        where_clauses.append(f"ADJUSTMENT_TYPE IN ({in_list})")
+
+    where_sql = " AND ".join(where_clauses)
+    df_adjs = run_query_df(f"""
+        SELECT *
+        FROM ADJUSTMENT_APP.VW_MY_WORK
+        WHERE {where_sql}
+        ORDER BY SUBMITTED_AT DESC
+        LIMIT 200
+    """)
+except Exception as e:
+    df_adjs = pd.DataFrame()
+    st.warning(f"Could not load adjustments: {e}")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# STATUS TABS
+# ──────────────────────────────────────────────────────────────────────────────
+
+tab_labels = {
+    "⏳ Pending":        ["Pending"],
+    "📝 Pending Approval": ["Pending Approval"],
+    "✅ Approved":        ["Approved"],
+    "✔️ Processed":      ["Processed"],
+    "❌ Errors / Rejected": ["Error", "Rejected", "Rejected - SignedOff"],
+}
+
+counts = {}
+for label, statuses in tab_labels.items():
+    if df_adjs.empty:
+        counts[label] = 0
+    else:
+        counts[label] = int(df_adjs[df_adjs["RUN_STATUS"].isin(statuses)].shape[0])
+
+tab_names = [f"{lbl} ({counts[lbl]})" for lbl in tab_labels]
+tabs = st.tabs(tab_names)
+
+
+def render_adj_card(row):
+    """Render one adjustment as an expandable card."""
+    adj_id      = row.get("ADJ_ID", "?")
+    scope       = str(row.get("PROCESS_TYPE", ""))
+    adj_type    = str(row.get("ADJUSTMENT_TYPE", ""))
+    run_status  = str(row.get("RUN_STATUS", ""))
+    entity      = str(row.get("ENTITY_CODE", "")) or "—"
+    book        = str(row.get("BOOK_CODE", "")) or "—"
+    record_cnt  = row.get("RECORD_COUNT", 0)
+    try:
+        record_cnt = int(record_cnt) if record_cnt and record_cnt == record_cnt else 0
+    except (ValueError, TypeError):
+        record_cnt = 0
+    scope_cfg   = SCOPE_CONFIG.get(scope, {})
+
+    with st.expander(
+        f'ADJ #{adj_id} · {scope_cfg.get("icon","📊")} {scope} · '
+        f'{adj_type} · {run_status} · {record_cnt} rows',
+        expanded=False,
+    ):
+        col_info, col_meta = st.columns([2, 1])
+
+        with col_info:
+            st.markdown(status_badge(run_status), unsafe_allow_html=True)
+            st.markdown("<br/>", unsafe_allow_html=True)
+
+            section_title("Filters Applied", "🔍")
+            render_filter_chips(row)
+
+            reason = row.get("REASON", "")
+            st.markdown(
+                f'<br/><div style="font-size:0.85rem"><strong>Business Reason:</strong><br/>'
+                f'<span style="color:{P["grey_700"]}">{reason or "—"}</span></div>',
+                unsafe_allow_html=True)
+
+            if row.get("ERRORMESSAGE"):
+                st.markdown(
+                    f'<div class="overlap-box" style="margin-top:0.5rem">'
+                    f'<h4>❌ Error</h4>'
+                    f'<div style="font-size:0.82rem;font-family:monospace">{row["ERRORMESSAGE"]}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True)
+
+        with col_meta:
+            submitted_at = row.get("SUBMITTED_AT", "")
+            if hasattr(submitted_at, "strftime"):
+                submitted_at = submitted_at.strftime("%d %b %Y %H:%M")
+            process_date = row.get("PROCESS_DATE", "")
+            if hasattr(process_date, "strftime"):
+                process_date = process_date.strftime("%d %b %Y %H:%M")
+
+            meta_rows = [
+                ("Target COB",   str(row.get("COBID", "—"))),
+                ("Records",      f"{record_cnt:,}" if record_cnt else "—"),
+                ("Created by",   str(row.get("SUBMITTED_BY", "—"))),
+                ("Created",      str(submitted_at) if submitted_at else "—"),
+                ("Scale",        f'{row.get("SCALE_FACTOR", 1):.4f}×' if row.get("SCALE_FACTOR") and float(row.get("SCALE_FACTOR", 1)) != 1 else "—"),
+                ("Source COB",   str(row.get("SOURCE_COBID", "—")) if row.get("SOURCE_COBID") else "—"),
+                ("Processed at", str(process_date) if process_date else "—"),
+                ("Occurrence",   str(row.get("ADJUSTMENT_OCCURRENCE", "—"))),
+            ]
+            rows_html = "".join(
+                f'<tr><td style="color:{P["grey_700"]};padding:3px 0;font-size:0.8rem;'
+                f'white-space:nowrap;padding-right:12px">{k}</td>'
+                f'<td style="font-size:0.82rem;font-weight:600">{v}</td></tr>'
+                for k, v in meta_rows if v and v != "—"
+            )
+            st.markdown(
+                f'<div class="mcard" style="padding:0.8rem">'
+                f'<table style="width:100%;border-collapse:collapse">{rows_html}</table>'
+                f'</div>',
+                unsafe_allow_html=True)
+
+        # ── Status history ──────────────────────────────────────────────────
+        st.markdown("---")
+        section_title("Status History", "🕐")
+        try:
+            history = run_query(f"""
+                SELECT NEW_STATUS, OLD_STATUS, CHANGED_BY, CHANGED_AT, COMMENT
+                FROM ADJUSTMENT_APP.ADJ_STATUS_HISTORY
+                WHERE ADJ_ID = {adj_id}
+                ORDER BY CHANGED_AT DESC
+            """)
+            # Convert Row objects to dicts
+            history_dicts = [dict(h) for h in history] if history else []
+            render_status_timeline(history_dicts)
+        except Exception:
+            st.info("No history available.")
+
+        # ── Actions ─────────────────────────────────────────────────────────
+        st.markdown("---")
+        section_title("Actions", "⚡")
+        act_cols = st.columns(4)
+
+        if run_status == "Pending":
+            with act_cols[0]:
+                if st.button("�️ Delete", key=f"del_{adj_id}", use_container_width=True):
+                    try:
+                        run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                            SET IS_DELETED = TRUE
+                            WHERE ADJ_ID = {adj_id}
+                        """)
+                        st.success("Adjustment deleted.")
+                        safe_rerun()
+                    except Exception as ex:
+                        st.error(str(ex))            with act_cols[1]:
+                if st.button("🔐 Submit for Approval", key=f"approv_{adj_id}", use_container_width=True):
+                    try:
+                        run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                            SET RUN_STATUS = 'Pending Approval'
+                            WHERE ADJ_ID = {adj_id}
+                        """)
+                        run_query(f"""
+                            INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
+                                (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
+                            VALUES ({adj_id}, 'Pending', 'Pending Approval',
+                                    '{user}', 'Submitted for approval')
+                        """)
+                        st.success("Submitted for approval.")
+                        safe_rerun()
+                    except Exception as ex:
+                        st.error(str(ex))
+
+        elif run_status == "Pending Approval":
+            with act_cols[0]:
+                if st.button("↩️ Recall to Pending", key=f"recall_{adj_id}", use_container_width=True):
+                    try:
+                        run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                            SET RUN_STATUS = 'Pending'
+                            WHERE ADJ_ID = {adj_id}
+                        """)
+                        run_query(f"""
+                            INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
+                                (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
+                            VALUES ({adj_id}, 'Pending Approval', 'Pending',
+                                    '{user}', 'Recalled by submitter')
+                        """)
+                        st.success("Recalled to Pending.")
+                        safe_rerun()
+                    except Exception as ex:
+                        st.error(str(ex))
+        elif run_status == "Error":
+            with act_cols[0]:
+                if st.button("🔄 Retry", key=f"retry_{adj_id}",
+                             use_container_width=True, type="primary"):
+                    try:
+                        run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                            SET RUN_STATUS = 'Pending',
+                                ERRORMESSAGE = NULL
+                            WHERE ADJ_ID = {adj_id}
+                        """)
+                        run_query(f"""
+                            INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
+                                (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
+                            VALUES ({adj_id}, 'Error', 'Pending',
+                                    '{user}', 'Retrying after error')
+                        """)
+                        st.success("Queued for retry.")
+                        safe_rerun()
+                    except Exception as ex:
+                        st.error(str(ex))
+
+
+# ── Render tabs ────────────────────────────────────────────────────────────────
+
+for tab, (label, statuses) in zip(tabs, tab_labels.items()):
+    with tab:
+        if df_adjs.empty:
+            tab_adjs = pd.DataFrame()
+        else:
+            tab_adjs = df_adjs[df_adjs["RUN_STATUS"].isin(statuses)]
+
+        if tab_adjs.empty:
+            st.markdown(
+                f'<div class="mcard" style="text-align:center;padding:2.5rem;color:{P["grey_700"]}">'
+                f'<div style="font-size:1.8rem">🕳️</div>'
+                f'<div style="font-size:0.9rem;margin-top:0.5rem">No adjustments in this category</div>'
+                f'</div>',
+                unsafe_allow_html=True)
+            continue
+
+        # Quick summary row by scope
+        scopes_in_tab = tab_adjs["PROCESS_TYPE"].unique()
+        summary_html = '<div style="display:flex;gap:16px;margin-bottom:1rem;flex-wrap:wrap">'
+        for scope_key in scopes_in_tab:
+            cnt = int(tab_adjs[tab_adjs["PROCESS_TYPE"] == scope_key].shape[0])
+            cfg = SCOPE_CONFIG.get(scope_key, {})
+            summary_html += (
+                f'<div style="background:{cfg.get("bg", P["grey_100"])};border-radius:6px;'
+                f'padding:4px 10px;font-size:0.78rem;font-weight:600;color:{cfg.get("color", P["grey_700"])}">'
+                f'{cfg.get("icon", "")} {cfg.get("label", scope_key)} · {cnt}</div>')
+        summary_html += '</div>'
+        st.markdown(summary_html, unsafe_allow_html=True)
+
+        for _, row in tab_adjs.iterrows():
+            render_adj_card(row.to_dict())
