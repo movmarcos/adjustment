@@ -765,8 +765,53 @@ elif wiz["step"] == 2:
             )
 
             if not df_preview.empty:
-                st.markdown(f"**{len(df_preview):,} rows** would be affected")
-                st.dataframe(df_preview.head(200), use_container_width=True, height=300)
+                total_rows = len(df_preview)
+
+                # ── KPI metrics ────────────────────────────────────────────
+                def _fmt(v):
+                    try:
+                        return f"{float(v):,.0f}"
+                    except Exception:
+                        return "—"
+
+                col_cv  = next((c for c in df_preview.columns if "CURRENT_VALUE"    in c and "LOCAL" not in c), None)
+                col_del = next((c for c in df_preview.columns if "ADJUSTMENT_DELTA" in c and "LOCAL" not in c), None)
+                col_pv  = next((c for c in df_preview.columns if "PROJECTED_VALUE"  in c and "LOCAL" not in c), None)
+
+                sum_cv  = df_preview[col_cv].sum()  if col_cv  else None
+                sum_del = df_preview[col_del].sum() if col_del else None
+                sum_pv  = df_preview[col_pv].sum()  if col_pv  else None
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Rows Affected",      f"{total_rows:,}")
+                m2.metric("Total Original",     _fmt(sum_cv)  if sum_cv  is not None else "—")
+                m3.metric("Total Adjustment",   _fmt(sum_del) if sum_del is not None else "—")
+                m4.metric("Total Projected",    _fmt(sum_pv)  if sum_pv  is not None else "—")
+
+                st.markdown("<br/>", unsafe_allow_html=True)
+
+                # ── Breakdown by BOOK_CODE / DEPARTMENT_CODE ───────────────
+                grp_cols = [c for c in ["BOOK_CODE", "DEPARTMENT_CODE", "ENTITY_CODE"] if c in df_preview.columns]
+                val_cols = [c for c in [col_cv, col_del, col_pv] if c]
+                if grp_cols and val_cols:
+                    df_grp = (
+                        df_preview.groupby(grp_cols)[val_cols]
+                        .sum()
+                        .reset_index()
+                        .sort_values(grp_cols)
+                    )
+                    rename_map = {}
+                    if col_cv:  rename_map[col_cv]  = "Original"
+                    if col_del: rename_map[col_del] = "Adjustment"
+                    if col_pv:  rename_map[col_pv]  = "Projected"
+                    df_grp = df_grp.rename(columns=rename_map)
+                    st.markdown("**Breakdown by " + " / ".join(grp_cols) + "**")
+                    st.dataframe(df_grp, use_container_width=True, height=min(300, 38 + 35 * len(df_grp)))
+
+                # ── Full detail (collapsed) ────────────────────────────────
+                with st.expander(f"View all {total_rows:,} rows", expanded=False):
+                    st.dataframe(df_preview, use_container_width=True, height=300)
+
             else:
                 st.info("No matching rows found for this filter combination.")
 
@@ -785,20 +830,21 @@ elif wiz["step"] == 2:
             wiz["step"] = 1
             safe_rerun()
     with nav2:
-        if st.button("🚀 Submit Adjustment", type="primary", use_container_width=True):
-            _do_submit()
-            result = wiz.get("result", {})
+        if st.button("🚀 Submit Adjustment", type="primary", use_container_width=True,
+                     disabled=st.session_state.get("_submitting", False)):
+            st.session_state["_submitting"] = True
+            with st.spinner("Submitting adjustment…"):
+                _do_submit()
+            st.session_state["_submitting"] = False
+            result = (wiz.get("result") or {})
             if result.get("status") != "Error":
-                # Store success message, set nav flag, reset wizard so page is
-                # fresh next time, then rerun — the nav flag triggers switch_page
-                # at the very top of this file before any widgets render.
                 msg = result.get("message", "Adjustment created successfully")
                 st.session_state["_submit_success"] = msg
                 st.session_state["_nav_to_queue"] = True
                 reset_wizard()
             safe_rerun()
 
-    if wiz.get("result", {}).get("status") == "Error":
+    if (wiz.get("result") or {}).get("status") == "Error":
         st.error(f"❌ {wiz['result'].get('message', 'Submission failed')}")
         if st.button("← Back to Edit", key="back_err", use_container_width=True):
             wiz["result"] = None
