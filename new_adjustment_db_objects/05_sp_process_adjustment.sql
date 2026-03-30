@@ -21,7 +21,7 @@
 USE DATABASE DVLP_RAPTOR_NEWADJ;
 USE SCHEMA ADJUSTMENT_APP;
 
-CREATE OR MODIFY PROCEDURE ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT(
+CREATE OR REPLACE PROCEDURE ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT(
     process_type STRING,
     adjustment_action STRING,
     cobid INT
@@ -351,7 +351,7 @@ def main(session, process_type, adjustment_action, cobid):
             exclude_keys = "*" if key_name == pk_expr else f"* EXCLUDE ({key_name})"
 
             insert_sql = f"""
-            CREATE OR MODIFY TABLE {fact_adj_tbl_name}_TEMP
+            CREATE OR REPLACE TABLE {fact_adj_tbl_name}_TEMP
             (
                 COBID, ADJUSTMENT_ID, ADJUSTMENT_CREATED_TIMESTAMP,
                 {insert_non_metric}, {metric_col_list},
