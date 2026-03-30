@@ -22,7 +22,7 @@ DROP VIEW IF EXISTS ADJUSTMENT_APP.VW_APPROVAL_QUEUE;
 -- The submit procedure also checks this before allowing submissions.
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE OR MODIFY VIEW ADJUSTMENT_APP.VW_SIGNOFF_STATUS
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_SIGNOFF_STATUS
     COMMENT = 'Unified sign-off status. IS_SIGNED_OFF = TRUE means no new adjustments allowed for that COB/scope. Reads from ADJ_SIGNOFF_STATUS.'
 AS
 SELECT
@@ -44,7 +44,7 @@ FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS s;
 -- One row per COB with counts by status, total impact, and timing metrics.
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE OR MODIFY VIEW ADJUSTMENT_APP.VW_DASHBOARD_KPI
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_DASHBOARD_KPI
     COMMENT = 'High-level KPIs per COB for the dashboard header cards.'
 AS
 SELECT
@@ -77,7 +77,7 @@ GROUP BY h.COBID;
 -- Combines header submissions + status transitions for a timeline view.
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE OR MODIFY VIEW ADJUSTMENT_APP.VW_RECENT_ACTIVITY
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_RECENT_ACTIVITY
     COMMENT = 'Activity feed combining submissions and status changes. Used for the dashboard timeline.'
 AS
 SELECT
@@ -118,7 +118,7 @@ WHERE h.IS_DELETED = FALSE;
 -- 4. VW_ERRORS — Current errors for the error panel
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE OR MODIFY VIEW ADJUSTMENT_APP.VW_ERRORS
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_ERRORS
     COMMENT = 'Adjustments currently in Error status. Used for the error panel in dashboard.'
 AS
 SELECT
@@ -144,7 +144,7 @@ WHERE h.RUN_STATUS = 'Error'
 -- Filtered in Streamlit by: WHERE SUBMITTED_BY = CURRENT_USER()
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE OR MODIFY VIEW ADJUSTMENT_APP.VW_MY_WORK
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_MY_WORK
     COMMENT = 'All adjustments with full detail. Streamlit My Work page filters by CURRENT_USER().'
 AS
 SELECT
@@ -179,7 +179,7 @@ FROM ADJUSTMENT_APP.ADJ_HEADER h;
 -- 6. VW_PROCESSING_QUEUE — Adjustments currently being processed or pending
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE OR MODIFY VIEW ADJUSTMENT_APP.VW_PROCESSING_QUEUE
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_PROCESSING_QUEUE
     COMMENT = 'Live view of the processing pipeline. Pending, Approved, and Processing adjustments.'
 AS
 SELECT
@@ -211,7 +211,7 @@ WHERE h.RUN_STATUS IN ('Pending', 'Approved', 'Processing')
 -- 7. VW_APPROVAL_QUEUE — Adjustments awaiting approval
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE OR MODIFY VIEW ADJUSTMENT_APP.VW_APPROVAL_QUEUE
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_APPROVAL_QUEUE
     COMMENT = 'Adjustments currently in Pending Approval status. Used by the Approval Queue page.'
 AS
 SELECT
