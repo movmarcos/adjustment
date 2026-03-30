@@ -204,14 +204,19 @@ def render_var_upload_form():
         f'Category, Detail</code>.'
         f'</div>', unsafe_allow_html=True)
 
-    uploaded_file = st.file_uploader(
-        "Upload VaR CSV", type=["csv"], key="var_csv_uploader",
-        help="The CSV must have the standard VaR Upload column layout.")
 
-    if uploaded_file is not None:
+    csv_text = st.text_area(
+        "Paste VaR CSV Data Here",
+        value="",
+        height=180,
+        key="var_csv_textarea",
+        help="Paste the full CSV content including header row. The CSV must have the standard VaR Upload column layout.")
+
+    if csv_text.strip():
         try:
-            df = pd.read_csv(uploaded_file)
-            wiz["uploaded_file_name"] = uploaded_file.name
+            from io import StringIO
+            df = pd.read_csv(StringIO(csv_text.strip()))
+            wiz["uploaded_file_name"] = f"CSV_Pasted_{len(csv_text)}_chars.csv"
             wiz["uploaded_df"] = df
 
             # Validate columns
