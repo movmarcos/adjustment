@@ -808,9 +808,9 @@ elif wiz["step"] == 2:
                     st.markdown("**Breakdown by " + " / ".join(grp_cols) + "**")
                     st.dataframe(df_grp, use_container_width=True, height=min(300, 38 + 35 * len(df_grp)))
 
-                # ── Full detail (collapsed) ────────────────────────────────
-                with st.expander(f"View all {total_rows:,} rows", expanded=False):
-                    st.dataframe(df_preview, use_container_width=True, height=300)
+                # ── Full detail (collapsed, capped at 1 000 rows for display) ─
+                with st.expander(f"View sample rows (up to 1,000 of {total_rows:,})", expanded=False):
+                    st.dataframe(df_preview.head(1000), use_container_width=True, height=300)
 
             else:
                 st.info("No matching rows found for this filter combination.")

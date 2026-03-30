@@ -205,7 +205,6 @@ def main(session, p_adjustment):
     WHERE {where_sql}
       AND fact.{primary_metric} IS NOT NULL
     ORDER BY ABS(fact.{primary_metric}) DESC
-    LIMIT 1000
     """
 
     return session.sql(preview_sql)
