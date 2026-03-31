@@ -5,6 +5,7 @@ Main entry point. Live overview of all adjustments, queue, and pending actions.
 Reads from: VW_DASHBOARD_KPI, DT_DASHBOARD, DT_OVERLAP_ALERTS, VW_RECENT_ACTIVITY.
 """
 import streamlit as st
+import plotly.graph_objects as go
 
 st.set_page_config(
     page_title="Adjustment Engine · MUFG",
@@ -84,8 +85,6 @@ with col_left:
             ORDER BY PROCESS_TYPE, RUN_STATUS
         """)
         if not df_dash.empty:
-            import plotly.graph_objects as go
-
             scopes = df_dash["PROCESS_TYPE"].unique()
             statuses = ["Pending", "Pending Approval", "Approved", "Processed", "Error"]
             color_map = {
@@ -236,3 +235,98 @@ with col_right:
             st.info("No activity yet.")
     except Exception:
         st.info("No activity data available.")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LAST 5 COBs — TREND CHARTS
+# ──────────────────────────────────────────────────────────────────────────────
+
+st.markdown("<br/>", unsafe_allow_html=True)
+section_title("Last 5 COBs — Activity Trend", "📈")
+
+try:
+    df_cob = run_query_df("""
+        SELECT
+            COBID,
+            PROCESS_TYPE,
+            COUNT(*)                        AS ADJ_COUNT,
+            COALESCE(SUM(RECORD_COUNT), 0)  AS ROW_COUNT
+        FROM ADJUSTMENT_APP.ADJ_HEADER
+        WHERE IS_DELETED = FALSE
+          AND COBID IN (
+              SELECT DISTINCT COBID
+              FROM ADJUSTMENT_APP.ADJ_HEADER
+              WHERE IS_DELETED = FALSE
+              ORDER BY COBID DESC
+              LIMIT 5
+          )
+        GROUP BY COBID, PROCESS_TYPE
+        ORDER BY COBID, PROCESS_TYPE
+    """)
+
+    if not df_cob.empty:
+        cobs = sorted(df_cob["COBID"].unique())
+        cob_labels = [str(c) for c in cobs]
+
+        ch1, ch2 = st.columns(2)
+
+        # ── Chart 1: Adjustments submitted per COB, stacked by scope ──────
+        with ch1:
+            st.markdown(
+                f"<div style='font-size:0.82rem;font-weight:600;color:{P['grey_700']};"
+                f"margin-bottom:0.3rem'>Adjustments Submitted per COB</div>",
+                unsafe_allow_html=True)
+            fig1 = go.Figure()
+            scopes = df_cob["PROCESS_TYPE"].unique()
+            scope_colors = [
+                SCOPE_CONFIG.get(s, {}).get("color", P["grey_400"]) for s in scopes
+            ]
+            for scope, color in zip(scopes, scope_colors):
+                vals = []
+                for cob in cobs:
+                    mask = (df_cob["COBID"] == cob) & (df_cob["PROCESS_TYPE"] == scope)
+                    vals.append(int(df_cob.loc[mask, "ADJ_COUNT"].sum()) if mask.any() else 0)
+                fig1.add_trace(go.Bar(
+                    x=cob_labels, y=vals, name=scope, marker_color=color,
+                ))
+            fig1.update_layout(
+                barmode="stack", plot_bgcolor="white", paper_bgcolor="white",
+                margin=dict(l=0, r=0, t=10, b=0), height=240,
+                legend=dict(orientation="h", yanchor="bottom", y=1, xanchor="left", x=0, font_size=11),
+                xaxis=dict(showgrid=False, tickfont_size=11, title="COB"),
+                yaxis=dict(showgrid=True, gridcolor="#F0F0F0", tickfont_size=10, title="Adjustments"),
+                font_family="Inter",
+            )
+            st.plotly_chart(fig1, use_container_width=True, config={"displayModeBar": False})
+
+        # ── Chart 2: Total rows adjusted per COB, line by scope ───────────
+        with ch2:
+            st.markdown(
+                f"<div style='font-size:0.82rem;font-weight:600;color:{P['grey_700']};"
+                f"margin-bottom:0.3rem'>Rows Adjusted per COB</div>",
+                unsafe_allow_html=True)
+            fig2 = go.Figure()
+            for scope, color in zip(scopes, scope_colors):
+                vals = []
+                for cob in cobs:
+                    mask = (df_cob["COBID"] == cob) & (df_cob["PROCESS_TYPE"] == scope)
+                    vals.append(int(df_cob.loc[mask, "ROW_COUNT"].sum()) if mask.any() else 0)
+                fig2.add_trace(go.Scatter(
+                    x=cob_labels, y=vals, name=scope,
+                    mode="lines+markers",
+                    line=dict(color=color, width=2),
+                    marker=dict(color=color, size=7),
+                ))
+            fig2.update_layout(
+                plot_bgcolor="white", paper_bgcolor="white",
+                margin=dict(l=0, r=0, t=10, b=0), height=240,
+                legend=dict(orientation="h", yanchor="bottom", y=1, xanchor="left", x=0, font_size=11),
+                xaxis=dict(showgrid=False, tickfont_size=11, title="COB"),
+                yaxis=dict(showgrid=True, gridcolor="#F0F0F0", tickfont_size=10, title="Rows"),
+                font_family="Inter",
+            )
+            st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
+
+    else:
+        st.info("No COB data available yet.")
+except Exception as e:
+    st.info(f"COB trend data not available: {e}")

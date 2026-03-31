@@ -212,8 +212,8 @@ def inject_css():
     .tl-item::before {{
         content: ""; position: absolute; left: -20px; top: 14px;
         width: 10px; height: 10px; border-radius: 50%;
-        background: {P["primary"]}; border: 2px solid {P["white"]};
-        box-shadow: 0 0 0 2px {P["primary"]};
+        background: {P["grey_400"]}; border: 2px solid {P["white"]};
+        box-shadow: 0 0 0 2px {P["border"]};
     }}
     .tl-status {{ font-size: 0.78rem; font-weight: 700; text-transform: uppercase; }}
     .tl-meta {{ font-size: 0.73rem; color: {P["grey_700"]}; margin-top: 2px; }}
