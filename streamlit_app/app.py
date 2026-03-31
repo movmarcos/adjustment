@@ -207,34 +207,7 @@ with col_mid:
 
 # ── Recent Activity ─────────────────────────────────────────────────────────
 with col_right:
-    section_title("Recent Activity", "🕐")
-    try:
-        df_activity = run_query_df("""
-            SELECT ADJ_ID, PROCESS_TYPE, ADJUSTMENT_TYPE, ACTOR,
-                   EVENT_TYPE, EVENT_TIME, EVENT_DETAIL, CURRENT_STATUS
-            FROM ADJUSTMENT_APP.VW_RECENT_ACTIVITY
-            ORDER BY EVENT_TIME DESC
-            LIMIT 12
-        """)
-        if not df_activity.empty:
-            st.markdown('<div class="timeline">', unsafe_allow_html=True)
-            for _, row in df_activity.iterrows():
-                scope_cfg = SCOPE_CONFIG.get(row["PROCESS_TYPE"], {})
-                icon = scope_cfg.get("icon", "📊")
-                ts = str(row["EVENT_TIME"])[:16] if row.get("EVENT_TIME") else ""
-                detail = str(row.get("EVENT_DETAIL", ""))[:60]
-                st.markdown(
-                    f'<div class="tl-item">'
-                    f'<div class="tl-status">{icon} #{row["ADJ_ID"]} — {row["EVENT_TYPE"]}</div>'
-                    f'<div class="tl-meta">by {row["ACTOR"]} · {ts}</div>'
-                    + (f'<div class="tl-comment">"{detail}"</div>' if detail and detail != "None" else "")
-                    + '</div>',
-                    unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
-        else:
-            st.info("No activity yet.")
-    except Exception:
-        st.info("No activity data available.")
+    pass  # Recent Activity moved to full-width grid at the bottom
 
 # ──────────────────────────────────────────────────────────────────────────────
 # LAST 5 COBs — TREND CHARTS
@@ -330,3 +303,48 @@ try:
         st.info("No COB data available yet.")
 except Exception as e:
     st.info(f"COB trend data not available: {e}")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# RECENT ACTIVITY — full-width grid
+# ──────────────────────────────────────────────────────────────────────────────
+
+st.markdown("<br/>", unsafe_allow_html=True)
+section_title("Recent Activity", "🕐")
+
+try:
+    df_activity = run_query_df("""
+        SELECT
+            ADJ_ID          AS "Adj #",
+            EVENT_TIME      AS "Time",
+            EVENT_TYPE      AS "Event",
+            CURRENT_STATUS  AS "Status",
+            PROCESS_TYPE    AS "Scope",
+            ADJUSTMENT_TYPE AS "Type",
+            ACTOR           AS "User",
+            EVENT_DETAIL    AS "Detail"
+        FROM ADJUSTMENT_APP.VW_RECENT_ACTIVITY
+        ORDER BY EVENT_TIME DESC
+        LIMIT 50
+    """)
+
+    if not df_activity.empty:
+        def _colour_status(val):
+            colours = {
+                "Processed":        f"color:{P['success']};font-weight:600",
+                "Error":            f"color:{P['danger']};font-weight:600",
+                "Pending":          f"color:{P['warning']};font-weight:600",
+                "Pending Approval": f"color:{P['info']};font-weight:600",
+                "Approved":         "color:#00897B;font-weight:600",
+            }
+            return colours.get(val, "")
+
+        st.dataframe(
+            df_activity.style.map(_colour_status, subset=["Status"]),
+            use_container_width=True,
+            height=400,
+            hide_index=True,
+        )
+    else:
+        st.info("No activity yet.")
+except Exception:
+    st.info("No activity data available.")
