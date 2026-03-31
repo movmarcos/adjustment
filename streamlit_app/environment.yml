@@ -1,0 +1,5 @@
+name: adjustment-engine
+channels:
+  - snowflake
+dependencies:
+  - plotly

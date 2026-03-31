@@ -222,16 +222,11 @@ def deploy_streamlit_app(session):
     # ── Upload files ─────────────────────────────────────────────────────
     files_to_upload = []
 
-    # Root: app.py, requirements.txt, environment.yml
-    for fname in ['app.py', 'requirements.txt']:
+    # Root files: app.py, requirements.txt, environment.yml (SiS package declaration)
+    for fname in ['app.py', 'requirements.txt', 'environment.yml']:
         fpath = app_dir / fname
         if fpath.exists():
             files_to_upload.append((fpath, ''))
-
-    # environment.yml lives at the project root (one level above streamlit_app/)
-    env_yml = Path(__file__).parent / 'environment.yml'
-    if env_yml.exists():
-        files_to_upload.append((env_yml, ''))
 
     # utils/ directory
     utils_dir = app_dir / 'utils'
