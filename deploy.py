@@ -311,11 +311,10 @@ def deploy_streamlit_app(session):
     print(f"\n  🚀 Creating Streamlit app {streamlit_name}...")
     create_sql = f"""
     CREATE OR REPLACE STREAMLIT {streamlit_name}
-        ROOT_LOCATION    = '@{stage_name}'
-        MAIN_FILE        = 'app.py'
-        ENVIRONMENT_FILE = 'environment.yml'
-        QUERY_WAREHOUSE  = 'DVLP_RAPTOR_WH_XS'
-        COMMENT          = 'Adjustment Engine — MUFG. Unified adjustment management for VaR, Stress, FRTB, Sensitivity.'
+        ROOT_LOCATION   = '@{stage_name}'
+        MAIN_FILE       = 'app.py'
+        QUERY_WAREHOUSE = 'DVLP_RAPTOR_WH_XS'
+        COMMENT         = 'Adjustment Engine — MUFG. Unified adjustment management for VaR, Stress, FRTB, Sensitivity.'
     """
     try:
         session.sql(create_sql).collect()
