@@ -107,6 +107,21 @@ except Exception as e:
 # QUEUE ITEMS
 # ──────────────────────────────────────────────────────────────────────────────
 
+# ── Pre-load overlaps for all queued adj_ids (single query, not N queries) ───
+df_overlaps = pd.DataFrame()
+if not df_queue.empty:
+    try:
+        queued_ids = ",".join(str(int(i)) for i in df_queue["ADJ_ID"].dropna())
+        df_overlaps = run_query_df(f"""
+            SELECT ADJ_ID_A, ADJ_ID_B, COBID,
+                   ENTITY_A, ENTITY_B, BOOK_A, BOOK_B, ALERT_MESSAGE
+            FROM ADJUSTMENT_APP.DT_OVERLAP_ALERTS
+            WHERE ADJ_ID_A IN ({queued_ids})
+               OR ADJ_ID_B IN ({queued_ids})
+        """)
+    except Exception:
+        df_overlaps = pd.DataFrame()
+
 section_title(f"Adjustments Awaiting Approval ({len(df_queue)})", "📝")
 
 if df_queue.empty:
@@ -131,11 +146,18 @@ else:
         if hasattr(submitted_at, "strftime"):
             submitted_at = submitted_at.strftime("%d %b %Y %H:%M")
 
-        with st.expander(
+        has_overlap = (not df_overlaps.empty and (
+            (df_overlaps["ADJ_ID_A"] == adj_id).any() or
+            (df_overlaps["ADJ_ID_B"] == adj_id).any()
+        ))
+        expander_label = (
+            f'⚠️ ADJ #{adj_id} · {scope_cfg.get("icon","📊")} {scope} · '
+            f'{adj_type} · by {submitted_by}  — OVERLAP'
+            if has_overlap else
             f'ADJ #{adj_id} · {scope_cfg.get("icon","📊")} {scope} · '
-            f'{adj_type} · by {submitted_by}',
-            expanded=False,
-        ):
+            f'{adj_type} · by {submitted_by}'
+        )
+        with st.expander(expander_label, expanded=has_overlap):
             col_info, col_actions = st.columns([3, 1])
 
             with col_info:
@@ -163,6 +185,44 @@ else:
 
                 section_title("Filters Applied", "🔍")
                 render_filter_chips(row.to_dict())
+
+                # ── Overlap warnings ──────────────────────────────────────
+                if not df_overlaps.empty:
+                    adj_overlaps = df_overlaps[
+                        (df_overlaps["ADJ_ID_A"] == adj_id) |
+                        (df_overlaps["ADJ_ID_B"] == adj_id)
+                    ]
+                    if not adj_overlaps.empty:
+                        other_ids = adj_overlaps.apply(
+                            lambda r: r["ADJ_ID_B"] if r["ADJ_ID_A"] == adj_id
+                                      else r["ADJ_ID_A"], axis=1
+                        ).tolist()
+                        rows_html = "".join(
+                            f'<tr>'
+                            f'<td style="padding:3px 10px 3px 0;font-size:0.78rem;'
+                            f'font-weight:700;white-space:nowrap">'
+                            f'ADJ #{int(r["ADJ_ID_B"] if r["ADJ_ID_A"] == adj_id else r["ADJ_ID_A"])}'
+                            f'</td>'
+                            f'<td style="padding:3px 0;font-size:0.78rem;color:{P["grey_700"]}">'
+                            f'{str(r.get("ALERT_MESSAGE","")).strip() or "Overlapping filters on same COB"}'
+                            f'</td>'
+                            f'</tr>'
+                            for _, r in adj_overlaps.iterrows()
+                        )
+                        st.markdown(
+                            f'<div style="background:#FFF8E1;border:1px solid #FFD54F;'
+                            f'border-left:4px solid #F9A825;border-radius:8px;'
+                            f'padding:0.7rem 1rem;margin:0.8rem 0">'
+                            f'<div style="font-weight:700;font-size:0.82rem;color:#E65100;'
+                            f'margin-bottom:0.4rem">⚠️ Overlap Detected with '
+                            f'{len(other_ids)} adjustment(s)</div>'
+                            f'<table style="width:100%;border-collapse:collapse">'
+                            f'{rows_html}</table>'
+                            f'<div style="font-size:0.72rem;color:#795548;margin-top:0.4rem">'
+                            f'These adjustments target overlapping data. '
+                            f'Review carefully before approving.</div>'
+                            f'</div>',
+                            unsafe_allow_html=True)
 
                 st.markdown(
                     f'<br/><div style="font-size:0.85rem"><strong>Business Reason:</strong><br/>'
