@@ -222,11 +222,16 @@ def deploy_streamlit_app(session):
     # ── Upload files ─────────────────────────────────────────────────────
     files_to_upload = []
 
-    # Root: app.py, requirements.txt
+    # Root: app.py, requirements.txt, environment.yml
     for fname in ['app.py', 'requirements.txt']:
         fpath = app_dir / fname
         if fpath.exists():
             files_to_upload.append((fpath, ''))
+
+    # environment.yml lives at the project root (one level above streamlit_app/)
+    env_yml = Path(__file__).parent / 'environment.yml'
+    if env_yml.exists():
+        files_to_upload.append((env_yml, ''))
 
     # utils/ directory
     utils_dir = app_dir / 'utils'
@@ -306,10 +311,11 @@ def deploy_streamlit_app(session):
     print(f"\n  🚀 Creating Streamlit app {streamlit_name}...")
     create_sql = f"""
     CREATE OR REPLACE STREAMLIT {streamlit_name}
-        ROOT_LOCATION  = '@{stage_name}'
-        MAIN_FILE      = 'app.py'
-        QUERY_WAREHOUSE = 'DVLP_RAPTOR_WH_XS'
-        COMMENT        = 'Adjustment Engine — MUFG. Unified adjustment management for VaR, Stress, FRTB, Sensitivity.'
+        ROOT_LOCATION    = '@{stage_name}'
+        MAIN_FILE        = 'app.py'
+        ENVIRONMENT_FILE = 'environment.yml'
+        QUERY_WAREHOUSE  = 'DVLP_RAPTOR_WH_XS'
+        COMMENT          = 'Adjustment Engine — MUFG. Unified adjustment management for VaR, Stress, FRTB, Sensitivity.'
     """
     try:
         session.sql(create_sql).collect()
