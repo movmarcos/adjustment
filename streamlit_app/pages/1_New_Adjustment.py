@@ -628,7 +628,7 @@ if wiz["step"] == 1:
             bg     = ccfg["bg"]   if is_sel else P["white"]
             st.markdown(
                 f'<div style="background:{bg};border:2px solid {border};border-radius:10px;'
-                f'padding:0.8rem 0.5rem;text-align:center;min-height:100px">'
+                f'padding:0.8rem 0.5rem;text-align:center;min-height:130px">'
                 f'<div style="font-size:1.8rem">{ccfg["icon"]}</div>'
                 f'<div style="font-weight:700;font-size:0.85rem;margin-top:0.3rem">{ck}</div>'
                 f'<div style="font-size:0.68rem;color:{P["grey_700"]};margin-top:0.2rem">'
