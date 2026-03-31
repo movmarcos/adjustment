@@ -75,17 +75,17 @@ TYPE_CONFIG = {
 # ── Adjustment Category — the first selection in the wizard ──────────────────
 
 CATEGORY_CONFIG = {
-    "Global Adjustment": {
-        "icon": "🌐", "color": "#1565C0", "bg": "#E3F2FD",
-        "desc": "Metadata-only adjustment tracked in GLOBAL_ADJUSTMENT_SF",
+    "Scaling Adjustment": {
+        "icon": "⚖️", "color": "#D50032", "bg": "#FFF0F3",
+        "desc": "Scale, flatten or roll fact table data (config-driven)",
     },
     "VaR Upload": {
         "icon": "📤", "color": "#6A1B9A", "bg": "#F3E5F5",
         "desc": "Upload a CSV with 21 VaR measure columns for direct insertion",
     },
-    "Scaling Adjustment": {
-        "icon": "⚖️", "color": "#D50032", "bg": "#FFF0F3",
-        "desc": "Scale, flatten or roll fact table data (config-driven)",
+    "Global Adjustment": {
+        "icon": "🌐", "color": "#1565C0", "bg": "#E3F2FD",
+        "desc": "Metadata-only adjustment tracked in GLOBAL_ADJUSTMENT_SF",
     },
 }
 
