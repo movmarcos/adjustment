@@ -31,7 +31,7 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # FILTERS
 # ──────────────────────────────────────────────────────────────────────────────
 
-f1, f2, f3, f4 = st.columns(4)
+f1, f2, f3, f4, f5 = st.columns(5)
 with f1:
     filter_status = st.multiselect(
         "Status",
@@ -48,6 +48,9 @@ with f3:
 with f4:
     show_all = st.checkbox("Show all users' adjustments", value=False,
                            help="When checked, shows all adjustments (not just yours).")
+with f5:
+    show_deleted = st.checkbox("Show deleted", value=False,
+                               help="Include adjustments that have been soft-deleted.")
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -56,7 +59,7 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # ──────────────────────────────────────────────────────────────────────────────
 
 try:
-    where_clauses = ["IS_DELETED = FALSE"]
+    where_clauses = [] if show_deleted else ["IS_DELETED = FALSE"]
     if not show_all:
         where_clauses.append(f"SUBMITTED_BY = '{user}'")
     if filter_status:
@@ -86,22 +89,25 @@ except Exception as e:
 # ──────────────────────────────────────────────────────────────────────────────
 
 tab_labels = {
-    "⏳ Pending":        ["Pending"],
-    "📝 Pending Approval": ["Pending Approval"],
-    "✅ Approved":        ["Approved"],
-    "✔️ Processed":      ["Processed"],
+    "⏳ Pending":           ["Pending"],
+    "📝 Pending Approval":  ["Pending Approval"],
+    "✅ Approved":           ["Approved"],
+    "✔️ Processed":         ["Processed"],
     "❌ Errors / Rejected": ["Error", "Rejected", "Rejected - SignedOff"],
 }
+if show_deleted:
+    tab_labels["🗑️ Deleted"] = None   # None = filter by IS_DELETED, not by status
 
-counts = {}
-for label, statuses in tab_labels.items():
+def _tab_df(label, statuses):
     if df_adjs.empty:
-        counts[label] = 0
-    else:
-        counts[label] = int(df_adjs[df_adjs["RUN_STATUS"].isin(statuses)].shape[0])
+        return pd.DataFrame()
+    if statuses is None:                          # Deleted tab
+        return df_adjs[df_adjs["IS_DELETED"].astype(bool)]
+    return df_adjs[df_adjs["RUN_STATUS"].isin(statuses) & ~df_adjs["IS_DELETED"].astype(bool)]
 
+counts    = {lbl: len(_tab_df(lbl, st)) for lbl, st in tab_labels.items()}
 tab_names = [f"{lbl} ({counts[lbl]})" for lbl in tab_labels]
-tabs = st.tabs(tab_names)
+tabs      = st.tabs(tab_names)
 
 
 def render_adj_card(row):
@@ -312,10 +318,7 @@ def render_adj_card(row):
 
 for tab, (label, statuses) in zip(tabs, tab_labels.items()):
     with tab:
-        if df_adjs.empty:
-            tab_adjs = pd.DataFrame()
-        else:
-            tab_adjs = df_adjs[df_adjs["RUN_STATUS"].isin(statuses)]
+        tab_adjs = _tab_df(label, statuses)
 
         if tab_adjs.empty:
             st.markdown(
