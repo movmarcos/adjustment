@@ -736,12 +736,12 @@ elif wiz["step"] == 2:
                                 if c in df_preview.columns]
                     val_cols = [c for c in [col_cv, col_del, col_pv] if c]
 
-                    btn1, btn2 = st.columns(2)
+                    btn1, btn2, _ = st.columns([1, 1, 3])
                     with btn1:
-                        if st.button("📊 Show Breakdown", key=_k("show_breakdown"), type="secondary"):
+                        if st.button("📊 Show Breakdown", key=_k("show_breakdown"), type="secondary", use_container_width=True):
                             wiz["show_breakdown"] = True
                     with btn2:
-                        if st.button("🔍 Show Sample Rows", key=_k("show_sample"), type="secondary"):
+                        if st.button("🔍 Show Sample Rows", key=_k("show_sample"), type="secondary", use_container_width=True):
                             wiz["show_sample"] = True
 
                     if wiz.get("show_breakdown") and grp_cols and val_cols:
