@@ -1,43 +1,38 @@
 -- =============================================================================
 -- 02_STREAMS.SQL
--- Streams on the entry-point tables to detect new/changed adjustments.
+-- One stream per scope pipeline, each on its queue view.
 --
--- The processing task watches these streams and fires when new data arrives.
+-- APPEND_ONLY = TRUE: we only care about rows becoming eligible (appearing
+-- in the view). Rows leaving the view (claimed as Running) are not tracked.
+--
+-- PREREQUISITE: Task 1 must run first (CHANGE_TRACKING = TRUE on ADJ_HEADER).
+-- PREREQUISITE: Task 2 must run first (VW_QUEUE_* views must exist).
 -- =============================================================================
 
 USE DATABASE DVLP_RAPTOR_NEWADJ;
 USE SCHEMA ADJUSTMENT_APP;
 
--- ═══════════════════════════════════════════════════════════════════════════
--- 1. Stream on ADJ_HEADER — triggers the main processing task
---
--- Detects new adjustments (INSERT) and status changes (UPDATE).
--- Task in 06_tasks.sql uses SYSTEM$STREAM_HAS_DATA('ADJ_HEADER_STREAM').
--- ═══════════════════════════════════════════════════════════════════════════
+CREATE OR REPLACE STREAM ADJUSTMENT_APP.STREAM_QUEUE_VAR
+    ON VIEW ADJUSTMENT_APP.VW_QUEUE_VAR
+    APPEND_ONLY = TRUE
+    COMMENT = 'Fires when new eligible VaR adjustments appear (Pending + unblocked). Triggers TASK_PROCESS_VAR.';
 
-CREATE OR REPLACE STREAM ADJUSTMENT_APP.ADJ_HEADER_STREAM
-    ON TABLE ADJUSTMENT_APP.ADJ_HEADER
-    APPEND_ONLY = FALSE          -- Need INSERT + UPDATE to track status changes
-    SHOW_INITIAL_ROWS = FALSE    -- Only new data after stream creation
-    COMMENT = 'Watches ADJ_HEADER for new submissions and status transitions. Drives the processing task.';
+CREATE OR REPLACE STREAM ADJUSTMENT_APP.STREAM_QUEUE_STRESS
+    ON VIEW ADJUSTMENT_APP.VW_QUEUE_STRESS
+    APPEND_ONLY = TRUE
+    COMMENT = 'Fires when new eligible Stress adjustments appear. Triggers TASK_PROCESS_STRESS.';
 
+CREATE OR REPLACE STREAM ADJUSTMENT_APP.STREAM_QUEUE_FRTB
+    ON VIEW ADJUSTMENT_APP.VW_QUEUE_FRTB
+    APPEND_ONLY = TRUE
+    COMMENT = 'Fires when new eligible FRTB-pipeline adjustments appear (all sub-types). Triggers TASK_PROCESS_FRTB.';
 
--- ═══════════════════════════════════════════════════════════════════════════
--- 2. Stream on ADJ_LINE_ITEM — optional, for monitoring line-item arrivals
---
--- Useful if we want a separate task that validates line items before
--- marking the header as "ready" (e.g., CSV parsing complete).
--- ═══════════════════════════════════════════════════════════════════════════
-
-CREATE OR REPLACE STREAM ADJUSTMENT_APP.ADJ_LINE_ITEM_STREAM
-    ON TABLE ADJUSTMENT_APP.ADJ_LINE_ITEM
-    APPEND_ONLY = TRUE           -- Only care about new rows, not updates
-    SHOW_INITIAL_ROWS = FALSE
-    COMMENT = 'Watches ADJ_LINE_ITEM for new upload data. Can trigger validation before header is marked ready.';
-
+CREATE OR REPLACE STREAM ADJUSTMENT_APP.STREAM_QUEUE_SENSITIVITY
+    ON VIEW ADJUSTMENT_APP.VW_QUEUE_SENSITIVITY
+    APPEND_ONLY = TRUE
+    COMMENT = 'Fires when new eligible Sensitivity adjustments appear. Triggers TASK_PROCESS_SENSITIVITY.';
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- VERIFY
 -- ═══════════════════════════════════════════════════════════════════════════
-
-SHOW STREAMS LIKE 'ADJ_%' IN SCHEMA ADJUSTMENT_APP;
+SHOW STREAMS LIKE 'STREAM_QUEUE_%' IN SCHEMA ADJUSTMENT_APP;
