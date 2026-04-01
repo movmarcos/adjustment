@@ -45,9 +45,15 @@ FRTBALL_SKIP = {'FRTBALL'}
 
 def main(session, scope, pipeline_types):
     types = json.loads(pipeline_types)
+    ALLOWED_TYPES = {'VaR', 'Stress', 'Sensitivity', 'FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL'}
+    for t in types:
+        if t not in ALLOWED_TYPES:
+            raise ValueError(f"Unknown pipeline_type: {repr(t)}")
     pipeline_in = ", ".join(f"'{t}'" for t in types)
     real_types = [t for t in types if t not in FRTBALL_SKIP]
-    real_in = ", ".join(f"'{t}'" for t in real_types) if real_types else pipeline_in
+    if not real_types:
+        return json.dumps({"scope": scope, "message": "No real process types after FRTBALL exclusion — check pipeline_types"})
+    real_in = ", ".join(f"'{t}'" for t in real_types)
 
     results = []
 
@@ -74,6 +80,10 @@ def main(session, scope, pipeline_types):
     """).collect()
 
     if not all_running:
+        # Note: if a previous run left adjustments in a Blocked state and their blocker
+        # has since finished (from a separate run), those rows won't be unblocked by
+        # this invocation. A periodic cleanup task or manual intervention is needed
+        # to handle permanently-stuck blocked rows in that edge case.
         return json.dumps({"scope": scope, "message": "No eligible adjustments found"})
 
     # ── 3. For each Running adjustment, block overlapping Pending ones ────
@@ -100,7 +110,7 @@ def main(session, scope, pipeline_types):
             """).collect()
             results.append({"process_type": pt, "cobid": cob, "status": "ok"})
         except Exception as e:
-            err = str(e)[:990].replace("'", "")
+            err = str(e)[:990].replace("'", "''")
             # Mark the Running adjustments for this specific call as Failed
             session.sql(f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER
@@ -168,7 +178,21 @@ def _unblock_resolved(session, pipeline_in, previously_running):
       2. Find Pending adjs blocked by any of those → try to reassign to a
          still-Running overlapping adj, or clear to NULL if none.
     """
-    finished_ids = [str(r["ADJ_ID"]) for r in previously_running]
+    candidate_ids = [str(r["ADJ_ID"]) for r in previously_running]
+    if not candidate_ids:
+        return
+
+    candidate_in = ", ".join(candidate_ids)
+
+    # Re-query actual statuses — some may still be Running if SP_PROCESS_ADJUSTMENT
+    # raised an exception before updating status. Only treat truly finished rows as released.
+    actually_finished = session.sql(f"""
+        SELECT ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
+        WHERE ADJ_ID IN ({candidate_in})
+          AND RUN_STATUS IN ('Processed', 'Failed')
+    """).collect()
+
+    finished_ids = [str(r["ADJ_ID"]) for r in actually_finished]
     if not finished_ids:
         return
 
