@@ -96,7 +96,7 @@ WITH active_adjustments AS (
         RUN_STATUS
     FROM ADJUSTMENT_APP.ADJ_HEADER
     WHERE IS_DELETED = FALSE
-      AND RUN_STATUS IN ('Pending', 'Pending Approval', 'Approved', 'Processed')
+      AND RUN_STATUS IN ('Pending', 'Pending Approval', 'Approved', 'Running', 'Processed')
 ),
 overlaps AS (
     SELECT
