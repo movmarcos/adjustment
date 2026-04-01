@@ -551,6 +551,18 @@ def render_scaling_form() -> None:
 # PAGE LAYOUT — STEP BAR + ROUTER
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _is_entity_only(wiz: dict) -> bool:
+    """True when a Scaling Adjustment has Entity set but no other filter dimensions."""
+    if wiz.get("category") != "Scaling Adjustment":
+        return False
+    if not (wiz.get("entity_code") or "").strip():
+        return False
+    narrow_dims = ["source_system_code", "department_code", "book_code",
+                   "currency_code", "trade_typology", "strategy",
+                   "instrument_code", "simulation_name"]
+    return not any((wiz.get(d) or "").strip() for d in narrow_dims)
+
+
 STEPS = ["Category & Details", "Preview & Submit"]
 
 if wiz["step"] in (1, 2):
@@ -593,18 +605,6 @@ if wiz["step"] == 1:
         render_var_upload_form()
     else:
         render_scaling_form()
-
-
-def _is_entity_only(wiz: dict) -> bool:
-    """True when a Scaling Adjustment has Entity set but no other filter dimensions."""
-    if wiz.get("category") != "Scaling Adjustment":
-        return False
-    if not (wiz.get("entity_code") or "").strip():
-        return False
-    narrow_dims = ["source_system_code", "department_code", "book_code",
-                   "currency_code", "trade_typology", "strategy",
-                   "instrument_code", "simulation_name"]
-    return not any((wiz.get(d) or "").strip() for d in narrow_dims)
 
 
 # ── STEP 2 : Preview & Submit ─────────────────────────────────────────────────
