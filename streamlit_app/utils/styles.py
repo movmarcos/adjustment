@@ -43,8 +43,9 @@ STATUS_COLORS = {
     "Pending":              "#FB8C00",
     "Pending Approval":     "#1565C0",
     "Approved":             "#00897B",
+    "Running":              "#1565C0",
     "Processed":            "#388E3C",
-    "Error":                "#D32F2F",
+    "Failed":               "#D32F2F",
     "Rejected":             "#C62828",
     "Rejected - SignedOff": "#7B1FA2",
 }
@@ -53,8 +54,9 @@ STATUS_ICONS = {
     "Pending":              "⏳",
     "Pending Approval":     "📝",
     "Approved":             "✅",
+    "Running":              "⚡",
     "Processed":            "✔️",
-    "Error":                "❌",
+    "Failed":               "❌",
     "Rejected":             "❌",
     "Rejected - SignedOff": "🔒",
 }
@@ -448,7 +450,7 @@ def render_sidebar():
                     COUNT(*) AS TOTAL,
                     SUM(CASE WHEN RUN_STATUS = 'Pending' THEN 1 ELSE 0 END) AS PENDING,
                     SUM(CASE WHEN RUN_STATUS = 'Processed' THEN 1 ELSE 0 END) AS PROCESSED,
-                    SUM(CASE WHEN RUN_STATUS = 'Error' THEN 1 ELSE 0 END) AS ERRORS
+                    SUM(CASE WHEN RUN_STATUS = 'Failed' THEN 1 ELSE 0 END) AS ERRORS
                 FROM ADJUSTMENT_APP.ADJ_HEADER
                 WHERE IS_DELETED = FALSE
             """)
