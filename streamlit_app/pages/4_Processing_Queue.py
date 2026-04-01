@@ -49,7 +49,7 @@ running_count = int(df_q[df_q["RUN_STATUS"] == "Running"].shape[0]) if not df_q.
 
 # Determine pipeline stage
 if running_count > 0:
-    stage = 4   # SP executing
+    stage = 3   # SP executing
 elif pending_count > 0:
     stage = 2   # Adjustment queued, task will poll within 1 minute
 else:

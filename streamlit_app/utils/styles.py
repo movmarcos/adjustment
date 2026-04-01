@@ -398,9 +398,8 @@ def render_status_timeline(history_rows):
 def render_pipeline_diagram(current_stage: int = 0):
     stages = [
         ("💾", "ADJ Header\nInsert"),
-        ("🌊", "Stream\nCapture"),
-        ("⚙️", "Task\nWakes Up"),
-        ("🔄", "SP\nExecutes"),
+        ("⏰", "Task Polls\n(≤1 min)"),
+        ("🔄", "SP_RUN_PIPELINE\nExecutes"),
         ("📊", "Dynamic Table\nRefresh"),
     ]
     nodes = []
