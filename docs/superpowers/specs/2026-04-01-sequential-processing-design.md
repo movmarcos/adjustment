@@ -30,6 +30,16 @@ Four independent pipelines:
 | FRTB | `FRTB`, `FRTBDRC`, `FRTBRRAO`, `FRTBALL` |
 | Sensitivity | `Sensitivity` |
 
+### FRTBALL — fan-out adjustment
+
+`FRTBALL` is **not** an independent process type. It is a fan-out tag: an adjustment submitted with `PROCESS_TYPE = 'FRTBALL'` is applied once for each real FRTB sub-type (`FRTB`, `FRTBDRC`, `FRTBRRAO`). The processing engine, when running for any FRTB sub-type, fetches adjustments where `PROCESS_TYPE IN (<sub-type>, 'FRTBALL')`.
+
+Consequences for this design:
+- `FRTBALL` has **no row** in `ADJUSTMENTS_SETTINGS` (it uses the settings of the sub-type being processed).
+- `FRTBALL` adjustments live in the **FRTB queue view** alongside the other FRTB sub-types.
+- **Overlap detection**: an `FRTBALL` adjustment overlaps with adjustments of type `FRTB`, `FRTBDRC`, `FRTBRRAO`, and other `FRTBALL` — i.e., all FRTB pipeline adjustments for the same COBID.
+- **Blocking**: if an `FRTBALL` adjustment is Running (being processed as part of any FRTB sub-type run), it blocks any other FRTB pipeline adjustment that overlaps with it, because it will be re-applied for the remaining sub-types.
+
 Each pipeline has its own: **view → stream → task**.
 
 ---
@@ -247,7 +257,7 @@ The task's Step 2 (set blocking for newly-claimed Running adjustments) handles t
 
 ## Open Items
 
-- `FRTBALL` must be added to `ADJUSTMENTS_SETTINGS` seed data with its fact table mapping before the FRTB pipeline can process it.
+- None outstanding.
 
 ---
 
