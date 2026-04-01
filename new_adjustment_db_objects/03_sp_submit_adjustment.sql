@@ -82,7 +82,7 @@ def find_blocking_adj(session, process_type, cobid, adj_values):
             SELECT ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER r
             WHERE r.COBID = {cobid}
               AND r.PROCESS_TYPE IN ({pipeline_in})
-              AND r.RUN_STATUS IN ('Pending', 'Running')
+              AND r.RUN_STATUS IN ('Pending', 'Approved', 'Running')
               AND r.IS_DELETED = FALSE
             ORDER BY r.ADJ_ID ASC
             LIMIT 1

@@ -44,7 +44,7 @@ except Exception as e:
     df_q = pd.DataFrame()
     st.warning(f"Could not load queue: {e}")
 
-pending_count = int(df_q[df_q["RUN_STATUS"] == "Pending"].shape[0]) if not df_q.empty else 0
+pending_count = int(df_q[df_q["RUN_STATUS"].isin(["Pending", "Approved"])].shape[0]) if not df_q.empty else 0
 running_count = int(df_q[df_q["RUN_STATUS"] == "Running"].shape[0]) if not df_q.empty else 0
 
 # Determine pipeline stage

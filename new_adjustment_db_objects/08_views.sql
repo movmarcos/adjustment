@@ -204,7 +204,7 @@ SELECT
             h.CREATED_DATE
     ) AS QUEUE_POSITION
 FROM ADJUSTMENT_APP.ADJ_HEADER h
-WHERE h.RUN_STATUS IN ('Pending', 'Running')
+WHERE h.RUN_STATUS IN ('Pending', 'Approved', 'Running')
   AND h.IS_DELETED = FALSE;
 
 

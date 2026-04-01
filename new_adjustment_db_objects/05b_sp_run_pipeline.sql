@@ -57,13 +57,15 @@ def main(session, scope, pipeline_types):
 
     results = []
 
-    # ── 1. Atomically claim all eligible Pending → Running ───────────────
+    # ── 1. Atomically claim all eligible Pending/Approved → Running ─────
+    # 'Approved' is treated identically to 'Pending' — it just went through
+    # an approval step before reaching the queue.
     session.sql(f"""
         UPDATE ADJUSTMENT_APP.ADJ_HEADER
         SET RUN_STATUS = 'Running',
             PROCESS_DATE = CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9)
         WHERE PROCESS_TYPE IN ({pipeline_in})
-          AND RUN_STATUS = 'Pending'
+          AND RUN_STATUS IN ('Pending', 'Approved')
           AND BLOCKED_BY_ADJ_ID IS NULL
           AND IS_DELETED = FALSE
     """).collect()
@@ -159,7 +161,7 @@ def _block_overlapping(session, running_row, pipeline_in):
         SET BLOCKED_BY_ADJ_ID = '{adj_id}'
         WHERE p.COBID = {cobid}
           AND p.PROCESS_TYPE IN ({pipeline_in})
-          AND p.RUN_STATUS = 'Pending'
+          AND p.RUN_STATUS IN ('Pending', 'Approved')
           AND p.BLOCKED_BY_ADJ_ID IS NULL
           AND p.IS_DELETED = FALSE
           AND p.ADJ_ID != '{adj_id}'
@@ -205,7 +207,7 @@ def _unblock_resolved(session, pipeline_in, previously_running):
                b.BOOK_CODE, b.CURRENCY_CODE, b.TRADE_TYPOLOGY, b.STRATEGY
         FROM ADJUSTMENT_APP.ADJ_HEADER b
         WHERE b.BLOCKED_BY_ADJ_ID IN ({finished_in})
-          AND b.RUN_STATUS = 'Pending'
+          AND b.RUN_STATUS IN ('Pending', 'Approved')
           AND b.IS_DELETED = FALSE
     """).collect()
 

@@ -54,38 +54,38 @@ DROP STREAM IF EXISTS ADJUSTMENT_APP.STREAM_QUEUE_SENSITIVITY;
 -- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_QUEUE_VAR
-    COMMENT = 'Eligible VaR adjustments: Pending + unblocked. Monitoring view for TASK_PROCESS_VAR.'
+    COMMENT = 'Eligible VaR adjustments: Pending/Approved + unblocked. Monitoring view for TASK_PROCESS_VAR.'
 AS
 SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER
 WHERE PROCESS_TYPE = 'VaR'
-  AND RUN_STATUS = 'Pending'
+  AND RUN_STATUS IN ('Pending', 'Approved')
   AND BLOCKED_BY_ADJ_ID IS NULL
   AND IS_DELETED = FALSE;
 
 CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_QUEUE_STRESS
-    COMMENT = 'Eligible Stress adjustments: Pending + unblocked. Monitoring view for TASK_PROCESS_STRESS.'
+    COMMENT = 'Eligible Stress adjustments: Pending/Approved + unblocked. Monitoring view for TASK_PROCESS_STRESS.'
 AS
 SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER
 WHERE PROCESS_TYPE = 'Stress'
-  AND RUN_STATUS = 'Pending'
+  AND RUN_STATUS IN ('Pending', 'Approved')
   AND BLOCKED_BY_ADJ_ID IS NULL
   AND IS_DELETED = FALSE;
 
 CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_QUEUE_FRTB
-    COMMENT = 'Eligible FRTB-pipeline adjustments (FRTB + FRTBDRC + FRTBRRAO + FRTBALL): Pending + unblocked.'
+    COMMENT = 'Eligible FRTB-pipeline adjustments (FRTB + FRTBDRC + FRTBRRAO + FRTBALL): Pending/Approved + unblocked.'
 AS
 SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER
 WHERE PROCESS_TYPE IN ('FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL')
-  AND RUN_STATUS = 'Pending'
+  AND RUN_STATUS IN ('Pending', 'Approved')
   AND BLOCKED_BY_ADJ_ID IS NULL
   AND IS_DELETED = FALSE;
 
 CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_QUEUE_SENSITIVITY
-    COMMENT = 'Eligible Sensitivity adjustments: Pending + unblocked. Monitoring view for TASK_PROCESS_SENSITIVITY.'
+    COMMENT = 'Eligible Sensitivity adjustments: Pending/Approved + unblocked. Monitoring view for TASK_PROCESS_SENSITIVITY.'
 AS
 SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER
 WHERE PROCESS_TYPE = 'Sensitivity'
-  AND RUN_STATUS = 'Pending'
+  AND RUN_STATUS IN ('Pending', 'Approved')
   AND BLOCKED_BY_ADJ_ID IS NULL
   AND IS_DELETED = FALSE;
 
