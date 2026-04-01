@@ -706,56 +706,60 @@ elif wiz["step"] == 2:
                 if val and str(val).strip():
                     preview_json[key] = str(val).strip()
 
-            try:
-                df_preview = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
-                                         json.dumps(preview_json))
-                if not df_preview.empty:
-                    total_rows = len(df_preview)
-                    col_cv  = next((c for c in df_preview.columns
-                                    if "CURRENT_VALUE"    in c and "LOCAL" not in c), None)
-                    col_del = next((c for c in df_preview.columns
-                                    if "ADJUSTMENT_DELTA" in c and "LOCAL" not in c), None)
-                    col_pv  = next((c for c in df_preview.columns
-                                    if "PROJECTED_VALUE"  in c and "LOCAL" not in c), None)
+            if st.button("👁️ Load Impact Preview", key=_k("load_preview"), type="secondary"):
+                wiz["preview_loaded"] = True
 
-                    def _fmt(v):
-                        try:    return f"{float(v):,.0f}"
-                        except: return "—"
+            if wiz.get("preview_loaded"):
+                try:
+                    df_preview = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                                             json.dumps(preview_json))
+                    if not df_preview.empty:
+                        total_rows = len(df_preview)
+                        col_cv  = next((c for c in df_preview.columns
+                                        if "CURRENT_VALUE"    in c and "LOCAL" not in c), None)
+                        col_del = next((c for c in df_preview.columns
+                                        if "ADJUSTMENT_DELTA" in c and "LOCAL" not in c), None)
+                        col_pv  = next((c for c in df_preview.columns
+                                        if "PROJECTED_VALUE"  in c and "LOCAL" not in c), None)
 
-                    m1, m2, m3, m4, m5 = st.columns(5)
-                    m1.metric("Rows Affected",    f"{total_rows:,}")
-                    m2.metric("Non-zero Rows",    f"{int((df_preview[col_cv] != 0).sum()):,}"
-                                                   if col_cv else "—")
-                    m3.metric("Total Original",   _fmt(df_preview[col_cv].sum())  if col_cv  else "—")
-                    m4.metric("Total Adjustment", _fmt(df_preview[col_del].sum()) if col_del else "—")
-                    m5.metric("Total Projected",  _fmt(df_preview[col_pv].sum())  if col_pv  else "—")
+                        def _fmt(v):
+                            try:    return f"{float(v):,.0f}"
+                            except: return "—"
 
-                    st.markdown("<br/>", unsafe_allow_html=True)
+                        m1, m2, m3, m4, m5 = st.columns(5)
+                        m1.metric("Rows Affected",    f"{total_rows:,}")
+                        m2.metric("Non-zero Rows",    f"{int((df_preview[col_cv] != 0).sum()):,}"
+                                                       if col_cv else "—")
+                        m3.metric("Total Original",   _fmt(df_preview[col_cv].sum())  if col_cv  else "—")
+                        m4.metric("Total Adjustment", _fmt(df_preview[col_del].sum()) if col_del else "—")
+                        m5.metric("Total Projected",  _fmt(df_preview[col_pv].sum())  if col_pv  else "—")
 
-                    grp_cols = [c for c in ["BOOK_CODE", "DEPARTMENT_CODE", "ENTITY_CODE"]
-                                if c in df_preview.columns]
-                    val_cols = [c for c in [col_cv, col_del, col_pv] if c]
-                    if grp_cols and val_cols:
-                        with st.expander(f"📊 Breakdown by {' / '.join(grp_cols)}", expanded=False):
-                            df_grp = (df_preview.groupby(grp_cols)[val_cols]
-                                      .sum().reset_index().sort_values(grp_cols))
-                            df_grp.rename(columns={col_cv: "Original", col_del: "Adjustment",
-                                                   col_pv: "Projected"}, inplace=True)
-                            st.dataframe(df_grp, use_container_width=True,
-                                         height=min(300, 38 + 35 * len(df_grp)))
+                        st.markdown("<br/>", unsafe_allow_html=True)
 
-                    with st.expander(f"View sample rows (up to 1,000 of {total_rows:,})",
-                                     expanded=False):
-                        st.dataframe(df_preview.head(1000), use_container_width=True,
-                                     height=300)
-                else:
-                    st.info("No matching rows found for this filter combination.")
+                        grp_cols = [c for c in ["BOOK_CODE", "DEPARTMENT_CODE", "ENTITY_CODE"]
+                                    if c in df_preview.columns]
+                        val_cols = [c for c in [col_cv, col_del, col_pv] if c]
+                        if grp_cols and val_cols:
+                            with st.expander(f"📊 Breakdown by {' / '.join(grp_cols)}", expanded=False):
+                                df_grp = (df_preview.groupby(grp_cols)[val_cols]
+                                          .sum().reset_index().sort_values(grp_cols))
+                                df_grp.rename(columns={col_cv: "Original", col_del: "Adjustment",
+                                                       col_pv: "Projected"}, inplace=True)
+                                st.dataframe(df_grp, use_container_width=True,
+                                             height=min(300, 38 + 35 * len(df_grp)))
 
-                with st.expander("🔍 Debug — request params", expanded=df_preview.empty):
-                    st.code(json.dumps(preview_json, indent=2), language="json")
+                        with st.expander(f"View sample rows (up to 1,000 of {total_rows:,})",
+                                         expanded=False):
+                            st.dataframe(df_preview.head(1000), use_container_width=True,
+                                         height=300)
+                    else:
+                        st.info("No matching rows found for this filter combination.")
 
-            except Exception as exc:
-                st.warning(f"Preview not available: {exc}")
+                    with st.expander("🔍 Debug — request params", expanded=df_preview.empty):
+                        st.code(json.dumps(preview_json, indent=2), language="json")
+
+                except Exception as exc:
+                    st.warning(f"Preview not available: {exc}")
 
     # ── Error from previous attempt ────────────────────────────────────────
     if (wiz.get("result") or {}).get("status") == "Error":
@@ -766,8 +770,9 @@ elif wiz["step"] == 2:
     nav1, nav2 = st.columns(2)
     with nav1:
         if st.button("← Back", use_container_width=True, key=_k("back")):
-            wiz["result"] = None
-            wiz["step"]   = 1
+            wiz["result"]          = None
+            wiz["step"]            = 1
+            wiz["preview_loaded"]  = False
             safe_rerun()
     with nav2:
         if st.button("🚀 Submit Adjustment", type="primary",
