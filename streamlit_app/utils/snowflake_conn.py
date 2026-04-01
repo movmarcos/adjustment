@@ -21,7 +21,12 @@ def get_session():
         try:
             # Streamlit in Snowflake — session injected by the platform
             from snowflake.snowpark.context import get_active_session
-            st.session_state["snowpark_session"] = get_active_session()
+            _sess = get_active_session()
+            try:
+                _sess.sql("USE WAREHOUSE DVLP_RAVEN_WH_M").collect()
+            except Exception:
+                pass
+            st.session_state["snowpark_session"] = _sess
         except Exception:
             # Local development — use connection parameters
             from snowflake.snowpark import Session

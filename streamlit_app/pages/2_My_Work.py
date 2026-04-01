@@ -59,7 +59,9 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # ──────────────────────────────────────────────────────────────────────────────
 
 try:
-    where_clauses = [] if show_deleted else ["IS_DELETED = FALSE"]
+    where_clauses = ["1=1"]
+    if not show_deleted:
+        where_clauses.append("IS_DELETED = FALSE")
     if not show_all:
         where_clauses.append(f"SUBMITTED_BY = '{user}'")
     if filter_status:
@@ -93,7 +95,7 @@ tab_labels = {
     "📝 Pending Approval":  ["Pending Approval"],
     "✅ Approved":           ["Approved"],
     "✔️ Processed":         ["Processed"],
-    "❌ Errors / Rejected": ["Error", "Rejected", "Rejected - SignedOff"],
+    "❌ Errors / Rejected": ["Failed", "Rejected", "Rejected - SignedOff"],
 }
 if show_deleted:
     tab_labels["🗑️ Deleted"] = None   # None = filter by IS_DELETED, not by status
@@ -101,9 +103,10 @@ if show_deleted:
 def _tab_df(label, statuses):
     if df_adjs.empty:
         return pd.DataFrame()
+    is_del = df_adjs["IS_DELETED"].fillna(False).astype(bool)
     if statuses is None:                          # Deleted tab
-        return df_adjs[df_adjs["IS_DELETED"].astype(bool)]
-    return df_adjs[df_adjs["RUN_STATUS"].isin(statuses) & ~df_adjs["IS_DELETED"].astype(bool)]
+        return df_adjs[is_del]
+    return df_adjs[df_adjs["RUN_STATUS"].isin(statuses) & ~is_del]
 
 counts    = {lbl: len(_tab_df(lbl, st)) for lbl, st in tab_labels.items()}
 tab_names = [f"{lbl} ({counts[lbl]})" for lbl in tab_labels]
@@ -204,7 +207,7 @@ def render_adj_card(row):
         section_title("Actions", "⚡")
         act_cols = st.columns(4)
 
-        if run_status in ("Pending", "Error", "Processed"):
+        if run_status in ("Pending", "Failed", "Processed"):
             with act_cols[0]:
                 if st.button("🗑️ Delete", key=f"del_{adj_id}", use_container_width=True):
                     try:
@@ -291,7 +294,7 @@ def render_adj_card(row):
                         safe_rerun()
                     except Exception as ex:
                         st.error(str(ex))
-        elif run_status == "Error":
+        elif run_status == "Failed":
             with act_cols[0]:
                 if st.button("🔄 Retry", key=f"retry_{adj_id}",
                              use_container_width=True, type="primary"):
@@ -305,8 +308,8 @@ def render_adj_card(row):
                         run_query(f"""
                             INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
                                 (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
-                            VALUES ({adj_id}, 'Error', 'Pending',
-                                    '{user}', 'Retrying after error')
+                            VALUES ({adj_id}, 'Failed', 'Pending',
+                                    '{user}', 'Retrying after failure')
                         """)
                         st.success("Queued for retry.")
                         safe_rerun()

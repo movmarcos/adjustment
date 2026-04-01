@@ -552,15 +552,20 @@ def render_scaling_form() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _is_entity_only(wiz: dict) -> bool:
-    """True when a Scaling Adjustment has Entity set but no other filter dimensions."""
+    """True when a Scaling Adjustment is broad-scope (entity set, no book or department).
+
+    Entity+currency is treated as broad-scope because it still targets millions of
+    rows and the preview times out. The pipeline blocking logic already handles it
+    correctly — only book_code and department_code narrow the scope meaningfully.
+    """
     if wiz.get("category") != "Scaling Adjustment":
         return False
     if not (wiz.get("entity_code") or "").strip():
         return False
-    narrow_dims = ["source_system_code", "department_code", "book_code",
-                   "currency_code", "trade_typology", "strategy",
-                   "instrument_code", "simulation_name"]
-    return not any((wiz.get(d) or "").strip() for d in narrow_dims)
+    # Broad-scope: no book_code and no department_code (currency alone doesn't narrow enough)
+    has_book = bool((wiz.get("book_code") or "").strip())
+    has_dept = bool((wiz.get("department_code") or "").strip())
+    return not has_book and not has_dept
 
 
 STEPS = ["Category & Details", "Preview & Submit"]
@@ -833,5 +838,7 @@ elif wiz["step"] == 3:
             try:
                 st.switch_page("pages/4_Processing_Queue.py")
             except Exception:
-                pass
-            safe_rerun()
+                try:
+                    st.switch_page("4_Processing_Queue.py")
+                except Exception:
+                    safe_rerun()

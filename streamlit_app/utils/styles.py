@@ -48,6 +48,7 @@ STATUS_COLORS = {
     "Failed":               "#D32F2F",
     "Rejected":             "#C62828",
     "Rejected - SignedOff": "#7B1FA2",
+    "Deleted":              "#757575",
 }
 
 STATUS_ICONS = {
@@ -59,6 +60,7 @@ STATUS_ICONS = {
     "Failed":               "❌",
     "Rejected":             "❌",
     "Rejected - SignedOff": "🔒",
+    "Deleted":              "🗑️",
 }
 
 SCOPE_CONFIG = {

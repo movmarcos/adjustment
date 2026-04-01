@@ -16,7 +16,7 @@ USE SCHEMA ADJUSTMENT_APP;
 -- ─── VaR ───────────────────────────────────────────────────────────────────
 
 CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_VAR
-    WAREHOUSE = DVLP_RAPTOR_WH_XS
+    WAREHOUSE = DVLP_RAVEN_WH_M
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Processes eligible VaR adjustments. Stream-triggered via STREAM_QUEUE_VAR.'
     WHEN SYSTEM$STREAM_HAS_DATA('ADJUSTMENT_APP.STREAM_QUEUE_VAR')
@@ -27,7 +27,7 @@ AS
 -- ─── Stress ────────────────────────────────────────────────────────────────
 
 CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS
-    WAREHOUSE = DVLP_RAPTOR_WH_XS
+    WAREHOUSE = DVLP_RAVEN_WH_M
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Processes eligible Stress adjustments. Stream-triggered via STREAM_QUEUE_STRESS.'
     WHEN SYSTEM$STREAM_HAS_DATA('ADJUSTMENT_APP.STREAM_QUEUE_STRESS')
@@ -38,7 +38,7 @@ AS
 -- ─── FRTB (all sub-types) ───────────────────────────────────────────────────
 
 CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB
-    WAREHOUSE = DVLP_RAPTOR_WH_XS
+    WAREHOUSE = DVLP_RAVEN_WH_M
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Processes eligible FRTB-pipeline adjustments (FRTB, FRTBDRC, FRTBRRAO, FRTBALL). Stream-triggered via STREAM_QUEUE_FRTB.'
     WHEN SYSTEM$STREAM_HAS_DATA('ADJUSTMENT_APP.STREAM_QUEUE_FRTB')
@@ -49,7 +49,7 @@ AS
 -- ─── Sensitivity ───────────────────────────────────────────────────────────
 
 CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY
-    WAREHOUSE = DVLP_RAPTOR_WH_XS
+    WAREHOUSE = DVLP_RAVEN_WH_M
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Processes eligible Sensitivity adjustments. Stream-triggered via STREAM_QUEUE_SENSITIVITY.'
     WHEN SYSTEM$STREAM_HAS_DATA('ADJUSTMENT_APP.STREAM_QUEUE_SENSITIVITY')

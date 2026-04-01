@@ -24,7 +24,7 @@ def get_session():
     mufgconn = m_sf.MufgSnowflakeConn('dvlp', 'apd_raptor_sfk_depl@mufgsecurities.com')
     session = mufgconn.get_snowflake_session()
     session.use_role("DVLP_RAPTOR_OWNER")
-    session.use_warehouse("DVLP_RAPTOR_WH_XS")
+    session.use_warehouse("DVLP_RAVEN_WH_M")
     session.use_database("DVLP_RAPTOR_NEWADJ")
     return session
 
@@ -308,7 +308,7 @@ def deploy_streamlit_app(session):
     CREATE OR REPLACE STREAMLIT {streamlit_name}
         ROOT_LOCATION   = '@{stage_name}'
         MAIN_FILE       = 'app.py'
-        QUERY_WAREHOUSE = 'DVLP_RAPTOR_WH_XS'
+        QUERY_WAREHOUSE = 'DVLP_RAVEN_WH_M'
         COMMENT         = 'Adjustment Engine — MUFG. Unified adjustment management for VaR, Stress, FRTB, Sensitivity.'
     """
     try:
