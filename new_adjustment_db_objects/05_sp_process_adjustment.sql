@@ -441,7 +441,32 @@ def main(session, process_type, adjustment_action, cobid):
             result["insert_cmd"] = insert_sql
             session.sql(insert_sql).collect()
 
-            # ── Delete old adjustments ───────────────────────────────────
+            # ── Supersede: delete older adjustments for positions in TEMP ──
+            # The DENSE_RANK in the CTE only sees the *current* Running batch.
+            # Adjustments processed in earlier SP calls (e.g. a Flatten with
+            # narrower filters) are already in the fact table and won't appear
+            # in the CTE, so DENSE_RANK never evicts them.
+            # Fix: for every position the TEMP table covers, delete any row in
+            # the fact table that belongs to a *different* (older) adjustment.
+            # Blocking guarantees the current batch is always the newest for
+            # any position it touches, so deleting older rows is always correct.
+            _supersede_dims = [k for k in pk_parts if k.upper() != 'COBID']
+            if _supersede_dims:
+                _ids_str = ', '.join(str(a) for a in adj_ids)
+                _pos_join = " AND ".join(
+                    [f"fa.{k} = tmp.{k}" for k in _supersede_dims]
+                )
+                session.sql(f"""
+                    DELETE FROM {fact_adj_tbl_name} fa
+                    WHERE fa.COBID = {cobid}
+                      AND fa.ADJUSTMENT_ID NOT IN ({_ids_str})
+                      AND EXISTS (
+                          SELECT 1 FROM {fact_adj_tbl_name}_TEMP tmp
+                          WHERE {_pos_join}
+                      )
+                """).collect()
+
+            # ── Delete old adjustments (current batch's own previous rows) ─
             fact_adj_tbl.delete(
                 (fact_adj_tbl["COBID"] == df_adj_scale["COBID"]) &
                 (fact_adj_tbl["ADJUSTMENT_ID"] == df_adj_scale["ADJ_ID"]),
