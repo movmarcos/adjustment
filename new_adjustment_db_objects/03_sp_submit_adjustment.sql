@@ -58,40 +58,61 @@ OVERLAP_DIMS_SUBMIT = [
 
 def find_blocking_adj(session, process_type, cobid, adj_values):
     """
-    Return ADJ_ID of a Running adjustment in the same pipeline that overlaps
-    with the new adjustment being submitted, or None if no blocker found.
+    Return ADJ_ID of an adjustment in the same pipeline that blocks the new one,
+    or None if no blocker found.
 
     adj_values: dict with optional dimension values (lowercase keys) for the new adjustment.
+
+    Entity-only adjustments (only ENTITY_CODE set, all other dims NULL) are
+    broad-scope: they block the entire scope and must wait for the scope to be
+    completely clear (no Pending or Running). Normal adjustments are only blocked
+    by overlapping Running adjustments.
     """
     pipeline = PIPELINE_TYPES.get(process_type.upper(), [process_type])
     pipeline_in = ", ".join(f"'{t}'" for t in pipeline)
 
-    dim_conditions = []
-    for dim in OVERLAP_DIMS_SUBMIT:
-        new_val = adj_values.get(dim.lower())
-        if new_val is None:
-            # New adj is wildcard → overlaps with everything → no dim restriction
-            # New adj is wildcard (NULL) → matches any running adj for this dimension
-            dim_conditions.append("TRUE")
-        else:
-            # r.{dim} IS NULL: running adj is wildcard → also matches any new value
-            escaped = str(new_val).replace("'", "''")
-            dim_conditions.append(
-                f"(r.{dim} IS NULL OR UPPER(r.{dim}) = UPPER('{escaped}'))"
-            )
+    non_entity_dims = [d for d in OVERLAP_DIMS_SUBMIT if d != 'ENTITY_CODE']
+    entity_only = all(adj_values.get(d.lower()) is None for d in non_entity_dims)
 
-    where_dims = " AND ".join(dim_conditions)
+    if entity_only:
+        # Entity-only adj is scope-wide: block if ANY Pending or Running adj
+        # exists in the scope so the queue is completely clear before it runs.
+        sql = f"""
+            SELECT ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER r
+            WHERE r.COBID = {cobid}
+              AND r.PROCESS_TYPE IN ({pipeline_in})
+              AND r.RUN_STATUS IN ('Pending', 'Running')
+              AND r.IS_DELETED = FALSE
+            ORDER BY r.ADJ_ID ASC
+            LIMIT 1
+        """
+    else:
+        # Normal overlap check: dimension-level overlap with Running adjustments.
+        dim_conditions = []
+        for dim in OVERLAP_DIMS_SUBMIT:
+            new_val = adj_values.get(dim.lower())
+            if new_val is None:
+                # New adj is wildcard (NULL) → matches any running adj for this dimension
+                dim_conditions.append("TRUE")
+            else:
+                # r.{dim} IS NULL: running adj is wildcard → also matches any new value
+                escaped = str(new_val).replace("'", "''")
+                dim_conditions.append(
+                    f"(r.{dim} IS NULL OR UPPER(r.{dim}) = UPPER('{escaped}'))"
+                )
 
-    sql = f"""
-        SELECT ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER r
-        WHERE r.COBID = {cobid}
-          AND r.PROCESS_TYPE IN ({pipeline_in})
-          AND r.RUN_STATUS = 'Running'
-          AND r.IS_DELETED = FALSE
-          AND {where_dims}
-        ORDER BY r.ADJ_ID ASC
-        LIMIT 1
-    """
+        where_dims = " AND ".join(dim_conditions)
+        sql = f"""
+            SELECT ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER r
+            WHERE r.COBID = {cobid}
+              AND r.PROCESS_TYPE IN ({pipeline_in})
+              AND r.RUN_STATUS = 'Running'
+              AND r.IS_DELETED = FALSE
+              AND {where_dims}
+            ORDER BY r.ADJ_ID ASC
+            LIMIT 1
+        """
+
     rows = session.sql(sql).collect()
     return rows[0]["ADJ_ID"] if rows else None
 

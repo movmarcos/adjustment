@@ -595,6 +595,18 @@ if wiz["step"] == 1:
         render_scaling_form()
 
 
+def _is_entity_only(wiz: dict) -> bool:
+    """True when a Scaling Adjustment has Entity set but no other filter dimensions."""
+    if wiz.get("category") != "Scaling Adjustment":
+        return False
+    if not (wiz.get("entity_code") or "").strip():
+        return False
+    narrow_dims = ["source_system_code", "department_code", "book_code",
+                   "currency_code", "trade_typology", "strategy",
+                   "instrument_code", "simulation_name"]
+    return not any((wiz.get(d) or "").strip() for d in narrow_dims)
+
+
 # ── STEP 2 : Preview & Submit ─────────────────────────────────────────────────
 
 elif wiz["step"] == 2:
@@ -670,70 +682,80 @@ elif wiz["step"] == 2:
 
         # ── Impact Preview ─────────────────────────────────────────────────
         section_title("Impact Preview", "👁️")
-        preview_json = {
-            "cobid":           wiz["cobid"],
-            "process_type":    wiz["process_type"],
-            "adjustment_type": wiz["adjustment_type"],
-            "source_cobid":    wiz.get("source_cobid") or wiz["cobid"],
-            "scale_factor":    wiz.get("scale_factor", 1.0),
-        }
-        for key in ["entity_code", "source_system_code", "department_code",
-                    "book_code", "currency_code", "trade_typology",
-                    "strategy", "instrument_code", "simulation_name"]:
-            val = wiz.get(key)
-            if val and str(val).strip():
-                preview_json[key] = str(val).strip()
 
-        try:
-            df_preview = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
-                                     json.dumps(preview_json))
-            if not df_preview.empty:
-                total_rows = len(df_preview)
-                col_cv  = next((c for c in df_preview.columns
-                                if "CURRENT_VALUE"    in c and "LOCAL" not in c), None)
-                col_del = next((c for c in df_preview.columns
-                                if "ADJUSTMENT_DELTA" in c and "LOCAL" not in c), None)
-                col_pv  = next((c for c in df_preview.columns
-                                if "PROJECTED_VALUE"  in c and "LOCAL" not in c), None)
+        if _is_entity_only(wiz):
+            st.info(
+                f"**Entity-wide adjustment** — this applies to all books and departments "
+                f"for entity **{wiz.get('entity_code')}** on COB **{wiz['cobid']}**. "
+                f"Data preview is skipped for broad-scope adjustments to avoid timeouts. "
+                f"The adjustment will be queued and will only be processed once no other "
+                f"adjustments are active in the **{wiz.get('process_type','')}** scope."
+            )
+        else:
+            preview_json = {
+                "cobid":           wiz["cobid"],
+                "process_type":    wiz["process_type"],
+                "adjustment_type": wiz["adjustment_type"],
+                "source_cobid":    wiz.get("source_cobid") or wiz["cobid"],
+                "scale_factor":    wiz.get("scale_factor", 1.0),
+            }
+            for key in ["entity_code", "source_system_code", "department_code",
+                        "book_code", "currency_code", "trade_typology",
+                        "strategy", "instrument_code", "simulation_name"]:
+                val = wiz.get(key)
+                if val and str(val).strip():
+                    preview_json[key] = str(val).strip()
 
-                def _fmt(v):
-                    try:    return f"{float(v):,.0f}"
-                    except: return "—"
+            try:
+                df_preview = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                                         json.dumps(preview_json))
+                if not df_preview.empty:
+                    total_rows = len(df_preview)
+                    col_cv  = next((c for c in df_preview.columns
+                                    if "CURRENT_VALUE"    in c and "LOCAL" not in c), None)
+                    col_del = next((c for c in df_preview.columns
+                                    if "ADJUSTMENT_DELTA" in c and "LOCAL" not in c), None)
+                    col_pv  = next((c for c in df_preview.columns
+                                    if "PROJECTED_VALUE"  in c and "LOCAL" not in c), None)
 
-                m1, m2, m3, m4, m5 = st.columns(5)
-                m1.metric("Rows Affected",    f"{total_rows:,}")
-                m2.metric("Non-zero Rows",    f"{int((df_preview[col_cv] != 0).sum()):,}"
-                                               if col_cv else "—")
-                m3.metric("Total Original",   _fmt(df_preview[col_cv].sum())  if col_cv  else "—")
-                m4.metric("Total Adjustment", _fmt(df_preview[col_del].sum()) if col_del else "—")
-                m5.metric("Total Projected",  _fmt(df_preview[col_pv].sum())  if col_pv  else "—")
+                    def _fmt(v):
+                        try:    return f"{float(v):,.0f}"
+                        except: return "—"
 
-                st.markdown("<br/>", unsafe_allow_html=True)
+                    m1, m2, m3, m4, m5 = st.columns(5)
+                    m1.metric("Rows Affected",    f"{total_rows:,}")
+                    m2.metric("Non-zero Rows",    f"{int((df_preview[col_cv] != 0).sum()):,}"
+                                                   if col_cv else "—")
+                    m3.metric("Total Original",   _fmt(df_preview[col_cv].sum())  if col_cv  else "—")
+                    m4.metric("Total Adjustment", _fmt(df_preview[col_del].sum()) if col_del else "—")
+                    m5.metric("Total Projected",  _fmt(df_preview[col_pv].sum())  if col_pv  else "—")
 
-                grp_cols = [c for c in ["BOOK_CODE", "DEPARTMENT_CODE", "ENTITY_CODE"]
-                            if c in df_preview.columns]
-                val_cols = [c for c in [col_cv, col_del, col_pv] if c]
-                if grp_cols and val_cols:
-                    df_grp = (df_preview.groupby(grp_cols)[val_cols]
-                              .sum().reset_index().sort_values(grp_cols))
-                    df_grp.rename(columns={col_cv: "Original", col_del: "Adjustment",
-                                           col_pv: "Projected"}, inplace=True)
-                    st.markdown(f"**Breakdown by {' / '.join(grp_cols)}**")
-                    st.dataframe(df_grp, use_container_width=True,
-                                 height=min(300, 38 + 35 * len(df_grp)))
+                    st.markdown("<br/>", unsafe_allow_html=True)
 
-                with st.expander(f"View sample rows (up to 1,000 of {total_rows:,})",
-                                 expanded=False):
-                    st.dataframe(df_preview.head(1000), use_container_width=True,
-                                 height=300)
-            else:
-                st.info("No matching rows found for this filter combination.")
+                    grp_cols = [c for c in ["BOOK_CODE", "DEPARTMENT_CODE", "ENTITY_CODE"]
+                                if c in df_preview.columns]
+                    val_cols = [c for c in [col_cv, col_del, col_pv] if c]
+                    if grp_cols and val_cols:
+                        df_grp = (df_preview.groupby(grp_cols)[val_cols]
+                                  .sum().reset_index().sort_values(grp_cols))
+                        df_grp.rename(columns={col_cv: "Original", col_del: "Adjustment",
+                                               col_pv: "Projected"}, inplace=True)
+                        st.markdown(f"**Breakdown by {' / '.join(grp_cols)}**")
+                        st.dataframe(df_grp, use_container_width=True,
+                                     height=min(300, 38 + 35 * len(df_grp)))
 
-            with st.expander("🔍 Debug — request params", expanded=df_preview.empty):
-                st.code(json.dumps(preview_json, indent=2), language="json")
+                    with st.expander(f"View sample rows (up to 1,000 of {total_rows:,})",
+                                     expanded=False):
+                        st.dataframe(df_preview.head(1000), use_container_width=True,
+                                     height=300)
+                else:
+                    st.info("No matching rows found for this filter combination.")
 
-        except Exception as exc:
-            st.warning(f"Preview not available: {exc}")
+                with st.expander("🔍 Debug — request params", expanded=df_preview.empty):
+                    st.code(json.dumps(preview_json, indent=2), language="json")
+
+            except Exception as exc:
+                st.warning(f"Preview not available: {exc}")
 
     # ── Error from previous attempt ────────────────────────────────────────
     if (wiz.get("result") or {}).get("status") == "Error":
