@@ -10,9 +10,7 @@
 --   ④ Records status transitions in ADJ_STATUS_HISTORY
 --   ⑤ Logs to BATCH.RUN_LOG
 --
--- Called by:
---   • SP_SUBMIT_ADJUSTMENT (ad-hoc, immediate)
---   • PROCESS_PENDING_TASK  (recurring, stream-triggered)
+-- Called by: SP_RUN_PIPELINE (one call per adjustment, after claim step)
 --
 -- Signature matches the existing procedure for backward compatibility:
 --   CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT('VaR', 'Scale', 20250328);
@@ -79,7 +77,7 @@ def update_header_status(session, df_adjustments, cobid, new_status, error_msg=N
         (
             (adj_header["ADJ_ID"] == df_adjustments["ADJ_ID"]) &
             (adj_header["COBID"] == cobid) &
-            (adj_header["RUN_STATUS"].isin(["Pending", "Approved"]))
+            (adj_header["RUN_STATUS"] == "Running")
         ),
         df_adjustments
     )
@@ -164,7 +162,7 @@ def main(session, process_type, adjustment_action, cobid):
             (col('COBID') == cobid) &
             ((upper(col('PROCESS_TYPE')) == process_type.upper()) |
              (upper(col('PROCESS_TYPE')) == 'FRTBALL')) &
-            (col('RUN_STATUS').isin(['Pending', 'Approved']))
+            (col('RUN_STATUS') == 'Running')
         )
 
         # Column lists for joining
@@ -230,7 +228,7 @@ def main(session, process_type, adjustment_action, cobid):
 
             # Update status
             update_header_status(session, df_adj_direct, cobid, "Processed")
-            log_status_history(session, adj_ids, "Pending", "Processed")
+            log_status_history(session, adj_ids, "Running", "Processed")
 
             rows_count = len(df_pd_valid)
             adj_ids_str = ', '.join(str(a) for a in adj_ids)
@@ -348,7 +346,7 @@ def main(session, process_type, adjustment_action, cobid):
                 INNER JOIN {adj_base_tbl_name} adjust
                 WHERE adjust.COBID = {cobid}
                   AND adjust.IS_DELETED = FALSE
-                  AND adjust.RUN_STATUS IN ('Pending', 'Approved')
+                  AND adjust.RUN_STATUS = 'Running'
                   AND (adjust.PROCESS_TYPE = '{process_type}' OR adjust.PROCESS_TYPE = 'FRTBALL')
                   AND {metric_usd_name} IS NOT NULL
             """
@@ -553,7 +551,7 @@ def main(session, process_type, adjustment_action, cobid):
 
             # ── Update status ────────────────────────────────────────────
             update_header_status(session, df_adj_scale, cobid, "Processed")
-            log_status_history(session, adj_ids, "Pending", "Processed")
+            log_status_history(session, adj_ids, "Running", "Processed")
 
             # ── Insert into DIMENSION.ADJUSTMENT ─────────────────────────
             try:
@@ -606,9 +604,9 @@ def main(session, process_type, adjustment_action, cobid):
             df_adj_err = session.table(adj_base_tbl_name).filter(
                 (col('COBID') == cobid) &
                 (upper(col('PROCESS_TYPE')) == process_type.upper()) &
-                (col('RUN_STATUS').isin(['Pending', 'Approved']))
+                (col('RUN_STATUS') == 'Running')
             )
-            update_header_status(session, df_adj_err, cobid, "Error", error_msg)
+            update_header_status(session, df_adj_err, cobid, "Failed", error_msg)
         except:
             pass
 
