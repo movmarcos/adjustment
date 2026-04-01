@@ -44,14 +44,13 @@ except Exception as e:
     df_q = pd.DataFrame()
     st.warning(f"Could not load queue: {e}")
 
-pending_count  = int(df_q[df_q["RUN_STATUS"] == "Pending"].shape[0]) if not df_q.empty else 0
-approved_count = int(df_q[df_q["RUN_STATUS"] == "Approved"].shape[0]) if not df_q.empty else 0
-processing_count = int(df_q[df_q["RUN_STATUS"] == "Processing"].shape[0]) if not df_q.empty else 0
+pending_count = int(df_q[df_q["RUN_STATUS"] == "Pending"].shape[0]) if not df_q.empty else 0
+running_count = int(df_q[df_q["RUN_STATUS"] == "Running"].shape[0]) if not df_q.empty else 0
 
 # Determine pipeline stage
-if processing_count > 0:
+if running_count > 0:
     stage = 4   # SP executing
-elif pending_count > 0 or approved_count > 0:
+elif pending_count > 0:
     stage = 2   # Stream captured, task about to wake
 else:
     stage = 5   # All done / idle
@@ -62,9 +61,9 @@ st.markdown(
     f'<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;'
     f'font-size:0.78rem;color:{P["grey_700"]};text-align:center;margin-top:0.3rem">'
     f'<div>Adjustment saved to<br/><strong>ADJ_HEADER</strong></div>'
-    f'<div>CDC captured by<br/><strong>ADJ_HEADER_STREAM</strong></div>'
-    f'<div>Scheduled <strong>PROCESS_PENDING_TASK</strong><br/>wakes every 60s</div>'
-    f'<div><strong>SP_PROCESS_ADJUSTMENT</strong><br/>computes &amp; writes deltas</div>'
+    f'<div>CDC captured by<br/><strong>4 scope streams</strong><br/>(VaR/Stress/FRTB/Sensitivity)</div>'
+    f'<div><strong>Scope task</strong><br/>wakes on stream data</div>'
+    f'<div><strong>SP_RUN_PIPELINE</strong><br/>claim → block → process → unblock</div>'
     f'<div><strong>Dynamic Tables</strong><br/>auto-refresh (1 min lag)</div>'
     f'</div>',
     unsafe_allow_html=True)
@@ -78,12 +77,11 @@ st.markdown("<br/>", unsafe_allow_html=True)
 try:
     df_stats = run_query_df("""
         SELECT
-            COUNT(*)                                                  AS TOTAL,
-            SUM(CASE WHEN RUN_STATUS = 'Pending' THEN 1 ELSE 0 END)    AS PENDING,
-            SUM(CASE WHEN RUN_STATUS = 'Approved' THEN 1 ELSE 0 END)    AS APPROVED,
-            SUM(CASE WHEN RUN_STATUS = 'Processing' THEN 1 ELSE 0 END) AS PROCESSING,
-            SUM(CASE WHEN RUN_STATUS = 'Processed' THEN 1 ELSE 0 END)  AS PROCESSED,
-            SUM(CASE WHEN RUN_STATUS = 'Error' THEN 1 ELSE 0 END)      AS ERRORS
+            COUNT(*)                                                   AS TOTAL,
+            SUM(CASE WHEN RUN_STATUS = 'Pending'   THEN 1 ELSE 0 END) AS PENDING,
+            SUM(CASE WHEN RUN_STATUS = 'Running'   THEN 1 ELSE 0 END) AS RUNNING,
+            SUM(CASE WHEN RUN_STATUS = 'Processed' THEN 1 ELSE 0 END) AS PROCESSED,
+            SUM(CASE WHEN RUN_STATUS = 'Failed'    THEN 1 ELSE 0 END) AS FAILED
         FROM ADJUSTMENT_APP.ADJ_HEADER
         WHERE IS_DELETED = FALSE
     """)
@@ -91,15 +89,14 @@ try:
 except Exception:
     qs = {}
 
-c1, c2, c3, c4, c5 = st.columns(5)
+c1, c2, c3, c4 = st.columns(4)
 stat_items = [
     ("Pending",    qs.get("PENDING", 0),    P["warning"], "⏸"),
-    ("Approved",   qs.get("APPROVED", 0),   "#00897B",    "✅"),
-    ("Processing", qs.get("PROCESSING", 0), "#1565C0",    "⚡"),
+    ("Running",    qs.get("RUNNING", 0),    "#1565C0",    "⚡"),
     ("Processed",  qs.get("PROCESSED", 0),  P["success"], "✔"),
-    ("Errors",     qs.get("ERRORS", 0),     P["danger"],  "✗"),
+    ("Failed",     qs.get("FAILED", 0),     P["danger"],  "✗"),
 ]
-for col, (label, val, color, icon) in zip([c1, c2, c3, c4, c5], stat_items):
+for col, (label, val, color, icon) in zip([c1, c2, c3, c4], stat_items):
     col.markdown(
         f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
         f'border-top:3px solid {color};border-radius:8px;padding:0.8rem;text-align:center">'
@@ -134,8 +131,8 @@ else:
         entity      = str(qi.get("ENTITY_CODE", "")) or "—"
         occurrence  = str(qi.get("ADJUSTMENT_OCCURRENCE", ""))
 
-        status_color = P["info"] if run_status == "Processing" else ("#00897B" if run_status == "Approved" else P["warning"])
-        status_icon  = "⚡" if run_status == "Processing" else ("✅" if run_status == "Approved" else "⏸")
+        status_color = "#1565C0" if run_status == "Running" else ("#00897B" if run_status == "Approved" else P["warning"])
+        status_icon  = "⚡" if run_status == "Running" else ("✅" if run_status == "Approved" else "⏸")
 
         st.markdown(
             f'<div class="queue-item {run_status.lower()}">'
@@ -172,7 +169,7 @@ try:
                BOOK_CODE, RUN_STATUS, USERNAME, RECORD_COUNT,
                CREATED_DATE, PROCESS_DATE, ERRORMESSAGE
         FROM ADJUSTMENT_APP.ADJ_HEADER
-        WHERE RUN_STATUS IN ('Processed', 'Error')
+        WHERE RUN_STATUS IN ('Processed', 'Failed')
           AND IS_DELETED = FALSE
         ORDER BY PROCESS_DATE DESC
         LIMIT 30
@@ -182,7 +179,7 @@ try:
         def color_status(val):
             if val == "Processed":
                 return f"color:{P['success']};font-weight:600"
-            if val == "Error":
+            if val == "Failed":
                 return f"color:{P['danger']};font-weight:600"
             return ""
 
@@ -208,21 +205,22 @@ section_title("Snowflake Task Schedule (Reference)", "⚙️")
 
 with st.expander("View Snowflake Tasks configuration", expanded=False):
     st.markdown("""
-    | Task | Schedule | Trigger | Action |
-    |------|----------|---------|--------|
-    | `PROCESS_PENDING_TASK` | Every 1 min | When `ADJ_HEADER_STREAM` has data | Calls `SP_PROCESS_ADJUSTMENT()` for each pending row |
-    | `INSTANTIATE_RECURRING_TASK` | Every 5 min | Time-based | Creates new ADJ_HEADER rows from recurring templates |
+| Task | Schedule | Trigger | Action |
+|------|----------|---------|--------|
+| `TASK_PROCESS_VAR` | Every 1 min | `STREAM_QUEUE_VAR` has data | Calls `SP_RUN_PIPELINE('VaR', ...)` |
+| `TASK_PROCESS_STRESS` | Every 1 min | `STREAM_QUEUE_STRESS` has data | Calls `SP_RUN_PIPELINE('Stress', ...)` |
+| `TASK_PROCESS_FRTB` | Every 1 min | `STREAM_QUEUE_FRTB` has data | Calls `SP_RUN_PIPELINE('FRTB', ...)` — covers FRTB, FRTBDRC, FRTBRRAO, FRTBALL |
+| `TASK_PROCESS_SENSITIVITY` | Every 1 min | `STREAM_QUEUE_SENSITIVITY` has data | Calls `SP_RUN_PIPELINE('Sensitivity', ...)` |
 
-    **Dynamic Table Refresh:**
-    - `DT_DASHBOARD` refreshes with **1-minute lag** — near real-time metrics
-    - `DT_OVERLAP_ALERTS` refreshes with **1-minute lag** — detects overlapping adjustments
+**Processing Flow:**
+1. User submits adjustment → `SP_SUBMIT_ADJUSTMENT` inserts into `ADJ_HEADER` (checks for Running overlaps → sets `BLOCKED_BY_ADJ_ID` if blocked)
+2. Eligible adjustment appears in scope queue view (`VW_QUEUE_*`)
+3. Stream detects new row → scope task wakes
+4. `SP_RUN_PIPELINE`: atomically claims eligible Pending → Running, blocks overlapping Pending adjustments, calls `SP_PROCESS_ADJUSTMENT` per adjustment, unblocks waiting adjustments
+5. Status updated to `Processed` (or `Failed` on error)
+6. If an adjustment was blocked, `BLOCKED_BY_ADJ_ID` cleared → it appears in queue view → stream fires again
 
-    **Processing Flow:**
-    1. User creates adjustment via Streamlit (insert into `ADJ_HEADER`)
-    2. `ADJ_HEADER_STREAM` captures the CDC event
-    3. `PROCESS_PENDING_TASK` wakes up (every 60 seconds, stream-guarded)
-    4. Task calls `SP_PROCESS_ADJUSTMENT()` for each row with status = 'Pending'
-    5. SP writes deltas to the appropriate FACT table
-    6. Status updated to 'Processed' (or 'Error' on failure)
-    7. Dynamic tables auto-refresh with updated aggregations
+**Dynamic Table Refresh:**
+- `DT_DASHBOARD` refreshes with **1-minute lag**
+- `DT_OVERLAP_ALERTS` refreshes with **1-minute lag** — detects overlapping adjustments (includes Running)
     """)
