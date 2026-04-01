@@ -323,6 +323,8 @@ def deploy_streamlit_app(session):
     try:
         session.sql(f"GRANT USAGE ON STREAMLIT {streamlit_name} TO ROLE DVLP_RAPTOR_OWNER").collect()
         print(f"     ✅ USAGE granted to DVLP_RAPTOR_OWNER")
+        session.sql(f"GRANT USAGE ON STREAMLIT {streamlit_name} TO ROLE DVLP_RAPTOR_RO").collect()
+        print(f"     ✅ USAGE granted to DVLP_RAPTOR_RO")
     except Exception as e:
         # May fail if role already owns it — that's fine
         print(f"     ℹ️  Grant note: {str(e)[:100]}")
