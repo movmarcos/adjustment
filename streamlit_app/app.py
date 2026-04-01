@@ -40,9 +40,9 @@ try:
             COALESCE(SUM(PENDING_COUNT), 0)            AS PENDING,
             COALESCE(SUM(PENDING_APPROVAL_COUNT), 0)   AS PENDING_APPROVAL,
             COALESCE(SUM(APPROVED_COUNT), 0)           AS APPROVED,
+            COALESCE(SUM(RUNNING_COUNT), 0)            AS RUNNING,
             COALESCE(SUM(PROCESSED_COUNT), 0)          AS PROCESSED,
-            COALESCE(SUM(ERROR_COUNT), 0)              AS ERRORS,
-            COALESCE(SUM(REJECTED_COUNT), 0)           AS REJECTED,
+            COALESCE(SUM(FAILED_COUNT), 0)             AS FAILED,
             COALESCE(SUM(OVERLAP_ALERTS), 0)           AS OVERLAPS
         FROM ADJUSTMENT_APP.VW_DASHBOARD_KPI
     """)
@@ -51,15 +51,16 @@ except Exception as e:
     kpis = {}
     st.warning(f"Could not load KPIs: {e}")
 
-cols = st.columns(7)
+cols = st.columns(8)
 kpi_data = [
-    ("Total",            kpis.get("TOTAL", 0),            "All adjustments", "primary"),
-    ("Pending",          kpis.get("PENDING", 0),           "Awaiting process","warning"),
-    ("Awaiting Approval",kpis.get("PENDING_APPROVAL", 0),  "Need approval",   "info"),
-    ("Approved",         kpis.get("APPROVED", 0),          "Ready to process","success"),
-    ("Processed",        kpis.get("PROCESSED", 0),         "In the data",     "success"),
-    ("Errors",           kpis.get("ERRORS", 0),            "Need attention",  "danger"),
-    ("Overlaps",         kpis.get("OVERLAPS", 0),          "Overlap alerts",  "purple"),
+    ("Total",            kpis.get("TOTAL", 0),            "All adjustments",  "primary"),
+    ("Pending",          kpis.get("PENDING", 0),           "Awaiting queue",   "warning"),
+    ("Awaiting Approval",kpis.get("PENDING_APPROVAL", 0),  "Need approval",    "info"),
+    ("Approved",         kpis.get("APPROVED", 0),          "Ready to process", "success"),
+    ("Running",          kpis.get("RUNNING", 0),           "Processing now",   "info"),
+    ("Processed",        kpis.get("PROCESSED", 0),         "In the data",      "success"),
+    ("Failed",           kpis.get("FAILED", 0),            "Need attention",   "danger"),
+    ("Overlaps",         kpis.get("OVERLAPS", 0),          "Overlap alerts",   "purple"),
 ]
 for col, (lbl, val, sub, variant) in zip(cols, kpi_data):
     col.markdown(kpi_card(lbl, int(val), sub, variant), unsafe_allow_html=True)
@@ -86,12 +87,14 @@ with col_left:
         """)
         if not df_dash.empty:
             scopes = df_dash["PROCESS_TYPE"].unique()
-            statuses = ["Pending", "Pending Approval", "Approved", "Processed", "Error"]
+            statuses = ["Pending", "Pending Approval", "Approved", "Running", "Processed", "Failed"]
             color_map = {
-                "Pending": P["warning"],
+                "Pending":          P["warning"],
                 "Pending Approval": P["info"],
-                "Approved": "#00897B",
-                "Processed": P["success"], "Error": P["danger"],
+                "Approved":         "#00897B",
+                "Running":          "#1565C0",
+                "Processed":        P["success"],
+                "Failed":           P["danger"],
             }
 
             fig = go.Figure()
@@ -331,7 +334,8 @@ try:
         def _colour_status(val):
             colours = {
                 "Processed":        f"color:{P['success']};font-weight:600",
-                "Error":            f"color:{P['danger']};font-weight:600",
+                "Failed":           f"color:{P['danger']};font-weight:600",
+                "Running":          f"color:{P['info']};font-weight:600",
                 "Pending":          f"color:{P['warning']};font-weight:600",
                 "Pending Approval": f"color:{P['info']};font-weight:600",
                 "Approved":         "color:#00897B;font-weight:600",
