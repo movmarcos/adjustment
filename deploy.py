@@ -343,6 +343,31 @@ def deploy_streamlit_app(session):
     return True
 
 
+# ─── Resume Tasks ────────────────────────────────────────────────────────────
+
+def resume_pipeline_tasks(session):
+    """
+    Explicitly resume the four scope-pipeline tasks.
+
+    CREATE OR REPLACE TASK always leaves tasks in Suspended state. This runs
+    as a dedicated step after all DB objects are deployed so it is guaranteed
+    to execute regardless of SQL parsing order within the task file.
+    """
+    tasks = [
+        'ADJUSTMENT_APP.TASK_PROCESS_VAR',
+        'ADJUSTMENT_APP.TASK_PROCESS_STRESS',
+        'ADJUSTMENT_APP.TASK_PROCESS_FRTB',
+        'ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY',
+    ]
+    for task in tasks:
+        try:
+            session.sql(f"ALTER TASK {task} RESUME").collect()
+            print(f"     ✅ Resumed {task}")
+        except Exception as e:
+            err_msg = str(e).split('\n')[0][:120]
+            print(f"     ❌ Could not resume {task}: {err_msg}")
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -380,6 +405,11 @@ def main():
         if not deploy_db_objects(session):
             print("\n  ⚠️  Some DB objects had errors — review above.")
             success = False
+
+        print("\n" + "─" * 64)
+        print("  PHASE 1b: Resume pipeline tasks")
+        print("─" * 64)
+        resume_pipeline_tasks(session)
 
     # ── Deploy Streamlit app ─────────────────────────────────────────────
     if deploy_st:

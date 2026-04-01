@@ -57,15 +57,8 @@ AS
     CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('Sensitivity', '["Sensitivity"]');
 
 
--- ═══════════════════════════════════════════════════════════════════════════
--- RESUME ALL
--- CREATE OR REPLACE leaves tasks in Suspended state — must explicitly resume.
--- ═══════════════════════════════════════════════════════════════════════════
-
-ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_VAR         RESUME;
-ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS       RESUME;
-ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB         RESUME;
-ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY  RESUME;
+-- NOTE: Tasks are resumed by deploy.py (resume_pipeline_tasks) as a
+-- dedicated step after all DB objects are deployed.
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- VERIFY
