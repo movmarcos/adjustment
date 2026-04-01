@@ -762,6 +762,10 @@ elif wiz["step"] == 3:
     result = wiz.get("result") or {}
     msg    = result.get("message", "Adjustment created successfully")
 
+    blocked_msg = ""
+    if "Blocked by ADJ #" in msg:
+        blocked_msg = msg
+
     st.markdown(
         f'<div style="background:#E8F5E9;border:2px solid #A5D6A7;'
         f'border-radius:12px;padding:2.5rem;text-align:center;margin:1rem 0">'
@@ -769,10 +773,18 @@ elif wiz["step"] == 3:
         f'<div style="font-size:1.4rem;font-weight:700;color:#2E7D32;margin-top:0.5rem">'
         f'Adjustment Submitted Successfully</div>'
         f'<div style="font-size:0.9rem;color:#388E3C;margin-top:0.4rem">{msg}</div>'
-        f'<div style="font-size:0.82rem;color:{P["grey_700"]};margin-top:0.8rem">'
-        f'Your adjustment is queued for processing. '
+        f'<div style="font-size:0.82rem;color:{P["info"]};margin-top:0.8rem">'
+        f'⚡ Your adjustment is queued and will be processed automatically by the scope pipeline. '
         f'You can monitor its progress in the Processing Queue.</div>'
         f'</div>', unsafe_allow_html=True)
+
+    if blocked_msg:
+        st.markdown(
+            f'<div style="background:#FFF3E0;border:1px solid #FFB74D;border-radius:8px;'
+            f'padding:0.75rem 1rem;margin-top:0.5rem;font-size:0.83rem;color:#E65100">'
+            f'⏸ <strong>Processing is queued behind another adjustment.</strong> '
+            f'{blocked_msg} It will be picked up automatically once that run completes.</div>',
+            unsafe_allow_html=True)
 
     st.markdown("<br/>", unsafe_allow_html=True)
     c1, c2 = st.columns(2)

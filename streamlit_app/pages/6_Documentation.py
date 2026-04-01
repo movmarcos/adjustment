@@ -195,8 +195,8 @@ with tab_architecture:
         <div style="display:flex;flex-direction:column;align-items:center;min-width:130px">
             <div style="background:#E3F2FD;border:2px solid #42A5F5;border-radius:10px;padding:1rem;text-align:center;width:130px">
                 <div style="font-size:2rem">🌊</div>
-                <div style="font-weight:700;font-size:0.82rem;color:#1976D2">STREAM</div>
-                <div style="font-size:0.7rem;color:{P['grey_700']}">CDC Capture</div>
+                <div style="font-weight:700;font-size:0.82rem;color:#1976D2">4 STREAMS</div>
+                <div style="font-size:0.7rem;color:{P['grey_700']}">One per scope</div>
             </div>
             <div style="font-size:0.68rem;color:{P['grey_700']};margin-top:6px;text-align:center">
                 Detects INSERT<br/>and UPDATE events
@@ -208,8 +208,8 @@ with tab_architecture:
         <div style="display:flex;flex-direction:column;align-items:center;min-width:150px">
             <div style="background:{P['purple_lt']};border:2px solid {P['purple']};border-radius:10px;padding:1rem;text-align:center;width:150px">
                 <div style="font-size:2rem">⏰</div>
-                <div style="font-weight:700;font-size:0.82rem;color:{P['purple']}">TASK</div>
-                <div style="font-size:0.7rem;color:{P['grey_700']}">Every 60 seconds</div>
+                <div style="font-weight:700;font-size:0.82rem;color:{P['purple']}">4 TASKS</div>
+                <div style="font-size:0.7rem;color:{P['grey_700']}">Independent per scope</div>
             </div>
             <div style="font-size:0.68rem;color:{P['grey_700']};margin-top:6px;text-align:center">
                 Stream-guarded<br/>Only fires with data
@@ -287,23 +287,33 @@ with tab_architecture:
 
     <div style="margin-bottom:1.2rem">
         <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:{P['info']};margin-bottom:0.5rem">
-        ③ CDC Layer — Change detection</div>
+        ③ CDC Layer — Change detection (one stream per scope)</div>
         <div style="display:flex;gap:10px;flex-wrap:wrap">
             <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            🌊 ADJ_HEADER_STREAM</div>
+            🌊 STREAM_QUEUE_VAR</div>
             <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            🌊 ADJ_LINE_ITEM_STREAM</div>
+            🌊 STREAM_QUEUE_STRESS</div>
+            <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
+            🌊 STREAM_QUEUE_FRTB</div>
+            <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
+            🌊 STREAM_QUEUE_SENSITIVITY</div>
         </div>
     </div>
 
     <div style="margin-bottom:1.2rem">
         <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:{P['warning']};margin-bottom:0.5rem">
-        ④ Processing Layer — Async execution</div>
+        ④ Processing Layer — Async execution (one task per scope)</div>
         <div style="display:flex;gap:10px;flex-wrap:wrap">
             <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            ⏰ PROCESS_PENDING_TASK</div>
+            ⏰ TASK_PROCESS_VAR</div>
             <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            ⏰ INSTANTIATE_RECURRING_TASK</div>
+            ⏰ TASK_PROCESS_STRESS</div>
+            <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
+            ⏰ TASK_PROCESS_FRTB</div>
+            <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
+            ⏰ TASK_PROCESS_SENSITIVITY</div>
+            <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
+            ⚡ SP_RUN_PIPELINE</div>
             <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
             ⚡ SP_SUBMIT_ADJUSTMENT</div>
             <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
@@ -370,7 +380,16 @@ with tab_workflow:
         </div>
         <div style="text-align:center;padding:0 8px">
             <div style="font-size:1.2rem;color:{P['grey_400']}">→</div>
-            <div style="font-size:0.6rem;color:{P['grey_700']}">Task fires<br/>SP_PROCESS</div>
+            <div style="font-size:0.6rem;color:{P['grey_700']}">SP_RUN_PIPELINE<br/>claims</div>
+        </div>
+        <div style="background:#E3F2FD;border:2px solid {STATUS_COLORS['Running']};border-radius:10px;padding:0.8rem 1rem;text-align:center;min-width:120px">
+            <div style="font-size:1.3rem">{STATUS_ICONS['Running']}</div>
+            <div style="font-weight:700;font-size:0.82rem;color:{STATUS_COLORS['Running']}">Running</div>
+            <div style="font-size:0.65rem;color:{P['grey_700']}">Processing now</div>
+        </div>
+        <div style="text-align:center;padding:0 8px">
+            <div style="font-size:1.2rem;color:{P['grey_400']}">→</div>
+            <div style="font-size:0.6rem;color:{P['grey_700']}">SP_PROCESS<br/>succeeds</div>
         </div>
         <div style="background:#E8F5E9;border:2px solid {STATUS_COLORS['Processed']};border-radius:10px;padding:0.8rem 1rem;text-align:center;min-width:120px">
             <div style="font-size:1.3rem">{STATUS_ICONS['Processed']}</div>
@@ -396,9 +415,9 @@ with tab_workflow:
         </div>
         <div style="text-align:center;padding:0 8px">
             <div style="font-size:1.2rem;color:{P['grey_400']}">→</div>
-            <div style="font-size:0.6rem;color:{P['grey_700']}">Task fires<br/>SP_PROCESS</div>
+            <div style="font-size:0.6rem;color:{P['grey_700']}">SP_RUN_PIPELINE<br/>claims</div>
         </div>
-        <div style="font-size:0.82rem;font-weight:700;color:{STATUS_COLORS['Processed']}">✔ Processed</div>
+        <div style="font-size:0.82rem;font-weight:700;color:{STATUS_COLORS['Running']}">⚡ Running → ✔ Processed</div>
     </div>
 
     <div style="display:flex;gap:2rem;flex-wrap:wrap;padding-left:2rem">
@@ -414,12 +433,9 @@ with tab_workflow:
         <div style="display:flex;align-items:center;gap:8px">
             <div style="font-size:0.72rem;color:{P['grey_700']}">SP_PROCESS fails</div>
             <div style="font-size:1rem;color:{P['grey_400']}">→</div>
-            <div style="background:#FFEBEE;border:2px solid {STATUS_COLORS['Error']};border-radius:10px;padding:0.5rem 0.8rem;text-align:center">
-                <div style="font-weight:700;font-size:0.78rem;color:{STATUS_COLORS['Error']}">❌ Error</div>
+            <div style="background:#FFEBEE;border:2px solid {STATUS_COLORS.get('Failed', '#D32F2F')};border-radius:10px;padding:0.5rem 0.8rem;text-align:center">
+                <div style="font-weight:700;font-size:0.78rem;color:{STATUS_COLORS.get('Failed', '#D32F2F')}">❌ Failed</div>
             </div>
-            <div style="font-size:1rem;color:{P['grey_400']}">→</div>
-            <div style="font-size:0.65rem;color:{P['grey_700']}">Retry →</div>
-            <div style="font-size:0.72rem;color:{STATUS_COLORS['Pending']}">⏳ Pending</div>
         </div>
 
     </div>
@@ -441,8 +457,10 @@ with tab_workflow:
          "Task picks up and processes → Processed"),
         ("Processed",            "Successfully applied to the FACT.*_ADJUSTMENT table",
          "Terminal state (adjustments are in the data)"),
-        ("Error",                "SP_PROCESS_ADJUSTMENT encountered an error",
-         "User can Retry → resets to Pending"),
+        ("Running",              "Currently being processed by SP_RUN_PIPELINE",
+         "On success → Processed; on error → Failed"),
+        ("Failed",               "SP_PROCESS_ADJUSTMENT encountered an error",
+         "Terminal state — check ERRORMESSAGE for details"),
         ("Rejected",             "Rejected by the system or an operator",
          "Terminal state"),
         ("Rejected - SignedOff", "COB was already signed off at submission time",
@@ -480,14 +498,19 @@ with tab_workflow:
             <span style="color:{P['grey_400']}">→</span>
             <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-weight:600">SP_SUBMIT validates + inserts</div>
             <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['primary']}">SP_PROCESS executes immediately</div>
+            <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">⚡ Scope stream detects</div>
+            <span style="color:{P['grey_400']}">→</span>
+            <div style="background:{P['purple_lt']};border-radius:6px;padding:4px 10px;font-weight:600;color:{P['purple']}">⏰ TASK_PROCESS_&lt;SCOPE&gt;</div>
+            <span style="color:{P['grey_400']}">→</span>
+            <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['primary']}">SP_RUN_PIPELINE</div>
             <span style="color:{P['grey_400']}">→</span>
             <div style="background:#E8F5E9;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['success']}">✔ Processed</div>
         </div>
         </div>
         <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:0.4rem">
-        <strong>Key:</strong> Ad-hoc adjustments are processed immediately — SP_SUBMIT calls SP_PROCESS directly.
-        The user sees the result immediately.
+        <strong>Key:</strong> SP_SUBMIT inserts the ADJ_HEADER row as Pending (checking for overlapping
+        Running adjustments and setting BLOCKED_BY_ADJ_ID if needed). The scope pipeline task picks it
+        up automatically when the stream fires.
         </div>
         """)
 
@@ -501,11 +524,11 @@ with tab_workflow:
             <span style="color:{P['grey_400']}">→</span>
             <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-weight:600">Inserts ADJ_HEADER (Pending)</div>
             <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">🌊 Stream detects</div>
+            <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">🌊 Scope stream detects</div>
             <span style="color:{P['grey_400']}">→</span>
-            <div style="background:{P['purple_lt']};border-radius:6px;padding:4px 10px;font-weight:600;color:{P['purple']}">⏰ PROCESS_PENDING_TASK</div>
+            <div style="background:{P['purple_lt']};border-radius:6px;padding:4px 10px;font-weight:600;color:{P['purple']}">⏰ TASK_PROCESS_&lt;SCOPE&gt;</div>
             <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['primary']}">SP_PROCESS</div>
+            <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['primary']}">SP_RUN_PIPELINE</div>
             <span style="color:{P['grey_400']}">→</span>
             <div style="background:#E8F5E9;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['success']}">✔ Processed</div>
         </div>
@@ -513,7 +536,7 @@ with tab_workflow:
         <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:0.4rem">
         <strong>Key:</strong> Recurring adjustments are fully automatic.
         <code>INSTANTIATE_RECURRING_TASK</code> checks templates every 5 minutes and creates ADJ_HEADER
-        rows when dependencies are met. <code>PROCESS_PENDING_TASK</code> processes them.
+        rows when dependencies are met. The scope pipeline task picks them up via stream.
         </div>
         """)
 
@@ -543,10 +566,30 @@ with tab_workflow:
 
 with tab_processing:
 
+    section_title("Pipeline Architecture — 4 Independent Scope Pipelines", "⚙️")
+
+    _html(f"""
+    <div class="mcard" style="border-left:4px solid {P['info']};margin-bottom:0.8rem">
+    Adjustments are processed by <strong>four independent pipelines</strong> — one per scope (VaR, Stress, FRTB, Sensitivity).
+    A long-running FRTB job has <em>zero impact</em> on VaR, Stress, or Sensitivity.
+    Each pipeline has its own queue view → stream → task → <code>SP_RUN_PIPELINE</code> call.
+    </div>
+    <div class="mcard" style="border-left:4px solid {P['warning']};margin-bottom:0.8rem">
+    <strong>FRTBALL fan-out:</strong> An adjustment submitted with <code>PROCESS_TYPE = 'FRTBALL'</code> is applied
+    once for each real FRTB sub-type (<code>FRTB</code>, <code>FRTBDRC</code>, <code>FRTBRRAO</code>).
+    It lives in the FRTB pipeline queue alongside the other sub-types.
+    </div>
+    <div class="mcard" style="border-left:4px solid {P['success']};margin-bottom:0.8rem">
+    <strong>Blocking:</strong> When a Running adjustment overlaps with a Pending one (same COB + scope +
+    overlapping dimension filters), the Pending adjustment is blocked via <code>BLOCKED_BY_ADJ_ID</code>
+    and will not be picked up until the Running one finishes.
+    </div>
+    """)
+
     section_title("SP_PROCESS_ADJUSTMENT — Core Engine", "⚙️")
 
     _html(f"""
-    The processing engine is a **Python/Snowpark stored procedure** that reads pending adjustments
+    The processing engine is a **Python/Snowpark stored procedure** that reads Running adjustments
     from `ADJ_HEADER` and writes delta rows to the appropriate `FACT.*_ADJUSTMENT` table.
     It supports two paths: **Direct** (Upload) and **Scale** (Scale/Flatten/Roll).
     """)
@@ -573,9 +616,9 @@ with tab_processing:
     <div style="display:flex;align-items:center;gap:12px">
         <div style="background:{P['info_lt']};border:2px solid {P['info']};border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;color:{P['info']};flex-shrink:0">2</div>
         <div style="flex:1">
-            <div style="font-weight:700;font-size:0.88rem">Read Pending Adjustments</div>
+            <div style="font-weight:700;font-size:0.88rem">Read Running Adjustments</div>
             <div style="font-size:0.78rem;color:{P['grey_700']}">
-                Filter <code>ADJ_HEADER</code> where <code>RUN_STATUS = 'Pending'</code>,
+                Filter <code>ADJ_HEADER</code> where <code>RUN_STATUS = 'Running'</code>,
                 <code>COBID = target</code>, <code>PROCESS_TYPE = scope</code>
             </div>
         </div>
