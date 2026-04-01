@@ -497,7 +497,7 @@ def render_scaling_form() -> None:
     with c1:
         wiz["entity_code"]    = st.text_input("Entity Code",    key=_k("entity"),
                                                value=wiz.get("entity_code") or "",
-                                               placeholder="e.g. MUSE")
+                                               placeholder="e.g. MUSI")
         wiz["department_code"] = st.text_input("Department Code", key=_k("dept"),
                                                 value=wiz.get("department_code") or "")
         wiz["book_code"]      = st.text_input("Book Code",      key=_k("book"),
@@ -736,13 +736,13 @@ elif wiz["step"] == 2:
                                 if c in df_preview.columns]
                     val_cols = [c for c in [col_cv, col_del, col_pv] if c]
                     if grp_cols and val_cols:
-                        df_grp = (df_preview.groupby(grp_cols)[val_cols]
-                                  .sum().reset_index().sort_values(grp_cols))
-                        df_grp.rename(columns={col_cv: "Original", col_del: "Adjustment",
-                                               col_pv: "Projected"}, inplace=True)
-                        st.markdown(f"**Breakdown by {' / '.join(grp_cols)}**")
-                        st.dataframe(df_grp, use_container_width=True,
-                                     height=min(300, 38 + 35 * len(df_grp)))
+                        with st.expander(f"📊 Breakdown by {' / '.join(grp_cols)}", expanded=False):
+                            df_grp = (df_preview.groupby(grp_cols)[val_cols]
+                                      .sum().reset_index().sort_values(grp_cols))
+                            df_grp.rename(columns={col_cv: "Original", col_del: "Adjustment",
+                                                   col_pv: "Projected"}, inplace=True)
+                            st.dataframe(df_grp, use_container_width=True,
+                                         height=min(300, 38 + 35 * len(df_grp)))
 
                     with st.expander(f"View sample rows (up to 1,000 of {total_rows:,})",
                                      expanded=False):
