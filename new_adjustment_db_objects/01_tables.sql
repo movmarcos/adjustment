@@ -360,6 +360,19 @@ COMMENT = 'COB sign-off status per scope. SIGN_OFF_STATUS = SIGNED_OFF means no 
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- MIGRATION: Sequential pipeline additions
+-- Run once after initial table creation.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- Blocking column: NULL = eligible; populated = waiting for that ADJ_ID to finish
+ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER
+    ADD COLUMN IF NOT EXISTS BLOCKED_BY_ADJ_ID NUMBER(38,0) DEFAULT NULL;
+
+-- Change tracking required for streams on views derived from this table
+ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER SET CHANGE_TRACKING = TRUE;
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- 8. VERIFY
 -- ═══════════════════════════════════════════════════════════════════════════
 SELECT 'ADJ_HEADER' AS OBJECT, COUNT(*) AS ROW_COUNT FROM ADJUSTMENT_APP.ADJ_HEADER
