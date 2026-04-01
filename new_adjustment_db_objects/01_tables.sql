@@ -367,30 +367,24 @@ COMMENT = 'COB sign-off status per scope. SIGN_OFF_STATUS = SIGNED_OFF means no 
 -- MIGRATION: Apply to existing tables (idempotent — safe to re-run).
 -- ═══════════════════════════════════════════════════════════════════════════
 
--- 1. BLOCKED_BY_ADJ_ID — now VARCHAR(36) to match UUID-based ADJ_ID.
---    If the column already exists as NUMBER, drop and re-add (or recreate the table).
-ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER
-    ADD COLUMN IF NOT EXISTS BLOCKED_BY_ADJ_ID VARCHAR(36) DEFAULT NULL;
+-- 1. BLOCKED_BY_ADJ_ID — change to VARCHAR(36) to match UUID-based ADJ_ID.
+--    ADD COLUMN IF NOT EXISTS is insufficient when the column already exists as a
+--    different type; DROP + ADD handles both the "column missing" and "wrong type" cases.
+ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER DROP COLUMN IF EXISTS BLOCKED_BY_ADJ_ID;
+ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER ADD COLUMN BLOCKED_BY_ADJ_ID VARCHAR(36) DEFAULT NULL;
 
 -- 2. DIMENSION_ADJ_ID — stores DIMENSION.ADJUSTMENT.ADJUSTMENT_ID after processing.
+--    ADD COLUMN IF NOT EXISTS is safe here; it is a new column with no type conflict.
 ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER
     ADD COLUMN IF NOT EXISTS DIMENSION_ADJ_ID NUMBER(38,0) DEFAULT NULL;
 
 -- Change tracking (kept for potential future stream use, harmless otherwise)
 ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER SET CHANGE_TRACKING = TRUE;
 
--- ─── FACT TABLE NOTE ────────────────────────────────────────────────────────
--- FACT.*_ADJUSTMENT tables store ADJUSTMENT_ID which is sourced from ADJ_HEADER.ADJ_ID.
--- Those tables must also have their ADJUSTMENT_ID column changed to VARCHAR(36).
--- Run the following for each adjustment fact table (requires ALTER privilege on FACT schema):
---
---   ALTER TABLE FACT.VAR_MEASURES_ADJUSTMENT       MODIFY COLUMN ADJUSTMENT_ID VARCHAR(36);
---   ALTER TABLE FACT.STRESS_MEASURES_ADJUSTMENT    MODIFY COLUMN ADJUSTMENT_ID VARCHAR(36);
---   ALTER TABLE FACT.SENSITIVITY_MEASURES_ADJUSTMENT MODIFY COLUMN ADJUSTMENT_ID VARCHAR(36);
---   ALTER TABLE FACT.ES_MEASURES_ADJUSTMENT        MODIFY COLUMN ADJUSTMENT_ID VARCHAR(36);
---   ALTER TABLE FACT.FRTBSA_SENSITIVITY_MEASURES_ADJUSTMENT MODIFY COLUMN ADJUSTMENT_ID VARCHAR(36);
---   ALTER TABLE FACT.FRTBSA_DRC_MEASURES_ADJUSTMENT         MODIFY COLUMN ADJUSTMENT_ID VARCHAR(36);
---   ALTER TABLE FACT.FRTBSA_RRAO_MEASURES_ADJUSTMENT        MODIFY COLUMN ADJUSTMENT_ID VARCHAR(36);
+-- ─── NOTE: FACT.*_ADJUSTMENT.ADJUSTMENT_ID ──────────────────────────────────
+-- FACT tables store ADJUSTMENT_ID sourced from DIMENSION.ADJUSTMENT.ADJUSTMENT_ID
+-- (a NUMBER sequence), NOT from ADJ_HEADER.ADJ_ID (UUID).
+-- No type change to FACT tables is required.
 
 
 -- ═══════════════════════════════════════════════════════════════════════════

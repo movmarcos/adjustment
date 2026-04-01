@@ -98,14 +98,51 @@ def log_status_history(session, adj_ids, old_status, new_status, changed_by="SYS
     """).collect()
 
 
-def store_dimension_adj_ids(session, adj_ids):
+def insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str):
     """
-    After INSERT INTO DIMENSION.ADJUSTMENT, look up the generated ADJUSTMENT_ID
-    for each of our adj_ids and store it back in ADJ_HEADER.DIMENSION_ADJ_ID.
+    1. Insert one row per ADJ_ID into DIMENSION.ADJUSTMENT (RECORD_COUNT = NULL,
+       updated later once fact-table row counts are known).
+    2. Read back the generated DIMENSION.ADJUSTMENT.ADJUSTMENT_ID for each adj.
+    3. Store it in ADJ_HEADER.DIMENSION_ADJ_ID.
+    4. Return {adj_uuid: dimension_adjustment_id} so callers can use the NUMBER
+       key when writing to FACT.*_ADJUSTMENT tables.
 
-    Match on COBID + PROCESS_TYPE + USERNAME + CREATED_DATE — the combination
-    that was inserted verbatim from ADJ_HEADER into DIMENSION.ADJUSTMENT.
+    Match uses COBID + PROCESS_TYPE + USERNAME + CREATED_DATE — the four columns
+    that are always present and inserted verbatim from ADJ_HEADER.
     """
+    session.sql(f"""
+        INSERT INTO DIMENSION.ADJUSTMENT (
+            COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, SOURCE_COBID,
+            ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE, BOOK_CODE,
+            TENOR_CODE, CURRENCY_CODE, CURVE_CODE, INSTRUMENT_CODE,
+            MEASURE_TYPE_CODE, ADJUSTMENT_VALUE_IN_USD,
+            CREATED_DATE, PROCESS_DATE, USERNAME, RUN_STATUS, REASON,
+            MUREX_FAMILY, MUREX_GROUP, TRADE_TYPOLOGY, TRADE_CODE,
+            SCALE_FACTOR, BATCH_REGION_AREA, SIMULATION_NAME, TRADER_CODE,
+            VAR_COMPONENT_ID, VAR_SUB_COMPONENT_ID, SCENARIO_DATE_ID,
+            GUARANTEED_ENTITY, STRATEGY, REGION_KEY,
+            UNDERLYING_TENOR_CODE, PRODUCT_CATEGORY_ATTRIBUTES,
+            ADJUSTMENT_OCCURRENCE, GLOBAL_REFERENCE, FILE_NAME,
+            SIMULATION_SOURCE, DAY_TYPE
+        )
+        SELECT
+            COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, SOURCE_COBID,
+            ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE, BOOK_CODE,
+            TENOR_CODE, CURRENCY_CODE, CURVE_CODE, INSTRUMENT_CODE,
+            MEASURE_TYPE_CODE, ADJUSTMENT_VALUE_IN_USD,
+            CREATED_DATE, CURRENT_TIMESTAMP(), USERNAME, 'Processed', REASON,
+            MUREX_FAMILY, MUREX_GROUP, TRADE_TYPOLOGY, TRADE_CODE,
+            SCALE_FACTOR, BATCH_REGION_AREA, SIMULATION_NAME, TRADER_CODE,
+            VAR_COMPONENT_ID, VAR_SUB_COMPONENT_ID, SCENARIO_DATE_ID,
+            GUARANTEED_ENTITY, STRATEGY, REGION_KEY,
+            UNDERLYING_TENOR_CODE, PRODUCT_CATEGORY_ATTRIBUTES,
+            ADJUSTMENT_OCCURRENCE, GLOBAL_REFERENCE, FILE_NAME,
+            SIMULATION_SOURCE, DAY_TYPE
+        FROM ADJUSTMENT_APP.ADJ_HEADER
+        WHERE ADJ_ID IN ({adj_ids_str})
+    """).collect()
+
+    dim_adj_map = {}
     for aid in adj_ids:
         try:
             row = session.sql(f"""
@@ -121,13 +158,16 @@ def store_dimension_adj_ids(session, adj_ids):
                 LIMIT 1
             """).collect()
             if row:
+                dim_adj_id = row[0]['ADJUSTMENT_ID']
+                dim_adj_map[aid] = dim_adj_id
                 session.sql(f"""
                     UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                    SET DIMENSION_ADJ_ID = {row[0]['ADJUSTMENT_ID']}
+                    SET DIMENSION_ADJ_ID = {dim_adj_id}
                     WHERE ADJ_ID = '{aid}'
                 """).collect()
         except Exception as e:
-            print(f"Warning: could not store DIMENSION_ADJ_ID for {aid}: {e}")
+            print(f"Warning: could not retrieve DIMENSION_ADJ_ID for {aid}: {e}")
+    return dim_adj_map
 
 
 def surrogate_key(list_key, key_name):
@@ -144,12 +184,15 @@ def main(session, process_type, adjustment_action, cobid):
     Flow:
       1. Read config from ADJUSTMENTS_SETTINGS
       2. Filter Running adjustments in ADJ_HEADER
-      3. For Direct  → read ADJ_LINE_ITEM, map to fact columns, insert
-      4. For Scale   → 3-way UNION ALL (same-COB, cross-COB, flatten),
-                        DENSE_RANK overlap resolution, SCD2 key fix,
-                        summary rebuild
-      5. Update ADJ_HEADER status
-      6. Log to ADJ_STATUS_HISTORY
+      3. INSERT into DIMENSION.ADJUSTMENT; retrieve generated ADJUSTMENT_ID (NUMBER)
+         → store in ADJ_HEADER.DIMENSION_ADJ_ID
+      4. For Direct  → read ADJ_LINE_ITEM, set ADJUSTMENT_ID = DIMENSION_ADJ_ID,
+                        delete old FACT rows, insert
+      5. For Scale   → 3-way UNION ALL using DIMENSION_ADJ_ID as ADJUSTMENT_ID,
+                        DENSE_RANK overlap resolution, supersede delete,
+                        SCD2 key fix, summary rebuild
+      6. Update RECORD_COUNT in ADJ_HEADER + DIMENSION.ADJUSTMENT
+      7. Update ADJ_HEADER status; log to ADJ_STATUS_HISTORY
     """
     adj_ids = []
     try:
@@ -227,6 +270,15 @@ def main(session, process_type, adjustment_action, cobid):
             adj_ids = [row["ADJ_ID"] for row in df_adj_direct.select("ADJ_ID").collect()]
             adj_ids_str = ", ".join(f"'{a}'" for a in adj_ids)
 
+            # ── Insert into DIMENSION.ADJUSTMENT FIRST ───────────────────
+            # We need DIMENSION.ADJUSTMENT.ADJUSTMENT_ID before writing to FACT,
+            # so that FACT.ADJUSTMENT_ID = DIMENSION.ADJUSTMENT.ADJUSTMENT_ID (NUMBER).
+            dim_adj_map = {}
+            try:
+                dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str)
+            except Exception as dim_err:
+                print(f"Warning: could not insert into DIMENSION.ADJUSTMENT: {dim_err}")
+
             # Read line items for these adjustments
             df_line_items = session.table("ADJUSTMENT_APP.ADJ_LINE_ITEM").filter(
                 (col("ADJ_ID").isin(adj_ids)) &
@@ -237,15 +289,20 @@ def main(session, process_type, adjustment_action, cobid):
                 result["message"] = "No line items found for Direct adjustments"
                 return json.dumps(result)
 
-            # Map line-item columns to fact adjustment table columns
+            # Convert line items to pandas (preserve ADJ_ID for the ADJUSTMENT_ID mapping)
+            _raw_pd = df_line_items.to_pandas()
             df_pd = check_columns(df_line_items, fact_adj_cols, metric_name, metric_usd_name)
+            # Set ADJUSTMENT_ID = DIMENSION.ADJUSTMENT.ADJUSTMENT_ID (NUMBER, not our UUID)
+            if "ADJUSTMENT_ID" in df_pd.columns and dim_adj_map:
+                df_pd["ADJUSTMENT_ID"] = _raw_pd["ADJ_ID"].map(dim_adj_map)
 
-            # Delete existing adjustments for these ADJ_IDs
-            fact_adj_tbl.delete(
-                (fact_adj_tbl["COBID"] == df_adj_direct["COBID"]) &
-                (fact_adj_tbl["ADJUSTMENT_ID"] == df_adj_direct["ADJ_ID"]),
-                df_adj_direct
-            )
+            # Delete existing fact rows for these DIMENSION ADJUSTMENT_IDs
+            dim_ids_str = ', '.join(str(v) for v in dim_adj_map.values()) if dim_adj_map else "''"
+            session.sql(f"""
+                DELETE FROM {fact_adj_tbl_name}
+                WHERE COBID = {cobid}
+                  AND ADJUSTMENT_ID IN ({dim_ids_str})
+            """).collect()
 
             # Exclude soft-deleted line items
             df_pd_valid = df_pd[df_pd["IS_DELETED"] == False].drop(columns=["IS_DELETED"])
@@ -269,43 +326,13 @@ def main(session, process_type, adjustment_action, cobid):
                 SET RECORD_COUNT = {rows_count}
                 WHERE ADJ_ID IN ({adj_ids_str})
             """).collect()
-
-            # Insert into DIMENSION.ADJUSTMENT and store back the generated ADJUSTMENT_ID
-            try:
+            # Update RECORD_COUNT in DIMENSION.ADJUSTMENT now that count is known
+            if dim_adj_map:
                 session.sql(f"""
-                    INSERT INTO DIMENSION.ADJUSTMENT (
-                        COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, SOURCE_COBID,
-                        ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE, BOOK_CODE,
-                        TENOR_CODE, CURRENCY_CODE, CURVE_CODE, INSTRUMENT_CODE,
-                        MEASURE_TYPE_CODE, ADJUSTMENT_VALUE_IN_USD,
-                        CREATED_DATE, PROCESS_DATE, USERNAME, RUN_STATUS, REASON,
-                        MUREX_FAMILY, MUREX_GROUP, TRADE_TYPOLOGY, TRADE_CODE,
-                        SCALE_FACTOR, BATCH_REGION_AREA, SIMULATION_NAME, TRADER_CODE,
-                        VAR_COMPONENT_ID, VAR_SUB_COMPONENT_ID, SCENARIO_DATE_ID,
-                        GUARANTEED_ENTITY, STRATEGY, REGION_KEY,
-                        UNDERLYING_TENOR_CODE, PRODUCT_CATEGORY_ATTRIBUTES,
-                        ADJUSTMENT_OCCURRENCE, GLOBAL_REFERENCE, FILE_NAME,
-                        SIMULATION_SOURCE, DAY_TYPE, RECORD_COUNT
-                    )
-                    SELECT
-                        COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, SOURCE_COBID,
-                        ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE, BOOK_CODE,
-                        TENOR_CODE, CURRENCY_CODE, CURVE_CODE, INSTRUMENT_CODE,
-                        MEASURE_TYPE_CODE, ADJUSTMENT_VALUE_IN_USD,
-                        CREATED_DATE, CURRENT_TIMESTAMP(), USERNAME, 'Processed', REASON,
-                        MUREX_FAMILY, MUREX_GROUP, TRADE_TYPOLOGY, TRADE_CODE,
-                        SCALE_FACTOR, BATCH_REGION_AREA, SIMULATION_NAME, TRADER_CODE,
-                        VAR_COMPONENT_ID, VAR_SUB_COMPONENT_ID, SCENARIO_DATE_ID,
-                        GUARANTEED_ENTITY, STRATEGY, REGION_KEY,
-                        UNDERLYING_TENOR_CODE, PRODUCT_CATEGORY_ATTRIBUTES,
-                        ADJUSTMENT_OCCURRENCE, GLOBAL_REFERENCE, FILE_NAME,
-                        SIMULATION_SOURCE, DAY_TYPE, {rows_count}
-                    FROM ADJUSTMENT_APP.ADJ_HEADER
-                    WHERE ADJ_ID IN ({adj_ids_str})
+                    UPDATE DIMENSION.ADJUSTMENT
+                    SET RECORD_COUNT = {rows_count}
+                    WHERE ADJUSTMENT_ID IN ({dim_ids_str})
                 """).collect()
-                store_dimension_adj_ids(session, adj_ids)
-            except Exception as dim_err:
-                print(f"Warning: could not insert into DIMENSION.ADJUSTMENT: {dim_err}")
 
             result["rows_inserted"] = rows_count
             result["message"] = "Direct adjustments processed successfully"
@@ -326,6 +353,16 @@ def main(session, process_type, adjustment_action, cobid):
 
             adj_ids     = [row["ADJ_ID"] for row in df_adj_scale.select("ADJ_ID").collect()]
             adj_ids_str = ", ".join(f"'{a}'" for a in adj_ids)
+
+            # ── Insert into DIMENSION.ADJUSTMENT FIRST ───────────────────
+            # Get DIMENSION.ADJUSTMENT.ADJUSTMENT_ID (NUMBER) before building
+            # the TEMP table so FACT.ADJUSTMENT_ID = DIMENSION.ADJUSTMENT.ADJUSTMENT_ID.
+            dim_adj_map = {}
+            try:
+                dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str)
+            except Exception as dim_err:
+                print(f"Warning: could not insert into DIMENSION.ADJUSTMENT: {dim_err}")
+            dim_ids_str = ', '.join(str(v) for v in dim_adj_map.values()) if dim_adj_map else "0"
 
             # ── Join columns (fact ∩ adj, minus exclusions) ──────────────
             exclude_join = ['COBID', 'IS_OFFICIAL_SOURCE', 'STRATEGY',
@@ -410,8 +447,10 @@ def main(session, process_type, adjustment_action, cobid):
             ])
 
             # ── 3-way UNION ALL ──────────────────────────────────────────
+            # ADJUSTMENT_ID = DIMENSION.ADJUSTMENT.ADJUSTMENT_ID (NUMBER), not our UUID.
+            # ADJ_HEADER.DIMENSION_ADJ_ID was populated above by insert_to_dimension_and_get_ids.
             select_scale = (
-                f"SELECT DISTINCT adjust.COBID, adjust.ADJ_ID AS ADJUSTMENT_ID, "
+                f"SELECT DISTINCT adjust.COBID, adjust.DIMENSION_ADJ_ID AS ADJUSTMENT_ID, "
                 f"adjust.CREATED_DATE AS ADJUSTMENT_CREATED_TIMESTAMP, "
                 f"{select_non_metric}, {select_measure}"
             )
@@ -485,26 +524,26 @@ def main(session, process_type, adjustment_action, cobid):
             # any position it touches, so deleting older rows is always correct.
             _supersede_dims = [k for k in pk_parts if k.upper() != 'COBID']
             if _supersede_dims:
-                _ids_str = ', '.join(f"'{a}'" for a in adj_ids)
+                # dim_ids_str contains DIMENSION.ADJUSTMENT NUMBERs — no quoting needed
                 _pos_join = " AND ".join(
                     [f"fa.{k} = tmp.{k}" for k in _supersede_dims]
                 )
                 session.sql(f"""
                     DELETE FROM {fact_adj_tbl_name} fa
                     WHERE fa.COBID = {cobid}
-                      AND fa.ADJUSTMENT_ID NOT IN ({_ids_str})
+                      AND fa.ADJUSTMENT_ID NOT IN ({dim_ids_str})
                       AND EXISTS (
                           SELECT 1 FROM {fact_adj_tbl_name}_TEMP tmp
                           WHERE {_pos_join}
                       )
                 """).collect()
 
-            # ── Delete old adjustments (current batch's own previous rows) ─
-            fact_adj_tbl.delete(
-                (fact_adj_tbl["COBID"] == df_adj_scale["COBID"]) &
-                (fact_adj_tbl["ADJUSTMENT_ID"] == df_adj_scale["ADJ_ID"]),
-                df_adj_scale
-            )
+            # ── Delete current batch's own previous rows (re-run scenario) ─
+            session.sql(f"""
+                DELETE FROM {fact_adj_tbl_name}
+                WHERE COBID = {cobid}
+                  AND ADJUSTMENT_ID IN ({dim_ids_str})
+            """).collect()
 
             # Delete from summary table
             if fact_adj_summary_name:
@@ -537,7 +576,7 @@ def main(session, process_type, adjustment_action, cobid):
                         ad.SOURCE_COBID
                     FROM {fact_adj_tbl_name} f
                     INNER JOIN {adj_base_tbl_name} ad
-                        ON f.ADJUSTMENT_ID = ad.ADJ_ID AND f.COBID = ad.COBID
+                        ON f.ADJUSTMENT_ID = ad.DIMENSION_ADJ_ID AND f.COBID = ad.COBID
                     WHERE f.COBID = {cobid}
                       AND ad.COBID <> ad.SOURCE_COBID
                 )
@@ -592,12 +631,12 @@ def main(session, process_type, adjustment_action, cobid):
                 """
                 session.sql(summary_insert).collect()
 
-            # ── Count rows inserted and update ADJ_HEADER.RECORD_COUNT ──
+            # ── Count rows inserted and update RECORD_COUNT ──────────────
             rows_count_row = session.sql(f"""
                 SELECT COUNT(*) AS CNT
                 FROM {fact_adj_tbl_name}
                 WHERE COBID = {cobid}
-                  AND ADJUSTMENT_ID IN ({adj_ids_str})
+                  AND ADJUSTMENT_ID IN ({dim_ids_str})
             """).collect()
             rows_count = rows_count_row[0]["CNT"] if rows_count_row else 0
             session.sql(f"""
@@ -605,48 +644,18 @@ def main(session, process_type, adjustment_action, cobid):
                 SET RECORD_COUNT = {rows_count}
                 WHERE ADJ_ID IN ({adj_ids_str})
             """).collect()
+            # Update RECORD_COUNT in DIMENSION.ADJUSTMENT now that count is known
+            if dim_adj_map:
+                session.sql(f"""
+                    UPDATE DIMENSION.ADJUSTMENT
+                    SET RECORD_COUNT = {rows_count}
+                    WHERE ADJUSTMENT_ID IN ({dim_ids_str})
+                """).collect()
             result["rows_inserted"] = rows_count
 
             # ── Update status ────────────────────────────────────────────
             update_header_status(session, df_adj_scale, cobid, "Processed")
             log_status_history(session, adj_ids, "Running", "Processed")
-
-            # ── Insert into DIMENSION.ADJUSTMENT and store back the generated ADJUSTMENT_ID ──
-            try:
-                session.sql(f"""
-                    INSERT INTO DIMENSION.ADJUSTMENT (
-                        COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, SOURCE_COBID,
-                        ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE, BOOK_CODE,
-                        TENOR_CODE, CURRENCY_CODE, CURVE_CODE, INSTRUMENT_CODE,
-                        MEASURE_TYPE_CODE, ADJUSTMENT_VALUE_IN_USD,
-                        CREATED_DATE, PROCESS_DATE, USERNAME, RUN_STATUS, REASON,
-                        MUREX_FAMILY, MUREX_GROUP, TRADE_TYPOLOGY, TRADE_CODE,
-                        SCALE_FACTOR, BATCH_REGION_AREA, SIMULATION_NAME, TRADER_CODE,
-                        VAR_COMPONENT_ID, VAR_SUB_COMPONENT_ID, SCENARIO_DATE_ID,
-                        GUARANTEED_ENTITY, STRATEGY, REGION_KEY,
-                        UNDERLYING_TENOR_CODE, PRODUCT_CATEGORY_ATTRIBUTES,
-                        ADJUSTMENT_OCCURRENCE, GLOBAL_REFERENCE, FILE_NAME,
-                        SIMULATION_SOURCE, DAY_TYPE, RECORD_COUNT
-                    )
-                    SELECT
-                        COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, SOURCE_COBID,
-                        ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE, BOOK_CODE,
-                        TENOR_CODE, CURRENCY_CODE, CURVE_CODE, INSTRUMENT_CODE,
-                        MEASURE_TYPE_CODE, ADJUSTMENT_VALUE_IN_USD,
-                        CREATED_DATE, CURRENT_TIMESTAMP(), USERNAME, 'Processed', REASON,
-                        MUREX_FAMILY, MUREX_GROUP, TRADE_TYPOLOGY, TRADE_CODE,
-                        SCALE_FACTOR, BATCH_REGION_AREA, SIMULATION_NAME, TRADER_CODE,
-                        VAR_COMPONENT_ID, VAR_SUB_COMPONENT_ID, SCENARIO_DATE_ID,
-                        GUARANTEED_ENTITY, STRATEGY, REGION_KEY,
-                        UNDERLYING_TENOR_CODE, PRODUCT_CATEGORY_ATTRIBUTES,
-                        ADJUSTMENT_OCCURRENCE, GLOBAL_REFERENCE, FILE_NAME,
-                        SIMULATION_SOURCE, DAY_TYPE, {rows_count}
-                    FROM ADJUSTMENT_APP.ADJ_HEADER
-                    WHERE ADJ_ID IN ({adj_ids_str})
-                """).collect()
-                store_dimension_adj_ids(session, adj_ids)
-            except Exception as dim_err:
-                print(f"Warning: could not insert into DIMENSION.ADJUSTMENT: {dim_err}")
 
             result["message"] = "Scale adjustments processed successfully"
 
