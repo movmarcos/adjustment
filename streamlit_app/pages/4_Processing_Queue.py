@@ -146,7 +146,7 @@ else:
             f'</div>'
             f'<div style="display:flex;justify-content:space-between;margin-top:4px;font-size:0.72rem;color:{P["grey_700"]}">'
             f'  <span>COB: {qi.get("COBID","?")} · {occurrence} · Submitted by: {qi.get("SUBMITTED_BY","?")}</span>'
-            f'  <span>Submitted: {submitted_at.strftime("%d %b %H:%M") if hasattr(submitted_at, "strftime") else str(submitted_at)}</span>'
+            f'  <span>Submitted: {submitted_at.strftime("%d %b %H:%M") if hasattr(submitted_at, "strftime") and str(submitted_at) != "NaT" else str(submitted_at)}</span>'
             f'</div>'
             f'</div>',
             unsafe_allow_html=True)

@@ -158,10 +158,10 @@ def render_adj_card(row):
 
         with col_meta:
             submitted_at = row.get("SUBMITTED_AT", "")
-            if hasattr(submitted_at, "strftime"):
+            if hasattr(submitted_at, "strftime") and submitted_at is not None and str(submitted_at) != "NaT":
                 submitted_at = submitted_at.strftime("%d %b %Y %H:%M")
             process_date = row.get("PROCESS_DATE", "")
-            if hasattr(process_date, "strftime"):
+            if hasattr(process_date, "strftime") and process_date is not None and str(process_date) != "NaT":
                 process_date = process_date.strftime("%d %b %Y %H:%M")
 
             meta_rows = [
