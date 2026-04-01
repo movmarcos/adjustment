@@ -21,6 +21,7 @@ EXECUTE AS CALLER
 AS
 $$
 import json
+import uuid
 from snowflake.snowpark.functions import col, lit, upper, max as sf_max
 from datetime import datetime
 
@@ -187,7 +188,7 @@ def main(session, p_adjustment):
       file_name                      str     Original CSV filename (Upload)
 
     Returns VARIANT:
-      { "adj_id": 200001, "status": "Pending", "message": "..." }
+      { "adj_id": "a1b2c3d4-...", "status": "Pending", "message": "..." }
     """
     try:
         adj = json.loads(p_adjustment) if isinstance(p_adjustment, str) else p_adjustment
@@ -257,8 +258,12 @@ def main(session, p_adjustment):
             blocked_by_adj_id = find_blocking_adj(session, process_type, cobid, dim_vals)
 
         # ── Build the INSERT ─────────────────────────────────────────────
+        # Generate a UUID for this adjustment — unambiguous vs DIMENSION.ADJUSTMENT.ADJUSTMENT_ID
+        adj_id = str(uuid.uuid4())
+
         # Map JSON keys → column names (only include non-null values)
         col_map = {
+            "ADJ_ID":                      adj_id,
             "COBID":                       cobid,
             "PROCESS_TYPE":                process_type,
             "ADJUSTMENT_TYPE":             adjustment_type,
@@ -322,21 +327,12 @@ def main(session, p_adjustment):
         """
         session.sql(insert_sql).collect()
 
-        # ── Get the ADJ_ID that was just created ─────────────────────────
-        safe_username = str(username).replace("'", "''")
-        adj_id_row = session.sql(
-            f"SELECT ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER "
-            f"WHERE USERNAME = '{safe_username}' AND COBID = {cobid} "
-            f"ORDER BY ADJ_ID DESC LIMIT 1"
-        ).collect()
-        adj_id = adj_id_row[0]["ADJ_ID"] if adj_id_row else None
-
         # ── Audit: status history ────────────────────────────────────────
         session.sql(f"""
             INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
                 (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
             VALUES
-                ({adj_id}, NULL, '{initial_status}', '{username}',
+                ('{adj_id}', NULL, '{initial_status}', '{username}',
                  'Submitted via Streamlit — {adjustment_type} / {process_type}')
         """).collect()
 

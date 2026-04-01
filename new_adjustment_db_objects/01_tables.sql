@@ -31,7 +31,7 @@ USE SCHEMA ADJUSTMENT_APP;
 
 CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_HEADER (
     -- Identity
-    ADJ_ID                      NUMBER(38,0) NOT NULL AUTOINCREMENT START 200000 INCREMENT 1 ORDER,
+    ADJ_ID                      VARCHAR(36)  NOT NULL DEFAULT UUID_STRING(),
     COBID                       NUMBER(38,0) NOT NULL,
 
     -- Scope & type
@@ -76,6 +76,9 @@ CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_HEADER (
     -- Business context
     REASON                      VARCHAR(1000) COLLATE 'en-ci',
 
+    -- Cross-reference to dimension table
+    DIMENSION_ADJ_ID            NUMBER(38,0) DEFAULT NULL,       -- DIMENSION.ADJUSTMENT.ADJUSTMENT_ID set after processing
+
     -- Workflow status
     RUN_STATUS                  VARCHAR(30)  COLLATE 'en-ci' DEFAULT 'Pending',
     IS_POSITIVE_ADJUSTMENT      BOOLEAN      DEFAULT TRUE,       -- FALSE = superseded / inactive
@@ -97,6 +100,7 @@ CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_HEADER (
     GLOBAL_REFERENCE            VARCHAR(50)  COLLATE 'en-ci',    -- Unique ref for dedup / linking
     FILE_NAME                   VARCHAR(500) COLLATE 'en-ci',    -- For CSV uploads via Streamlit
     APPROVAL_ID                 NUMBER(38,0),                     -- Optional: set when requires_approval = true
+    BLOCKED_BY_ADJ_ID           VARCHAR(36)  DEFAULT NULL,        -- FK to ADJ_HEADER.ADJ_ID; NULL = eligible to run
 
     CONSTRAINT PK_ADJ_HEADER PRIMARY KEY (ADJ_ID)
 )
@@ -116,7 +120,7 @@ COMMENT = 'Single point of entry for ALL adjustments. Streamlit writes here via 
 
 CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_LINE_ITEM (
     LINE_ID                     NUMBER(38,0) NOT NULL AUTOINCREMENT,
-    ADJ_ID                      NUMBER(38,0) NOT NULL,  -- FK to ADJ_HEADER
+    ADJ_ID                      VARCHAR(36)  NOT NULL,  -- FK to ADJ_HEADER
 
     -- Dimension codes (matched to fact table columns for joining)
     COBID                       NUMBER(38,0),
@@ -167,7 +171,7 @@ COMMENT = 'Detail rows for Direct/Upload adjustments. Each row = one dimension c
 
 CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_STATUS_HISTORY (
     HISTORY_ID                  NUMBER(38,0) NOT NULL AUTOINCREMENT,
-    ADJ_ID                      NUMBER(38,0) NOT NULL,
+    ADJ_ID                      VARCHAR(36)  NOT NULL,  -- FK to ADJ_HEADER
     OLD_STATUS                  VARCHAR(30),
     NEW_STATUS                  VARCHAR(30)  NOT NULL,
     CHANGED_BY                  VARCHAR(50)  NOT NULL,
@@ -360,16 +364,33 @@ COMMENT = 'COB sign-off status per scope. SIGN_OFF_STATUS = SIGNED_OFF means no 
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- MIGRATION: Sequential pipeline additions
--- Run once after initial table creation.
+-- MIGRATION: Apply to existing tables (idempotent — safe to re-run).
 -- ═══════════════════════════════════════════════════════════════════════════
 
--- Blocking column: NULL = eligible; populated = waiting for that ADJ_ID to finish
+-- 1. BLOCKED_BY_ADJ_ID — now VARCHAR(36) to match UUID-based ADJ_ID.
+--    If the column already exists as NUMBER, drop and re-add (or recreate the table).
 ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER
-    ADD COLUMN IF NOT EXISTS BLOCKED_BY_ADJ_ID NUMBER(38,0) DEFAULT NULL;
+    ADD COLUMN IF NOT EXISTS BLOCKED_BY_ADJ_ID VARCHAR(36) DEFAULT NULL;
 
--- Change tracking required for streams on views derived from this table
+-- 2. DIMENSION_ADJ_ID — stores DIMENSION.ADJUSTMENT.ADJUSTMENT_ID after processing.
+ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER
+    ADD COLUMN IF NOT EXISTS DIMENSION_ADJ_ID NUMBER(38,0) DEFAULT NULL;
+
+-- Change tracking (kept for potential future stream use, harmless otherwise)
 ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER SET CHANGE_TRACKING = TRUE;
+
+-- ─── FACT TABLE NOTE ────────────────────────────────────────────────────────
+-- FACT.*_ADJUSTMENT tables store ADJUSTMENT_ID which is sourced from ADJ_HEADER.ADJ_ID.
+-- Those tables must also have their ADJUSTMENT_ID column changed to VARCHAR(36).
+-- Run the following for each adjustment fact table (requires ALTER privilege on FACT schema):
+--
+--   ALTER TABLE FACT.VAR_MEASURES_ADJUSTMENT       MODIFY COLUMN ADJUSTMENT_ID VARCHAR(36);
+--   ALTER TABLE FACT.STRESS_MEASURES_ADJUSTMENT    MODIFY COLUMN ADJUSTMENT_ID VARCHAR(36);
+--   ALTER TABLE FACT.SENSITIVITY_MEASURES_ADJUSTMENT MODIFY COLUMN ADJUSTMENT_ID VARCHAR(36);
+--   ALTER TABLE FACT.ES_MEASURES_ADJUSTMENT        MODIFY COLUMN ADJUSTMENT_ID VARCHAR(36);
+--   ALTER TABLE FACT.FRTBSA_SENSITIVITY_MEASURES_ADJUSTMENT MODIFY COLUMN ADJUSTMENT_ID VARCHAR(36);
+--   ALTER TABLE FACT.FRTBSA_DRC_MEASURES_ADJUSTMENT         MODIFY COLUMN ADJUSTMENT_ID VARCHAR(36);
+--   ALTER TABLE FACT.FRTBSA_RRAO_MEASURES_ADJUSTMENT        MODIFY COLUMN ADJUSTMENT_ID VARCHAR(36);
 
 
 -- ═══════════════════════════════════════════════════════════════════════════

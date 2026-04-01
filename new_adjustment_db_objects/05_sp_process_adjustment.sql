@@ -88,7 +88,7 @@ def log_status_history(session, adj_ids, old_status, new_status, changed_by="SYS
     if not adj_ids:
         return
     values = ", ".join([
-        f"({aid}, '{old_status}', '{new_status}', '{changed_by}', CURRENT_TIMESTAMP(), 'Processed by SP_PROCESS_ADJUSTMENT')"
+        f"('{aid}', '{old_status}', '{new_status}', '{changed_by}', CURRENT_TIMESTAMP(), 'Processed by SP_PROCESS_ADJUSTMENT')"
         for aid in adj_ids
     ])
     session.sql(f"""
@@ -96,6 +96,38 @@ def log_status_history(session, adj_ids, old_status, new_status, changed_by="SYS
             (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, CHANGED_AT, COMMENT)
         VALUES {values}
     """).collect()
+
+
+def store_dimension_adj_ids(session, adj_ids):
+    """
+    After INSERT INTO DIMENSION.ADJUSTMENT, look up the generated ADJUSTMENT_ID
+    for each of our adj_ids and store it back in ADJ_HEADER.DIMENSION_ADJ_ID.
+
+    Match on COBID + PROCESS_TYPE + USERNAME + CREATED_DATE — the combination
+    that was inserted verbatim from ADJ_HEADER into DIMENSION.ADJUSTMENT.
+    """
+    for aid in adj_ids:
+        try:
+            row = session.sql(f"""
+                SELECT da.ADJUSTMENT_ID
+                FROM DIMENSION.ADJUSTMENT da
+                INNER JOIN ADJUSTMENT_APP.ADJ_HEADER ah
+                    ON  da.COBID        = ah.COBID
+                    AND da.PROCESS_TYPE = ah.PROCESS_TYPE
+                    AND da.USERNAME     = ah.USERNAME
+                    AND da.CREATED_DATE = ah.CREATED_DATE
+                WHERE ah.ADJ_ID = '{aid}'
+                ORDER BY da.ADJUSTMENT_ID DESC
+                LIMIT 1
+            """).collect()
+            if row:
+                session.sql(f"""
+                    UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                    SET DIMENSION_ADJ_ID = {row[0]['ADJUSTMENT_ID']}
+                    WHERE ADJ_ID = '{aid}'
+                """).collect()
+        except Exception as e:
+            print(f"Warning: could not store DIMENSION_ADJ_ID for {aid}: {e}")
 
 
 def surrogate_key(list_key, key_name):
@@ -193,7 +225,7 @@ def main(session, process_type, adjustment_action, cobid):
 
             # Collect ADJ_IDs for line-item lookup
             adj_ids = [row["ADJ_ID"] for row in df_adj_direct.select("ADJ_ID").collect()]
-            adj_ids_str = ", ".join(str(a) for a in adj_ids)
+            adj_ids_str = ", ".join(f"'{a}'" for a in adj_ids)
 
             # Read line items for these adjustments
             df_line_items = session.table("ADJUSTMENT_APP.ADJ_LINE_ITEM").filter(
@@ -232,14 +264,13 @@ def main(session, process_type, adjustment_action, cobid):
             log_status_history(session, adj_ids, "Running", "Processed")
 
             rows_count = len(df_pd_valid)
-            adj_ids_str = ', '.join(str(a) for a in adj_ids)
             session.sql(f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER
                 SET RECORD_COUNT = {rows_count}
                 WHERE ADJ_ID IN ({adj_ids_str})
             """).collect()
 
-            # Insert into DIMENSION.ADJUSTMENT
+            # Insert into DIMENSION.ADJUSTMENT and store back the generated ADJUSTMENT_ID
             try:
                 session.sql(f"""
                     INSERT INTO DIMENSION.ADJUSTMENT (
@@ -272,6 +303,7 @@ def main(session, process_type, adjustment_action, cobid):
                     FROM ADJUSTMENT_APP.ADJ_HEADER
                     WHERE ADJ_ID IN ({adj_ids_str})
                 """).collect()
+                store_dimension_adj_ids(session, adj_ids)
             except Exception as dim_err:
                 print(f"Warning: could not insert into DIMENSION.ADJUSTMENT: {dim_err}")
 
@@ -292,7 +324,8 @@ def main(session, process_type, adjustment_action, cobid):
                 result["message"] = f'No Running Scale adjustments found'
                 return json.dumps(result)
 
-            adj_ids = [row["ADJ_ID"] for row in df_adj_scale.select("ADJ_ID").collect()]
+            adj_ids     = [row["ADJ_ID"] for row in df_adj_scale.select("ADJ_ID").collect()]
+            adj_ids_str = ", ".join(f"'{a}'" for a in adj_ids)
 
             # ── Join columns (fact ∩ adj, minus exclusions) ──────────────
             exclude_join = ['COBID', 'IS_OFFICIAL_SOURCE', 'STRATEGY',
@@ -452,7 +485,7 @@ def main(session, process_type, adjustment_action, cobid):
             # any position it touches, so deleting older rows is always correct.
             _supersede_dims = [k for k in pk_parts if k.upper() != 'COBID']
             if _supersede_dims:
-                _ids_str = ', '.join(str(a) for a in adj_ids)
+                _ids_str = ', '.join(f"'{a}'" for a in adj_ids)
                 _pos_join = " AND ".join(
                     [f"fa.{k} = tmp.{k}" for k in _supersede_dims]
                 )
@@ -560,7 +593,6 @@ def main(session, process_type, adjustment_action, cobid):
                 session.sql(summary_insert).collect()
 
             # ── Count rows inserted and update ADJ_HEADER.RECORD_COUNT ──
-            adj_ids_str = ', '.join(str(a) for a in adj_ids)
             rows_count_row = session.sql(f"""
                 SELECT COUNT(*) AS CNT
                 FROM {fact_adj_tbl_name}
@@ -579,7 +611,7 @@ def main(session, process_type, adjustment_action, cobid):
             update_header_status(session, df_adj_scale, cobid, "Processed")
             log_status_history(session, adj_ids, "Running", "Processed")
 
-            # ── Insert into DIMENSION.ADJUSTMENT ─────────────────────────
+            # ── Insert into DIMENSION.ADJUSTMENT and store back the generated ADJUSTMENT_ID ──
             try:
                 session.sql(f"""
                     INSERT INTO DIMENSION.ADJUSTMENT (
@@ -612,6 +644,7 @@ def main(session, process_type, adjustment_action, cobid):
                     FROM ADJUSTMENT_APP.ADJ_HEADER
                     WHERE ADJ_ID IN ({adj_ids_str})
                 """).collect()
+                store_dimension_adj_ids(session, adj_ids)
             except Exception as dim_err:
                 print(f"Warning: could not insert into DIMENSION.ADJUSTMENT: {dim_err}")
 

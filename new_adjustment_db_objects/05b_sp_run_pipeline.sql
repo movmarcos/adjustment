@@ -156,13 +156,13 @@ def _block_overlapping(session, running_row, pipeline_in):
 
     session.sql(f"""
         UPDATE ADJUSTMENT_APP.ADJ_HEADER p
-        SET BLOCKED_BY_ADJ_ID = {adj_id}
+        SET BLOCKED_BY_ADJ_ID = '{adj_id}'
         WHERE p.COBID = {cobid}
           AND p.PROCESS_TYPE IN ({pipeline_in})
           AND p.RUN_STATUS = 'Pending'
           AND p.BLOCKED_BY_ADJ_ID IS NULL
           AND p.IS_DELETED = FALSE
-          AND p.ADJ_ID != {adj_id}
+          AND p.ADJ_ID != '{adj_id}'
           AND {where_dims}
     """).collect()
 
@@ -178,11 +178,11 @@ def _unblock_resolved(session, pipeline_in, previously_running):
       2. Find Pending adjs blocked by any of those → try to reassign to a
          still-Running overlapping adj, or clear to NULL if none.
     """
-    candidate_ids = [str(r["ADJ_ID"]) for r in previously_running]
+    candidate_ids = [r["ADJ_ID"] for r in previously_running]
     if not candidate_ids:
         return
 
-    candidate_in = ", ".join(candidate_ids)
+    candidate_in = ", ".join(f"'{c}'" for c in candidate_ids)
 
     # Re-query actual statuses — some may still be Running if SP_PROCESS_ADJUSTMENT
     # raised an exception before updating status. Only treat truly finished rows as released.
@@ -192,11 +192,11 @@ def _unblock_resolved(session, pipeline_in, previously_running):
           AND RUN_STATUS IN ('Processed', 'Failed')
     """).collect()
 
-    finished_ids = [str(r["ADJ_ID"]) for r in actually_finished]
+    finished_ids = [r["ADJ_ID"] for r in actually_finished]
     if not finished_ids:
         return
 
-    finished_in = ", ".join(finished_ids)
+    finished_in = ", ".join(f"'{f}'" for f in finished_ids)
 
     # Find all Pending adjustments blocked by a now-finished adj
     blocked = session.sql(f"""
@@ -242,14 +242,14 @@ def _unblock_resolved(session, pipeline_in, previously_running):
             new_blocker = other_running[0]["ADJ_ID"]
             session.sql(f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                SET BLOCKED_BY_ADJ_ID = {new_blocker}
-                WHERE ADJ_ID = {b_adj_id}
+                SET BLOCKED_BY_ADJ_ID = '{new_blocker}'
+                WHERE ADJ_ID = '{b_adj_id}'
             """).collect()
         else:
             session.sql(f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER
                 SET BLOCKED_BY_ADJ_ID = NULL
-                WHERE ADJ_ID = {b_adj_id}
+                WHERE ADJ_ID = '{b_adj_id}'
             """).collect()
 $$;
 
