@@ -375,11 +375,11 @@ ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER ADD COLUMN BLOCKED_BY_ADJ_ID VARCHAR(36) D
 
 -- 2. DIMENSION_ADJ_ID — stores DIMENSION.ADJUSTMENT.ADJUSTMENT_ID after processing.
 --    ADD COLUMN IF NOT EXISTS is safe here; it is a new column with no type conflict.
-ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER
-    ADD COLUMN IF NOT EXISTS DIMENSION_ADJ_ID NUMBER(38,0) DEFAULT NULL;
+ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER ADD COLUMN IF NOT EXISTS DIMENSION_ADJ_ID NUMBER(38,0) DEFAULT NULL;
 
--- Change tracking (kept for potential future stream use, harmless otherwise)
-ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER SET CHANGE_TRACKING = TRUE;
+-- NOTE: SET CHANGE_TRACKING = TRUE was previously required for stream guards on tasks.
+-- Streams have been removed (tasks use pure time-based polling). This statement requires
+-- OWNERSHIP privilege and is no longer needed. Removed from the automated migration.
 
 -- ─── NOTE: FACT.*_ADJUSTMENT.ADJUSTMENT_ID ──────────────────────────────────
 -- FACT tables store ADJUSTMENT_ID sourced from DIMENSION.ADJUSTMENT.ADJUSTMENT_ID
