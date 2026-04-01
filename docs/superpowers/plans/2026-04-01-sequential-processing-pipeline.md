@@ -1303,6 +1303,174 @@ git commit -m "docs: update unified_adjustment_design.md with 4-pipeline archite
 
 ---
 
+## Task 13: New Adjustment page — update success screen and blocked message
+
+**Files:**
+- Modify: `streamlit_app/pages/1_New_Adjustment.py`
+
+Two changes: (1) the Step 3 success screen should tell the user the adjustment is **queued** not immediately processed; (2) when the SP returns a `BLOCKED_BY_ADJ_ID`, show it clearly.
+
+- [ ] **Step 1: Update Step 3 success screen**
+
+Find the Step 3 block (around line 759). The `msg` variable comes from the SP response. Update the success subtitle line:
+
+```python
+# Find:
+f'<div style="font-size:0.9rem;color:#388E3C;margin-top:0.4rem">{msg}</div>'
+f'<div style="font-size:0.82rem;color:{P["grey_700"]};margin-top:0.8rem">'
+# Replace with:
+f'<div style="font-size:0.9rem;color:#388E3C;margin-top:0.4rem">{msg}</div>'
+f'<div style="font-size:0.82rem;color:{P["info"]};margin-top:0.5rem">'
+f'⚡ Your adjustment is queued and will be processed automatically by the scope pipeline.</div>'
+f'<div style="font-size:0.82rem;color:{P["grey_700"]};margin-top:0.8rem">'
+```
+
+- [ ] **Step 2: Show blocked-by indicator on success**
+
+Just after the `msg` lines in the Step 3 block, add a conditional warning if the returned `adj_id` is blocked:
+
+```python
+result = wiz.get("result") or {}
+msg    = result.get("message", "Adjustment created successfully")
+blocked_msg = ""
+if "Blocked by ADJ #" in msg:
+    blocked_msg = msg  # already contains "Blocked by ADJ #<id>" from SP
+
+# In the HTML block, add after the queue message line:
+# (add inside the same mcard div, before the closing </div>)
++ (f'<div style="font-size:0.8rem;color:{P["warning"]};margin-top:0.3rem">'
+   f'⏳ {blocked_msg}</div>' if blocked_msg else '')
+```
+
+- [ ] **Step 3: Update error check — keep as-is**
+
+The line `wiz["step"] = 3 if result.get("status") != "Error" else 2` uses `"Error"` as the SP response status (not the DB `RUN_STATUS`). This is correct and should **not** be changed — the SP still returns `{"status": "Error"}` for submission failures.
+
+- [ ] **Step 4: Verify**
+
+Submit a new adjustment in the UI. The Step 3 screen should show:
+- The green success card
+- The "queued and will be processed automatically" blue note
+- `BLOCKED_BY_ADJ_ID` warning if applicable
+
+```sql
+-- Confirm the submitted adj is Pending (not Processed immediately)
+SELECT ADJ_ID, RUN_STATUS, BLOCKED_BY_ADJ_ID
+FROM ADJUSTMENT_APP.ADJ_HEADER
+ORDER BY ADJ_ID DESC LIMIT 1;
+-- Expected: RUN_STATUS = 'Pending'
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add streamlit_app/pages/1_New_Adjustment.py
+git commit -m "feat: update New Adjustment success screen — queued message and blocked indicator"
+```
+
+---
+
+## Task 14: Documentation page — update architecture, status flow, and pipeline description
+
+**Files:**
+- Modify: `streamlit_app/pages/6_Documentation.py`
+
+Four sections need updating: Architecture tab (single stream → 4 pipelines), Workflow & Status tab (old statuses → new), Processing Engine tab (old task description → new), and the architecture diagram.
+
+- [ ] **Step 1: Update Architecture tab — pipeline diagram text**
+
+Find the STREAM box description (around line 199):
+```python
+# Replace:
+f'<div style="font-weight:700;font-size:0.82rem;color:#1976D2">STREAM</div>'
+f'<div style="font-size:0.7rem;color:{P["grey_700"]}">CDC Capture</div>'
+# With:
+f'<div style="font-weight:700;font-size:0.82rem;color:#1976D2">4 STREAMS</div>'
+f'<div style="font-size:0.7rem;color:{P["grey_700"]}">One per scope</div>'
+```
+
+Find the TASK box description (around line 211):
+```python
+# Replace:
+f'<div style="font-weight:700;font-size:0.82rem;color:{P["purple"]}">TASK</div>'
+f'<div style="font-size:0.7rem;color:{P["grey_700"]}">Every 60 seconds</div>'
+# With:
+f'<div style="font-weight:700;font-size:0.82rem;color:{P["purple"]}">4 TASKS</div>'
+f'<div style="font-size:0.7rem;color:{P["grey_700"]}">Independent per scope</div>'
+```
+
+- [ ] **Step 2: Find and update the Workflow & Status tab status table**
+
+Search for the status table in the Workflow tab (look for "Pending Approval" or "Error" status descriptions). Replace any status table or list with:
+
+```python
+st.markdown("""
+| Status | Meaning |
+|--------|---------|
+| `Pending` | Submitted, waiting to be claimed by the scope task |
+| `Pending Approval` | Awaiting approver action before entering the queue |
+| `Approved` | Approved, enters the processing queue as Pending |
+| `Running` | Claimed by the scope task — actively being processed |
+| `Processed` | Successfully written to the fact adjustment table |
+| `Failed` | Processing error — check ERRORMESSAGE on the adjustment |
+| `Rejected` | Rejected by an approver |
+| `Rejected - SignedOff` | Submitted after COB was signed off |
+""")
+```
+
+- [ ] **Step 3: Find and update the Processing Engine tab**
+
+Search for the Processing Engine tab content (look for `tab_processing`). Replace or update the task/stream description to reflect 4 independent pipelines:
+
+```python
+st.markdown("""
+### 4 Independent Scope Pipelines
+
+Each Data Scope (VaR, Stress, FRTB, Sensitivity) has its own independent pipeline:
+
+```
+ADJ_HEADER → VW_QUEUE_<SCOPE> → STREAM_QUEUE_<SCOPE> → TASK_PROCESS_<SCOPE>
+                                                              ↓
+                                                    SP_RUN_PIPELINE
+                                              (claim → block → process → unblock)
+```
+
+**Why independent?** A 15-minute FRTB adjustment has zero impact on VaR, Stress, or Sensitivity teams. Each scope runs on its own Snowflake task and warehouse.
+
+### Blocking (BLOCKED_BY_ADJ_ID)
+
+Non-overlapping adjustments within the same scope run concurrently. Overlapping adjustments are serialised:
+
+- **At submit time**: `SP_SUBMIT_ADJUSTMENT` checks for Running adjustments that overlap dimensionally. If found, `BLOCKED_BY_ADJ_ID` is set on the new row — it stays invisible in the queue view until the blocker finishes.
+- **At task time**: `SP_RUN_PIPELINE` blocks any remaining Pending adjustments that overlap with the newly claimed Running ones.
+- **At completion**: `BLOCKED_BY_ADJ_ID` is cleared — the row reappears in the queue view, the stream fires, the task wakes.
+
+### FRTBALL
+
+`FRTBALL` is a fan-out tag: an adjustment submitted as `FRTBALL` is applied to **all** FRTB sub-types (FRTB, FRTBDRC, FRTBRRAO). It has no dedicated settings row — it borrows the sub-type config at runtime.
+
+### Deduplication
+
+`SP_PROCESS_ADJUSTMENT` uses `DENSE_RANK() OVER (PARTITION BY <FACT_TABLE_PK> ORDER BY CREATED_DATE DESC)` to keep only the most recent delta per source fact row. `FACT_TABLE_PK` is configured per scope in `ADJUSTMENTS_SETTINGS`.
+""")
+```
+
+- [ ] **Step 4: Verify**
+
+Open the Documentation page in Streamlit. Check:
+- Architecture tab: "4 STREAMS / One per scope" and "4 TASKS / Independent per scope"
+- Workflow tab: status table includes `Running` and `Failed`, no `Error` or `Processing`
+- Processing Engine tab: shows the 4-pipeline architecture and blocking description
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add streamlit_app/pages/6_Documentation.py
+git commit -m "docs: update Documentation page — 4-pipeline architecture, new statuses, blocking description"
+```
+
+---
+
 ## Self-Review Notes
 
 **Spec coverage:**
@@ -1320,6 +1488,8 @@ git commit -m "docs: update unified_adjustment_design.md with 4-pipeline archite
 - ✅ app.py KPI cards — Task 10
 - ✅ Processing Queue page — Task 11
 - ✅ Documentation — Task 12
+- ✅ New Adjustment success screen — Task 13
+- ✅ Documentation page (6_Documentation.py) — Task 14
 - ✅ FRTBALL fan-out handled in SP_RUN_PIPELINE (skip in direct-call loop)
 - ✅ Deduplication via DENSE_RANK already in SP_PROCESS_ADJUSTMENT (unchanged)
 
