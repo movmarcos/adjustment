@@ -193,7 +193,7 @@ def render_adj_card(row):
             history = run_query(f"""
                 SELECT NEW_STATUS, OLD_STATUS, CHANGED_BY, CHANGED_AT, COMMENT
                 FROM ADJUSTMENT_APP.ADJ_STATUS_HISTORY
-                WHERE ADJ_ID = {adj_id}
+                WHERE ADJ_ID = '{adj_id}'
                 ORDER BY CHANGED_AT DESC
             """)
             # Convert Row objects to dicts
@@ -212,26 +212,35 @@ def render_adj_card(row):
                 if st.button("🗑️ Delete", key=f"del_{adj_id}", use_container_width=True):
                     try:
                         process_type = str(row.get("PROCESS_TYPE", ""))
-                        # Soft-delete header and mark status as Deleted
+                        # Get DIMENSION_ADJ_ID — used for DIMENSION.ADJUSTMENT and FACT table deletes
+                        dim_row = run_query(f"""
+                            SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
+                            WHERE ADJ_ID = '{adj_id}' LIMIT 1
+                        """)
+                        dim_adj_id = (dim_row[0]["DIMENSION_ADJ_ID"]
+                                      if dim_row and dim_row[0]["DIMENSION_ADJ_ID"] else None)
+                        # Soft-delete header
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
                             SET IS_DELETED = TRUE,
                                 RUN_STATUS = 'Deleted'
-                            WHERE ADJ_ID = {adj_id}
+                            WHERE ADJ_ID = '{adj_id}'
                         """)
-                        # Soft-delete in DIMENSION.ADJUSTMENT
-                        try:
-                            run_query(f"""
-                                UPDATE DIMENSION.ADJUSTMENT
-                                SET IS_DELETED = TRUE,
-                                    DELETED_BY = '{user}',
-                                    DELETED_DATE = CURRENT_TIMESTAMP()
-                                WHERE ADJUSTMENT_ID = {adj_id}
-                            """)
-                        except Exception:
-                            pass
-                        # Remove rows from fact adjustment table AND summary table
-                        if process_type:
+                        # Soft-delete in DIMENSION.ADJUSTMENT (uses the dimension table's own ID)
+                        if dim_adj_id:
+                            try:
+                                run_query(f"""
+                                    UPDATE DIMENSION.ADJUSTMENT
+                                    SET IS_DELETED = TRUE,
+                                        RUN_STATUS  = 'Deleted',
+                                        DELETED_BY  = '{user}',
+                                        DELETED_DATE = CURRENT_TIMESTAMP()
+                                    WHERE ADJUSTMENT_ID = {dim_adj_id}
+                                """)
+                            except Exception:
+                                pass
+                        # Remove rows from fact adjustment and summary tables
+                        if process_type and dim_adj_id:
                             try:
                                 settings = run_query(f"""
                                     SELECT ADJUSTMENTS_TABLE, ADJUSTMENTS_SUMMARY_TABLE
@@ -243,12 +252,12 @@ def render_adj_card(row):
                                     if settings[0]["ADJUSTMENTS_TABLE"]:
                                         run_query(f"""
                                             DELETE FROM {settings[0]["ADJUSTMENTS_TABLE"]}
-                                            WHERE ADJUSTMENT_ID = {adj_id}
+                                            WHERE ADJUSTMENT_ID = {dim_adj_id}
                                         """)
                                     if settings[0]["ADJUSTMENTS_SUMMARY_TABLE"]:
                                         run_query(f"""
                                             DELETE FROM {settings[0]["ADJUSTMENTS_SUMMARY_TABLE"]}
-                                            WHERE ADJUSTMENT_ID = {adj_id}
+                                            WHERE ADJUSTMENT_ID = {dim_adj_id}
                                         """)
                             except Exception:
                                 pass
@@ -262,12 +271,12 @@ def render_adj_card(row):
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
                             SET RUN_STATUS = 'Pending Approval'
-                            WHERE ADJ_ID = {adj_id}
+                            WHERE ADJ_ID = '{adj_id}'
                         """)
                         run_query(f"""
                             INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
                                 (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
-                            VALUES ({adj_id}, 'Pending', 'Pending Approval',
+                            VALUES ('{adj_id}', 'Pending', 'Pending Approval',
                                     '{user}', 'Submitted for approval')
                         """)
                         st.success("Submitted for approval.")
@@ -282,12 +291,12 @@ def render_adj_card(row):
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
                             SET RUN_STATUS = 'Pending'
-                            WHERE ADJ_ID = {adj_id}
+                            WHERE ADJ_ID = '{adj_id}'
                         """)
                         run_query(f"""
                             INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
                                 (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
-                            VALUES ({adj_id}, 'Pending Approval', 'Pending',
+                            VALUES ('{adj_id}', 'Pending Approval', 'Pending',
                                     '{user}', 'Recalled by submitter')
                         """)
                         st.success("Recalled to Pending.")
@@ -303,12 +312,12 @@ def render_adj_card(row):
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
                             SET RUN_STATUS = 'Pending',
                                 ERRORMESSAGE = NULL
-                            WHERE ADJ_ID = {adj_id}
+                            WHERE ADJ_ID = '{adj_id}'
                         """)
                         run_query(f"""
                             INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
                                 (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
-                            VALUES ({adj_id}, 'Failed', 'Pending',
+                            VALUES ('{adj_id}', 'Failed', 'Pending',
                                     '{user}', 'Retrying after failure')
                         """)
                         st.success("Queued for retry.")

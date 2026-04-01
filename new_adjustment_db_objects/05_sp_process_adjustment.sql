@@ -130,7 +130,7 @@ def insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str):
             ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE, BOOK_CODE,
             TENOR_CODE, CURRENCY_CODE, CURVE_CODE, INSTRUMENT_CODE,
             MEASURE_TYPE_CODE, ADJUSTMENT_VALUE_IN_USD,
-            CREATED_DATE, CURRENT_TIMESTAMP(), USERNAME, 'Processed', REASON,
+            CREATED_DATE, CURRENT_TIMESTAMP(), USERNAME, 'Running', REASON,
             MUREX_FAMILY, MUREX_GROUP, TRADE_TYPOLOGY, TRADE_CODE,
             SCALE_FACTOR, BATCH_REGION_AREA, SIMULATION_NAME, TRADER_CODE,
             VAR_COMPONENT_ID, VAR_SUB_COMPONENT_ID, SCENARIO_DATE_ID,
@@ -195,6 +195,7 @@ def main(session, process_type, adjustment_action, cobid):
       7. Update ADJ_HEADER status; log to ADJ_STATUS_HISTORY
     """
     adj_ids = []
+    dim_adj_map = {}
     try:
         result = {
             "process_type": process_type,
@@ -326,11 +327,12 @@ def main(session, process_type, adjustment_action, cobid):
                 SET RECORD_COUNT = {rows_count}
                 WHERE ADJ_ID IN ({adj_ids_str})
             """).collect()
-            # Update RECORD_COUNT in DIMENSION.ADJUSTMENT now that count is known
+            # Update RECORD_COUNT + RUN_STATUS in DIMENSION.ADJUSTMENT
             if dim_adj_map:
                 session.sql(f"""
                     UPDATE DIMENSION.ADJUSTMENT
-                    SET RECORD_COUNT = {rows_count}
+                    SET RECORD_COUNT = {rows_count},
+                        RUN_STATUS   = 'Processed'
                     WHERE ADJUSTMENT_ID IN ({dim_ids_str})
                 """).collect()
 
@@ -644,11 +646,12 @@ def main(session, process_type, adjustment_action, cobid):
                 SET RECORD_COUNT = {rows_count}
                 WHERE ADJ_ID IN ({adj_ids_str})
             """).collect()
-            # Update RECORD_COUNT in DIMENSION.ADJUSTMENT now that count is known
+            # Update RECORD_COUNT + RUN_STATUS in DIMENSION.ADJUSTMENT
             if dim_adj_map:
                 session.sql(f"""
                     UPDATE DIMENSION.ADJUSTMENT
-                    SET RECORD_COUNT = {rows_count}
+                    SET RECORD_COUNT = {rows_count},
+                        RUN_STATUS   = 'Processed'
                     WHERE ADJUSTMENT_ID IN ({dim_ids_str})
                 """).collect()
             result["rows_inserted"] = rows_count
@@ -677,6 +680,13 @@ def main(session, process_type, adjustment_action, cobid):
             update_header_status(session, df_adj_err, cobid, "Failed", error_msg)
             if adj_ids:
                 log_status_history(session, adj_ids, "Running", "Failed")
+            if dim_adj_map:
+                _fail_ids = ', '.join(str(v) for v in dim_adj_map.values())
+                session.sql(f"""
+                    UPDATE DIMENSION.ADJUSTMENT
+                    SET RUN_STATUS = 'Failed'
+                    WHERE ADJUSTMENT_ID IN ({_fail_ids})
+                """).collect()
         except:
             pass
 

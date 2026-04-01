@@ -249,13 +249,13 @@ else:
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
                             SET RUN_STATUS = 'Approved'
-                            WHERE ADJ_ID = {adj_id}
+                            WHERE ADJ_ID = '{adj_id}'
                               AND RUN_STATUS = 'Pending Approval'
                         """)
                         run_query(f"""
                             INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
                                 (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
-                            VALUES ({adj_id}, 'Pending Approval', 'Approved',
+                            VALUES ('{adj_id}', 'Pending Approval', 'Approved',
                                     '{user}', 'Approved by {user}')
                         """)
                         st.success(f"ADJ #{adj_id} approved!")
@@ -276,13 +276,13 @@ else:
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
                             SET RUN_STATUS = 'Rejected'
-                            WHERE ADJ_ID = {adj_id}
+                            WHERE ADJ_ID = '{adj_id}'
                               AND RUN_STATUS = 'Pending Approval'
                         """)
                         run_query(f"""
                             INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
                                 (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
-                            VALUES ({adj_id}, 'Pending Approval', 'Rejected',
+                            VALUES ('{adj_id}', 'Pending Approval', 'Rejected',
                                     '{user}', '{comment}')
                         """)
                         st.success(f"ADJ #{adj_id} rejected.")
