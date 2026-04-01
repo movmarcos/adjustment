@@ -363,29 +363,6 @@ CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS (
 COMMENT = 'COB sign-off status per scope. SIGN_OFF_STATUS = SIGNED_OFF means no new adjustments allowed. Managed via Admin page.';
 
 
--- ═══════════════════════════════════════════════════════════════════════════
--- MIGRATION: Apply to existing tables (idempotent — safe to re-run).
--- ═══════════════════════════════════════════════════════════════════════════
-
--- 1. BLOCKED_BY_ADJ_ID — change to VARCHAR(36) to match UUID-based ADJ_ID.
---    ADD COLUMN IF NOT EXISTS is insufficient when the column already exists as a
---    different type; DROP + ADD handles both the "column missing" and "wrong type" cases.
-ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER DROP COLUMN IF EXISTS BLOCKED_BY_ADJ_ID;
-ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER ADD COLUMN BLOCKED_BY_ADJ_ID VARCHAR(36) DEFAULT NULL;
-
--- 2. DIMENSION_ADJ_ID — stores DIMENSION.ADJUSTMENT.ADJUSTMENT_ID after processing.
---    ADD COLUMN IF NOT EXISTS is safe here; it is a new column with no type conflict.
-ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER ADD COLUMN IF NOT EXISTS DIMENSION_ADJ_ID NUMBER(38,0) DEFAULT NULL;
-
--- NOTE: SET CHANGE_TRACKING = TRUE was previously required for stream guards on tasks.
--- Streams have been removed (tasks use pure time-based polling). This statement requires
--- OWNERSHIP privilege and is no longer needed. Removed from the automated migration.
-
--- ─── NOTE: FACT.*_ADJUSTMENT.ADJUSTMENT_ID ──────────────────────────────────
--- FACT tables store ADJUSTMENT_ID sourced from DIMENSION.ADJUSTMENT.ADJUSTMENT_ID
--- (a NUMBER sequence), NOT from ADJ_HEADER.ADJ_ID (UUID).
--- No type change to FACT tables is required.
-
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 8. VERIFY
