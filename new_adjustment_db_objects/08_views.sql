@@ -243,53 +243,9 @@ WHERE h.RUN_STATUS = 'Pending Approval'
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- QUEUE VIEWS — one per processing pipeline
---
--- Show only adjustments that are:
---   • Pending (not yet claimed by a task)
---   • Not blocked (BLOCKED_BY_ADJ_ID IS NULL)
---   • Not soft-deleted
---
--- Stream-ready: change tracking on ADJ_HEADER (Task 1) enables streams on
--- these simple single-table filtered views.
+-- NOTE: VW_QUEUE_* views are defined in 02_streams.sql (before the streams
+-- that depend on them). They are not duplicated here.
 -- ═══════════════════════════════════════════════════════════════════════════
-
-CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_QUEUE_VAR
-    COMMENT = 'Eligible VaR adjustments: Pending + unblocked. Stream source for TASK_PROCESS_VAR.'
-AS
-SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER
-WHERE PROCESS_TYPE = 'VaR'
-  AND RUN_STATUS = 'Pending'
-  AND BLOCKED_BY_ADJ_ID IS NULL
-  AND IS_DELETED = FALSE;
-
-CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_QUEUE_STRESS
-    COMMENT = 'Eligible Stress adjustments: Pending + unblocked. Stream source for TASK_PROCESS_STRESS.'
-AS
-SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER
-WHERE PROCESS_TYPE = 'Stress'
-  AND RUN_STATUS = 'Pending'
-  AND BLOCKED_BY_ADJ_ID IS NULL
-  AND IS_DELETED = FALSE;
-
-CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_QUEUE_FRTB
-    COMMENT = 'Eligible FRTB-pipeline adjustments (FRTB + FRTBDRC + FRTBRRAO + FRTBALL): Pending + unblocked.'
-AS
-SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER
-WHERE PROCESS_TYPE IN ('FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL')
-  AND RUN_STATUS = 'Pending'
-  AND BLOCKED_BY_ADJ_ID IS NULL
-  AND IS_DELETED = FALSE;
-
-CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_QUEUE_SENSITIVITY
-    COMMENT = 'Eligible Sensitivity adjustments: Pending + unblocked. Stream source for TASK_PROCESS_SENSITIVITY.'
-AS
-SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER
-WHERE PROCESS_TYPE = 'Sensitivity'
-  AND RUN_STATUS = 'Pending'
-  AND BLOCKED_BY_ADJ_ID IS NULL
-  AND IS_DELETED = FALSE;
-
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- VERIFY
