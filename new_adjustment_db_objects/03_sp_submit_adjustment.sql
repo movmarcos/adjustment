@@ -71,8 +71,10 @@ def find_blocking_adj(session, process_type, cobid, adj_values):
         new_val = adj_values.get(dim.lower())
         if new_val is None:
             # New adj is wildcard → overlaps with everything → no dim restriction
+            # New adj is wildcard (NULL) → matches any running adj for this dimension
             dim_conditions.append("TRUE")
         else:
+            # r.{dim} IS NULL: running adj is wildcard → also matches any new value
             escaped = str(new_val).replace("'", "''")
             dim_conditions.append(
                 f"(r.{dim} IS NULL OR UPPER(r.{dim}) = UPPER('{escaped}'))"
@@ -286,14 +288,12 @@ def main(session, p_adjustment):
         cols_to_insert = {k: v for k, v in col_map.items() if v is not None}
         col_names  = ", ".join(cols_to_insert.keys())
         col_values = ", ".join([
+            "TRUE"   if isinstance(v, bool) else
             f"'{v}'" if isinstance(v, str) else
-            f"{v}"   if isinstance(v, (int, float, bool)) else
+            f"{v}"   if isinstance(v, (int, float)) else
             "NULL"
             for v in cols_to_insert.values()
         ])
-
-        # Fix booleans for SQL
-        col_values = col_values.replace("True", "TRUE").replace("False", "FALSE")
 
         insert_sql = f"""
             INSERT INTO ADJUSTMENT_APP.ADJ_HEADER ({col_names})
@@ -302,9 +302,11 @@ def main(session, p_adjustment):
         session.sql(insert_sql).collect()
 
         # ── Get the ADJ_ID that was just created ─────────────────────────
+        safe_username = str(username).replace("'", "''")
         adj_id_row = session.sql(
-            "SELECT ADJUSTMENT_APP.ADJ_HEADER.ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER "
-            "ORDER BY ADJ_ID DESC LIMIT 1"
+            f"SELECT ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER "
+            f"WHERE USERNAME = '{safe_username}' AND COBID = {cobid} "
+            f"ORDER BY ADJ_ID DESC LIMIT 1"
         ).collect()
         adj_id = adj_id_row[0]["ADJ_ID"] if adj_id_row else None
 
