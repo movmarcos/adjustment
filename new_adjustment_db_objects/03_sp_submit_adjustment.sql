@@ -16,7 +16,7 @@ LANGUAGE PYTHON
 RUNTIME_VERSION = '3.11'
 PACKAGES = ('snowflake-snowpark-python')
 HANDLER = 'main'
-COMMENT = 'Entry point from Streamlit. Validates input, inserts into ADJ_HEADER, optionally triggers processing for ad-hoc Scale/Flatten.'
+COMMENT = 'Entry point from Streamlit. Validates input, checks for Running blockers, inserts into ADJ_HEADER with BLOCKED_BY_ADJ_ID if overlapping. Processing handled by scope pipeline tasks.'
 EXECUTE AS CALLER
 AS
 $$
@@ -37,6 +37,62 @@ ACTION_MAP = {
     "upload":   "Direct",
     "direct":   "Direct",
 }
+
+# Pipeline groupings — used for blocking checks at submit time
+PIPELINE_TYPES = {
+    'VAR':         ['VaR'],
+    'STRESS':      ['Stress'],
+    'SENSITIVITY': ['Sensitivity'],
+    'ES':          ['ES'],
+    'FRTB':        ['FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL'],
+    'FRTBDRC':     ['FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL'],
+    'FRTBRRAO':    ['FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL'],
+    'FRTBALL':     ['FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL'],
+}
+
+OVERLAP_DIMS_SUBMIT = [
+    'ENTITY_CODE', 'SOURCE_SYSTEM_CODE', 'DEPARTMENT_CODE',
+    'BOOK_CODE', 'CURRENCY_CODE', 'TRADE_TYPOLOGY', 'STRATEGY',
+]
+
+
+def find_blocking_adj(session, process_type, cobid, adj_values):
+    """
+    Return ADJ_ID of a Running adjustment in the same pipeline that overlaps
+    with the new adjustment being submitted, or None if no blocker found.
+
+    adj_values: dict with optional dimension values (lowercase keys) for the new adjustment.
+    """
+    pipeline = PIPELINE_TYPES.get(process_type.upper(), [process_type])
+    pipeline_in = ", ".join(f"'{t}'" for t in pipeline)
+
+    dim_conditions = []
+    for dim in OVERLAP_DIMS_SUBMIT:
+        new_val = adj_values.get(dim.lower())
+        if new_val is None:
+            # New adj is wildcard → overlaps with everything → no dim restriction
+            dim_conditions.append("TRUE")
+        else:
+            escaped = str(new_val).replace("'", "''")
+            dim_conditions.append(
+                f"(r.{dim} IS NULL OR UPPER(r.{dim}) = UPPER('{escaped}'))"
+            )
+
+    where_dims = " AND ".join(dim_conditions)
+
+    sql = f"""
+        SELECT ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER r
+        WHERE r.COBID = {cobid}
+          AND r.PROCESS_TYPE IN ({pipeline_in})
+          AND r.RUN_STATUS = 'Running'
+          AND r.IS_DELETED = FALSE
+          AND {where_dims}
+        ORDER BY r.ADJ_ID ASC
+        LIMIT 1
+    """
+    rows = session.sql(sql).collect()
+    return rows[0]["ADJ_ID"] if rows else None
+
 
 def compute_scale_factor_adjusted(adj_type, scale_factor, cobid, source_cobid):
     """Derive the effective scale factor the processing engine multiplies by."""
@@ -163,6 +219,20 @@ def main(session, p_adjustment):
             else:
                 initial_status = STATUS_PENDING
 
+        # ── Blocking check — set before INSERT ──────────────────────────
+        blocked_by_adj_id = None
+        if initial_status == STATUS_PENDING:
+            dim_vals = {
+                "entity_code":          adj.get("entity_code"),
+                "source_system_code":   adj.get("source_system_code"),
+                "department_code":      adj.get("department_code"),
+                "book_code":            adj.get("book_code"),
+                "currency_code":        adj.get("currency_code"),
+                "trade_typology":       adj.get("trade_typology"),
+                "strategy":             adj.get("strategy"),
+            }
+            blocked_by_adj_id = find_blocking_adj(session, process_type, cobid, dim_vals)
+
         # ── Build the INSERT ─────────────────────────────────────────────
         # Map JSON keys → column names (only include non-null values)
         col_map = {
@@ -209,6 +279,7 @@ def main(session, p_adjustment):
             "GLOBAL_REFERENCE":            adj.get("global_reference"),
             "FILE_NAME":                   adj.get("file_name"),
             "APPROVAL_ID":                 adj.get("approval_id"),
+            "BLOCKED_BY_ADJ_ID":           blocked_by_adj_id,
         }
 
         # Only include non-None values (let NULLs default in the table)
@@ -246,26 +317,11 @@ def main(session, p_adjustment):
                  'Submitted via Streamlit — {adjustment_type} / {process_type}')
         """).collect()
 
-        # ── Ad-hoc + Pending → process immediately ──────────────────────
-        # NOTE: When requires_approval = True, status is 'Pending Approval'
-        # and processing is deferred until an approver sets status to 'Approved'.
-        if occurrence == "ADHOC" and initial_status == STATUS_PENDING:
-            if adj_action == "Scale":
-                session.sql(f"""
-                    CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT(
-                        '{process_type}', 'Scale', {cobid})
-                """).collect()
-            elif adj_action == "Direct":
-                session.sql(f"""
-                    CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT(
-                        '{process_type}', 'Direct', {cobid})
-                """).collect()
-
         return {
             "adj_id":  adj_id,
             "status":  initial_status,
             "message": f"Adjustment {adj_id} created with status '{initial_status}'."
-                       + (" Processing triggered." if occurrence == "ADHOC" and initial_status == STATUS_PENDING else "")
+                       + (" Blocked by ADJ #{}.".format(blocked_by_adj_id) if blocked_by_adj_id else "")
         }
 
     except KeyError as ke:
