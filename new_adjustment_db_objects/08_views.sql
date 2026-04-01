@@ -54,7 +54,8 @@ SELECT
     COUNT(DISTINCT CASE WHEN h.RUN_STATUS = 'Pending Approval'   THEN h.ADJ_ID END) AS PENDING_APPROVAL_COUNT,
     COUNT(DISTINCT CASE WHEN h.RUN_STATUS = 'Approved'           THEN h.ADJ_ID END) AS APPROVED_COUNT,
     COUNT(DISTINCT CASE WHEN h.RUN_STATUS = 'Processed'          THEN h.ADJ_ID END) AS PROCESSED_COUNT,
-    COUNT(DISTINCT CASE WHEN h.RUN_STATUS = 'Error'              THEN h.ADJ_ID END) AS ERROR_COUNT,
+    COUNT(DISTINCT CASE WHEN h.RUN_STATUS = 'Running'            THEN h.ADJ_ID END) AS RUNNING_COUNT,
+    COUNT(DISTINCT CASE WHEN h.RUN_STATUS = 'Failed'             THEN h.ADJ_ID END) AS FAILED_COUNT,
     COUNT(DISTINCT CASE WHEN h.RUN_STATUS LIKE 'Rejected%'       THEN h.ADJ_ID END) AS REJECTED_COUNT,
     SUM(CASE WHEN h.RUN_STATUS = 'Processed' AND NOT h.IS_DELETED
              THEN h.ADJUSTMENT_VALUE_IN_USD ELSE 0 END)               AS TOTAL_PROCESSED_VALUE_USD,
@@ -119,7 +120,7 @@ WHERE h.IS_DELETED = FALSE;
 -- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_ERRORS
-    COMMENT = 'Adjustments currently in Error status. Used for the error panel in dashboard.'
+    COMMENT = 'Adjustments currently in Failed status. Used for the error panel in dashboard.'
 AS
 SELECT
     h.ADJ_ID,
@@ -134,7 +135,7 @@ SELECT
     h.ERRORMESSAGE,
     h.REASON
 FROM ADJUSTMENT_APP.ADJ_HEADER h
-WHERE h.RUN_STATUS = 'Error'
+WHERE h.RUN_STATUS = 'Failed'
   AND h.IS_DELETED = FALSE;
 
 
@@ -180,7 +181,7 @@ FROM ADJUSTMENT_APP.ADJ_HEADER h;
 -- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_PROCESSING_QUEUE
-    COMMENT = 'Live view of the processing pipeline. Pending, Approved, and Processing adjustments.'
+    COMMENT = 'Live view of the processing pipeline. Pending and Running adjustments.'
 AS
 SELECT
     h.ADJ_ID,
@@ -203,7 +204,7 @@ SELECT
             h.CREATED_DATE
     ) AS QUEUE_POSITION
 FROM ADJUSTMENT_APP.ADJ_HEADER h
-WHERE h.RUN_STATUS IN ('Pending', 'Approved', 'Processing')
+WHERE h.RUN_STATUS IN ('Pending', 'Running')
   AND h.IS_DELETED = FALSE;
 
 
@@ -239,6 +240,55 @@ SELECT
 FROM ADJUSTMENT_APP.ADJ_HEADER h
 WHERE h.RUN_STATUS = 'Pending Approval'
   AND h.IS_DELETED = FALSE;
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- QUEUE VIEWS — one per processing pipeline
+--
+-- Show only adjustments that are:
+--   • Pending (not yet claimed by a task)
+--   • Not blocked (BLOCKED_BY_ADJ_ID IS NULL)
+--   • Not soft-deleted
+--
+-- Stream-ready: change tracking on ADJ_HEADER (Task 1) enables streams on
+-- these simple single-table filtered views.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_QUEUE_VAR
+    COMMENT = 'Eligible VaR adjustments: Pending + unblocked. Stream source for TASK_PROCESS_VAR.'
+AS
+SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER
+WHERE PROCESS_TYPE = 'VaR'
+  AND RUN_STATUS = 'Pending'
+  AND BLOCKED_BY_ADJ_ID IS NULL
+  AND IS_DELETED = FALSE;
+
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_QUEUE_STRESS
+    COMMENT = 'Eligible Stress adjustments: Pending + unblocked. Stream source for TASK_PROCESS_STRESS.'
+AS
+SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER
+WHERE PROCESS_TYPE = 'Stress'
+  AND RUN_STATUS = 'Pending'
+  AND BLOCKED_BY_ADJ_ID IS NULL
+  AND IS_DELETED = FALSE;
+
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_QUEUE_FRTB
+    COMMENT = 'Eligible FRTB-pipeline adjustments (FRTB + FRTBDRC + FRTBRRAO + FRTBALL): Pending + unblocked.'
+AS
+SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER
+WHERE PROCESS_TYPE IN ('FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL')
+  AND RUN_STATUS = 'Pending'
+  AND BLOCKED_BY_ADJ_ID IS NULL
+  AND IS_DELETED = FALSE;
+
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_QUEUE_SENSITIVITY
+    COMMENT = 'Eligible Sensitivity adjustments: Pending + unblocked. Stream source for TASK_PROCESS_SENSITIVITY.'
+AS
+SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER
+WHERE PROCESS_TYPE = 'Sensitivity'
+  AND RUN_STATUS = 'Pending'
+  AND BLOCKED_BY_ADJ_ID IS NULL
+  AND IS_DELETED = FALSE;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
