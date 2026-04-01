@@ -188,7 +188,8 @@ def main(session, process_type, adjustment_action, cobid):
          → store in ADJ_HEADER.DIMENSION_ADJ_ID
       4. For Direct  → read ADJ_LINE_ITEM, set ADJUSTMENT_ID = DIMENSION_ADJ_ID,
                         delete old FACT rows, insert
-      5. For Scale   → 3-way UNION ALL using DIMENSION_ADJ_ID as ADJUSTMENT_ID,
+      5. For Scale   → 3-way UNION ALL (same-COB scale/flatten + cross-COB roll legs),
+                        netted into one delta row per position (cross-COB pairs collapsed),
                         DENSE_RANK overlap resolution, supersede delete,
                         SCD2 key fix, summary rebuild
       6. Update RECORD_COUNT in ADJ_HEADER + DIMENSION.ADJUSTMENT
@@ -402,6 +403,19 @@ def main(session, process_type, adjustment_action, cobid):
                 metric_sum_list = (f"SUM({metric_name}) AS {metric_name}, "
                                    f"SUM({metric_usd_name}) AS {metric_usd_name}")
 
+            # ── Netting: collapse cross-COB pairs into one delta row per position ──
+            # A cross-COB roll produces 2 CTE rows per position (leg ② scale +
+            # leg ③ flatten). Grouping by the surrogate/PK key and summing the
+            # metric collapses them into a single net-delta row (e.g. -1 + 1.5 → 0.5).
+            # Same-COB rows are already one row per position; grouping is a no-op.
+            # HAVING <> 0 drops positions whose net change is exactly zero.
+            non_metric_any = ', '.join([f"ANY_VALUE({c}) AS {c}" for c in fact_non_metric_matched])
+            if metric_name == metric_usd_name:
+                metric_sums = f"SUM({metric_usd_name}) AS {metric_usd_name}"
+            else:
+                metric_sums = (f"SUM({metric_name}) AS {metric_name}, "
+                               f"SUM({metric_usd_name}) AS {metric_usd_name}")
+
             # ── Build perm INSERT column list (only cols in target adj table) ───
             _adj_set = set(fact_adj_cols)
             _perm = (['COBID', 'ADJUSTMENT_ID']
@@ -478,13 +492,13 @@ def main(session, process_type, adjustment_action, cobid):
                 AND adjust.COBID = adjust.SOURCE_COBID
                 {join_cond}
                 UNION ALL
-                -- ② Roll/Scale cross-COB: always reads from original fact table at SOURCE_COBID
+                -- ② Roll/Scale cross-COB: reads positions from SOURCE_COBID, applies factor
                 {select_scale} {from_where}
                 AND fact.COBID = adjust.SOURCE_COBID
                 AND adjust.COBID <> adjust.SOURCE_COBID
                 {join_cond}
                 UNION ALL
-                -- ③ Flatten current COB (for cross-COB: zero out existing values at target COB)
+                -- ③ Flatten current COB (offsets existing values at target COB for cross-COB roll)
                 {select_flatten} {from_where}
                 AND fact.COBID = adjust.COBID
                 AND adjust.COBID <> adjust.SOURCE_COBID
@@ -494,6 +508,24 @@ def main(session, process_type, adjustment_action, cobid):
                 SELECT {select_with_keys}
                 FROM cte
             ),
+            netted AS (
+                -- Collapse cross-COB roll pairs (legs ② + ③) into one net-delta row per
+                -- position: e.g. -1.0 (flatten) + 1.5 (scale) → 0.5.
+                -- Same-COB rows (leg ①) are already one row per position; GROUP BY is a no-op.
+                -- ANY_VALUE is safe for non-metric dimension columns because legs ② and ③
+                -- represent the same position; SCD2 key discrepancies are fixed post-insert.
+                -- HAVING <> 0 drops positions whose net change is exactly zero.
+                SELECT
+                    {key_name},
+                    ANY_VALUE(COBID)                          AS COBID,
+                    ANY_VALUE(ADJUSTMENT_ID)                  AS ADJUSTMENT_ID,
+                    ANY_VALUE(ADJUSTMENT_CREATED_TIMESTAMP)   AS ADJUSTMENT_CREATED_TIMESTAMP,
+                    {non_metric_any},
+                    {metric_sums}
+                FROM fact_key
+                GROUP BY {key_name}
+                HAVING SUM({metric_usd_name}) <> 0
+            ),
             ranked AS (
                 SELECT
                     {exclude_keys},
@@ -501,7 +533,7 @@ def main(session, process_type, adjustment_action, cobid):
                         PARTITION BY {key_name}
                         ORDER BY ADJUSTMENT_CREATED_TIMESTAMP DESC, ADJUSTMENT_ID DESC
                     ) AS ROW_NUM
-                FROM fact_key
+                FROM netted
             )
             SELECT
                 ranked.* EXCLUDE (ROW_NUM),
@@ -509,7 +541,6 @@ def main(session, process_type, adjustment_action, cobid):
                 CURRENT_TIMESTAMP() AS LOAD_TIMESTAMP
             FROM ranked
             WHERE ROW_NUM = 1
-              AND {metric_usd_name} <> 0
             """
 
             result["insert_cmd"] = insert_sql

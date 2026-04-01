@@ -217,9 +217,10 @@ Streams only capture INSERT events. When a blocked adjustment is unblocked (`BLO
 **Processing Flow:**
 1. User submits adjustment → `SP_SUBMIT_ADJUSTMENT` inserts into `ADJ_HEADER` (checks for Running overlaps → sets `BLOCKED_BY_ADJ_ID` if blocked)
 2. Within ≤1 minute: scope task fires and calls `SP_RUN_PIPELINE`
-3. `SP_RUN_PIPELINE`: atomically claims eligible Pending → Running, blocks overlapping Pending adjustments, calls `SP_PROCESS_ADJUSTMENT` per adjustment, unblocks waiting adjustments
-4. Status updated to `Processed` (or `Failed` on error)
-5. If an adjustment was blocked, `BLOCKED_BY_ADJ_ID` is cleared → next task poll (within 1 min) picks it up
+3. `SP_RUN_PIPELINE`: atomically claims eligible Pending/Approved → Running, blocks overlapping adjustments, calls `SP_PROCESS_ADJUSTMENT` per adjustment, unblocks waiting adjustments
+4. `SP_PROCESS_ADJUSTMENT` Scale path: 3-way UNION ALL (same-COB scale/flatten + cross-COB roll legs) → netted into **one delta row per position** (cross-COB roll pairs collapsed: e.g. −1 + 1.5 → 0.5) → DENSE_RANK overlap resolution → supersede → SCD2 key fix → summary rebuild
+5. Status updated to `Processed` (or `Failed` on error)
+6. If an adjustment was blocked, `BLOCKED_BY_ADJ_ID` is cleared → next task poll (within 1 min) picks it up
 
 **Dynamic Table Refresh:**
 - `DT_DASHBOARD` refreshes with **1-minute lag**
