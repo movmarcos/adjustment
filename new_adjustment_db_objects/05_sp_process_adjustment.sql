@@ -29,7 +29,7 @@ LANGUAGE PYTHON
 RUNTIME_VERSION = '3.11'
 PACKAGES = ('snowflake-snowpark-python')
 HANDLER = 'main'
-COMMENT = 'Core processing engine. Reads pending adjustments from ADJ_HEADER, applies Scale/Direct logic, writes to FACT.*_ADJUSTMENT tables.'
+COMMENT = 'Core processing engine. Reads Running adjustments (claimed by SP_RUN_PIPELINE), applies Scale/Direct logic, writes to FACT.*_ADJUSTMENT tables, marks records Processed or Failed.'
 EXECUTE AS CALLER
 AS
 $$
@@ -107,11 +107,11 @@ def surrogate_key(list_key, key_name):
 
 def main(session, process_type, adjustment_action, cobid):
     """
-    Process pending adjustments.
+    Process Running adjustments (already claimed by SP_RUN_PIPELINE).
 
     Flow:
       1. Read config from ADJUSTMENTS_SETTINGS
-      2. Filter pending adjustments in ADJ_HEADER
+      2. Filter Running adjustments in ADJ_HEADER
       3. For Direct  → read ADJ_LINE_ITEM, map to fact columns, insert
       4. For Scale   → 3-way UNION ALL (same-COB, cross-COB, flatten),
                         DENSE_RANK overlap resolution, SCD2 key fix,
@@ -119,6 +119,7 @@ def main(session, process_type, adjustment_action, cobid):
       5. Update ADJ_HEADER status
       6. Log to ADJ_STATUS_HISTORY
     """
+    adj_ids = []
     try:
         result = {
             "process_type": process_type,
@@ -187,8 +188,8 @@ def main(session, process_type, adjustment_action, cobid):
             )
 
             if df_adj_direct.count() == 0:
-                result["message"] = f'No pending Direct adjustments found'
-                return result
+                result["message"] = f'No Running Direct adjustments found'
+                return json.dumps(result)
 
             # Collect ADJ_IDs for line-item lookup
             adj_ids = [row["ADJ_ID"] for row in df_adj_direct.select("ADJ_ID").collect()]
@@ -202,7 +203,7 @@ def main(session, process_type, adjustment_action, cobid):
 
             if df_line_items.count() == 0:
                 result["message"] = "No line items found for Direct adjustments"
-                return result
+                return json.dumps(result)
 
             # Map line-item columns to fact adjustment table columns
             df_pd = check_columns(df_line_items, fact_adj_cols, metric_name, metric_usd_name)
@@ -288,8 +289,8 @@ def main(session, process_type, adjustment_action, cobid):
             )
 
             if df_adj_scale.count() == 0:
-                result["message"] = f'No pending Scale adjustments found'
-                return result
+                result["message"] = f'No Running Scale adjustments found'
+                return json.dumps(result)
 
             adj_ids = [row["ADJ_ID"] for row in df_adj_scale.select("ADJ_ID").collect()]
 
@@ -599,7 +600,7 @@ def main(session, process_type, adjustment_action, cobid):
         print(f"Error: {error_msg}")
         result["message"] = f"Error: {error_msg}"
 
-        # Try to mark as Error
+        # Try to mark as Failed
         try:
             df_adj_err = session.table(adj_base_tbl_name).filter(
                 (col('COBID') == cobid) &
@@ -607,6 +608,8 @@ def main(session, process_type, adjustment_action, cobid):
                 (col('RUN_STATUS') == 'Running')
             )
             update_header_status(session, df_adj_err, cobid, "Failed", error_msg)
+            if adj_ids:
+                log_status_history(session, adj_ids, "Running", "Failed")
         except:
             pass
 
