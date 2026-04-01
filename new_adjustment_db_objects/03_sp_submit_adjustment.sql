@@ -309,7 +309,7 @@ def main(session, p_adjustment):
         cols_to_insert = {k: v for k, v in col_map.items() if v is not None}
         col_names  = ", ".join(cols_to_insert.keys())
         col_values = ", ".join([
-            "TRUE"   if isinstance(v, bool) else
+            ("TRUE" if v else "FALSE") if isinstance(v, bool) else
             f"'{v}'" if isinstance(v, str) else
             f"{v}"   if isinstance(v, (int, float)) else
             "NULL"
