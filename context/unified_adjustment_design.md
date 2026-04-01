@@ -1,6 +1,6 @@
 # Unified Adjustment Process — Architecture Design
 
-> **Created:** 2026-03-28  |  **Updated:** 2026-03-28
+> **Created:** 2026-03-28  |  **Updated:** 2026-04-01
 >
 > **Requirements:** [requirements.md](requirements.md)
 >
@@ -25,8 +25,8 @@
 | P6 | **Overlap = keep most recent** | DENSE_RANK by `CREATED_DATE DESC, ADJ_ID DESC` — same pattern as existing proc |
 | P7 | **Idempotent processing** | DELETE existing + re-INSERT for every adjustment (safe to re-run) |
 | P8 | **Sign-off is a gate** | Signed-off adjustments are recorded (`Rejected - SignedOff`) but never processed |
-| P9 | **Ad-hoc = immediate** | On "Save", Streamlit calls `SP_SUBMIT_ADJUSTMENT` which processes synchronously |
-| P10 | **Recurring = task-driven** | `PROCESS_PENDING_TASK` polls the stream on `ADJ_HEADER` every 1 minute |
+| P9 | **Queue-driven processing** | All adjustments enter a Pending queue. `SP_SUBMIT_ADJUSTMENT` checks for Running overlaps and sets `BLOCKED_BY_ADJ_ID` if needed. Processing is driven by 4 independent scope tasks. |
+| P10 | **4 independent scope pipelines** | VaR, Stress, FRTB, Sensitivity each have their own queue view → stream → task → `SP_RUN_PIPELINE`. A slow FRTB run has zero impact on VaR. |
 | P11 | **ADJUSTMENT schema** | All new objects live under `ADJUSTMENT` (except `BATCH.RUN_LOG` which already exists) |
 
 ---
@@ -66,7 +66,7 @@
   │  + ADJUSTMENT.ADJ_STATUS_HISTORY  (audit trail)                      │
   └────────────────────────────┬─────────────────────────────────────────┘
                                │
-                               │ Stream (ADJ_HEADER_STREAM)
+                               │ 4 queue views → 4 streams (one per scope)
                                ▼
 
  ════════════════════════════════════════════════════════════════════════════
@@ -74,12 +74,14 @@
  ════════════════════════════════════════════════════════════════════════════
 
   ┌────────────────────────────────────────────────────────────────────────┐
-  │  Ad-hoc path: SP_SUBMIT_ADJUSTMENT calls SP_PROCESS_ADJUSTMENT       │
-  │               immediately (synchronous, same session)                │
+  │  4 independent pipelines — one per scope                             │
   │                                                                      │
-  │  Recurring path: PROCESS_PENDING_TASK (1-min, stream-guarded)        │
-  │                  iterates pending recurring adjustments and calls     │
-  │                  SP_PROCESS_ADJUSTMENT per (scope, action, COB)      │
+  │  ADJ_HEADER → VW_QUEUE_VAR ──────── STREAM_QUEUE_VAR ──────── TASK_PROCESS_VAR        │
+  │             → VW_QUEUE_STRESS ────── STREAM_QUEUE_STRESS ────── TASK_PROCESS_STRESS    │
+  │             → VW_QUEUE_FRTB ─────── STREAM_QUEUE_FRTB ─────── TASK_PROCESS_FRTB      │
+  │             → VW_QUEUE_SENSITIVITY ─ STREAM_QUEUE_SENSITIVITY ─ TASK_PROCESS_SENSITIVITY│
+  │                                                                      │
+  │  Each task calls SP_RUN_PIPELINE: claim → block → process → unblock  │
   └────────────────────────────┬─────────────────────────────────────────┘
                                │
                                ▼
@@ -95,7 +97,7 @@
   │     • DENSE_RANK overlap resolution                                  │
   │     • Cross-COB: SCD2 dimension key fix                              │
   │     • Summary rebuild                                                │
-  │  5. Update ADJ_HEADER.RUN_STATUS → 'Processed' / 'Error'            │
+  │  5. Update ADJ_HEADER.RUN_STATUS → 'Processed' / 'Failed'           │
   │  6. Log to ADJ_STATUS_HISTORY                                        │
   └────────────────────────────┬─────────────────────────────────────────┘
                                │
@@ -193,8 +195,10 @@ from them when dependencies are met.
 
 | Stream | On | Mode | Purpose |
 |---|---|---|---|
-| `ADJ_HEADER_STREAM` | `ADJ_HEADER` | INSERT + UPDATE | Guards the processing task |
-| `ADJ_LINE_ITEM_STREAM` | `ADJ_LINE_ITEM` | APPEND_ONLY | Optional: validate line items before marking ready |
+| `STREAM_QUEUE_VAR` | `VW_QUEUE_VAR` | APPEND_ONLY | Fires when eligible VaR adjustments appear. Triggers TASK_PROCESS_VAR. |
+| `STREAM_QUEUE_STRESS` | `VW_QUEUE_STRESS` | APPEND_ONLY | Fires when eligible Stress adjustments appear. Triggers TASK_PROCESS_STRESS. |
+| `STREAM_QUEUE_FRTB` | `VW_QUEUE_FRTB` | APPEND_ONLY | Fires when eligible FRTB-pipeline adjustments appear (all sub-types). Triggers TASK_PROCESS_FRTB. |
+| `STREAM_QUEUE_SENSITIVITY` | `VW_QUEUE_SENSITIVITY` | APPEND_ONLY | Fires when eligible Sensitivity adjustments appear. Triggers TASK_PROCESS_SENSITIVITY. |
 
 ### 3.3 — Stored Procedures
 
@@ -207,10 +211,10 @@ Entry point from Streamlit. Accepts a JSON string with all adjustment details.
 2. Compute derived values (`ADJUSTMENT_ACTION`, `SCALE_FACTOR_ADJUSTED`)
 3. Validate scope is active in `ADJUSTMENTS_SETTINGS`
 4. Check sign-off status → if signed off, set status `Rejected - SignedOff`
-5. Insert into `ADJ_HEADER`
-6. Record in `ADJ_STATUS_HISTORY`
-7. For ad-hoc + Pending → immediately call `SP_PROCESS_ADJUSTMENT`
-8. Return JSON: `{ adj_id, status, message }`
+5. Check for Running overlaps → set `BLOCKED_BY_ADJ_ID` on new row if blocked
+6. Insert into `ADJ_HEADER`
+7. Record in `ADJ_STATUS_HISTORY`
+8. Return JSON: `{ adj_id, status, message }` (includes blocked notice if applicable)
 
 #### SP_PREVIEW_ADJUSTMENT (04_sp_preview_adjustment.sql)
 
@@ -233,16 +237,19 @@ Core processing engine. Adapted from the existing `ADJUSTMENT.PROCESS_ADJUSTMENT
 - For Direct: reads values from `ADJ_LINE_ITEM` (not from the base table)
 - Updates `ADJ_HEADER.RUN_STATUS` (not `DIMENSION.ADJUSTMENT`)
 - Records transitions in `ADJ_STATUS_HISTORY`
-- Filters by `RUN_STATUS = 'Pending'` (not just presence)
+- Filters by `RUN_STATUS = 'Running'` (adjustments already claimed by SP_RUN_PIPELINE)
+- Sets `RUN_STATUS = 'Failed'` on error (not 'Error')
 
 ### 3.4 — Tasks (06_tasks.sql)
 
 | Task | Schedule | Guard | Purpose |
 |---|---|---|---|
-| `PROCESS_PENDING_TASK` | 1 min | `ADJ_HEADER_STREAM` | Processes recurring pending adjustments |
-| `INSTANTIATE_RECURRING_TASK` | 5 min | Only when processing idle | Creates `ADJ_HEADER` from templates |
+| `TASK_PROCESS_VAR` | 1 min | `STREAM_QUEUE_VAR` has data | Calls `SP_RUN_PIPELINE('VaR', '["VaR"]')` |
+| `TASK_PROCESS_STRESS` | 1 min | `STREAM_QUEUE_STRESS` has data | Calls `SP_RUN_PIPELINE('Stress', '["Stress"]')` |
+| `TASK_PROCESS_FRTB` | 1 min | `STREAM_QUEUE_FRTB` has data | Calls `SP_RUN_PIPELINE('FRTB', '["FRTB","FRTBDRC","FRTBRRAO","FRTBALL"]')` |
+| `TASK_PROCESS_SENSITIVITY` | 1 min | `STREAM_QUEUE_SENSITIVITY` has data | Calls `SP_RUN_PIPELINE('Sensitivity', '["Sensitivity"]')` |
 
-Both start SUSPENDED. Enable with `ALTER TASK ... RESUME` when ready.
+All start SUSPENDED. Enable with `ALTER TASK ... RESUME` when ready.
 
 ### 3.5 — Dynamic Tables (07_dynamic_tables.sql)
 
@@ -262,6 +269,10 @@ Both start SUSPENDED. Enable with `ALTER TASK ... RESUME` when ready.
 | `VW_APPROVAL_QUEUE` | Pending Approval items with context | Approval Queue page |
 | `VW_MY_WORK` | All adjustments for a user | My Work page |
 | `VW_PROCESSING_QUEUE` | Pipeline view with queue position | Processing Queue page |
+| `VW_QUEUE_VAR` | Eligible VaR adjustments (Pending + unblocked) | STREAM_QUEUE_VAR source |
+| `VW_QUEUE_STRESS` | Eligible Stress adjustments (Pending + unblocked) | STREAM_QUEUE_STRESS source |
+| `VW_QUEUE_FRTB` | Eligible FRTB-pipeline adjustments (Pending + unblocked) | STREAM_QUEUE_FRTB source |
+| `VW_QUEUE_SENSITIVITY` | Eligible Sensitivity adjustments (Pending + unblocked) | STREAM_QUEUE_SENSITIVITY source |
 
 ---
 
@@ -277,11 +288,13 @@ Both start SUSPENDED. Enable with `ALTER TASK ... RESUME` when ready.
 4. Streamlit calls: CALL SP_SUBMIT_ADJUSTMENT(JSON)
    a. Validates input, checks sign-off
    b. Computes ADJUSTMENT_ACTION = 'Scale', SCALE_FACTOR_ADJUSTED
-   c. INSERT INTO ADJ_HEADER → returns ADJ_ID
-   d. INSERT INTO ADJ_STATUS_HISTORY (NULL → Pending)
-   e. Immediately calls: CALL SP_PROCESS_ADJUSTMENT('VaR', 'Scale', 20250328)
-   f. Returns: { adj_id: 200001, status: 'Processed', message: '...' }
-5. Streamlit shows success/error to user
+   c. Checks for Running overlaps → sets BLOCKED_BY_ADJ_ID if applicable
+   d. INSERT INTO ADJ_HEADER → returns ADJ_ID
+   e. INSERT INTO ADJ_STATUS_HISTORY (NULL → Pending)
+   f. Returns: { adj_id: 200001, status: 'Pending', message: 'Adjustment queued.' }
+5. Streamlit shows "queued" confirmation to user
+6. STREAM_QUEUE_VAR detects the new Pending+unblocked row → TASK_PROCESS_VAR wakes
+7. SP_RUN_PIPELINE claims → blocks overlaps → processes → unblocks → status: Processed/Failed
 ```
 
 ### 4.2 — Ad-Hoc Upload (VaR CSV via Streamlit)
@@ -313,9 +326,10 @@ Both start SUSPENDED. Enable with `ALTER TASK ... RESUME` when ready.
    b. Does an adjustment for today's COB already exist? (dedup)
    c. Are dependencies met? (external signal)
    d. If yes → INSERT INTO ADJ_HEADER from template
-3. PROCESS_PENDING_TASK (1-min, stream-guarded) picks up new header:
-   a. Iterates over distinct (PROCESS_TYPE, ACTION, COBID)
-   b. Calls SP_PROCESS_ADJUSTMENT for each
+3. Scope task (1-min, stream-guarded) picks up new header:
+   a. STREAM_QUEUE_<SCOPE> detects the new Pending row
+   b. TASK_PROCESS_<SCOPE> calls SP_RUN_PIPELINE
+   c. SP_RUN_PIPELINE claims → blocks → processes → unblocks
 4. Status updates + audit trail logged automatically
 ```
 
@@ -328,8 +342,7 @@ Both start SUSPENDED. Enable with `ALTER TASK ... RESUME` when ready.
 4. Approver updates ADJ_HEADER.RUN_STATUS:
    → 'Approved' (ready for processing)
    → 'Rejected' (with comment)
-5. Next cycle of PROCESS_PENDING_TASK processes approved adjustments
-   (requires updating the task to also look for 'Approved' status)
+5. Approver sets status to 'Pending' → next scope task cycle picks it up via the queue view
 ```
 
 ---
@@ -342,10 +355,11 @@ PROCEDURE SP_PROCESS_ADJUSTMENT(process_type, adjustment_action, cobid)
   1. READ config from ADJUSTMENTS_SETTINGS
      → fact_table, fact_adjusted_table, adjustments_table, summary_table, metrics, pk
 
-  2. GET pending adjustments from ADJ_HEADER
+  2. GET Running adjustments from ADJ_HEADER
      WHERE COBID = cobid
        AND (PROCESS_TYPE = process_type OR PROCESS_TYPE = 'FRTBALL')
-       AND RUN_STATUS = 'Pending'
+       AND RUN_STATUS = 'Running'
+     (already claimed by SP_RUN_PIPELINE before this call)
 
   3. IF no pending adjustments → RETURN early
 
@@ -375,7 +389,7 @@ PROCEDURE SP_PROCESS_ADJUSTMENT(process_type, adjustment_action, cobid)
      i. UPDATE ADJ_HEADER.RUN_STATUS → 'Processed'
      j. INSERT into ADJ_STATUS_HISTORY
 
-  6. ON ERROR: set RUN_STATUS = 'Error', record error message
+  6. ON ERROR: set RUN_STATUS = 'Failed', record error message
 
   7. RETURN result JSON
 ```
@@ -392,29 +406,32 @@ PROCEDURE SP_PROCESS_ADJUSTMENT(process_type, adjustment_action, cobid)
   └─────────┘           │          │           │           │
                         └────┬─────┘           └─────┬─────┘
                              │                       │
-       requires_approval     │                       │ task processes
+       requires_approval     │                       │ set back to Pending
                         ┌────▼──────────┐            │
-                        │ Pending       │            │
-                        │ Approval      │            │
-                        └────┬──────────┘            │
-                             │ reject                │
-                        ┌────▼─────┐                 │
-                        │ Rejected │                 │
-                        └──────────┘                 │
-                                                     │
-            ┌────────────────────────────────────────┘
+                        │ Pending       │  ◄─────────┘
+                        │ Approval      │
+                        └────┬──────────┘
+                             │ reject
+                        ┌────▼─────┐
+                        │ Rejected │
+                        └──────────┘
+
+  Once Pending (and unblocked):
+  scope task claims → Running
             │
        ┌────▼──────┐   success   ┌───────────┐
-       │ Processing │───────────►│ Processed │
+       │ Running   │───────────►│ Processed │
        └────┬──────┘            └───────────┘
             │ failure
        ┌────▼─────┐
-       │ Error    │──── (retry: manually set back to Pending)
+       │ Failed   │──── (manual retry: re-submit as new adjustment)
        └──────────┘
 
   Special:
     └── Rejected - SignedOff  (COB already signed off, recorded but not processed)
     └── Deleted               (soft delete via IS_DELETED flag)
+    └── Blocked               (BLOCKED_BY_ADJ_ID set — not a status but a state;
+                               row is Pending but invisible in queue view until blocker finishes)
 ```
 
 ---
@@ -439,10 +456,11 @@ All scripts in `new_adjustment_db_objects/`:
 | # | File | Objects | Purpose |
 |---|---|---|---|
 | 1 | `01_tables.sql` | `ADJ_HEADER`, `ADJ_LINE_ITEM`, `ADJ_STATUS_HISTORY`, `ADJUSTMENTS_SETTINGS`, `ADJ_RECURRING_TEMPLATE` + seed | Foundation tables — point of entry |
-| 2 | `02_streams.sql` | `ADJ_HEADER_STREAM`, `ADJ_LINE_ITEM_STREAM` | CDC on entry-point tables |
+| 2 | `02_streams.sql` | `STREAM_QUEUE_VAR`, `STREAM_QUEUE_STRESS`, `STREAM_QUEUE_FRTB`, `STREAM_QUEUE_SENSITIVITY` | APPEND_ONLY streams on queue views — one per scope pipeline |
 | 3 | `03_sp_submit_adjustment.sql` | `SP_SUBMIT_ADJUSTMENT` | Streamlit → table (validates, inserts, triggers) |
 | 4 | `04_sp_preview_adjustment.sql` | `SP_PREVIEW_ADJUSTMENT` | Preview impact without applying |
-| 5 | `05_sp_process_adjustment.sql` | `SP_PROCESS_ADJUSTMENT` | Core processing engine (Direct + Scale) |
-| 6 | `06_tasks.sql` | `PROCESS_PENDING_TASK`, `INSTANTIATE_RECURRING_TASK` | Stream-triggered recurring processing |
+| 5 | `05_sp_process_adjustment.sql` | `SP_PROCESS_ADJUSTMENT` | Core processing engine (Direct + Scale); reads Running adjustments |
+| 5b | `05b_sp_run_pipeline.sql` | `SP_RUN_PIPELINE` | Pipeline orchestrator: claim → block → process → unblock |
+| 6 | `06_tasks.sql` | `TASK_PROCESS_VAR`, `TASK_PROCESS_STRESS`, `TASK_PROCESS_FRTB`, `TASK_PROCESS_SENSITIVITY` | 4 independent stream-triggered scope pipeline tasks |
 | 7 | `07_dynamic_tables.sql` | `DT_DASHBOARD`, `DT_OVERLAP_ALERTS` | Auto-refreshing visibility |
 | 8 | `08_views.sql` | `VW_SIGNOFF_STATUS`, `VW_DASHBOARD_KPI`, `VW_RECENT_ACTIVITY`, `VW_ERRORS`, `VW_APPROVAL_QUEUE`, `VW_MY_WORK`, `VW_PROCESSING_QUEUE` | Real-time views for Streamlit pages |
