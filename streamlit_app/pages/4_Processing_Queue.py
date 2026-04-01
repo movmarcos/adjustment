@@ -1,7 +1,7 @@
 """
 Processing Queue — Snowflake Async Pipeline
 ============================================
-Shows the Snowflake Streams → Tasks → Dynamic Table pipeline
+Shows the Snowflake Tasks → Pipeline → Dynamic Table processing
 and the live status of each enqueued adjustment.
 Reads from: VW_PROCESSING_QUEUE, ADJ_HEADER.
 """
@@ -24,7 +24,7 @@ render_sidebar()
 st.markdown("## ⏳ Processing Queue")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
-    "Adjustments are applied asynchronously via Snowflake Streams &amp; Tasks. "
+    "Adjustments are processed asynchronously via Snowflake Tasks polling every minute. "
     "Monitor the pipeline here."
     "</span>", unsafe_allow_html=True)
 st.markdown("<br/>", unsafe_allow_html=True)
@@ -51,18 +51,17 @@ running_count = int(df_q[df_q["RUN_STATUS"] == "Running"].shape[0]) if not df_q.
 if running_count > 0:
     stage = 4   # SP executing
 elif pending_count > 0:
-    stage = 2   # Stream captured, task about to wake
+    stage = 2   # Adjustment queued, task will poll within 1 minute
 else:
     stage = 5   # All done / idle
 
 render_pipeline_diagram(current_stage=stage)
 
 st.markdown(
-    f'<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;'
+    f'<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;'
     f'font-size:0.78rem;color:{P["grey_700"]};text-align:center;margin-top:0.3rem">'
     f'<div>Adjustment saved to<br/><strong>ADJ_HEADER</strong></div>'
-    f'<div>CDC captured by<br/><strong>4 scope streams</strong><br/>(VaR/Stress/FRTB/Sensitivity)</div>'
-    f'<div><strong>Scope task</strong><br/>wakes on stream data</div>'
+    f'<div><strong>Scope task</strong><br/>polls every 1 min<br/>exits fast when idle</div>'
     f'<div><strong>SP_RUN_PIPELINE</strong><br/>claim → block → process → unblock</div>'
     f'<div><strong>Dynamic Tables</strong><br/>auto-refresh (1 min lag)</div>'
     f'</div>',
@@ -207,18 +206,20 @@ with st.expander("View Snowflake Tasks configuration", expanded=False):
     st.markdown("""
 | Task | Schedule | Trigger | Action |
 |------|----------|---------|--------|
-| `TASK_PROCESS_VAR` | Every 1 min | `STREAM_QUEUE_VAR` has data | Calls `SP_RUN_PIPELINE('VaR', ...)` |
-| `TASK_PROCESS_STRESS` | Every 1 min | `STREAM_QUEUE_STRESS` has data | Calls `SP_RUN_PIPELINE('Stress', ...)` |
-| `TASK_PROCESS_FRTB` | Every 1 min | `STREAM_QUEUE_FRTB` has data | Calls `SP_RUN_PIPELINE('FRTB', ...)` — covers FRTB, FRTBDRC, FRTBRRAO, FRTBALL |
-| `TASK_PROCESS_SENSITIVITY` | Every 1 min | `STREAM_QUEUE_SENSITIVITY` has data | Calls `SP_RUN_PIPELINE('Sensitivity', ...)` |
+| `TASK_PROCESS_VAR` | Every 1 min | Time-based polling | Calls `SP_RUN_PIPELINE('VaR', ...)` |
+| `TASK_PROCESS_STRESS` | Every 1 min | Time-based polling | Calls `SP_RUN_PIPELINE('Stress', ...)` |
+| `TASK_PROCESS_FRTB` | Every 1 min | Time-based polling | Calls `SP_RUN_PIPELINE('FRTB', ...)` — covers FRTB, FRTBDRC, FRTBRRAO, FRTBALL |
+| `TASK_PROCESS_SENSITIVITY` | Every 1 min | Time-based polling | Calls `SP_RUN_PIPELINE('Sensitivity', ...)` |
+
+**Why time-based polling (no stream guard):**
+Streams only capture INSERT events. When a blocked adjustment is unblocked (`BLOCKED_BY_ADJ_ID` set to NULL by `_unblock_resolved`), that is an UPDATE — invisible to APPEND_ONLY streams. With a stream guard, the task would sleep after processing the first adjustment and the unblocked second adjustment would be stuck forever. Pure polling at 1-minute intervals is correct here. `SP_RUN_PIPELINE` exits in milliseconds when nothing is eligible.
 
 **Processing Flow:**
 1. User submits adjustment → `SP_SUBMIT_ADJUSTMENT` inserts into `ADJ_HEADER` (checks for Running overlaps → sets `BLOCKED_BY_ADJ_ID` if blocked)
-2. Eligible adjustment appears in scope queue view (`VW_QUEUE_*`)
-3. Stream detects new row → scope task wakes
-4. `SP_RUN_PIPELINE`: atomically claims eligible Pending → Running, blocks overlapping Pending adjustments, calls `SP_PROCESS_ADJUSTMENT` per adjustment, unblocks waiting adjustments
-5. Status updated to `Processed` (or `Failed` on error)
-6. If an adjustment was blocked, `BLOCKED_BY_ADJ_ID` cleared → it appears in queue view → stream fires again
+2. Within ≤1 minute: scope task fires and calls `SP_RUN_PIPELINE`
+3. `SP_RUN_PIPELINE`: atomically claims eligible Pending → Running, blocks overlapping Pending adjustments, calls `SP_PROCESS_ADJUSTMENT` per adjustment, unblocks waiting adjustments
+4. Status updated to `Processed` (or `Failed` on error)
+5. If an adjustment was blocked, `BLOCKED_BY_ADJ_ID` is cleared → next task poll (within 1 min) picks it up
 
 **Dynamic Table Refresh:**
 - `DT_DASHBOARD` refreshes with **1-minute lag**
