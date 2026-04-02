@@ -6,6 +6,7 @@ Reads from: VW_DASHBOARD_KPI, DT_DASHBOARD, DT_OVERLAP_ALERTS, VW_RECENT_ACTIVIT
 """
 import streamlit as st
 import plotly.graph_objects as go
+import pandas as pd
 from datetime import datetime
 import pytz
 
@@ -455,38 +456,65 @@ with col_alerts:
 st.markdown("<br/>", unsafe_allow_html=True)
 section_title("Recent Activity", "🕐")
 
+
+def _fmt_duration(seconds):
+    """Format a number of seconds as a human-readable string."""
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return "—"
+    if s < 0:
+        return "—"
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60}s"
+    return f"{s // 3600}h {(s % 3600) // 60}m"
+
+
 try:
+    # Query ADJ_HEADER directly — avoids VW_RECENT_ACTIVITY's cross-table JOIN
+    # which can fail if ADJ_STATUS_HISTORY.ADJ_ID type differs from ADJ_HEADER.ADJ_ID.
     df_activity = run_query_df("""
         SELECT
-            ADJ_ID          AS "Adj #",
-            EVENT_TIME      AS "Time",
-            EVENT_TYPE      AS "Event",
-            CURRENT_STATUS  AS "Status",
-            PROCESS_TYPE    AS "Scope",
-            ADJUSTMENT_TYPE AS "Type",
-            ACTOR           AS "User",
-            EVENT_DETAIL    AS "Detail"
-        FROM ADJUSTMENT_APP.VW_RECENT_ACTIVITY
-        ORDER BY EVENT_TIME DESC
+            ADJ_ID                                                      AS "Adj ID",
+            COBID                                                       AS "COB",
+            PROCESS_TYPE                                                AS "Scope",
+            ADJUSTMENT_TYPE                                             AS "Type",
+            RUN_STATUS                                                  AS "Status",
+            ENTITY_CODE                                                 AS "Entity",
+            USERNAME                                                    AS "User",
+            RECORD_COUNT                                                AS "Records",
+            CREATED_DATE                                                AS "Submitted",
+            PROCESS_DATE                                                AS "Processed",
+            DATEDIFF('second', CREATED_DATE, PROCESS_DATE)              AS DURATION_SECONDS
+        FROM ADJUSTMENT_APP.ADJ_HEADER
+        WHERE IS_DELETED = FALSE
+        ORDER BY CREATED_DATE DESC
         LIMIT 50
     """)
 
     if not df_activity.empty:
-        STATUS_COLORS = {
+        df_activity["Duration"] = df_activity["DURATION_SECONDS"].apply(
+            lambda v: _fmt_duration(v) if pd.notna(v) else "—"
+        )
+        df_activity = df_activity.drop(columns=["DURATION_SECONDS"])
+
+        STATUS_STYLE = {
             "Processed":        f"color:{P['success']};font-weight:600",
             "Failed":           f"color:{P['danger']};font-weight:600",
             "Running":          f"color:{P['info']};font-weight:600",
             "Pending":          f"color:{P['warning']};font-weight:600",
-            "Pending Approval": f"color:{P['info']};font-weight:600",
             "Approved":         "color:#00897B;font-weight:600",
+            "Pending Approval": f"color:{P['info']};font-weight:600",
         }
         st.dataframe(
-            df_activity.style.map(lambda v: STATUS_COLORS.get(v, ""), subset=["Status"]),
+            df_activity.style.map(lambda v: STATUS_STYLE.get(v, ""), subset=["Status"]),
             use_container_width=True,
             height=380,
             hide_index=True,
         )
     else:
-        st.info("No activity yet.")
-except Exception:
-    st.info("No activity data available.")
+        st.info("No adjustments yet.")
+except Exception as e:
+    st.warning(f"Could not load recent activity: {e}")

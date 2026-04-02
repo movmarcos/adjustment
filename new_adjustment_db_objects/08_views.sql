@@ -79,7 +79,7 @@ GROUP BY h.COBID;
 -- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_RECENT_ACTIVITY
-    COMMENT = 'Activity feed combining submissions and status changes. Used for the dashboard timeline.'
+    COMMENT = 'Activity feed combining submissions and status changes. Includes CREATED_DATE, PROCESS_DATE, and DURATION_SECONDS for timing analysis.'
 AS
 SELECT
     h.ADJ_ID,
@@ -88,30 +88,38 @@ SELECT
     h.ADJUSTMENT_TYPE,
     h.ENTITY_CODE,
     h.BOOK_CODE,
-    h.USERNAME                        AS ACTOR,
-    'Submitted'                       AS EVENT_TYPE,
-    h.CREATED_DATE                    AS EVENT_TIME,
-    h.REASON                          AS EVENT_DETAIL,
-    h.RUN_STATUS                      AS CURRENT_STATUS
+    h.USERNAME                                                AS ACTOR,
+    'Submitted'                                               AS EVENT_TYPE,
+    h.CREATED_DATE                                            AS EVENT_TIME,
+    h.REASON                                                  AS EVENT_DETAIL,
+    h.RUN_STATUS                                              AS CURRENT_STATUS,
+    h.CREATED_DATE,
+    h.PROCESS_DATE,
+    DATEDIFF('second', h.CREATED_DATE, h.PROCESS_DATE)        AS DURATION_SECONDS
 FROM ADJUSTMENT_APP.ADJ_HEADER h
 WHERE h.IS_DELETED = FALSE
 
 UNION ALL
 
 SELECT
-    sh.ADJ_ID,
+    h.ADJ_ID,
     h.COBID,
     h.PROCESS_TYPE,
     h.ADJUSTMENT_TYPE,
     h.ENTITY_CODE,
     h.BOOK_CODE,
-    sh.CHANGED_BY                     AS ACTOR,
-    sh.NEW_STATUS                     AS EVENT_TYPE,
-    sh.CHANGED_AT                     AS EVENT_TIME,
-    sh.COMMENT                        AS EVENT_DETAIL,
-    h.RUN_STATUS                      AS CURRENT_STATUS
+    sh.CHANGED_BY                                             AS ACTOR,
+    sh.NEW_STATUS                                             AS EVENT_TYPE,
+    sh.CHANGED_AT                                             AS EVENT_TIME,
+    sh.COMMENT                                                AS EVENT_DETAIL,
+    h.RUN_STATUS                                              AS CURRENT_STATUS,
+    h.CREATED_DATE,
+    h.PROCESS_DATE,
+    DATEDIFF('second', h.CREATED_DATE, h.PROCESS_DATE)        AS DURATION_SECONDS
 FROM ADJUSTMENT_APP.ADJ_STATUS_HISTORY sh
-INNER JOIN ADJUSTMENT_APP.ADJ_HEADER h ON h.ADJ_ID = sh.ADJ_ID
+-- Cast to VARCHAR so the join survives if ADJ_STATUS_HISTORY.ADJ_ID is still NUMBER
+INNER JOIN ADJUSTMENT_APP.ADJ_HEADER h
+    ON h.ADJ_ID = sh.ADJ_ID::VARCHAR
 WHERE h.IS_DELETED = FALSE;
 
 
