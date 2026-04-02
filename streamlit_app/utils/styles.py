@@ -110,26 +110,83 @@ def inject_css():
     [data-testid="stMainBlockContainer"] {{ padding-top: 1.5rem; padding-bottom: 3rem; }}
     [data-testid="stVerticalBlock"] {{ gap: 0.75rem; }}
 
-    /* Sidebar */
+    /* ── Sidebar — MUFG brand dark grey ────────────────────────────────── */
     [data-testid="stSidebar"] {{
-        background: {P["accent"]} !important;
+        background: #3C3D3E !important;
         border-right: none !important;
     }}
-    [data-testid="stSidebar"] > div:first-child {{ background: {P["accent"]} !important; }}
+    [data-testid="stSidebar"] > div:first-child {{
+        background: #3C3D3E !important;
+        overflow: hidden !important;   /* prevent sidebar scroll */
+        height: 100vh !important;
+        display: flex !important;
+        flex-direction: column !important;
+    }}
     [data-testid="stSidebar"] * {{ color: #E8E8EC !important; }}
     [data-testid="stSidebar"] hr {{ border-color: rgba(255,255,255,0.12) !important; }}
-    /* Compact sidebar navigation — fit all pages without scrolling */
-    [data-testid="stSidebar"] [data-testid="stSidebarNav"] {{ padding-top: 0.3rem !important; }}
-    [data-testid="stSidebar"] [data-testid="stSidebarNav"] li {{ margin: 0 !important; padding: 0 !important; }}
+
+    /* Logo area red top-stripe */
+    [data-testid="stSidebar"] > div:first-child::before {{
+        content: "";
+        display: block;
+        height: 3px;
+        background: #D50032;
+        flex-shrink: 0;
+    }}
+
+    /* Compact sidebar navigation — all pages visible with no scroll */
+    [data-testid="stSidebar"] [data-testid="stSidebarNav"] {{
+        padding-top: 0.2rem !important;
+        flex-shrink: 0 !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stSidebarNav"] ul {{
+        padding-bottom: 0.2rem !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stSidebarNav"] li {{
+        margin: 0 !important;
+        padding: 0 !important;
+    }}
     [data-testid="stSidebar"] [data-testid="stSidebarNav"] a {{
-        padding: 0.28rem 0.8rem !important;
-        font-size: 0.82rem !important;
-        line-height: 1.2 !important;
+        padding: 0.3rem 0.9rem !important;
+        font-size: 0.83rem !important;
+        line-height: 1.25 !important;
         min-height: unset !important;
+        border-radius: 0 !important;
+        transition: background .12s !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stSidebarNav"] a:hover {{
+        background: rgba(213,0,50,.15) !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stSidebarNav"] a[aria-selected="true"] {{
+        background: rgba(213,0,50,.22) !important;
+        border-left: 3px solid #D50032 !important;
     }}
     [data-testid="stSidebar"] [data-testid="stSidebarNav"] a span {{
-        font-size: 0.82rem !important;
+        font-size: 0.83rem !important;
         white-space: nowrap !important;
+    }}
+
+    /* Flex chain: sidebar inner blocks must pass flex context down so that
+       the spacer div (flex:1) can actually push the user footer to the bottom. */
+    [data-testid="stSidebar"] > div:first-child > div,
+    [data-testid="stSidebar"] > div:first-child > div > div,
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {{
+        display: flex !important;
+        flex-direction: column !important;
+        flex: 1 !important;
+        min-height: 0 !important;
+    }}
+    /* stSidebarNav must not stretch — it's a fixed-size block */
+    [data-testid="stSidebarNav"] {{
+        flex: 0 0 auto !important;
+    }}
+
+    /* Sidebar user footer — pushed to bottom */
+    .sidebar-user-footer {{
+        border-top: 1px solid rgba(255,255,255,0.1);
+        padding: 0.65rem 1rem;
+        background: #343536;
+        flex-shrink: 0 !important;
     }}
 
     /* Cards */
@@ -415,61 +472,44 @@ def render_pipeline_diagram(current_stage: int = 0):
 
 
 def render_sidebar():
-    """Render the branded sidebar with logo, user info, and quick stats."""
+    """Render the branded sidebar: MUFG logo, compact nav, user at bottom."""
     from utils.snowflake_conn import current_user_name
 
+    user = current_user_name()
+
     with st.sidebar:
-        # Logo / brand
+        # ── MUFG Logo (SVG inline, white text for dark background) ──────────
+        st.markdown("""
+        <div style="padding:0.8rem 1rem 0.6rem;border-bottom:1px solid rgba(255,255,255,0.08)">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 80"
+               style="width:100%;max-width:170px;height:auto;display:block">
+            <circle cx="40" cy="40" r="34" fill="#D50032"/>
+            <circle cx="40" cy="40" r="20" fill="#fff"/>
+            <circle cx="40" cy="40" r="12" fill="#D50032"/>
+            <text x="90" y="52" font-family="Arial,Helvetica,sans-serif"
+                  font-size="38" font-weight="700" fill="#ffffff" letter-spacing="3">MUFG</text>
+          </svg>
+          <div style="font-size:0.67rem;font-weight:600;text-transform:uppercase;
+            letter-spacing:.1em;color:rgba(255,255,255,0.4);margin-top:5px;padding-left:1px">
+            Adjustment Engine
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Nav links are rendered automatically by Streamlit (stSidebarNav) here.
+
+        # ── Spacer pushes user section to the bottom ─────────────────────────
         st.markdown(
-            '<div style="padding:0.6rem 0.5rem 0.4rem;border-bottom:1px solid rgba(255,255,255,0.1);'
-            'font-size:1rem;font-weight:800;color:white;letter-spacing:.04em">MUFG</div>',
+            '<div style="flex:1;min-height:1rem"></div>',
             unsafe_allow_html=True)
 
-        # User
-        user = current_user_name()
+        # ── User footer ───────────────────────────────────────────────────────
         st.markdown(
-            f'<div style="padding:0.4rem 0 0.1rem;font-size:0.65rem;font-weight:700;'
-            f'text-transform:uppercase;letter-spacing:.08em;color:rgba(255,255,255,0.45)">'
+            f'<div class="sidebar-user-footer">'
+            f'<div style="font-size:0.6rem;font-weight:700;text-transform:uppercase;'
+            f'letter-spacing:.1em;color:rgba(255,255,255,0.38);margin-bottom:3px">'
             f'Logged in as</div>'
-            f'<div style="font-size:0.82rem;font-weight:600;color:white;margin-bottom:0.3rem">'
-            f'{user}</div>',
+            f'<div style="font-size:0.82rem;font-weight:600;color:rgba(255,255,255,0.88)">'
+            f'{user}</div>'
+            f'</div>',
             unsafe_allow_html=True)
-
-        st.markdown("---")
-
-        # Quick stats (read from Snowflake)
-        st.markdown(
-            '<div style="font-size:0.65rem;font-weight:700;text-transform:uppercase;'
-            'letter-spacing:.08em;color:rgba(255,255,255,0.45);margin-bottom:0.3rem">'
-            'Quick Stats</div>',
-            unsafe_allow_html=True)
-
-        try:
-            from utils.snowflake_conn import run_query
-            stats = run_query("""
-                SELECT
-                    COUNT(*) AS TOTAL,
-                    SUM(CASE WHEN RUN_STATUS = 'Pending' THEN 1 ELSE 0 END) AS PENDING,
-                    SUM(CASE WHEN RUN_STATUS = 'Processed' THEN 1 ELSE 0 END) AS PROCESSED,
-                    SUM(CASE WHEN RUN_STATUS = 'Failed' THEN 1 ELSE 0 END) AS ERRORS
-                FROM ADJUSTMENT_APP.ADJ_HEADER
-                WHERE IS_DELETED = FALSE
-            """)
-            if stats:
-                s = stats[0]
-                for label, val, color in [
-                    ("Total adjustments", s["TOTAL"],     "#E8E8F4"),
-                    ("Pending",           s["PENDING"],   "#FFB74D"),
-                    ("Processed",         s["PROCESSED"], "#81C784"),
-                    ("Errors",            s["ERRORS"],    "#EF9A9A"),
-                ]:
-                    st.markdown(
-                        f'<div style="display:flex;justify-content:space-between;'
-                        f'padding:0.25rem 0;font-size:0.78rem">'
-                        f'<span style="color:rgba(255,255,255,0.6)">{label}</span>'
-                        f'<span style="color:{color};font-weight:700">{val}</span></div>',
-                        unsafe_allow_html=True)
-        except Exception:
-            st.markdown(
-                '<span style="font-size:0.75rem;color:rgba(255,255,255,0.4)">Loading...</span>',
-                unsafe_allow_html=True)
