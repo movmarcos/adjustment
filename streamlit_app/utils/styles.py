@@ -138,9 +138,14 @@ def inject_css():
     [data-testid="stSidebar"] [data-testid="stSidebarNav"] {{
         padding-top: 0.2rem !important;
         flex-shrink: 0 !important;
+        max-height: none !important;   /* override Streamlit's built-in scroll cap */
+        overflow: visible !important;
+        height: auto !important;
     }}
     [data-testid="stSidebar"] [data-testid="stSidebarNav"] ul {{
         padding-bottom: 0.2rem !important;
+        max-height: none !important;
+        overflow: visible !important;
     }}
     [data-testid="stSidebar"] [data-testid="stSidebarNav"] li {{
         margin: 0 !important;
