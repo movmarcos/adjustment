@@ -76,11 +76,11 @@ st.markdown("<br/>", unsafe_allow_html=True)
 try:
     df_stats = run_query_df("""
         SELECT
-            COUNT(*)                                                   AS TOTAL,
-            SUM(CASE WHEN RUN_STATUS = 'Pending'   THEN 1 ELSE 0 END) AS PENDING,
-            SUM(CASE WHEN RUN_STATUS = 'Running'   THEN 1 ELSE 0 END) AS RUNNING,
-            SUM(CASE WHEN RUN_STATUS = 'Processed' THEN 1 ELSE 0 END) AS PROCESSED,
-            SUM(CASE WHEN RUN_STATUS = 'Failed'    THEN 1 ELSE 0 END) AS FAILED
+            COUNT(*)                                                                       AS TOTAL,
+            SUM(CASE WHEN RUN_STATUS IN ('Pending', 'Approved') THEN 1 ELSE 0 END)        AS PENDING,
+            SUM(CASE WHEN RUN_STATUS = 'Running'                THEN 1 ELSE 0 END)        AS RUNNING,
+            SUM(CASE WHEN RUN_STATUS = 'Processed'              THEN 1 ELSE 0 END)        AS PROCESSED,
+            SUM(CASE WHEN RUN_STATUS = 'Failed'                 THEN 1 ELSE 0 END)        AS FAILED
         FROM ADJUSTMENT_APP.ADJ_HEADER
         WHERE IS_DELETED = FALSE
     """)
@@ -90,7 +90,7 @@ except Exception:
 
 c1, c2, c3, c4 = st.columns(4)
 stat_items = [
-    ("Pending",    qs.get("PENDING", 0),    P["warning"], "⏸"),
+    ("Pending / Approved", qs.get("PENDING", 0), P["warning"], "⏸"),
     ("Running",    qs.get("RUNNING", 0),    "#1565C0",    "⚡"),
     ("Processed",  qs.get("PROCESSED", 0),  P["success"], "✔"),
     ("Failed",     qs.get("FAILED", 0),     P["danger"],  "✗"),

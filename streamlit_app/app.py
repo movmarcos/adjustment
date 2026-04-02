@@ -103,18 +103,19 @@ st.markdown(f"""
 # KPI STRIP
 # ──────────────────────────────────────────────────────────────────────────────
 
+queued = int(kpis.get("PENDING", 0)) + int(kpis.get("APPROVED", 0))
+
 kpi_items = [
-    ("Total",             int(kpis.get("TOTAL", 0)),           "All adjustments",  P["primary"],   "📋"),
-    ("Pending",           int(kpis.get("PENDING", 0)),          "Awaiting queue",   P["warning"],   "⏸"),
-    ("Awaiting Approval", int(kpis.get("PENDING_APPROVAL", 0)), "Need approval",    P["info"],      "📝"),
-    ("Approved",          int(kpis.get("APPROVED", 0)),         "Ready to process", "#00897B",      "✅"),
-    ("Running",           int(kpis.get("RUNNING", 0)),          "Processing now",   P["info"],      "⚡"),
-    ("Processed",         int(kpis.get("PROCESSED", 0)),        "In the data",      P["success"],   "✔"),
-    ("Failed",            int(kpis.get("FAILED", 0)),           "Need attention",   P["danger"],    "✗"),
-    ("Overlaps",          int(kpis.get("OVERLAPS", 0)),         "Overlap alerts",   P["purple"],    "⚠️"),
+    ("Total",             int(kpis.get("TOTAL", 0)),           "All adjustments",      P["primary"],   "📋"),
+    ("Queued",            queued,                               "Pending + Approved",   P["warning"],   "⏸"),
+    ("Awaiting Approval", int(kpis.get("PENDING_APPROVAL", 0)), "Need approval",        P["info"],      "📝"),
+    ("Running",           int(kpis.get("RUNNING", 0)),          "Processing now",       P["info"],      "⚡"),
+    ("Processed",         int(kpis.get("PROCESSED", 0)),        "In the data",          P["success"],   "✔"),
+    ("Failed",            int(kpis.get("FAILED", 0)),           "Need attention",       P["danger"],    "✗"),
+    ("Overlaps",          int(kpis.get("OVERLAPS", 0)),         "Overlap alerts",       P["purple"],    "⚠️"),
 ]
 
-cards_html = '<div style="display:grid;grid-template-columns:repeat(8,1fr);gap:10px;margin-bottom:1.4rem">'
+cards_html = '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:10px;margin-bottom:1.4rem">'
 for label, val, sub, color, icon in kpi_items:
     alert_style = f"box-shadow:0 0 0 2px {color}44;" if (label == "Failed" and val > 0) or (label == "Overlaps" and val > 0) else ""
     cards_html += f"""
