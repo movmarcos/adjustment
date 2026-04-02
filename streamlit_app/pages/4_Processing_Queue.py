@@ -164,9 +164,12 @@ section_title("Recently Processed", "📜")
 
 try:
     df_recent = run_query_df("""
-        SELECT ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, ENTITY_CODE,
-               BOOK_CODE, RUN_STATUS, USERNAME, RECORD_COUNT,
-               CREATED_DATE, PROCESS_DATE, ERRORMESSAGE
+        SELECT
+            ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, ENTITY_CODE,
+            RUN_STATUS, USERNAME, RECORD_COUNT,
+            CREATED_DATE, START_DATE, PROCESS_DATE,
+            DATEDIFF('second', START_DATE, PROCESS_DATE) AS DURATION_SECONDS,
+            ERRORMESSAGE
         FROM ADJUSTMENT_APP.ADJ_HEADER
         WHERE RUN_STATUS IN ('Processed', 'Failed')
           AND IS_DELETED = FALSE
@@ -175,15 +178,31 @@ try:
     """)
 
     if not df_recent.empty:
+        import pandas as pd
+
+        def _fmt_dur(s):
+            try:
+                s = int(s)
+            except (TypeError, ValueError):
+                return "—"
+            if s < 0:   return "—"
+            if s < 60:  return f"{s}s"
+            if s < 3600: return f"{s//60}m {s%60}s"
+            return f"{s//3600}h {(s%3600)//60}m"
+
+        df_recent["Duration"] = df_recent["DURATION_SECONDS"].apply(
+            lambda v: _fmt_dur(v) if pd.notna(v) else "—"
+        )
+        df_recent = df_recent.drop(columns=["DURATION_SECONDS"])
+
         def color_status(val):
-            if val == "Processed":
-                return f"color:{P['success']};font-weight:600"
-            if val == "Failed":
-                return f"color:{P['danger']};font-weight:600"
+            if val == "Processed": return f"color:{P['success']};font-weight:600"
+            if val == "Failed":    return f"color:{P['danger']};font-weight:600"
             return ""
 
         display_cols = ["ADJ_ID", "PROCESS_TYPE", "ADJUSTMENT_TYPE", "RUN_STATUS",
-                        "ENTITY_CODE", "RECORD_COUNT", "USERNAME", "PROCESS_DATE", "ERRORMESSAGE"]
+                        "ENTITY_CODE", "RECORD_COUNT", "USERNAME",
+                        "CREATED_DATE", "START_DATE", "PROCESS_DATE", "Duration", "ERRORMESSAGE"]
         existing_cols = [c for c in display_cols if c in df_recent.columns]
         st.dataframe(
             df_recent[existing_cols].style.map(color_status, subset=["RUN_STATUS"]),

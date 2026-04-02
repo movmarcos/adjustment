@@ -485,9 +485,10 @@ try:
             ENTITY_CODE                                                 AS "Entity",
             USERNAME                                                    AS "User",
             RECORD_COUNT                                                AS "Records",
-            CREATED_DATE                                                AS "Submitted",
-            PROCESS_DATE                                                AS "Processed",
-            DATEDIFF('second', CREATED_DATE, PROCESS_DATE)              AS DURATION_SECONDS
+            CREATED_DATE                                                AS "Created",
+            START_DATE                                                  AS "Started",
+            PROCESS_DATE                                                AS "Ended",
+            DATEDIFF('second', START_DATE, PROCESS_DATE)                AS DURATION_SECONDS
         FROM ADJUSTMENT_APP.ADJ_HEADER
         WHERE IS_DELETED = FALSE
         ORDER BY CREATED_DATE DESC

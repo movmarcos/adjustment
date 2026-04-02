@@ -63,7 +63,7 @@ def main(session, scope, pipeline_types):
     session.sql(f"""
         UPDATE ADJUSTMENT_APP.ADJ_HEADER
         SET RUN_STATUS = 'Running',
-            PROCESS_DATE = CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9)
+            START_DATE = CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9)
         WHERE PROCESS_TYPE IN ({pipeline_in})
           AND RUN_STATUS IN ('Pending', 'Approved')
           AND BLOCKED_BY_ADJ_ID IS NULL

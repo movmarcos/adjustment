@@ -82,7 +82,8 @@ CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_HEADER (
     -- Workflow status
     RUN_STATUS                  VARCHAR(30)  COLLATE 'en-ci' DEFAULT 'Pending',
     IS_POSITIVE_ADJUSTMENT      BOOLEAN      DEFAULT TRUE,       -- FALSE = superseded / inactive
-    PROCESS_DATE                TIMESTAMP_NTZ(9),
+    START_DATE                  TIMESTAMP_NTZ(9),                -- Set when status → Running (processing starts)
+    PROCESS_DATE                TIMESTAMP_NTZ(9),                -- Set when status → Processed / Failed (processing ends)
     RECORD_COUNT                NUMBER(38,0),
     ERRORMESSAGE                VARCHAR(1000) COLLATE 'en-ci',
 
@@ -352,6 +353,13 @@ CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS (
 COMMENT = 'COB sign-off status per scope. SIGN_OFF_STATUS = SIGNED_OFF means no new adjustments allowed. Managed via Admin page.';
 
 
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- MIGRATION — add START_DATE to existing ADJ_HEADER
+-- ═══════════════════════════════════════════════════════════════════════════
+ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER
+    ADD COLUMN IF NOT EXISTS START_DATE TIMESTAMP_NTZ(9)
+    COMMENT 'Set when the adjustment transitions to Running. Distinct from PROCESS_DATE (end).';
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 8. VERIFY

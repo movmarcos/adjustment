@@ -94,8 +94,9 @@ SELECT
     h.REASON                                                  AS EVENT_DETAIL,
     h.RUN_STATUS                                              AS CURRENT_STATUS,
     h.CREATED_DATE,
+    h.START_DATE,
     h.PROCESS_DATE,
-    DATEDIFF('second', h.CREATED_DATE, h.PROCESS_DATE)        AS DURATION_SECONDS
+    DATEDIFF('second', h.START_DATE, h.PROCESS_DATE)          AS DURATION_SECONDS
 FROM ADJUSTMENT_APP.ADJ_HEADER h
 WHERE h.IS_DELETED = FALSE
 
@@ -114,8 +115,9 @@ SELECT
     sh.COMMENT                                                AS EVENT_DETAIL,
     h.RUN_STATUS                                              AS CURRENT_STATUS,
     h.CREATED_DATE,
+    h.START_DATE,
     h.PROCESS_DATE,
-    DATEDIFF('second', h.CREATED_DATE, h.PROCESS_DATE)        AS DURATION_SECONDS
+    DATEDIFF('second', h.START_DATE, h.PROCESS_DATE)          AS DURATION_SECONDS
 FROM ADJUSTMENT_APP.ADJ_STATUS_HISTORY sh
 -- Cast to VARCHAR so the join survives if ADJ_STATUS_HISTORY.ADJ_ID is still NUMBER
 INNER JOIN ADJUSTMENT_APP.ADJ_HEADER h
@@ -174,6 +176,7 @@ SELECT
     h.RUN_STATUS,
     h.USERNAME                AS SUBMITTED_BY,
     h.CREATED_DATE            AS SUBMITTED_AT,
+    h.START_DATE,
     h.PROCESS_DATE,
     h.RECORD_COUNT,
     h.ERRORMESSAGE,

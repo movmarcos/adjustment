@@ -157,21 +157,26 @@ def render_adj_card(row):
                     unsafe_allow_html=True)
 
         with col_meta:
-            submitted_at = row.get("SUBMITTED_AT", "")
-            if hasattr(submitted_at, "strftime") and submitted_at is not None and str(submitted_at) != "NaT":
-                submitted_at = submitted_at.strftime("%d %b %Y %H:%M")
-            process_date = row.get("PROCESS_DATE", "")
-            if hasattr(process_date, "strftime") and process_date is not None and str(process_date) != "NaT":
-                process_date = process_date.strftime("%d %b %Y %H:%M")
+            def _fmt_ts(val):
+                if val is None or str(val) == "NaT":
+                    return "—"
+                if hasattr(val, "strftime"):
+                    return val.strftime("%d %b %Y %H:%M")
+                return str(val) if str(val) not in ("None", "") else "—"
+
+            submitted_at = _fmt_ts(row.get("SUBMITTED_AT"))
+            start_date   = _fmt_ts(row.get("START_DATE"))
+            process_date = _fmt_ts(row.get("PROCESS_DATE"))
 
             meta_rows = [
                 ("Target COB",   str(row.get("COBID", "—"))),
                 ("Records",      f"{record_cnt:,}" if record_cnt else "—"),
                 ("Created by",   str(row.get("SUBMITTED_BY", "—"))),
-                ("Created",      str(submitted_at) if submitted_at else "—"),
+                ("Created",      submitted_at),
                 ("Scale",        f'{row.get("SCALE_FACTOR", 1):.4f}×' if row.get("SCALE_FACTOR") and float(row.get("SCALE_FACTOR", 1)) != 1 else "—"),
                 ("Source COB",   str(row.get("SOURCE_COBID", "—")) if row.get("SOURCE_COBID") else "—"),
-                ("Processed at", str(process_date) if process_date else "—"),
+                ("Started",      start_date),
+                ("Ended",        process_date),
                 ("Occurrence",   str(row.get("ADJUSTMENT_OCCURRENCE", "—"))),
             ]
             rows_html = "".join(
