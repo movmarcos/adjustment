@@ -509,10 +509,10 @@ try:
             "Pending Approval": f"color:{P['info']};font-weight:600",
         }
         st.dataframe(
-            df_activity.style.map(lambda v: STATUS_STYLE.get(v, ""), subset=["Status"]),
+            df_activity.style.map(lambda v: STATUS_STYLE.get(v, ""), subset=["Status"])
+                             .hide(axis="index"),
             use_container_width=True,
             height=380,
-            hide_index=True,
         )
     else:
         st.info("No adjustments yet.")
