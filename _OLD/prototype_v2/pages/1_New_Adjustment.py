@@ -15,14 +15,14 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from data.state_manager import (
+from _OLD.prototype_v2.data.state_manager import (
     init_state, reset_wizard, create_adjustment, update_status,
     check_overlaps, compute_preview, count_matched_rows,
     generate_ai_copilot, current_user, can_apply, dashboard_kpis,
     TYPE_LABELS, TYPE_FORMULA,
 )
-from data.mock_data import SCOPES, BUSINESS_DATES, LATEST_COB
-from data.styles import (
+from _OLD.prototype_v2.data.mock_data import SCOPES, BUSINESS_DATES, LATEST_COB
+from _OLD.prototype_v2.data.styles import (
     inject_css, render_sidebar, render_step_bar, render_filter_chips,
     render_ai_panel, render_overlap_warning, status_badge, section_title, fmt_number, P,
 )

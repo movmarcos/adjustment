@@ -9,7 +9,7 @@ import numpy as np
 from datetime import datetime, date, timedelta
 from copy import deepcopy
 
-from data.mock_data import (
+from _OLD.prototype_v2.data.mock_data import (
     SCOPES, FACT_GENERATORS, USERS, SEED_ADJUSTMENTS,
     SEED_STATUS_HISTORY, SEED_QUEUE, BUSINESS_DATES, LATEST_COB,
 )

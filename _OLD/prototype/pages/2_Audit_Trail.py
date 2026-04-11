@@ -5,10 +5,10 @@ import streamlit as st
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from data.state_manager import (init_state, get_headers, get_lines, get_history,
+from _OLD.prototype.data.state_manager import (init_state, get_headers, get_lines, get_history,
                                  update_status, reverse_adjustment, current_scope_cfg,
                                  VALID_TRANSITIONS, STATUS_COLORS)
-from data.styles import inject_css, section_header, status_badge, top_navbar, scope_and_user_controls, format_number
+from _OLD.prototype.data.styles import inject_css, section_header, status_badge, top_navbar, scope_and_user_controls, format_number
 
 st.set_page_config(page_title="Audit Trail", page_icon="📋", layout="wide", initial_sidebar_state="collapsed")
 inject_css()

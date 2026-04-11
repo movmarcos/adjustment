@@ -14,9 +14,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from data.state_manager import init_state, current_user, can_admin
-from data.mock_data import SCOPES, USERS, ROLE_LABELS
-from data.styles import inject_css, render_sidebar, section_title, P
+from _OLD.prototype_v2.data.state_manager import init_state, current_user, can_admin
+from _OLD.prototype_v2.data.mock_data import SCOPES, USERS, ROLE_LABELS
+from _OLD.prototype_v2.data.styles import inject_css, render_sidebar, section_title, P
 
 init_state()
 inject_css()

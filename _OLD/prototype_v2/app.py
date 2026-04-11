@@ -17,8 +17,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from data.state_manager import init_state, dashboard_kpis, get_all_adjustments, get_pending_approvals, get_queue_stats, tick_queue, current_user
-from data.styles import inject_css, render_sidebar, status_badge, kpi_card, section_title, P
+from _OLD.prototype_v2.data.state_manager import init_state, dashboard_kpis, get_all_adjustments, get_pending_approvals, get_queue_stats, tick_queue, current_user
+from _OLD.prototype_v2.data.styles import inject_css, render_sidebar, status_badge, kpi_card, section_title, P
 
 init_state()
 inject_css()
@@ -226,7 +226,7 @@ with col_right:
                     '✅ Nothing pending</div>', unsafe_allow_html=True)
     else:
         for adj in pending[:5]:
-            from data.mock_data import SCOPES
+            from _OLD.prototype_v2.data.mock_data import SCOPES
             scope = SCOPES.get(adj["scope_key"], {})
             created_ts = adj["created_at"].strftime("%d %b %H:%M") if adj.get("created_at") else ""
             recur_tag = '&nbsp;<span class="tag recurring">RECURRING</span>' if adj.get("frequency") == "RECURRING" else ""
@@ -261,7 +261,7 @@ history = st.session_state.get("status_history", [])
 recent = sorted(history, key=lambda h: h["changed_at"], reverse=True)[:8]
 
 if recent:
-    from data.mock_data import SCOPES as SC
+    from _OLD.prototype_v2.data.mock_data import SCOPES as SC
     cols_h = st.columns([1, 1.2, 1.5, 1.5, 3])
     cols_h[0].markdown('<span style="font-size:0.7rem;font-weight:700;color:#9E9E9E">ADJ</span>', unsafe_allow_html=True)
     cols_h[1].markdown('<span style="font-size:0.7rem;font-weight:700;color:#9E9E9E">STATUS</span>', unsafe_allow_html=True)

@@ -5,10 +5,10 @@ import streamlit as st
 import sys, os, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from data.state_manager import (init_state, get_fact_table, preview_adjustment,
+from _OLD.prototype.data.state_manager import (init_state, get_fact_table, preview_adjustment,
                                  create_adjustment, current_scope_cfg)
-from data.styles import inject_css, section_header, top_navbar, scope_and_user_controls, metric_card, format_number
-from data.mock_data import SCOPES
+from _OLD.prototype.data.styles import inject_css, section_header, top_navbar, scope_and_user_controls, metric_card, format_number
+from _OLD.prototype.data.mock_data import SCOPES
 
 st.set_page_config(page_title="Apply Adjustment", page_icon="📝", layout="wide", initial_sidebar_state="collapsed")
 inject_css()

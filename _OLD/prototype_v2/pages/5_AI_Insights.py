@@ -18,12 +18,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from data.state_manager import (
+from _OLD.prototype_v2.data.state_manager import (
     init_state, get_all_adjustments, generate_chat_response,
     dashboard_kpis, current_user,
 )
-from data.mock_data import SCOPES
-from data.styles import inject_css, render_sidebar, section_title, status_badge, P
+from _OLD.prototype_v2.data.mock_data import SCOPES
+from _OLD.prototype_v2.data.styles import inject_css, render_sidebar, section_title, status_badge, P
 
 init_state()
 inject_css()

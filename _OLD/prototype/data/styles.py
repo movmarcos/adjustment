@@ -5,7 +5,7 @@ MUFG-branded theme with top navigation bar.
 """
 import streamlit as st
 import base64, os, pathlib
-from data.state_manager import STATUS_COLORS
+from _OLD.prototype.data.state_manager import STATUS_COLORS
 import pandas as pd
 
 # ─────────────────────────────────────────────────────────────────────
@@ -199,7 +199,7 @@ _NAV_ITEMS = [
 
 def top_navbar(active_page: str = "Home"):
     """Render the MUFG top navigation bar with scope/user controls."""
-    from data.mock_data import SCOPES, get_scope_choices
+    from _OLD.prototype.data.mock_data import SCOPES, get_scope_choices
 
     logo_b64 = _get_logo_b64()
     logo_html = f'<img src="data:image/svg+xml;base64,{logo_b64}" alt="MUFG"/>' if logo_b64 else '<span style="font-weight:700;color:#D50032;font-size:1.2rem">MUFG</span>'
@@ -230,7 +230,7 @@ def top_navbar(active_page: str = "Home"):
 
 def scope_and_user_controls():
     """Render scope selector + user switcher as inline controls below the navbar."""
-    from data.mock_data import SCOPES, get_scope_choices
+    from _OLD.prototype.data.mock_data import SCOPES, get_scope_choices
     choices = get_scope_choices()
     labels = [f"{c['icon']}  {c['name']}" for c in choices]
     ids = [c["id"] for c in choices]

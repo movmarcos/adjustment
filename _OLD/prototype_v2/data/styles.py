@@ -5,7 +5,7 @@ Professional banking UI with sidebar navigation.
 """
 import streamlit as st
 import base64, pathlib
-from data.state_manager import STATUS_COLORS, STATUS_ICONS, dashboard_kpis, get_pending_approvals, get_queue_stats
+from _OLD.prototype_v2.data.state_manager import STATUS_COLORS, STATUS_ICONS, dashboard_kpis, get_pending_approvals, get_queue_stats
 
 # ──────────────────────────────────────────────────────────────────────────────
 # COLOUR PALETTE
@@ -473,8 +473,8 @@ def inject_css():
 # ──────────────────────────────────────────────────────────────────────────────
 
 def render_sidebar():
-    from data.state_manager import current_user, USERS, set_current_user, can_admin
-    from data.mock_data import ROLE_LABELS
+    from _OLD.prototype_v2.data.state_manager import current_user, USERS, set_current_user, can_admin
+    from _OLD.prototype_v2.data.mock_data import ROLE_LABELS
 
     kpis = dashboard_kpis()
     q    = get_queue_stats()
@@ -636,7 +636,7 @@ def render_step_bar(current_step: int, steps: list[str]):
 
 
 def render_filter_chips(filter_criteria: dict, scope_key: str):
-    from data.mock_data import SCOPES
+    from _OLD.prototype_v2.data.mock_data import SCOPES
     scope = SCOPES.get(scope_key, {})
     dim_map = {d["column"]: d["label"] for d in scope.get("dimensions", [])}
     chips = []

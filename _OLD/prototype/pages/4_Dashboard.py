@@ -5,10 +5,10 @@ import streamlit as st
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from data.state_manager import (init_state, get_fact_table, get_headers, get_lines,
+from _OLD.prototype.data.state_manager import (init_state, get_fact_table, get_headers, get_lines,
                                  get_fact_adjusted, current_scope_cfg)
-from data.styles import inject_css, section_header, top_navbar, scope_and_user_controls, metric_card, format_number
-from data.mock_data import SCOPES
+from _OLD.prototype.data.styles import inject_css, section_header, top_navbar, scope_and_user_controls, metric_card, format_number
+from _OLD.prototype.data.mock_data import SCOPES
 import pandas as pd
 import numpy as np
 
@@ -87,7 +87,7 @@ if HAS_PLOTLY and not headers.empty:
     # Adjustments by status
     with c2:
         section_header("By Status")
-        from data.state_manager import STATUS_COLORS
+        from _OLD.prototype.data.state_manager import STATUS_COLORS
         status_counts = headers["STATUS"].value_counts().reset_index()
         status_counts.columns = ["Status", "Count"]
         colors = [STATUS_COLORS.get(s, "#78909C") for s in status_counts["Status"]]

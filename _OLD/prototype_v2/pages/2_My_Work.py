@@ -14,12 +14,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from data.state_manager import (
+from _OLD.prototype_v2.data.state_manager import (
     init_state, get_my_adjustments, get_all_adjustments, get_status_history,
     update_status, current_user, can_approve,
 )
-from data.mock_data import SCOPES, TYPE_LABELS
-from data.styles import (
+from _OLD.prototype_v2.data.mock_data import SCOPES, TYPE_LABELS
+from _OLD.prototype_v2.data.styles import (
     inject_css, render_sidebar, render_filter_chips, render_status_timeline,
     status_badge, section_title, fmt_number, P, STATUS_COLORS,
 )

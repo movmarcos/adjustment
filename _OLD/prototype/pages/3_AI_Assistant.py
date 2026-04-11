@@ -5,10 +5,10 @@ import streamlit as st
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from data.state_manager import (init_state, get_fact_table, get_headers, get_lines,
+from _OLD.prototype.data.state_manager import (init_state, get_fact_table, get_headers, get_lines,
                                  get_fact_adjusted, current_scope_cfg)
-from data.styles import inject_css, section_header, top_navbar, scope_and_user_controls, metric_card, format_number, status_badge
-from data.mock_data import SCOPES
+from _OLD.prototype.data.styles import inject_css, section_header, top_navbar, scope_and_user_controls, metric_card, format_number, status_badge
+from _OLD.prototype.data.mock_data import SCOPES
 import pandas as pd
 import numpy as np
 

@@ -17,11 +17,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from data.state_manager import (
+from _OLD.prototype_v2.data.state_manager import (
     init_state, tick_queue, get_queue_stats, current_user,
 )
-from data.mock_data import SCOPES
-from data.styles import (
+from _OLD.prototype_v2.data.mock_data import SCOPES
+from _OLD.prototype_v2.data.styles import (
     inject_css, render_sidebar, render_pipeline_diagram,
     section_title, P, STATUS_COLORS,
 )

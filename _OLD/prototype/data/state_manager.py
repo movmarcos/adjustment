@@ -7,7 +7,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from data.mock_data import SCOPES, generate_fact_table, generate_sample_adjustments, DEFAULT_SCOPE
+from _OLD.prototype.data.mock_data import SCOPES, generate_fact_table, generate_sample_adjustments, DEFAULT_SCOPE
 
 VALID_TRANSITIONS = {
     "DRAFT":            ["PENDING_APPROVAL"],

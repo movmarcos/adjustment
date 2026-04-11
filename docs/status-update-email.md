@@ -34,7 +34,7 @@ The core platform is built and running end-to-end on Snowflake. The main pipelin
 ### Data & Infrastructure
 - Snowflake schema with clean separation: `ADJ_HEADER` (orchestration), `DIMENSION.ADJUSTMENT` (dimension SCD2), fact tables per scope.
 - Three clear timestamps per adjustment: **Created** (submitted), **Started** (pipeline begins), **Ended** (processed/failed).
-- Soft-delete propagated across header, dimension, and fact tables.
+- Soft-delete on `ADJ_HEADER` and `DIMENSION.ADJUSTMENT` (IS_DELETED flag + Deleted status); fact table rows are hard-deleted so they are immediately removed from downstream reports and PowerBI.
 - COB sign-off status prevents new submissions after a COB is signed off.
 - Dynamic Table (`DT_OVERLAP_ALERTS`) for real-time overlap detection across running and pending adjustments.
 

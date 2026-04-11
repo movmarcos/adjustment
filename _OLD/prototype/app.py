@@ -5,9 +5,9 @@ import streamlit as st
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 
-from data.state_manager import init_state, get_fact_table, get_headers, get_lines, current_scope_cfg, STATUS_COLORS
-from data.styles import inject_css, metric_card, status_badge, section_header, top_navbar, scope_and_user_controls, format_number
-from data.mock_data import SCOPES
+from _OLD.prototype.data.state_manager import init_state, get_fact_table, get_headers, get_lines, current_scope_cfg, STATUS_COLORS
+from _OLD.prototype.data.styles import inject_css, metric_card, status_badge, section_header, top_navbar, scope_and_user_controls, format_number
+from _OLD.prototype.data.mock_data import SCOPES
 
 st.set_page_config(page_title="MUFG Adjustment Engine", page_icon="⚙️", layout="wide", initial_sidebar_state="collapsed")
 inject_css()
