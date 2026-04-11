@@ -1,44 +1,47 @@
 -- =============================================================================
 -- 02_STREAMS.SQL
+-- Standard (non-APPEND_ONLY) streams on ADJ_HEADER, one per scope pipeline.
 -- Queue views (one per scope) used for monitoring.
 --
--- STREAMS REMOVED — see explanation below.
+-- WHY STANDARD STREAMS (NOT APPEND_ONLY):
+--   APPEND_ONLY streams only capture INSERT operations. When a blocked
+--   adjustment is unblocked (_unblock_resolved sets BLOCKED_BY_ADJ_ID = NULL),
+--   that is an UPDATE — invisible to APPEND_ONLY streams. Standard streams
+--   capture INSERTs, UPDATEs, and DELETEs, so newly unblocked adjustments
+--   will be visible and the tasks will fire correctly.
 --
--- WHY STREAMS WERE REMOVED:
---   The original design used APPEND_ONLY streams on these views as task guards
---   (WHEN SYSTEM$STREAM_HAS_DATA(...)). This had two fatal flaws:
+-- WHY STREAMS ON ADJ_HEADER (NOT ON VIEWS):
+--   Snowflake streams require a table or materialized view as source.
+--   The queue views (VW_QUEUE_*) are plain views and cannot have streams.
+--   ADJ_HEADER is the correct source — all changes flow through it.
 --
---   1. APPEND_ONLY only captures INSERTs. When a blocked adjustment is unblocked
---      (_unblock_resolved sets BLOCKED_BY_ADJ_ID = NULL), that is an UPDATE —
---      invisible to APPEND_ONLY streams. The task would never fire for newly
---      unblocked adjustments, leaving them stuck in the queue forever.
---
---   2. SP_RUN_PIPELINE reads from ADJ_HEADER directly, never from the stream.
---      Snowflake only advances a stream's offset when you consume it inside a
---      DML transaction. Since the stream was never consumed, SYSTEM$STREAM_HAS_DATA
---      remained TRUE permanently, making the guard useless after the first run.
---
---   The tasks now use pure time-based polling (every 1 minute) with no WHEN
---   clause. SP_RUN_PIPELINE exits cleanly when there is nothing to process.
---
--- QUEUE VIEWS are kept — they are still useful for the Processing Queue
--- monitoring page (VW_PROCESSING_QUEUE in 08_views.sql uses them conceptually,
--- and they make it easy to inspect the eligible queue directly in Snowflake).
---
--- PREREQUISITE: 01_tables.sql must run first (BLOCKED_BY_ADJ_ID column).
+-- PREREQUISITE: 01_tables.sql must run first (ADJ_HEADER + BLOCKED_BY_ADJ_ID).
 -- =============================================================================
 
 USE DATABASE DVLP_RAPTOR_NEWADJ;
 USE SCHEMA ADJUSTMENT_APP;
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- DROP STALE STREAMS (idempotent — safe to re-run after migration)
+-- STREAMS — standard (captures INSERT + UPDATE + DELETE)
+-- One stream per scope pipeline on ADJ_HEADER.
+-- APPEND_ONLY is intentionally omitted.
 -- ═══════════════════════════════════════════════════════════════════════════
 
-DROP STREAM IF EXISTS ADJUSTMENT_APP.STREAM_QUEUE_VAR;
-DROP STREAM IF EXISTS ADJUSTMENT_APP.STREAM_QUEUE_STRESS;
-DROP STREAM IF EXISTS ADJUSTMENT_APP.STREAM_QUEUE_FRTB;
-DROP STREAM IF EXISTS ADJUSTMENT_APP.STREAM_QUEUE_SENSITIVITY;
+CREATE OR REPLACE STREAM ADJUSTMENT_APP.STREAM_QUEUE_VAR
+    ON TABLE ADJUSTMENT_APP.ADJ_HEADER
+    COMMENT = 'Standard stream on ADJ_HEADER for VaR pipeline. Captures INSERTs and UPDATEs (e.g. unblocking via BLOCKED_BY_ADJ_ID = NULL).';
+
+CREATE OR REPLACE STREAM ADJUSTMENT_APP.STREAM_QUEUE_STRESS
+    ON TABLE ADJUSTMENT_APP.ADJ_HEADER
+    COMMENT = 'Standard stream on ADJ_HEADER for Stress pipeline. Captures INSERTs and UPDATEs.';
+
+CREATE OR REPLACE STREAM ADJUSTMENT_APP.STREAM_QUEUE_FRTB
+    ON TABLE ADJUSTMENT_APP.ADJ_HEADER
+    COMMENT = 'Standard stream on ADJ_HEADER for FRTB pipeline (FRTB, FRTBDRC, FRTBRRAO, FRTBALL). Captures INSERTs and UPDATEs.';
+
+CREATE OR REPLACE STREAM ADJUSTMENT_APP.STREAM_QUEUE_SENSITIVITY
+    ON TABLE ADJUSTMENT_APP.ADJ_HEADER
+    COMMENT = 'Standard stream on ADJ_HEADER for Sensitivity pipeline. Captures INSERTs and UPDATEs.';
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -93,4 +96,5 @@ WHERE PROCESS_TYPE = 'Sensitivity'
 -- ═══════════════════════════════════════════════════════════════════════════
 -- VERIFY
 -- ═══════════════════════════════════════════════════════════════════════════
-SHOW VIEWS LIKE 'VW_QUEUE_%' IN SCHEMA ADJUSTMENT_APP;
+SHOW STREAMS LIKE 'STREAM_QUEUE_%' IN SCHEMA ADJUSTMENT_APP;
+SHOW VIEWS  LIKE 'VW_QUEUE_%'     IN SCHEMA ADJUSTMENT_APP;
