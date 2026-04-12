@@ -16,6 +16,10 @@ from utils.styles import (
 )
 from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
 
+def _esc(val):
+    """Escape single quotes for safe SQL interpolation."""
+    return str(val).replace("'", "''") if val is not None else ""
+
 inject_css()
 render_sidebar()
 
@@ -28,6 +32,33 @@ st.markdown(
     "Approve to move them forward, or reject with a reason."
     "</span>", unsafe_allow_html=True)
 st.markdown("<br/>", unsafe_allow_html=True)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# APPROVER AUTHORIZATION CHECK
+# ──────────────────────────────────────────────────────────────────────────────
+
+is_approver = False
+approver_scopes = set()  # scopes the user can approve; empty set with is_approver=True means all scopes
+try:
+    df_approver = run_query_df(f"""
+        SELECT PROCESS_TYPE
+        FROM ADJUSTMENT_APP.ADJ_APPROVERS
+        WHERE UPPER(USERNAME) = UPPER('{_esc(user)}')
+          AND IS_ACTIVE = TRUE
+    """)
+    if not df_approver.empty:
+        is_approver = True
+        for _, r in df_approver.iterrows():
+            pt = r.get("PROCESS_TYPE")
+            if pt is None or str(pt).strip() == "" or str(pt) == "None":
+                approver_scopes = set()  # NULL = all scopes
+                break
+            approver_scopes.add(str(pt).upper())
+except Exception:
+    pass
+
+if not is_approver:
+    st.warning("You are not registered as an approver. Contact an admin to be added to the approvers list.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SUMMARY STATS
@@ -111,7 +142,7 @@ except Exception as e:
 df_overlaps = pd.DataFrame()
 if not df_queue.empty:
     try:
-        queued_ids = ",".join(str(int(i)) for i in df_queue["ADJ_ID"].dropna())
+        queued_ids = ",".join(f"'{str(i).replace(chr(39), chr(39)*2)}'" for i in df_queue["ADJ_ID"].dropna())
         df_overlaps = run_query_df(f"""
             SELECT ADJ_ID_A, ADJ_ID_B, COBID,
                    ENTITY_A, ENTITY_B, BOOK_A, BOOK_B, ALERT_MESSAGE
@@ -201,7 +232,7 @@ else:
                             f'<tr>'
                             f'<td style="padding:3px 10px 3px 0;font-size:0.78rem;'
                             f'font-weight:700;white-space:nowrap">'
-                            f'ADJ #{int(r["ADJ_ID_B"] if r["ADJ_ID_A"] == adj_id else r["ADJ_ID_A"])}'
+                            f'ADJ #{r["ADJ_ID_B"] if r["ADJ_ID_A"] == adj_id else r["ADJ_ID_A"]}'
                             f'</td>'
                             f'<td style="padding:3px 0;font-size:0.78rem;color:{P["grey_700"]}">'
                             f'{str(r.get("ALERT_MESSAGE","")).strip() or "Overlapping filters on same COB"}'
@@ -242,21 +273,51 @@ else:
                     f'color:{P["grey_700"]};font-weight:600">Actions</div>',
                     unsafe_allow_html=True)
 
+                # ── Authorization guards ──
+                is_own_adjustment = (
+                    user and submitted_by and
+                    str(user).strip().upper() == str(submitted_by).strip().upper()
+                )
+                can_approve_scope = (
+                    is_approver and (
+                        not approver_scopes or  # empty set = all scopes
+                        scope.upper() in approver_scopes
+                    )
+                )
+
+                if is_own_adjustment:
+                    st.markdown(
+                        f'<div style="background:#FFF3CD;border:1px solid #FFECB5;'
+                        f'border-radius:6px;padding:0.6rem;font-size:0.8rem;text-align:center;'
+                        f'color:#664D03;margin-bottom:0.5rem">'
+                        f'⚠️ You cannot approve your own adjustment</div>',
+                        unsafe_allow_html=True)
+                elif not can_approve_scope:
+                    st.markdown(
+                        f'<div style="background:#F8D7DA;border:1px solid #F5C2C7;'
+                        f'border-radius:6px;padding:0.6rem;font-size:0.8rem;text-align:center;'
+                        f'color:#842029;margin-bottom:0.5rem">'
+                        f'🔒 Not authorized for {scope}</div>',
+                        unsafe_allow_html=True)
+
+                actions_enabled = is_approver and can_approve_scope and not is_own_adjustment
+
                 # Approve
                 if st.button("✅ Approve", key=f"approve_{adj_id}",
-                             use_container_width=True, type="primary"):
+                             use_container_width=True, type="primary",
+                             disabled=not actions_enabled):
                     try:
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
                             SET RUN_STATUS = 'Approved'
-                            WHERE ADJ_ID = '{adj_id}'
+                            WHERE ADJ_ID = '{_esc(adj_id)}'
                               AND RUN_STATUS = 'Pending Approval'
                         """)
                         run_query(f"""
                             INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
                                 (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
-                            VALUES ('{adj_id}', 'Pending Approval', 'Approved',
-                                    '{user}', 'Approved by {user}')
+                            VALUES ('{_esc(adj_id)}', 'Pending Approval', 'Approved',
+                                    '{_esc(user)}', 'Approved by {_esc(user)}')
                         """)
                         st.success(f"ADJ #{adj_id} approved!")
                         safe_rerun()
@@ -270,20 +331,21 @@ else:
                     "Rejection reason", key=f"reject_reason_{adj_id}",
                     label_visibility="collapsed")
                 if st.button("❌ Reject", key=f"reject_{adj_id}",
-                             use_container_width=True):
+                             use_container_width=True,
+                             disabled=not actions_enabled):
                     try:
                         comment = reject_reason or "Rejected"
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
                             SET RUN_STATUS = 'Rejected'
-                            WHERE ADJ_ID = '{adj_id}'
+                            WHERE ADJ_ID = '{_esc(adj_id)}'
                               AND RUN_STATUS = 'Pending Approval'
                         """)
                         run_query(f"""
                             INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
                                 (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
-                            VALUES ('{adj_id}', 'Pending Approval', 'Rejected',
-                                    '{user}', '{comment}')
+                            VALUES ('{_esc(adj_id)}', 'Pending Approval', 'Rejected',
+                                    '{_esc(user)}', '{_esc(comment)}')
                         """)
                         st.success(f"ADJ #{adj_id} rejected.")
                         safe_rerun()

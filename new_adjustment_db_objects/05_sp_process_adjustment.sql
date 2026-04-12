@@ -543,7 +543,6 @@ def main(session, process_type, adjustment_action, cobid):
             WHERE ROW_NUM = 1
             """
 
-            result["insert_cmd"] = insert_sql
             session.sql(insert_sql).collect()
 
             # ── Supersede: delete older adjustments for positions in TEMP ──
@@ -693,22 +692,167 @@ def main(session, process_type, adjustment_action, cobid):
 
             result["message"] = "Scale adjustments processed successfully"
 
+        # ═════════════════════════════════════════════════════════════════
+        # ENTITY ROLL PATH
+        # Full delete + copy: no delta calculation.
+        # 1. Delete target COB+entity from FACT_TABLE and FACT_ADJUSTED_TABLE
+        # 2. Copy source COB+entity into FACT_TABLE (replace COBID)
+        # 3. Copy source COB+entity adjustments into FACT_ADJUSTED_TABLE
+        #    (replace COBID, consolidate all source ADJUSTMENT_IDs → single new ID)
+        # ═════════════════════════════════════════════════════════════════
+        elif adjustment_action.lower() == 'entityroll':
+
+            df_adj_er = df_adj.filter(
+                (col('ADJUSTMENT_ACTION') == 'EntityRoll') &
+                (col('IS_POSITIVE_ADJUSTMENT') == True)
+            )
+
+            if df_adj_er.count() == 0:
+                result["message"] = 'No Running EntityRoll adjustments found'
+                return json.dumps(result)
+
+            adj_ids = [row["ADJ_ID"] for row in df_adj_er.select("ADJ_ID").collect()]
+            adj_ids_str = ", ".join(f"'{a}'" for a in adj_ids)
+
+            # EntityRoll processes one adjustment at a time (entity-level operation)
+            er_row = df_adj_er.collect()[0]
+            source_cobid = er_row["SOURCE_COBID"]
+            entity_code  = er_row["ENTITY_CODE"]
+
+            if not entity_code:
+                raise Exception("EntityRoll requires ENTITY_CODE")
+            if not source_cobid or int(source_cobid) == int(cobid):
+                raise Exception("EntityRoll requires a SOURCE_COBID different from target COBID")
+
+            esc_entity = str(entity_code).replace("'", "''")
+
+            # ── Insert into DIMENSION.ADJUSTMENT ────────────────────────
+            dim_adj_map = {}
+            try:
+                dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str)
+            except Exception as dim_err:
+                print(f"Warning: could not insert into DIMENSION.ADJUSTMENT: {dim_err}")
+
+            # The single DIMENSION.ADJUSTMENT.ADJUSTMENT_ID for the new roll
+            new_dim_adj_id = list(dim_adj_map.values())[0] if dim_adj_map else None
+
+            # ── Detect entity column name ───────────────────────────────
+            # FACT tables use ENTITY_CODE or ENTITY_KEY — detect which exists
+            entity_col = None
+            for candidate in ['ENTITY_CODE', 'ENTITY_KEY']:
+                if candidate in fact_cols:
+                    entity_col = candidate
+                    break
+            if not entity_col:
+                raise Exception(f"Cannot find entity column (ENTITY_CODE or ENTITY_KEY) in {fact_tbl_name}")
+
+            entity_adj_col = None
+            for candidate in ['ENTITY_CODE', 'ENTITY_KEY']:
+                if candidate in fact_adj_cols:
+                    entity_adj_col = candidate
+                    break
+            if not entity_adj_col:
+                raise Exception(f"Cannot find entity column in {fact_adj_tbl_name}")
+
+            # ── STEP 1: Delete target COB+entity from FACT_TABLE ────────
+            del_fact_sql = f"""
+                DELETE FROM {fact_tbl_name}
+                WHERE COBID = {int(cobid)}
+                  AND {entity_col} = '{esc_entity}'
+            """
+            session.sql(del_fact_sql).collect()
+            print(f"EntityRoll: deleted from {fact_tbl_name} WHERE COBID={cobid}, {entity_col}={entity_code}")
+
+            # ── STEP 2: Delete target COB+entity from FACT_ADJUSTED_TABLE
+            del_adj_sql = f"""
+                DELETE FROM {fact_adjusted_tbl_name}
+                WHERE COBID = {int(cobid)}
+                  AND {entity_adj_col} = '{esc_entity}'
+            """
+            session.sql(del_adj_sql).collect()
+            print(f"EntityRoll: deleted from {fact_adjusted_tbl_name} WHERE COBID={cobid}, {entity_adj_col}={entity_code}")
+
+            # ── STEP 3: Copy source → target in FACT_TABLE ──────────────
+            # All columns except COBID are copied as-is; COBID is replaced
+            fact_copy_cols = [c for c in fact_cols if c != 'COBID']
+            fact_select_cols = ', '.join(fact_copy_cols)
+            insert_fact_sql = f"""
+                INSERT INTO {fact_tbl_name} (COBID, {fact_select_cols})
+                SELECT {int(cobid)}, {fact_select_cols}
+                FROM {fact_tbl_name}
+                WHERE COBID = {int(source_cobid)}
+                  AND {entity_col} = '{esc_entity}'
+            """
+            session.sql(insert_fact_sql).collect()
+            fact_count = session.sql(f"""
+                SELECT COUNT(*) AS CNT FROM {fact_tbl_name}
+                WHERE COBID = {int(cobid)} AND {entity_col} = '{esc_entity}'
+            """).collect()[0]["CNT"]
+            print(f"EntityRoll: copied {fact_count} rows into {fact_tbl_name}")
+
+            # ── STEP 4: Copy source → target in FACT_ADJUSTED_TABLE ─────
+            # Replace COBID and consolidate all ADJUSTMENT_IDs → single new ID
+            adj_copy_cols = [c for c in fact_adj_cols if c not in ('COBID', 'ADJUSTMENT_ID')]
+            adj_select_cols = ', '.join(adj_copy_cols)
+
+            adj_id_expr = str(new_dim_adj_id) if new_dim_adj_id else 'NULL'
+            insert_adj_sql = f"""
+                INSERT INTO {fact_adjusted_tbl_name} (COBID, ADJUSTMENT_ID, {adj_select_cols})
+                SELECT {int(cobid)}, {adj_id_expr}, {adj_select_cols}
+                FROM {fact_adjusted_tbl_name}
+                WHERE COBID = {int(source_cobid)}
+                  AND {entity_adj_col} = '{esc_entity}'
+            """
+            session.sql(insert_adj_sql).collect()
+            adj_count = session.sql(f"""
+                SELECT COUNT(*) AS CNT FROM {fact_adjusted_tbl_name}
+                WHERE COBID = {int(cobid)} AND {entity_adj_col} = '{esc_entity}'
+            """).collect()[0]["CNT"]
+            print(f"EntityRoll: copied {adj_count} rows into {fact_adjusted_tbl_name}")
+
+            # ── Update RECORD_COUNT in DIMENSION.ADJUSTMENT ─────────────
+            total_count = fact_count + adj_count
+            if new_dim_adj_id:
+                session.sql(f"""
+                    UPDATE DIMENSION.ADJUSTMENT
+                    SET RECORD_COUNT = {total_count},
+                        RUN_STATUS   = 'Processed',
+                        PROCESS_DATE = CURRENT_TIMESTAMP()
+                    WHERE ADJUSTMENT_ID = {new_dim_adj_id}
+                """).collect()
+
+            # ── Update ADJ_HEADER ───────────────────────────────────────
+            session.sql(f"""
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                SET RECORD_COUNT = {total_count},
+                    ADJUSTMENT_VALUE_IN_USD = NULL
+                WHERE ADJ_ID IN ({adj_ids_str})
+            """).collect()
+
+            update_header_status(session, df_adj_er, cobid, "Processed")
+            log_status_history(session, adj_ids, "Running", "Processed")
+
+            result["fact_rows_copied"]     = fact_count
+            result["adj_rows_copied"]      = adj_count
+            result["message"] = f"Entity Roll processed: {fact_count} fact rows + {adj_count} adjustment rows copied from COB {source_cobid} to {cobid}"
+
         else:
             result["message"] = f"Invalid adjustment_action: {adjustment_action}"
 
     except Exception as e:
-        error_msg = str(e).replace("'", "")
+        error_msg = str(e).replace("'", "''")
         print(f"Error: {error_msg}")
         result["message"] = f"Error: {error_msg}"
 
         # Try to mark as Failed
         try:
-            df_adj_err = session.table(adj_base_tbl_name).filter(
-                (col('COBID') == cobid) &
-                (upper(col('PROCESS_TYPE')) == process_type.upper()) &
-                (col('RUN_STATUS') == 'Running')
-            )
-            update_header_status(session, df_adj_err, cobid, "Failed", error_msg)
+            if 'adj_base_tbl_name' in dir():
+                df_adj_err = session.table(adj_base_tbl_name).filter(
+                    (col('COBID') == cobid) &
+                    (upper(col('PROCESS_TYPE')) == process_type.upper()) &
+                    (col('RUN_STATUS') == 'Running')
+                )
+                update_header_status(session, df_adj_err, cobid, "Failed", error_msg)
             if adj_ids:
                 log_status_history(session, adj_ids, "Running", "Failed")
             if dim_adj_map:
@@ -718,8 +862,8 @@ def main(session, process_type, adjustment_action, cobid):
                     SET RUN_STATUS = 'Failed'
                     WHERE ADJUSTMENT_ID IN ({_fail_ids})
                 """).collect()
-        except:
-            pass
+        except Exception as cleanup_err:
+            print(f"Cleanup failed: {cleanup_err}")
 
     return json.dumps(result)
 $$;

@@ -17,10 +17,14 @@
 --   changes relevant to THIS scope. No cross-scope noise.
 --
 -- FLOW (stream-driven — block first, not claim first):
---   1. Block overlapping Pending rows against any currently-Running adjustment.
---      Because Snowflake auto-commits each statement, blocked rows immediately
---      LEAVE the queue view → the stream records them as DELETE. By the time
---      we consume the stream in step 2, blocked rows are already excluded.
+--   1a. Block overlapping Pending rows against any currently-Running adjustment.
+--   1b. Block overlapping Pending rows against EACH OTHER (oldest proceeds,
+--       newer ones wait). Overlap is based purely on data scope (COBID +
+--       dimensions) — NOT on ADJUSTMENT_TYPE or ADJUSTMENT_ACTION. A Flatten
+--       and a Scale targeting the same entity/book/COB DO overlap.
+--       Because Snowflake auto-commits each statement, blocked rows immediately
+--       LEAVE the queue view → the stream records them as DELETE. By the time
+--       we consume the stream in step 2, blocked rows are already excluded.
 --   2. Consume the stream into a TEMP table. We SELECT only
 --      METADATA$ACTION = 'INSERT' rows (= rows that entered the view and
 --      stayed). No JOIN to ADJ_HEADER needed — the view's WHERE clause
@@ -113,13 +117,10 @@ def main(session, scope, pipeline_types):
 
     results = []
 
-    # ── 1. BLOCK OVERLAPPING PENDING ROWS ────────────────────────────────────
-    #    Runs BEFORE we consume the stream so blocked rows are already excluded
-    #    when we read the stream in step 2.
-    #
-    #    This handles two cases:
-    #      • Stuck Running rows from a crashed previous run
-    #      • Long-running adjustments spanning multiple task fires
+    # ── 1a. BLOCK PENDING vs RUNNING ─────────────────────────────────────────
+    #    If any adjustments are still Running (stuck from a crash, or
+    #    long-running from a previous task fire), block overlapping Pending
+    #    rows against them.
     all_running = session.sql(f"""
         SELECT ADJ_ID, COBID, PROCESS_TYPE,
                ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE,
@@ -132,6 +133,21 @@ def main(session, scope, pipeline_types):
 
     for r in all_running:
         _block_overlapping(session, r, pipeline_in)
+
+    # ── 1b. BLOCK PENDING vs PENDING (overlap serialisation) ──────────────────
+    #    Two overlapping adjustments must NOT run simultaneously, regardless
+    #    of ADJUSTMENT_TYPE or ADJUSTMENT_ACTION. Even if one is Flatten and
+    #    the other is Scale, they target the same data — processing them in
+    #    parallel would race on the fact-table rows.
+    #
+    #    Algorithm: fetch all unblocked Pending/Approved rows (oldest first).
+    #    Build a "proceeding" list. For each row:
+    #      • If it overlaps with anything already proceeding → block it
+    #      • Otherwise → add it to the proceeding list
+    #
+    #    This guarantees the oldest adjustment in each overlap group proceeds;
+    #    younger ones wait until the older one finishes.
+    _block_pending_overlaps(session, pipeline_in)
 
     # ── 2. CONSUME THE STREAM → TEMP TABLE ────────────────────────────────────
     #    The stream is on a queue VIEW (e.g. VW_QUEUE_VAR) that already filters
@@ -173,7 +189,7 @@ def main(session, scope, pipeline_types):
         # in (2) may have left UPDATE events in the stream. Drain and unblock,
         # then exit cleanly.
         _drain_stream(session, stream_name)
-        _unblock_resolved(session, pipeline_in, [])
+        _unblock_resolved(session, pipeline_in)
         return json.dumps({
             "scope": scope,
             "message": "No eligible adjustments in stream (all blocked or empty)",
@@ -186,12 +202,6 @@ def main(session, scope, pipeline_types):
             START_DATE = CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9)
         WHERE h.ADJ_ID IN (SELECT ADJ_ID FROM TEMP_STREAM_QUEUE)
     """).collect()
-
-    # Capture the adj_ids we just claimed — used by _unblock_resolved below.
-    claimed_ids = [
-        r["ADJ_ID"]
-        for r in session.sql("SELECT ADJ_ID FROM TEMP_STREAM_QUEUE").collect()
-    ]
 
     # ── 4. PROCESS EACH DISTINCT (pt, action, cob) COMBO — IN PARALLEL ──────
     #    SP_PROCESS_ADJUSTMENT is batch-oriented: one call processes ALL
@@ -264,7 +274,7 @@ def main(session, scope, pipeline_types):
     #    Any Pending row with BLOCKED_BY_ADJ_ID pointing to something we just
     #    finished → clear it (or reassign to another still-Running overlap).
     #    The UPDATE produces a stream event → next task fire re-evaluates it.
-    _unblock_resolved(session, pipeline_in, claimed_ids)
+    _unblock_resolved(session, pipeline_in)
 
     return json.dumps({"scope": scope, "processed": results})
 
@@ -275,22 +285,88 @@ def main(session, scope, pipeline_types):
 
 def _drain_stream(session, stream_name):
     """
-    Consume the stream with a `WHERE 1=0` filter. The INSERT still references
+    Consume the stream with a CTAS `WHERE 1=0`. The SELECT still references
     the stream in its FROM clause, so Snowflake advances the offset even though
-    zero rows are actually written. This is the standard "drain" pattern.
+    zero rows materialise. This is the standard "drain" pattern.
 
-    This clears any events produced by our own UPDATEs (block, promote to
-    Running, mark Processed/Failed) so the next task fire only sees genuinely
-    new work (new submissions or unblock events from step 6).
-
-    TEMP_STREAM_QUEUE must already exist (created in main() step 2).
+    Uses a standalone CTAS instead of inserting into TEMP_STREAM_QUEUE so it
+    works even if the temp table was never created (e.g. early error path).
     """
     session.sql(f"""
-        INSERT INTO TEMP_STREAM_QUEUE (ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_ACTION)
-        SELECT ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_ACTION
-        FROM {stream_name}
-        WHERE 1 = 0
+        CREATE OR REPLACE TEMPORARY TABLE _DRAIN_SINK AS
+        SELECT * FROM {stream_name} WHERE 1 = 0
     """).collect()
+
+
+def _block_pending_overlaps(session, pipeline_in):
+    """
+    Among unblocked Pending/Approved rows in the pipeline, the oldest
+    adjustment in each overlapping group proceeds; newer overlapping ones
+    get blocked.
+
+    Overlap is based purely on data scope (COBID + OVERLAP_DIMS). It does
+    NOT consider ADJUSTMENT_TYPE or ADJUSTMENT_ACTION — a Flatten and a
+    Scale targeting the same entity/book/COB DO overlap and must serialise.
+
+    Algorithm (oldest-first, in-memory):
+      1. Fetch all unblocked Pending/Approved rows, ordered by CREATED_DATE.
+      2. Maintain a 'proceeding' list of rows that will NOT be blocked.
+      3. For each row: if it overlaps any proceeding row → block it
+         (UPDATE BLOCKED_BY_ADJ_ID to the proceeding row's ADJ_ID).
+         Otherwise → add it to the proceeding list.
+    """
+    unblocked = session.sql(f"""
+        SELECT ADJ_ID, COBID, PROCESS_TYPE,
+               ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE,
+               BOOK_CODE, CURRENCY_CODE, TRADE_TYPOLOGY, STRATEGY,
+               CREATED_DATE
+        FROM ADJUSTMENT_APP.ADJ_HEADER
+        WHERE PROCESS_TYPE IN ({pipeline_in})
+          AND RUN_STATUS IN ('Pending', 'Approved')
+          AND BLOCKED_BY_ADJ_ID IS NULL
+          AND IS_DELETED = FALSE
+        ORDER BY CREATED_DATE ASC, ADJ_ID ASC
+    """).collect()
+
+    proceeding = []
+
+    for r in unblocked:
+        blocker_id = _find_overlap_in_list(r, proceeding)
+        if blocker_id:
+            adj_id = str(r["ADJ_ID"]).replace("'", "''")
+            safe_blocker = str(blocker_id).replace("'", "''")
+            session.sql(f"""
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                SET BLOCKED_BY_ADJ_ID = '{safe_blocker}'
+                WHERE ADJ_ID = '{adj_id}'
+            """).collect()
+        else:
+            proceeding.append(r)
+
+
+def _find_overlap_in_list(row, proceeding_list):
+    """
+    Check if `row` overlaps with any row in `proceeding_list`.
+    Return the ADJ_ID of the first overlapping row, or None.
+
+    Overlap = same COBID + each OVERLAP_DIM either matches or one side is NULL
+    (wildcard). ADJUSTMENT_TYPE / ADJUSTMENT_ACTION are NOT checked.
+    """
+    for p in proceeding_list:
+        if row["COBID"] != p["COBID"]:
+            continue
+        overlaps = True
+        for dim in OVERLAP_DIMS:
+            r_val = row[dim]
+            p_val = p[dim]
+            # NULL (wildcard) overlaps with anything
+            if r_val is not None and p_val is not None:
+                if str(r_val).upper() != str(p_val).upper():
+                    overlaps = False
+                    break
+        if overlaps:
+            return p["ADJ_ID"]
+    return None
 
 
 def _block_overlapping(session, running_row, pipeline_in):
@@ -301,14 +377,13 @@ def _block_overlapping(session, running_row, pipeline_in):
 
     Overlap rule per dimension: NULL (wildcard) overlaps with any value.
     """
-    adj_id = running_row["ADJ_ID"]
-    cobid  = running_row["COBID"]
+    adj_id = str(running_row["ADJ_ID"]).replace("'", "''")
+    cobid  = int(running_row["COBID"])
 
     dim_conditions = []
     for dim in OVERLAP_DIMS:
         val = running_row[dim]
         if val is None:
-            # Running adj is wildcard → overlaps with everything → no restriction
             dim_conditions.append("TRUE")
         else:
             escaped = str(val).replace("'", "''")
@@ -331,83 +406,48 @@ def _block_overlapping(session, running_row, pipeline_in):
     """).collect()
 
 
-def _unblock_resolved(session, pipeline_in, claimed_ids):
+def _unblock_resolved(session, pipeline_in):
     """
-    Clear BLOCKED_BY_ADJ_ID for any Pending/Approved row whose blocker is now
-    Processed or Failed. If a still-Running adjustment in the pipeline still
-    overlaps, reassign the block to that one instead of clearing it.
+    Clear BLOCKED_BY_ADJ_ID for any Pending/Approved row whose blocker is no
+    longer Running (i.e. Processed, Failed, or deleted). If another Running
+    adjustment still overlaps, reassign the block; otherwise set NULL.
 
-    claimed_ids: adj_ids that this run just claimed and processed. If empty,
-    the function still scans for any stale blocks whose blocker has finished
-    (covers leftover state from a prior crashed run).
+    Two-pass approach (avoids N+1 per-row queries):
+      Pass 1: Bulk-clear all blocked rows whose blocker is no longer Running.
+      Pass 2: Re-block any of those newly-released rows that still overlap
+              with a currently-Running adjustment (using _block_overlapping).
     """
-    # Find all currently-blocked Pending rows in this pipeline.
-    blocked = session.sql(f"""
-        SELECT b.ADJ_ID, b.COBID, b.BLOCKED_BY_ADJ_ID,
-               b.ENTITY_CODE, b.SOURCE_SYSTEM_CODE, b.DEPARTMENT_CODE,
-               b.BOOK_CODE, b.CURRENCY_CODE, b.TRADE_TYPOLOGY, b.STRATEGY
-        FROM ADJUSTMENT_APP.ADJ_HEADER b
+    # ── Pass 1: bulk-clear blocks where the blocker has finished ──────────
+    #    A single UPDATE with a subquery — no per-row queries needed.
+    session.sql(f"""
+        UPDATE ADJUSTMENT_APP.ADJ_HEADER b
+        SET BLOCKED_BY_ADJ_ID = NULL
         WHERE b.BLOCKED_BY_ADJ_ID IS NOT NULL
           AND b.PROCESS_TYPE IN ({pipeline_in})
           AND b.RUN_STATUS IN ('Pending', 'Approved')
           AND b.IS_DELETED = FALSE
+          AND NOT EXISTS (
+              SELECT 1 FROM ADJUSTMENT_APP.ADJ_HEADER blocker
+              WHERE blocker.ADJ_ID = b.BLOCKED_BY_ADJ_ID
+                AND blocker.RUN_STATUS = 'Running'
+          )
     """).collect()
 
-    if not blocked:
-        return
+    # ── Pass 2: re-block if another Running adj still overlaps ────────────
+    #    Check currently-Running adjustments and block any newly-released
+    #    Pending rows that overlap with them.
+    still_running = session.sql(f"""
+        SELECT ADJ_ID, COBID, PROCESS_TYPE,
+               ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE,
+               BOOK_CODE, CURRENCY_CODE, TRADE_TYPOLOGY, STRATEGY
+        FROM ADJUSTMENT_APP.ADJ_HEADER
+        WHERE PROCESS_TYPE IN ({pipeline_in})
+          AND RUN_STATUS = 'Running'
+          AND IS_DELETED = FALSE
+    """).collect()
 
-    for b in blocked:
-        b_adj_id   = b["ADJ_ID"]
-        blocker_id = b["BLOCKED_BY_ADJ_ID"]
-        cobid      = b["COBID"]
-
-        # Is the blocker still Running? If yes, leave this row blocked.
-        blocker_status = session.sql(f"""
-            SELECT RUN_STATUS FROM ADJUSTMENT_APP.ADJ_HEADER
-            WHERE ADJ_ID = '{blocker_id}'
-        """).collect()
-        if blocker_status and blocker_status[0]["RUN_STATUS"] == 'Running':
-            continue
-
-        # Blocker has finished — check if any OTHER still-Running adj overlaps.
-        dim_conditions = []
-        for dim in OVERLAP_DIMS:
-            val = b[dim]
-            if val is None:
-                dim_conditions.append("TRUE")
-            else:
-                escaped = str(val).replace("'", "''")
-                dim_conditions.append(
-                    f"(r.{dim} IS NULL OR UPPER(r.{dim}) = UPPER('{escaped}'))"
-                )
-        where_dims = " AND ".join(dim_conditions)
-
-        other_running = session.sql(f"""
-            SELECT ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER r
-            WHERE r.COBID = {cobid}
-              AND r.PROCESS_TYPE IN ({pipeline_in})
-              AND r.RUN_STATUS = 'Running'
-              AND r.ADJ_ID != '{b_adj_id}'
-              AND r.IS_DELETED = FALSE
-              AND {where_dims}
-            LIMIT 1
-        """).collect()
-
-        if other_running:
-            new_blocker = other_running[0]["ADJ_ID"]
-            session.sql(f"""
-                UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                SET BLOCKED_BY_ADJ_ID = '{new_blocker}'
-                WHERE ADJ_ID = '{b_adj_id}'
-            """).collect()
-        else:
-            # No remaining blockers → release this row.
-            # This UPDATE lands in the stream and wakes the next task run.
-            session.sql(f"""
-                UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                SET BLOCKED_BY_ADJ_ID = NULL
-                WHERE ADJ_ID = '{b_adj_id}'
-            """).collect()
+    for r in still_running:
+        _block_overlapping(session, r, pipeline_in)
 $$;
 
 -- ═══════════════════════════════════════════════════════════════════════════

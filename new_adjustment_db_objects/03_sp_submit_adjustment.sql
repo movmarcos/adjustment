@@ -30,13 +30,21 @@ STATUS_PENDING        = "Pending"
 STATUS_PENDING_APPROV = "Pending Approval"
 STATUS_REJECTED_SO    = "Rejected - SignedOff"
 
+# ─── SQL escape helper ───────────────────────────────────────────────────────
+def _esc(val):
+    """Escape a value for safe inclusion in a SQL string literal."""
+    if val is None:
+        return None
+    return str(val).replace("'", "''")
+
 # ─── Adjustment type → action mapping ────────────────────────────────────────
 ACTION_MAP = {
-    "flatten":  "Scale",
-    "scale":    "Scale",
-    "roll":     "Scale",
-    "upload":   "Direct",
-    "direct":   "Direct",
+    "flatten":      "Scale",
+    "scale":        "Scale",
+    "roll":         "Scale",
+    "entity_roll":  "EntityRoll",
+    "upload":       "Direct",
+    "direct":       "Direct",
 }
 
 # Pipeline groupings — used for blocking checks at submit time
@@ -44,7 +52,6 @@ PIPELINE_TYPES = {
     'VAR':         ['VaR'],
     'STRESS':      ['Stress'],
     'SENSITIVITY': ['Sensitivity'],
-    'ES':          ['ES'],
     'FRTB':        ['FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL'],
     'FRTBDRC':     ['FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL'],
     'FRTBRRAO':    ['FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL'],
@@ -64,55 +71,41 @@ def find_blocking_adj(session, process_type, cobid, adj_values):
 
     adj_values: dict with optional dimension values (lowercase keys) for the new adjustment.
 
-    Entity-only adjustments (only ENTITY_CODE set, all other dims NULL) are
-    broad-scope: they block the entire scope and must wait for the scope to be
-    completely clear (no Pending or Running). Normal adjustments are only blocked
-    by overlapping Running adjustments.
+    Checks against Pending, Approved, AND Running adjustments — not just Running.
+    This is consistent with SP_RUN_PIPELINE's _block_pending_overlaps which also
+    blocks Pending-vs-Pending overlaps. The user sees the blocking at submit time
+    rather than being surprised when the pipeline silently blocks it later.
+
+    Overlap rule: same COBID + each dimension matches (or one side is NULL/wildcard).
+    ADJUSTMENT_TYPE and ADJUSTMENT_ACTION are NOT considered — a Flatten and a
+    Scale targeting the same data DO overlap.
     """
     pipeline = PIPELINE_TYPES.get(process_type.upper(), [process_type])
     pipeline_in = ", ".join(f"'{t}'" for t in pipeline)
 
-    non_entity_dims = [d for d in OVERLAP_DIMS_SUBMIT if d != 'ENTITY_CODE']
-    entity_only = all(adj_values.get(d.lower()) is None for d in non_entity_dims)
+    dim_conditions = []
+    for dim in OVERLAP_DIMS_SUBMIT:
+        new_val = adj_values.get(dim.lower())
+        if new_val is None:
+            # New adj is wildcard (NULL) → matches any value on this dimension
+            dim_conditions.append("TRUE")
+        else:
+            escaped = str(new_val).replace("'", "''")
+            dim_conditions.append(
+                f"(r.{dim} IS NULL OR UPPER(r.{dim}) = UPPER('{escaped}'))"
+            )
 
-    if entity_only:
-        # Entity-only adj is scope-wide: block if ANY Pending or Running adj
-        # exists in the scope so the queue is completely clear before it runs.
-        sql = f"""
-            SELECT ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER r
-            WHERE r.COBID = {cobid}
-              AND r.PROCESS_TYPE IN ({pipeline_in})
-              AND r.RUN_STATUS IN ('Pending', 'Approved', 'Running')
-              AND r.IS_DELETED = FALSE
-            ORDER BY r.ADJ_ID ASC
-            LIMIT 1
-        """
-    else:
-        # Normal overlap check: dimension-level overlap with Running adjustments.
-        dim_conditions = []
-        for dim in OVERLAP_DIMS_SUBMIT:
-            new_val = adj_values.get(dim.lower())
-            if new_val is None:
-                # New adj is wildcard (NULL) → matches any running adj for this dimension
-                dim_conditions.append("TRUE")
-            else:
-                # r.{dim} IS NULL: running adj is wildcard → also matches any new value
-                escaped = str(new_val).replace("'", "''")
-                dim_conditions.append(
-                    f"(r.{dim} IS NULL OR UPPER(r.{dim}) = UPPER('{escaped}'))"
-                )
-
-        where_dims = " AND ".join(dim_conditions)
-        sql = f"""
-            SELECT ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER r
-            WHERE r.COBID = {cobid}
-              AND r.PROCESS_TYPE IN ({pipeline_in})
-              AND r.RUN_STATUS = 'Running'
-              AND r.IS_DELETED = FALSE
-              AND {where_dims}
-            ORDER BY r.ADJ_ID ASC
-            LIMIT 1
-        """
+    where_dims = " AND ".join(dim_conditions)
+    sql = f"""
+        SELECT ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER r
+        WHERE r.COBID = {int(cobid)}
+          AND r.PROCESS_TYPE IN ({pipeline_in})
+          AND r.RUN_STATUS IN ('Pending', 'Approved', 'Running')
+          AND r.IS_DELETED = FALSE
+          AND {where_dims}
+        ORDER BY r.CREATED_DATE ASC
+        LIMIT 1
+    """
 
     rows = session.sql(sql).collect()
     return rows[0]["ADJ_ID"] if rows else None
@@ -136,8 +129,8 @@ def check_signoff(session, process_type, cobid):
     sql = f"""
         SELECT COUNT(*) AS cnt
         FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-        WHERE COBID  = {cobid}
-          AND UPPER(PROCESS_TYPE) = '{process_type.upper()}'
+        WHERE COBID  = {int(cobid)}
+          AND UPPER(PROCESS_TYPE) = '{_esc(process_type).upper()}'
           AND UPPER(SIGN_OFF_STATUS) = 'SIGNED_OFF'
     """
     result = session.sql(sql).collect()
@@ -236,8 +229,10 @@ def main(session, p_adjustment):
             # Still insert the header (for audit) but mark as rejected
             initial_status = STATUS_REJECTED_SO
         else:
-            # Check if approval is required (optional flag from Streamlit)
+            # Entity Roll always requires approval (destructive operation)
             requires_approval = adj.get("requires_approval", False)
+            if adj_action == "EntityRoll":
+                requires_approval = True
             if requires_approval:
                 initial_status = STATUS_PENDING_APPROV
             else:
@@ -315,7 +310,7 @@ def main(session, p_adjustment):
         col_names  = ", ".join(cols_to_insert.keys())
         col_values = ", ".join([
             ("TRUE" if v else "FALSE") if isinstance(v, bool) else
-            f"'{v}'" if isinstance(v, str) else
+            f"'{_esc(v)}'" if isinstance(v, str) else
             f"{v}"   if isinstance(v, (int, float)) else
             "NULL"
             for v in cols_to_insert.values()
@@ -332,15 +327,16 @@ def main(session, p_adjustment):
             INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
                 (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
             VALUES
-                ('{adj_id}', NULL, '{initial_status}', '{username}',
-                 'Submitted via Streamlit — {adjustment_type} / {process_type}')
+                ('{_esc(adj_id)}', NULL, '{_esc(initial_status)}', '{_esc(username)}',
+                 'Submitted via Streamlit — {_esc(adjustment_type)} / {_esc(process_type)}')
         """).collect()
 
         return {
             "adj_id":  adj_id,
             "status":  initial_status,
+            "blocked_by": blocked_by_adj_id,
             "message": f"Adjustment {adj_id} created with status '{initial_status}'."
-                       + (" Blocked by ADJ #{}.".format(blocked_by_adj_id) if blocked_by_adj_id else "")
+                       + (f" Blocked by ADJ #{blocked_by_adj_id}." if blocked_by_adj_id else "")
         }
 
     except KeyError as ke:

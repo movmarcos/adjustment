@@ -219,10 +219,10 @@ COMMENT = 'Config: maps each scope to its fact/adjustment tables, metrics, PKs. 
 
 CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_RECURRING_TEMPLATE (
     TEMPLATE_ID                 NUMBER(38,0) NOT NULL AUTOINCREMENT,
-    TEMPLATE_NAME               VARCHAR(200) NOT NULL,
+    TEMPLATE_NAME               VARCHAR(200),
     PROCESS_TYPE                VARCHAR(30)  NOT NULL,
     ADJUSTMENT_TYPE             VARCHAR(20)  NOT NULL,
-    ADJUSTMENT_ACTION           VARCHAR(10)  NOT NULL,
+    ADJUSTMENT_ACTION           VARCHAR(10),
     SCALE_FACTOR                NUMBER(10,4) DEFAULT 1,
 
     -- Filter dimensions (same as ADJ_HEADER)
@@ -243,6 +243,9 @@ CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_RECURRING_TEMPLATE (
 
     REASON                      VARCHAR(1000),
     DEPENDS_ON                  VARCHAR(1000),              -- External dependency key(s)
+    START_COBID                 NUMBER(38,0),               -- First COB date this template applies to
+    END_COBID                   NUMBER(38,0),               -- Last COB date this template applies to
+    CRON_EXPRESSION             VARCHAR(100),               -- e.g. '0 8 * * MON-FRI'
     IS_ACTIVE                   BOOLEAN      DEFAULT TRUE,
     CREATED_BY                  VARCHAR(50),
     CREATED_DATE                TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
@@ -355,6 +358,27 @@ COMMENT = 'COB sign-off status per scope. SIGN_OFF_STATUS = SIGNED_OFF means no 
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- 7. ADJ_APPROVERS — Authorized approvers
+--
+-- Users listed here can approve/reject adjustments in the Approval Queue.
+-- Scope-level control: NULL PROCESS_TYPE = can approve all scopes.
+-- Self-approval is always blocked regardless of this table.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_APPROVERS (
+    APPROVER_ID                 NUMBER(38,0) NOT NULL AUTOINCREMENT,
+    USERNAME                    VARCHAR(50)  NOT NULL,
+    PROCESS_TYPE                VARCHAR(30),            -- NULL = all scopes
+    IS_ACTIVE                   BOOLEAN      DEFAULT TRUE,
+    ADDED_BY                    VARCHAR(50),
+    ADDED_DATE                  TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+
+    CONSTRAINT PK_ADJ_APPROVERS PRIMARY KEY (APPROVER_ID)
+)
+COMMENT = 'Authorized approvers for the Approval Queue. NULL PROCESS_TYPE means the user can approve any scope. Self-approval is always blocked.';
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- MIGRATION — add START_DATE to existing ADJ_HEADER
 -- ═══════════════════════════════════════════════════════════════════════════
 ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER
@@ -369,4 +393,5 @@ UNION ALL SELECT 'ADJ_LINE_ITEM', COUNT(*) FROM ADJUSTMENT_APP.ADJ_LINE_ITEM
 UNION ALL SELECT 'ADJ_STATUS_HISTORY', COUNT(*) FROM ADJUSTMENT_APP.ADJ_STATUS_HISTORY
 UNION ALL SELECT 'ADJUSTMENTS_SETTINGS', COUNT(*) FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
 UNION ALL SELECT 'ADJ_RECURRING_TEMPLATE', COUNT(*) FROM ADJUSTMENT_APP.ADJ_RECURRING_TEMPLATE
-UNION ALL SELECT 'ADJ_SIGNOFF_STATUS', COUNT(*) FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS;
+UNION ALL SELECT 'ADJ_SIGNOFF_STATUS', COUNT(*) FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+UNION ALL SELECT 'ADJ_APPROVERS', COUNT(*) FROM ADJUSTMENT_APP.ADJ_APPROVERS;

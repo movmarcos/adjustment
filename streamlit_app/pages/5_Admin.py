@@ -12,6 +12,10 @@ st.set_page_config(page_title="Admin · MUFG", page_icon="⚙️", layout="wide"
 from utils.styles import inject_css, render_sidebar, section_title, P, SCOPE_CONFIG
 from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
 
+def _esc(val):
+    """Escape single quotes for safe SQL interpolation."""
+    return str(val).replace("'", "''") if val is not None else ""
+
 inject_css()
 render_sidebar()
 
@@ -28,9 +32,10 @@ st.markdown("<br/>", unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
 
-tab_scopes, tab_signoff, tab_recurring, tab_schema, tab_sql = st.tabs([
+tab_scopes, tab_signoff, tab_approvers, tab_recurring, tab_schema, tab_sql = st.tabs([
     "📊 Scope Configuration",
     "🔒 Sign-Off Management",
+    "👤 Approvers",
     "🔁 Recurring Templates",
     "🗂️ Schema Reference",
     "🔧 SQL Reference",
@@ -165,15 +170,15 @@ with tab_signoff:
                 ):
                     try:
                         ts = "CURRENT_TIMESTAMP()" if new_status == "SIGNED_OFF" else "NULL"
-                        by = f"'{user}'" if new_status == "SIGNED_OFF" else "NULL"
+                        by = f"'{_esc(user)}'" if new_status == "SIGNED_OFF" else "NULL"
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-                            SET SIGN_OFF_STATUS    = '{new_status}',
+                            SET SIGN_OFF_STATUS    = '{_esc(new_status)}',
                                 SIGN_OFF_BY        = {by},
                                 SIGN_OFF_TIMESTAMP = {ts},
                                 UPDATED_DATE       = CURRENT_TIMESTAMP()
-                            WHERE COBID = {sel_cob}
-                              AND PROCESS_TYPE = '{sel_scope}'
+                            WHERE COBID = {int(sel_cob)}
+                              AND PROCESS_TYPE = '{_esc(sel_scope)}'
                         """)
                         st.success(f"COB {sel_cob} / {sel_scope} → {new_status}")
                         safe_rerun()
@@ -203,19 +208,20 @@ with tab_signoff:
             else:
                 try:
                     ts = "CURRENT_TIMESTAMP()" if so_status == "SIGNED_OFF" else "NULL"
-                    by = f"'{user}'" if so_status == "SIGNED_OFF" else "NULL"
+                    by = f"'{_esc(user)}'" if so_status == "SIGNED_OFF" else "NULL"
+                    cobid_int = int(so_cobid.strip())
                     run_query(f"""
                         MERGE INTO ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS tgt
-                        USING (SELECT {so_cobid.strip()} AS COBID, '{so_scope}' AS PROCESS_TYPE) src
+                        USING (SELECT {cobid_int} AS COBID, '{_esc(so_scope)}' AS PROCESS_TYPE) src
                         ON tgt.COBID = src.COBID AND tgt.PROCESS_TYPE = src.PROCESS_TYPE
                         WHEN MATCHED THEN UPDATE SET
-                            SIGN_OFF_STATUS    = '{so_status}',
+                            SIGN_OFF_STATUS    = '{_esc(so_status)}',
                             SIGN_OFF_BY        = {by},
                             SIGN_OFF_TIMESTAMP = {ts},
                             UPDATED_DATE       = CURRENT_TIMESTAMP()
                         WHEN NOT MATCHED THEN INSERT
                             (COBID, PROCESS_TYPE, SIGN_OFF_STATUS, SIGN_OFF_BY, SIGN_OFF_TIMESTAMP)
-                        VALUES ({so_cobid.strip()}, '{so_scope}', '{so_status}', {by}, {ts})
+                        VALUES ({cobid_int}, '{_esc(so_scope)}', '{_esc(so_status)}', {by}, {ts})
                     """)
                     st.success(f"Sign-off entry created: COB {so_cobid.strip()} / {so_scope} = {so_status}")
                     safe_rerun()
@@ -224,7 +230,111 @@ with tab_signoff:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — RECURRING TEMPLATES
+# TAB 3 — APPROVERS MANAGEMENT
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_approvers:
+    section_title("Authorized Approvers", "👤")
+    st.markdown(
+        f'<span style="font-size:0.85rem;color:{P["grey_700"]}">'
+        f'Users listed here can approve or reject adjustments in the Approval Queue. '
+        f'A user can <strong>never</strong> approve their own adjustment regardless of this list. '
+        f'Set <code>PROCESS_TYPE</code> to limit an approver to a specific scope, or leave blank for all scopes.'
+        f'</span>',
+        unsafe_allow_html=True)
+
+    try:
+        df_approvers = run_query_df("""
+            SELECT APPROVER_ID, USERNAME, PROCESS_TYPE, IS_ACTIVE,
+                   ADDED_BY, ADDED_DATE
+            FROM ADJUSTMENT_APP.ADJ_APPROVERS
+            ORDER BY IS_ACTIVE DESC, USERNAME
+        """)
+
+        if not df_approvers.empty:
+            active_ct  = int(df_approvers[df_approvers["IS_ACTIVE"] == True].shape[0])
+            inactive_ct = len(df_approvers) - active_ct
+            st.markdown(
+                f'<span style="font-size:0.85rem">'
+                f'<strong style="color:{P["success"]}">{active_ct} active</strong> · '
+                f'<strong style="color:{P["grey_700"]}">{inactive_ct} inactive</strong>'
+                f'</span>',
+                unsafe_allow_html=True)
+
+            st.dataframe(df_approvers, use_container_width=True, height=300)
+
+            # Deactivate / reactivate
+            st.markdown("<br/>", unsafe_allow_html=True)
+            section_title("Toggle Approver Status", "🔄")
+            toggle_cols = st.columns([2, 1, 1])
+            with toggle_cols[0]:
+                approver_options = [
+                    f"{r['USERNAME']} (ID {r['APPROVER_ID']}) — {'Active' if r['IS_ACTIVE'] else 'Inactive'}"
+                    for _, r in df_approvers.iterrows()
+                ]
+                sel_approver = st.selectbox("Select approver", approver_options, key="toggle_approver")
+            with toggle_cols[1]:
+                if st.button("✅ Activate", key="activate_approver_btn"):
+                    approver_id = int(sel_approver.split("ID ")[1].split(")")[0])
+                    try:
+                        run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_APPROVERS
+                            SET IS_ACTIVE = TRUE
+                            WHERE APPROVER_ID = {approver_id}
+                        """)
+                        st.success("Approver activated.")
+                        safe_rerun()
+                    except Exception as ex:
+                        st.error(str(ex))
+            with toggle_cols[2]:
+                if st.button("🚫 Deactivate", key="deactivate_approver_btn"):
+                    approver_id = int(sel_approver.split("ID ")[1].split(")")[0])
+                    try:
+                        run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_APPROVERS
+                            SET IS_ACTIVE = FALSE
+                            WHERE APPROVER_ID = {approver_id}
+                        """)
+                        st.success("Approver deactivated.")
+                        safe_rerun()
+                    except Exception as ex:
+                        st.error(str(ex))
+        else:
+            st.info("No approvers configured yet. Add one below.")
+    except Exception as e:
+        st.info(f"Approvers table not available: {e}")
+
+    st.markdown("<br/>", unsafe_allow_html=True)
+    section_title("Add New Approver", "➕")
+
+    with st.form("new_approver_form"):
+        ac1, ac2 = st.columns(2)
+        with ac1:
+            a_username = st.text_input("Username", placeholder="e.g. JSMITH", key="approver_user")
+        with ac2:
+            scope_options = ["All Scopes"] + list(SCOPE_CONFIG.keys())
+            a_scope = st.selectbox("Scope (optional)", scope_options, key="approver_scope")
+
+        a_submit = st.form_submit_button("Add Approver", type="primary")
+        if a_submit:
+            if not a_username.strip():
+                st.error("Username is required.")
+            else:
+                try:
+                    scope_val = "NULL" if a_scope == "All Scopes" else f"'{_esc(a_scope)}'"
+                    run_query(f"""
+                        INSERT INTO ADJUSTMENT_APP.ADJ_APPROVERS
+                            (USERNAME, PROCESS_TYPE, IS_ACTIVE, ADDED_BY)
+                        VALUES (UPPER('{_esc(a_username.strip())}'), {scope_val}, TRUE, '{_esc(user)}')
+                    """)
+                    st.success(f"Approver {a_username.strip().upper()} added successfully!")
+                    safe_rerun()
+                except Exception as ex:
+                    st.error(f"Failed to add approver: {ex}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — RECURRING TEMPLATES
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_recurring:
@@ -291,19 +401,19 @@ with tab_recurring:
                 st.error("Start and End COBID are required.")
             else:
                 try:
-                    book_val = f"'{t_book.strip()}'" if t_book.strip() else "NULL"
-                    dept_val = f"'{t_dept.strip()}'" if t_dept.strip() else "NULL"
-                    entity_val = f"'{t_entity.strip()}'" if t_entity.strip() else "NULL"
-                    cron_val = f"'{t_cron.strip()}'" if t_cron.strip() else "NULL"
+                    book_val = f"'{_esc(t_book.strip())}'" if t_book.strip() else "NULL"
+                    dept_val = f"'{_esc(t_dept.strip())}'" if t_dept.strip() else "NULL"
+                    entity_val = f"'{_esc(t_entity.strip())}'" if t_entity.strip() else "NULL"
+                    cron_val = f"'{_esc(t_cron.strip())}'" if t_cron.strip() else "NULL"
 
                     run_query(f"""
                         INSERT INTO ADJUSTMENT_APP.ADJ_RECURRING_TEMPLATE
                             (PROCESS_TYPE, ADJUSTMENT_TYPE, ENTITY_CODE, BOOK_CODE,
                              DEPARTMENT_CODE, SCALE_FACTOR, START_COBID, END_COBID,
                              CRON_EXPRESSION, IS_ACTIVE, CREATED_BY)
-                        VALUES ('{t_scope}', '{t_type}', {entity_val}, {book_val},
-                                {dept_val}, {t_scale}, {t_start.strip()}, {t_end.strip()},
-                                {cron_val}, TRUE, '{user}')
+                        VALUES ('{_esc(t_scope)}', '{_esc(t_type)}', {entity_val}, {book_val},
+                                {dept_val}, {float(t_scale)}, {int(t_start.strip())}, {int(t_end.strip())},
+                                {cron_val}, TRUE, '{_esc(user)}')
                     """)
                     st.success("Template created successfully!")
                     safe_rerun()
@@ -324,12 +434,15 @@ with tab_schema:
         ("ADJUSTMENT_APP.ADJ_STATUS_HISTORY",    "TABLE",         "Append-only audit log of every status change"),
         ("ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS",  "TABLE",         "Config: scope → fact table mapping, PK columns, metrics"),
         ("ADJUSTMENT_APP.ADJ_RECURRING_TEMPLATE","TABLE",         "Templates for automatically recurring adjustments"),
-        ("ADJUSTMENT_APP.ADJ_HEADER_STREAM",     "STREAM",        "CDC stream on ADJ_HEADER (INSERT + UPDATE)"),
-        ("ADJUSTMENT_APP.ADJ_LINE_ITEM_STREAM",  "STREAM",        "CDC stream on ADJ_LINE_ITEM (APPEND_ONLY)"),
+        ("ADJUSTMENT_APP.STREAM_QUEUE_VAR",       "STREAM",        "Standard stream on VW_QUEUE_VAR — fires TASK_PROCESS_VAR"),
+        ("ADJUSTMENT_APP.STREAM_QUEUE_STRESS",    "STREAM",        "Standard stream on VW_QUEUE_STRESS — fires TASK_PROCESS_STRESS"),
+        ("ADJUSTMENT_APP.STREAM_QUEUE_FRTB",      "STREAM",        "Standard stream on VW_QUEUE_FRTB — fires TASK_PROCESS_FRTB"),
+        ("ADJUSTMENT_APP.STREAM_QUEUE_SENSITIVITY","STREAM",       "Standard stream on VW_QUEUE_SENSITIVITY — fires TASK_PROCESS_SENSITIVITY"),
         ("ADJUSTMENT_APP.DT_DASHBOARD",          "DYNAMIC TABLE", "Aggregated metrics by scope, status, entity, user"),
         ("ADJUSTMENT_APP.DT_OVERLAP_ALERTS",     "DYNAMIC TABLE", "Self-join detecting overlapping adjustments"),
         ("ADJUSTMENT_APP.VW_DASHBOARD_KPI",      "VIEW",          "Pre-aggregated KPIs for the dashboard"),
         ("ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS",    "TABLE",         "COB sign-off status per scope. Managed via Admin page"),
+        ("ADJUSTMENT_APP.ADJ_APPROVERS",         "TABLE",         "Authorized approvers with optional scope restriction. Managed via Admin page"),
         ("ADJUSTMENT_APP.VW_SIGNOFF_STATUS",     "VIEW",          "COB sign-off status (reads from ADJ_SIGNOFF_STATUS)"),
         ("ADJUSTMENT_APP.VW_RECENT_ACTIVITY",    "VIEW",          "UNION of submissions + status changes"),
         ("ADJUSTMENT_APP.VW_ERRORS",             "VIEW",          "Adjustments with Error status"),
@@ -412,11 +525,15 @@ with tab_sql:
     "scale_factor": 1.05,
     "entity_code": "MUSE"
 }');"""),
-        "SP_PROCESS_ADJUSTMENT": (
-            "Core processing engine — writes deltas to fact tables. Called by Task.",
-            """-- Called automatically by PROCESS_PENDING_TASK
+        "SP_RUN_PIPELINE": (
+            "Stream-driven orchestrator — blocks overlaps, promotes to Running, processes in parallel, unblocks resolved.",
+            """-- Called automatically by scope tasks (TASK_PROCESS_VAR, etc.)
 -- Can also be called manually:
-CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT(200001);"""),
+CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('VaR', '["VaR"]');"""),
+        "SP_PROCESS_ADJUSTMENT": (
+            "Core processing engine — writes deltas to fact tables. Called by SP_RUN_PIPELINE.",
+            """-- Called by SP_RUN_PIPELINE for each (process_type, action, cobid) group:
+CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT('VaR', 'Scale', 20260328);"""),
     }
 
     for proc_name, (desc, code) in procs.items():
@@ -424,45 +541,41 @@ CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT(200001);"""),
             st.code(code, language="sql")
 
     section_title("Snowflake Tasks Configuration", "⚙️")
+    st.markdown("""
+    Four independent scope tasks, each guarded by a standard stream on its queue view.
+    Tasks fire every 1 minute **only when** the stream has data (INSERT or UPDATE on ADJ_HEADER
+    that matches the queue view filters).
+    """)
     st.code("""
--- Main processing task (fires when stream has data)
-CREATE OR REPLACE TASK ADJUSTMENT_APP.PROCESS_PENDING_TASK
-    WAREHOUSE = DVLP_RAPTOR_TASK_WH
+-- VaR pipeline
+CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_VAR
+    WAREHOUSE = DVLP_RAVEN_WH_M
     SCHEDULE  = '1 MINUTE'
-    WHEN SYSTEM$STREAM_HAS_DATA('ADJUSTMENT_APP.ADJ_HEADER_STREAM')
+    WHEN SYSTEM$STREAM_HAS_DATA('ADJUSTMENT_APP.STREAM_QUEUE_VAR')
 AS
-BEGIN
-    -- Process ad-hoc pending adjustments
-    FOR rec IN (
-        SELECT ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
-        WHERE RUN_STATUS = 'Pending'
-          AND ADJUSTMENT_OCCURRENCE = 'ADHOC'
-          AND IS_DELETED = FALSE
-        ORDER BY CREATED_DATE
-    ) DO
-        CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT(rec.ADJ_ID);
-    END FOR;
+    CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('VaR', '["VaR"]');
 
-    -- Process recurring instantiated adjustments
-    FOR rec IN (
-        SELECT ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
-        WHERE RUN_STATUS = 'Pending'
-          AND ADJUSTMENT_OCCURRENCE = 'RECURRING'
-          AND IS_DELETED = FALSE
-        ORDER BY CREATED_DATE
-    ) DO
-        CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT(rec.ADJ_ID);
-    END FOR;
-END;
-
--- Recurring template instantiation
-CREATE OR REPLACE TASK ADJUSTMENT_APP.INSTANTIATE_RECURRING_TASK
-    WAREHOUSE = DVLP_RAPTOR_TASK_WH
-    SCHEDULE  = '5 MINUTE'
+-- Stress pipeline
+CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS
+    WAREHOUSE = DVLP_RAVEN_WH_M
+    SCHEDULE  = '1 MINUTE'
+    WHEN SYSTEM$STREAM_HAS_DATA('ADJUSTMENT_APP.STREAM_QUEUE_STRESS')
 AS
-BEGIN
-    -- Creates ADJ_HEADER rows from active templates
-    -- when current business date falls in [START_COBID, END_COBID]
-    ...
-END;
+    CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('Stress', '["Stress"]');
+
+-- FRTB pipeline (all sub-types: FRTB, FRTBDRC, FRTBRRAO, FRTBALL)
+CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB
+    WAREHOUSE = DVLP_RAVEN_WH_M
+    SCHEDULE  = '1 MINUTE'
+    WHEN SYSTEM$STREAM_HAS_DATA('ADJUSTMENT_APP.STREAM_QUEUE_FRTB')
+AS
+    CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('FRTB', '["FRTB","FRTBDRC","FRTBRRAO","FRTBALL"]');
+
+-- Sensitivity pipeline
+CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY
+    WAREHOUSE = DVLP_RAVEN_WH_M
+    SCHEDULE  = '1 MINUTE'
+    WHEN SYSTEM$STREAM_HAS_DATA('ADJUSTMENT_APP.STREAM_QUEUE_SENSITIVITY')
+AS
+    CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('Sensitivity', '["Sensitivity"]');
     """, language="sql")

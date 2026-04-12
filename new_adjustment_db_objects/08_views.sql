@@ -12,9 +12,6 @@
 USE DATABASE DVLP_RAPTOR_NEWADJ;
 USE SCHEMA ADJUSTMENT_APP;
 
--- Drop legacy view (approval workflow removed)
-DROP VIEW IF EXISTS ADJUSTMENT_APP.VW_APPROVAL_QUEUE;
-
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 1. VW_SIGNOFF_STATUS — Unified sign-off check across all scopes
 --

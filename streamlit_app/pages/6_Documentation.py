@@ -108,6 +108,21 @@ with tab_overview:
             f'<td style="padding:10px 14px;font-family:monospace;font-size:0.82rem;'
             f'background:{P["grey_100"]};border-radius:4px">{tcfg["formula"]}</td>'
             f'</tr>')
+    # Add Entity Roll, Upload, Direct manually (not in TYPE_CONFIG)
+    type_rows += (
+        f'<tr>'
+        f'<td style="padding:10px 14px;font-weight:600;font-size:0.9rem;white-space:nowrap">🔄 Entity Roll</td>'
+        f'<td style="padding:10px 14px;font-size:0.85rem;color:{P["grey_700"]}">Full entity copy from source COB — deletes target, copies source (approval required)</td>'
+        f'<td style="padding:10px 14px;font-family:monospace;font-size:0.82rem;'
+        f'background:{P["grey_100"]};border-radius:4px">DELETE target + INSERT FROM source</td>'
+        f'</tr>'
+        f'<tr>'
+        f'<td style="padding:10px 14px;font-weight:600;font-size:0.9rem;white-space:nowrap">📤 Upload</td>'
+        f'<td style="padding:10px 14px;font-size:0.85rem;color:{P["grey_700"]}">Direct CSV upload of VaR measure values</td>'
+        f'<td style="padding:10px 14px;font-family:monospace;font-size:0.82rem;'
+        f'background:{P["grey_100"]};border-radius:4px">INSERT line items directly</td>'
+        f'</tr>')
+
     st.markdown(
         f'<table style="width:100%;border-collapse:collapse;border:1px solid {P["border"]};border-radius:8px;overflow:hidden">'
         f'<thead><tr style="background:{P["accent"]};color:white">'
@@ -125,9 +140,9 @@ with tab_overview:
         ("🏠", "Command Center",   "Dashboard with KPIs, status charts, overlap alerts, and activity feed"),
         ("✏️", "New Adjustment",    "3-step wizard: Scope & Filters → Preview → Submit"),
         ("📋", "My Work",           "All your adjustments with full history, actions, and status timeline"),
-        ("✅", "Approval Queue",     "Review and approve adjustments that require approval before processing"),
+        ("✅", "Approval Queue",     "Review and approve adjustments. Only authorized approvers can act. Self-approval is blocked"),
         ("⏳", "Processing Queue",  "Live view of the Snowflake processing pipeline and queue position"),
-        ("⚙️", "Admin",             "Settings management, recurring templates, schema reference"),
+        ("⚙️", "Admin",             "Settings management, approvers, recurring templates, schema reference"),
         ("📖", "Documentation",     "This page — full process guide with diagrams"),
     ]
     for icon, name, desc in pages:
@@ -695,7 +710,7 @@ with tab_workflow:
         </div>
         <div style="text-align:center;padding:0 8px">
             <div style="font-size:1.2rem;color:{P['grey_400']}">→</div>
-            <div style="font-size:0.6rem;color:{P['grey_700']}">Approver<br/>approves</div>
+            <div style="font-size:0.6rem;color:{P['grey_700']}">Authorized<br/>approver<br/>(not submitter)</div>
         </div>
         <div style="background:#E0F2F1;border:2px solid {STATUS_COLORS['Approved']};border-radius:10px;padding:0.8rem 1rem;text-align:center;min-width:120px">
             <div style="font-size:1.3rem">{STATUS_ICONS['Approved']}</div>
@@ -740,9 +755,9 @@ with tab_workflow:
     status_data = [
         ("Pending",              "Initial state after submission or after retry",
          "Process immediately (ad-hoc) or wait for task (recurring)"),
-        ("Pending Approval",     "Submitted with requires_approval flag — awaiting approver action",
+        ("Pending Approval",     "Submitted with requires_approval flag — awaiting approver action. Only users in ADJ_APPROVERS can act. Self-approval is blocked.",
          "Approve → Approved, Reject → Rejected, Recall → Pending"),
-        ("Approved",             "Approved by an authorised user — ready for processing",
+        ("Approved",             "Approved by an authorized user (listed in ADJ_APPROVERS, not the submitter) — ready for processing",
          "Task picks up and processes → Processed"),
         ("Processed",            "Successfully applied to the FACT.*_ADJUSTMENT table",
          "Terminal state (adjustments are in the data)"),
@@ -841,6 +856,31 @@ with tab_workflow:
         <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:0.4rem">
         <strong>Key:</strong> The adjustment is still inserted into ADJ_HEADER for audit, but
         immediately set to "Rejected - SignedOff". It is never processed.
+        </div>
+        """)
+
+    with st.expander("**Scenario 5: Entity Roll (Full Copy)**"):
+        _html(f"""
+        <div style="background:{P['grey_100']};border-radius:10px;padding:1rem;margin:0.5rem 0">
+        <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:0.82rem">
+            <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-weight:600">👤 User selects Entity Roll</div>
+            <span style="color:{P['grey_400']}">→</span>
+            <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-weight:600">Sets scope + COBs + Entity</div>
+            <span style="color:{P['grey_400']}">→</span>
+            <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:#E65100">⚠️ Pending Approval (mandatory)</div>
+            <span style="color:{P['grey_400']}">→</span>
+            <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">Approver reviews & approves</div>
+            <span style="color:{P['grey_400']}">→</span>
+            <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['danger']}">DELETE target COB+Entity</div>
+            <span style="color:{P['grey_400']}">→</span>
+            <div style="background:#E8F5E9;border-radius:6px;padding:4px 10px;font-weight:600;color:#2E7D32">INSERT from source COB ✔</div>
+        </div>
+        </div>
+        <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:0.4rem">
+        <strong>Key:</strong> Entity Roll is a destructive operation that <strong>always requires approval</strong>.
+        It deletes all data for the target COB + Entity in both FACT and FACT ADJUSTED tables, then copies
+        all data from the source COB + Entity (replacing COBID). All source adjustment records are consolidated
+        under a single new Adjustment ID. No delta calculation is performed.
         </div>
         """)
 
@@ -1088,6 +1128,7 @@ with tab_objects:
         ("INSTANTIATE_RECURRING_TASK","TASK",           "06_tasks.sql",    "Runs every 5 min. Creates ADJ_HEADER rows from ADJ_RECURRING_TEMPLATE."),
         ("DT_DASHBOARD",            "DYNAMIC TABLE",   "07_dynamic.sql",  "Pre-aggregated metrics by scope/status/entity/user. 1-min refresh."),
         ("DT_OVERLAP_ALERTS",       "DYNAMIC TABLE",   "07_dynamic.sql",  "Self-join overlap detection with wildcard matching. 1-min refresh."),
+        ("ADJ_APPROVERS",           "TABLE",           "01_tables.sql",   "Authorized approvers with optional scope restriction. Managed via Admin → Approvers tab."),
         ("ADJ_SIGNOFF_STATUS",      "TABLE",           "01_tables.sql",   "COB sign-off status per scope. Managed via Admin page."),
         ("VW_SIGNOFF_STATUS",       "VIEW",            "08_views.sql",    "Reads ADJ_SIGNOFF_STATUS for sign-off checks."),
         ("VW_DASHBOARD_KPI",        "VIEW",            "08_views.sql",    "Aggregated KPIs per COB: counts by status, total value, avg processing time, overlap alerts."),
@@ -1282,6 +1323,7 @@ with tab_ops:
         ("Overlap Resolution",  "When two adjustments target the same data, DENSE_RANK ensures the most recent one wins automatically."),
         ("Sign-Off Guard",      "SP_SUBMIT checks ADJ_SIGNOFF_STATUS. If COB is signed off, the adjustment is recorded but rejected. Managed via Admin page."),
         ("Optional Approval",   "When requires_approval is set, adjustments go through Pending Approval → Approved before processing. Approval is optional — unchecked adjustments skip straight to Pending → Processed."),
+        ("Approver Control",    "Only users registered in ADJ_APPROVERS (Admin → Approvers tab) can approve or reject. Approvers can be scoped to specific process types. A user can never approve their own adjustment."),
     ]
 
     for title, desc in principles:

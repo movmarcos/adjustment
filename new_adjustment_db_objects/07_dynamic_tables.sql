@@ -126,11 +126,14 @@ overlaps AS (
         AND a.PROCESS_TYPE = b.PROCESS_TYPE
         AND a.ADJ_ID       < b.ADJ_ID     -- avoid self-join duplicates
         -- Overlap condition: dimensions must match OR one side is wildcard
+        -- Must match all 7 OVERLAP_DIMS used by SP_RUN_PIPELINE
         AND (a.ENTITY_CODE       = b.ENTITY_CODE       OR a.ENTITY_CODE       = '*' OR b.ENTITY_CODE       = '*')
         AND (a.SOURCE_SYSTEM_CODE = b.SOURCE_SYSTEM_CODE OR a.SOURCE_SYSTEM_CODE = '*' OR b.SOURCE_SYSTEM_CODE = '*')
         AND (a.DEPARTMENT_CODE   = b.DEPARTMENT_CODE   OR a.DEPARTMENT_CODE   = '*' OR b.DEPARTMENT_CODE   = '*')
         AND (a.BOOK_CODE         = b.BOOK_CODE         OR a.BOOK_CODE         = '*' OR b.BOOK_CODE         = '*')
         AND (a.CURRENCY_CODE     = b.CURRENCY_CODE     OR a.CURRENCY_CODE     = '*' OR b.CURRENCY_CODE     = '*')
+        AND (a.TRADE_TYPOLOGY    = b.TRADE_TYPOLOGY    OR a.TRADE_TYPOLOGY    = '*' OR b.TRADE_TYPOLOGY    = '*')
+        AND (a.STRATEGY          = b.STRATEGY          OR a.STRATEGY          = '*' OR b.STRATEGY          = '*')
 )
 SELECT
     ADJ_ID_A,

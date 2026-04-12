@@ -87,6 +87,10 @@ CATEGORY_CONFIG = {
         "icon": "📤", "color": "#6A1B9A", "bg": "#F3E5F5",
         "desc": "Upload a CSV with 21 VaR measure columns for direct insertion",
     },
+    "Entity Roll": {
+        "icon": "🔄", "color": "#E65100", "bg": "#FFF3E0",
+        "desc": "Full entity roll — copies all data from a source COB (approval required)",
+    },
     "Global Adjustment": {
         "icon": "🌐", "color": "#1565C0", "bg": "#E3F2FD",
         "desc": "Metadata-only adjustment tracked in GLOBAL_ADJUSTMENT_SF",

@@ -127,6 +127,19 @@ def _build_payload() -> dict:
             "file_name":             wiz.get("uploaded_file_name", ""),
         }
 
+    if cat == "Entity Roll":
+        return {
+            "cobid":                 wiz["cobid"],
+            "process_type":          wiz["process_type"],
+            "adjustment_type":       "Entity_Roll",
+            "username":              current_user_name(),
+            "source_cobid":          wiz.get("source_cobid") or wiz["cobid"],
+            "reason":                wiz.get("reason", ""),
+            "entity_code":           wiz.get("entity_code", ""),
+            "requires_approval":     True,
+            "adjustment_occurrence": "ADHOC",
+        }
+
     # Scaling Adjustment
     payload = {
         "cobid":                 wiz["cobid"],
@@ -334,9 +347,12 @@ def render_var_upload_form() -> None:
         key=_k("var_approval"))
 
     st.markdown("<br/>", unsafe_allow_html=True)
-    missing = [f for f, v in [("CSV Data", wiz.get("uploaded_df")),
-                               ("COB Date", wiz.get("cobid")),
-                               ("Entity Code", wiz.get("entity_code"))] if not v]
+    _checks = [
+        ("CSV Data",     wiz.get("uploaded_df") is not None),
+        ("COB Date",     bool(wiz.get("cobid"))),
+        ("Entity Code",  bool(wiz.get("entity_code"))),
+    ]
+    missing = [f for f, present in _checks if not present]
     if missing:
         _missing_info(missing)
     else:
@@ -344,6 +360,92 @@ def render_var_upload_form() -> None:
                      use_container_width=True, key=_k("var_continue")):
             wiz["process_type"]    = "VaR"
             wiz["adjustment_type"] = "Upload"
+            wiz["step"] = 2
+            safe_rerun()
+
+
+# ── Entity Roll ──────────────────────────────────────────────────────────────
+
+def render_entity_roll_form() -> None:
+    section_title("Entity Roll — Full Entity Copy", "🔄")
+
+    st.markdown(
+        f'<div style="background:#FFF3E0;border:2px solid #FFB74D;border-radius:10px;'
+        f'padding:1rem;margin-bottom:1rem">'
+        f'<div style="font-weight:700;font-size:0.95rem;color:#E65100;margin-bottom:0.4rem">'
+        f'⚠️ Destructive Operation — Approval Required</div>'
+        f'<div style="font-size:0.84rem;color:#BF360C">'
+        f'This operation will <strong>delete all existing data</strong> for the target COB + Entity '
+        f'in both the FACT table and FACT ADJUSTED table, then <strong>copy all data</strong> from '
+        f'the source COB + Entity. No delta calculation is performed.<br/><br/>'
+        f'All source adjustment records will be consolidated under a single new Adjustment ID.<br/><br/>'
+        f'<strong>This adjustment always requires approval before processing.</strong>'
+        f'</div></div>',
+        unsafe_allow_html=True)
+
+    # Scope selection
+    section_title("Data Scope", "🔍")
+    scope_cols = st.columns(len(SCOPE_CONFIG))
+    for i, (sk, cfg) in enumerate(SCOPE_CONFIG.items()):
+        with scope_cols[i]:
+            is_sel = wiz.get("process_type") == sk
+            st.markdown(
+                f'<div style="background:{"#E3F2FD" if is_sel else P["white"]};'
+                f'border:2px solid {P["primary"] if is_sel else P["border"]};'
+                f'border-radius:10px;padding:0.6rem;text-align:center">'
+                f'<div style="font-size:1.3rem">{cfg.get("icon","📊")}</div>'
+                f'<div style="font-weight:600;font-size:0.82rem">{sk}</div></div>',
+                unsafe_allow_html=True)
+            if st.button(sk, key=_k(f"er_scope_{sk}"), use_container_width=True,
+                         type="primary" if is_sel else "secondary"):
+                wiz["process_type"] = sk
+                safe_rerun()
+
+    if not wiz.get("process_type"):
+        st.info("👆 Select a scope to continue.")
+        return
+
+    st.divider()
+    g1, g2, g3 = st.columns(3)
+    with g1:
+        cobid_val = st.text_input("Target COB Date (YYYYMMDD) *", key=_k("er_cobid"),
+                                   value=str(wiz.get("cobid") or ""),
+                                   placeholder="e.g. 20260328")
+        if cobid_val.strip().isdigit():
+            wiz["cobid"] = int(cobid_val.strip())
+    with g2:
+        src_val = st.text_input("Source COB Date (YYYYMMDD) *", key=_k("er_src_cobid"),
+                                 value=str(wiz.get("source_cobid") or ""),
+                                 placeholder="e.g. 20260327")
+        if src_val.strip().isdigit():
+            wiz["source_cobid"] = int(src_val.strip())
+    with g3:
+        wiz["entity_code"] = st.text_input(
+            "Entity Code *", key=_k("er_entity"),
+            value=wiz.get("entity_code") or "", placeholder="e.g. MUSE")
+
+    st.divider()
+    wiz["reason"] = st.text_area(
+        "Reason / Business Justification *", value=wiz.get("reason", ""),
+        height=60, key=_k("er_reason"), placeholder="e.g. Rolling MUSE VaR from previous business day")
+
+    # Approval is always required — show locked checkbox
+    st.checkbox("🔐 Requires Approval", value=True, disabled=True, key=_k("er_approval"))
+
+    st.markdown("<br/>", unsafe_allow_html=True)
+    missing = [f for f, v in [("Scope", wiz.get("process_type")),
+                               ("Target COB", wiz.get("cobid")),
+                               ("Source COB", wiz.get("source_cobid")),
+                               ("Entity Code", (wiz.get("entity_code") or "").strip())] if not v]
+    if wiz.get("cobid") and wiz.get("source_cobid") and wiz["cobid"] == wiz["source_cobid"]:
+        st.error("Source COB and Target COB must be different for an Entity Roll.")
+    elif missing:
+        _missing_info(missing)
+    else:
+        if st.button("Continue → Preview", type="primary",
+                     use_container_width=True, key=_k("er_continue")):
+            wiz["adjustment_type"] = "Entity_Roll"
+            wiz["requires_approval"] = True
             wiz["step"] = 2
             safe_rerun()
 
@@ -608,6 +710,8 @@ if wiz["step"] == 1:
         render_global_adj_form()
     elif wiz["category"] == "VaR Upload":
         render_var_upload_form()
+    elif wiz["category"] == "Entity Roll":
+        render_entity_roll_form()
     else:
         render_scaling_form()
 
@@ -665,6 +769,34 @@ elif wiz["step"] == 2:
         if df_up is not None:
             section_title(f"Data Preview ({row_count:,} rows)", "📊")
             st.dataframe(df_up.head(50), use_container_width=True, height=300)
+
+    elif cat == "Entity Roll":
+        st.markdown(
+            f'<div class="mcard" style="border-left:4px solid #E65100">'
+            f'<div style="display:flex;gap:16px;align-items:center">'
+            f'<span style="font-size:2rem">🔄</span>'
+            f'<div><div style="font-weight:700;font-size:1.1rem">'
+            f'{wiz.get("process_type","")} — Entity Roll</div>'
+            f'<div style="font-size:0.85rem;color:{P["grey_700"]}">'
+            f'Entity: {wiz.get("entity_code","")} · '
+            f'Source COB: {wiz.get("source_cobid","")} → Target COB: {wiz.get("cobid","")}'
+            f'</div></div></div></div>', unsafe_allow_html=True)
+
+        st.markdown(
+            f'<div style="background:#FFF3E0;border:1px solid #FFB74D;border-radius:8px;'
+            f'padding:0.75rem 1rem;margin-top:0.8rem;font-size:0.83rem;color:#E65100">'
+            f'⚠️ <strong>This will delete all {wiz.get("process_type","")} data for '
+            f'COB {wiz.get("cobid","")} / Entity {wiz.get("entity_code","")}</strong> '
+            f'in both FACT and FACT ADJUSTED tables, then copy from '
+            f'COB {wiz.get("source_cobid","")}. '
+            f'This operation requires approval before it is processed.</div>',
+            unsafe_allow_html=True)
+
+        if wiz.get("reason"):
+            st.markdown(
+                f'<div class="mcard" style="margin-top:0.8rem">'
+                f'<strong>Reason:</strong> {wiz.get("reason","")}</div>',
+                unsafe_allow_html=True)
 
     else:  # Scaling Adjustment
         scale_info = (f' · Scale: {wiz.get("scale_factor", 1.0)}×'
