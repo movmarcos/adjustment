@@ -438,17 +438,55 @@ def main(session, process_type, adjustment_action, cobid):
                   AND {metric_usd_name} IS NOT NULL
             """
 
-            # Special dimension filters: key-mapped columns (BOOK_KEY, TRADE_KEY)
-            # ADJ_HEADER stores codes (BOOK_CODE, TRADE_CODE) but FACT stores keys.
-            # We join through DIMENSION tables to apply these filters.
-            if "BOOK_KEY" in fact_non_metric_matched:
+            # ── Detect which filter fields actually have values ─────────
+            # When an adjustment leaves a filter NULL it means "match all" —
+            # the OR adjust.X IS NULL clause always returns TRUE, so the
+            # entire EXISTS / direct-join condition is a no-op that still
+            # costs a dimension table scan.  By checking up front which
+            # fields have at least one non-NULL value in the current batch
+            # we can skip unused lookups entirely.
+            _dim_fields = [
+                'BOOK_CODE', 'DEPARTMENT_CODE', 'TRADER_CODE',
+                'GUARANTEED_ENTITY', 'REGION_KEY',
+                'TRADE_CODE', 'STRATEGY', 'TRADE_TYPOLOGY',
+                'ENTITY_CODE', 'INSTRUMENT_CODE',
+                'SIMULATION_NAME', 'SIMULATION_SOURCE',
+                'VAR_COMPONENT_ID', 'VAR_SUB_COMPONENT_ID', 'DAY_TYPE',
+            ]
+            _check_fields = list(set(join_cols + _dim_fields))
+            _check_in_adj = [f for f in _check_fields if f in adj_columns]
+            if _check_in_adj:
+                _adj_sample = df_adj_scale.select(_check_in_adj).to_pandas()
+                _has = {f: _adj_sample[f].notna().any() for f in _check_in_adj}
+            else:
+                _has = {}
+
+            def _any_has(*fields):
+                """True if at least one adjustment has a value for any of the listed fields."""
+                return any(_has.get(f, False) for f in fields)
+
+            # ── Dimension lookup EXISTS filters ─────────────────────────────
+            # Only added when (a) the KEY column exists in the fact table AND
+            # (b) the current batch actually filters on the mapped fields.
+
+            # 1. BOOK_KEY → BOOK_CODE, DEPARTMENT_CODE, TRADER_CODE,
+            #               GUARANTEED_ENTITY, REGION_KEY
+            if "BOOK_KEY" in fact_cols and _any_has(
+                    'BOOK_CODE', 'DEPARTMENT_CODE', 'TRADER_CODE',
+                    'GUARANTEED_ENTITY', 'REGION_KEY'):
                 from_where += (
                     "\n AND EXISTS (SELECT 1 FROM DIMENSION.BOOK bk "
                     "WHERE bk.BOOK_KEY = COALESCE(fact.BOOK_KEY, -1) "
                     "AND (bk.BOOK_CODE = adjust.BOOK_CODE OR adjust.BOOK_CODE IS NULL) "
-                    "AND (bk.DEPARTMENT_CODE = adjust.DEPARTMENT_CODE OR adjust.DEPARTMENT_CODE IS NULL))"
+                    "AND (bk.DEPARTMENT_CODE = adjust.DEPARTMENT_CODE OR adjust.DEPARTMENT_CODE IS NULL) "
+                    "AND (bk.PRIMARY_TRADER_CODE = adjust.TRADER_CODE OR adjust.TRADER_CODE IS NULL) "
+                    "AND (bk.GUARANTEED_ENTITY = adjust.GUARANTEED_ENTITY OR adjust.GUARANTEED_ENTITY IS NULL) "
+                    "AND (bk.REGION_KEY = adjust.REGION_KEY OR adjust.REGION_KEY IS NULL))"
                 )
-            if "TRADE_KEY" in fact_non_metric_matched:
+
+            # 2. TRADE_KEY → TRADE_CODE, STRATEGY, TRADE_TYPOLOGY
+            if "TRADE_KEY" in fact_cols and _any_has(
+                    'TRADE_CODE', 'STRATEGY', 'TRADE_TYPOLOGY'):
                 from_where += (
                     "\n AND EXISTS (SELECT 1 FROM DIMENSION.TRADE td "
                     "WHERE td.TRADE_KEY = COALESCE(fact.TRADE_KEY, -1) "
@@ -457,9 +495,51 @@ def main(session, process_type, adjustment_action, cobid):
                     "AND (td.TRADE_TYPOLOGY = adjust.TRADE_TYPOLOGY OR adjust.TRADE_TYPOLOGY IS NULL))"
                 )
 
+            # 3. ENTITY_KEY → ENTITY_CODE (SENSITIVITY_MEASURES, STRESS_MEASURES)
+            if ("ENTITY_KEY" in fact_cols and "ENTITY_CODE" not in fact_cols
+                    and _any_has('ENTITY_CODE')):
+                from_where += (
+                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.ENTITY ent "
+                    "WHERE ent.ENTITY_KEY = COALESCE(fact.ENTITY_KEY, -1) "
+                    "AND (ent.ENTITY_CODE = adjust.ENTITY_CODE OR adjust.ENTITY_CODE IS NULL))"
+                )
+
+            # 4. COMMON_INSTRUMENT_KEY → INSTRUMENT_CODE
+            if ("COMMON_INSTRUMENT_KEY" in fact_cols and "INSTRUMENT_CODE" not in fact_cols
+                    and _any_has('INSTRUMENT_CODE')):
+                from_where += (
+                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.COMMON_INSTRUMENT ci "
+                    "WHERE ci.COMMON_INSTRUMENT_KEY = COALESCE(fact.COMMON_INSTRUMENT_KEY, -1) "
+                    "AND (ci.INSTRUMENT_CODE = adjust.INSTRUMENT_CODE OR adjust.INSTRUMENT_CODE IS NULL))"
+                )
+
+            # 5. STRESS_SIMULATION_KEY → SIMULATION_NAME, SIMULATION_SOURCE
+            if ("STRESS_SIMULATION_KEY" in fact_cols
+                    and _any_has('SIMULATION_NAME', 'SIMULATION_SOURCE')):
+                from_where += (
+                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.STRESS_SIMULATION ss "
+                    "WHERE ss.STRESS_SIMULATION_KEY = COALESCE(fact.STRESS_SIMULATION_KEY, -1) "
+                    "AND (ss.STRESS_SIMULATION_NAME = adjust.SIMULATION_NAME OR adjust.SIMULATION_NAME IS NULL) "
+                    "AND (ss.SIMULATION_SOURCE = adjust.SIMULATION_SOURCE OR adjust.SIMULATION_SOURCE IS NULL))"
+                )
+
+            # 6. VAR_SUBCOMPONENT_ID → VAR_COMPONENT_ID, VAR_SUB_COMPONENT_ID, DAY_TYPE
+            if ("VAR_SUBCOMPONENT_ID" in fact_cols
+                    and _any_has('VAR_COMPONENT_ID', 'VAR_SUB_COMPONENT_ID', 'DAY_TYPE')):
+                from_where += (
+                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.VAR_SUB_COMPONENT vsc "
+                    "WHERE vsc.VAR_SUB_COMPONENT_ID = COALESCE(fact.VAR_SUBCOMPONENT_ID, -1) "
+                    "AND (vsc.VAR_COMPONENT_ID = adjust.VAR_COMPONENT_ID OR adjust.VAR_COMPONENT_ID IS NULL) "
+                    "AND (vsc.VAR_SUB_COMPONENT_ID = adjust.VAR_SUB_COMPONENT_ID OR adjust.VAR_SUB_COMPONENT_ID IS NULL) "
+                    "AND (vsc.VAR_SUB_COMPONENT_DAY_TYPE = adjust.DAY_TYPE OR adjust.DAY_TYPE IS NULL))"
+                )
+
+            # ── Direct join conditions (auto-detected column matches) ───────
+            # Also skip conditions where no adjustment in the batch has a value.
             join_cond = '\n'.join([
                 f"AND (adjust.{c} = fact.{c} OR adjust.{c} IS NULL)"
                 for c in join_cols
+                if _has.get(c, True)
             ])
 
             # ── 3-way UNION ALL ──────────────────────────────────────────
