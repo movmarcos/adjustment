@@ -58,12 +58,13 @@ else:
 render_pipeline_diagram(current_stage=stage)
 
 st.markdown(
-    f'<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;'
+    f'<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;'
     f'font-size:0.78rem;color:{P["grey_700"]};text-align:center;margin-top:0.3rem">'
     f'<div>Adjustment saved to<br/><strong>ADJ_HEADER</strong></div>'
     f'<div><strong>Scope task</strong><br/>polls every 1 min<br/>exits fast when idle</div>'
     f'<div><strong>SP_RUN_PIPELINE</strong><br/>claim → block → process → unblock</div>'
     f'<div><strong>Dynamic Tables</strong><br/>auto-refresh (1 min lag)</div>'
+    f'<div><strong>PowerBI Refresh</strong><br/>ControlM every ~5 min</div>'
     f'</div>',
     unsafe_allow_html=True)
 
@@ -240,8 +241,89 @@ Streams only capture INSERT events. When a blocked adjustment is unblocked (`BLO
 4. `SP_PROCESS_ADJUSTMENT` Scale path: 3-way UNION ALL (same-COB scale/flatten + cross-COB roll legs) → netted into **one delta row per position** (cross-COB roll pairs collapsed: e.g. −1 + 1.5 → 0.5) → DENSE_RANK overlap resolution → supersede → SCD2 key fix → summary rebuild
 5. Status updated to `Processed` (or `Failed` on error)
 6. If an adjustment was blocked, `BLOCKED_BY_ADJ_ID` is cleared → next task poll (within 1 min) picks it up
+7. `SP_PROCESS_ADJUSTMENT` calls `FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS` → queues PowerBI refresh in `METADATA.POWERBI_ACTION`
+8. ControlM job (every ~5 min) picks up queued actions and triggers the PowerBI dataset refresh
+9. Once the refresh completes, reports reflect the adjustment data — status shows in **Report Refresh Status** below
 
 **Dynamic Table Refresh:**
 - `DT_DASHBOARD` refreshes with **1-minute lag**
 - `DT_OVERLAP_ALERTS` refreshes with **1-minute lag** — detects overlapping adjustments (includes Running)
     """)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# REPORT REFRESH STATUS
+# ──────────────────────────────────────────────────────────────────────────────
+
+st.markdown("<br/>", unsafe_allow_html=True)
+section_title("Report Refresh Status", "📈")
+
+try:
+    df_pbi_status = run_query_df("""
+        SELECT
+            CASE
+                WHEN START_TIME IS NULL THEN 'Queued'
+                WHEN COMPLETE_TIME IS NULL THEN 'Running'
+                ELSE 'Completed'
+            END AS STATUS,
+            CASE
+                WHEN OBJECT_NAME = 'RaptorReporting' AND INSERT_SOURCE LIKE '%VAR%' THEN 'VaR'
+                WHEN OBJECT_NAME = 'RaptorReporting' AND INSERT_SOURCE LIKE '%STRESS%' THEN 'Stress'
+                WHEN OBJECT_NAME = 'RaptorReporting' AND INSERT_SOURCE LIKE '%SENSITIVITY%' THEN 'Sensitivity'
+                WHEN OBJECT_NAME = 'RaptorReporting' AND INSERT_SOURCE LIKE '%FRTB%' THEN 'FRTB'
+                WHEN OBJECT_NAME = 'VaR Adjustment Summary Import' THEN 'VaR'
+                WHEN OBJECT_NAME = 'Stress Measures Adjustment Import' THEN 'Stress'
+                WHEN OBJECT_NAME = 'Sensitivity Summary Adjustment Import' THEN 'Sensitivity'
+                ELSE OBJECT_NAME
+            END AS SCOPE,
+            COBID,
+            OBJECT_NAME,
+            INSERT_SOURCE,
+            CONVERT_TIMEZONE('UTC', 'Europe/London', REQUEST_TIME::TIMESTAMP_NTZ) AS REQUEST_TIME,
+            CONVERT_TIMEZONE('UTC', 'Europe/London', START_TIME::TIMESTAMP_NTZ) AS START_TIME,
+            CONVERT_TIMEZONE('UTC', 'Europe/London', COMPLETE_TIME::TIMESTAMP_NTZ) AS COMPLETE_TIME
+        FROM METADATA.POWERBI_ACTION
+        WHERE INSERT_SOURCE LIKE 'LOAD_%_ADJUSTMENT'
+        ORDER BY REQUEST_TIME DESC
+        LIMIT 30
+    """)
+
+    if not df_pbi_status.empty:
+        pbi_queued    = int(df_pbi_status[df_pbi_status["STATUS"] == "Queued"].shape[0])
+        pbi_running   = int(df_pbi_status[df_pbi_status["STATUS"] == "Running"].shape[0])
+        pbi_completed = int(df_pbi_status[df_pbi_status["STATUS"] == "Completed"].shape[0])
+
+        pc1, pc2, pc3 = st.columns(3)
+        pbi_stats = [
+            ("Queued",    pbi_queued,    P["warning"]),
+            ("Running",   pbi_running,   "#1565C0"),
+            ("Completed", pbi_completed, P["success"]),
+        ]
+        for col, (lbl, val, color) in zip([pc1, pc2, pc3], pbi_stats):
+            col.markdown(
+                f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
+                f'border-top:3px solid {color};border-radius:8px;padding:0.6rem;text-align:center">'
+                f'<div style="font-size:1.3rem;font-weight:800;color:{color}">{val}</div>'
+                f'<div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.06em;'
+                f'color:{P["grey_700"]};margin-top:2px">{lbl}</div>'
+                f'</div>',
+                unsafe_allow_html=True)
+
+        st.markdown("<br/>", unsafe_allow_html=True)
+
+        def color_pbi_status(val):
+            if val == "Completed": return f"color:{P['success']};font-weight:600"
+            if val == "Running":   return f"color:#1565C0;font-weight:600"
+            if val == "Queued":    return f"color:{P['warning']};font-weight:600"
+            return ""
+
+        display = ["STATUS", "SCOPE", "COBID", "OBJECT_NAME",
+                    "REQUEST_TIME", "START_TIME", "COMPLETE_TIME"]
+        existing = [c for c in display if c in df_pbi_status.columns]
+        st.dataframe(
+            df_pbi_status[existing].style.map(color_pbi_status, subset=["STATUS"]),
+            use_container_width=True, height=250,
+        )
+    else:
+        st.info("No adjustment-related PowerBI refresh actions found.")
+except Exception as pbi_ex:
+    st.info(f"PowerBI refresh status not available: {pbi_ex}")
