@@ -98,6 +98,35 @@ def log_status_history(session, adj_ids, old_status, new_status, changed_by="SYS
     """).collect()
 
 
+# ── INSERT_SOURCE mapping for PowerBI ────────────────────────────────────
+PBI_INSERT_SOURCE = {
+    'VAR':         'LOAD_VAR_ADJUSTMENT',
+    'STRESS':      'LOAD_STRESS_ADJUSTMENT',
+    'SENSITIVITY': 'LOAD_SENSITIVITY_ADJUSTMENT',
+    'FRTB':        'LOAD_FRTB_ADJUSTMENT',
+    'FRTBDRC':     'LOAD_FRTB_ADJUSTMENT',
+    'FRTBRRAO':    'LOAD_FRTB_ADJUSTMENT',
+    'FRTBALL':     'LOAD_FRTB_ADJUSTMENT',
+}
+
+def trigger_powerbi_refresh(session, process_type, run_log_id):
+    """Call FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS to queue a PowerBI refresh."""
+    insert_source = PBI_INSERT_SOURCE.get(process_type.upper(),
+                                          f'LOAD_{process_type.upper()}_ADJUSTMENT')
+    try:
+        session.sql(f"""
+            CALL FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS(
+                '{process_type}',
+                'RaptorReporting',
+                '{insert_source}',
+                '{run_log_id}',
+                '0'
+            )
+        """).collect()
+    except Exception as pbi_err:
+        print(f"Warning: PowerBI refresh trigger failed: {pbi_err}")
+
+
 def insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str):
     """
     1. Insert one row per ADJ_ID into DIMENSION.ADJUSTMENT (RECORD_COUNT = NULL,
@@ -272,6 +301,13 @@ def main(session, process_type, adjustment_action, cobid):
             adj_ids = [row["ADJ_ID"] for row in df_adj_direct.select("ADJ_ID").collect()]
             adj_ids_str = ", ".join(f"'{a}'" for a in adj_ids)
 
+            # Store RUN_LOG_ID in ADJ_HEADER for traceability
+            session.sql(f"""
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                SET RUN_LOG_ID = {run_log_id}
+                WHERE ADJ_ID IN ({adj_ids_str})
+            """).collect()
+
             # ── Insert into DIMENSION.ADJUSTMENT FIRST ───────────────────
             # We need DIMENSION.ADJUSTMENT.ADJUSTMENT_ID before writing to FACT,
             # so that FACT.ADJUSTMENT_ID = DIMENSION.ADJUSTMENT.ADJUSTMENT_ID (NUMBER).
@@ -340,6 +376,9 @@ def main(session, process_type, adjustment_action, cobid):
             result["rows_inserted"] = rows_count
             result["message"] = "Direct adjustments processed successfully"
 
+            # ── Trigger PowerBI refresh ─────────────────────────────────
+            trigger_powerbi_refresh(session, process_type, run_log_id)
+
         # ═════════════════════════════════════════════════════════════════
         # SCALE (Scale / Flatten / Roll) PATH
         # ═════════════════════════════════════════════════════════════════
@@ -356,6 +395,13 @@ def main(session, process_type, adjustment_action, cobid):
 
             adj_ids     = [row["ADJ_ID"] for row in df_adj_scale.select("ADJ_ID").collect()]
             adj_ids_str = ", ".join(f"'{a}'" for a in adj_ids)
+
+            # Store RUN_LOG_ID in ADJ_HEADER for traceability
+            session.sql(f"""
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                SET RUN_LOG_ID = {run_log_id}
+                WHERE ADJ_ID IN ({adj_ids_str})
+            """).collect()
 
             # ── Insert into DIMENSION.ADJUSTMENT FIRST ───────────────────
             # Get DIMENSION.ADJUSTMENT.ADJUSTMENT_ID (NUMBER) before building
@@ -772,6 +818,9 @@ def main(session, process_type, adjustment_action, cobid):
 
             result["message"] = "Scale adjustments processed successfully"
 
+            # ── Trigger PowerBI refresh ─────────────────────────────────
+            trigger_powerbi_refresh(session, process_type, run_log_id)
+
         # ═════════════════════════════════════════════════════════════════
         # ENTITY ROLL PATH
         # Full delete + copy: no delta calculation.
@@ -793,6 +842,13 @@ def main(session, process_type, adjustment_action, cobid):
 
             adj_ids = [row["ADJ_ID"] for row in df_adj_er.select("ADJ_ID").collect()]
             adj_ids_str = ", ".join(f"'{a}'" for a in adj_ids)
+
+            # Store RUN_LOG_ID in ADJ_HEADER for traceability
+            session.sql(f"""
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                SET RUN_LOG_ID = {run_log_id}
+                WHERE ADJ_ID IN ({adj_ids_str})
+            """).collect()
 
             # EntityRoll processes one adjustment at a time (entity-level operation)
             er_row = df_adj_er.collect()[0]
@@ -915,6 +971,9 @@ def main(session, process_type, adjustment_action, cobid):
             result["fact_rows_copied"]     = fact_count
             result["adj_rows_copied"]      = adj_count
             result["message"] = f"Entity Roll processed: {fact_count} fact rows + {adj_count} adjustment rows copied from COB {source_cobid} to {cobid}"
+
+            # ── Trigger PowerBI refresh ─────────────────────────────────
+            trigger_powerbi_refresh(session, process_type, run_log_id)
 
         else:
             result["message"] = f"Invalid adjustment_action: {adjustment_action}"
