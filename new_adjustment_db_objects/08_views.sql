@@ -257,6 +257,100 @@ WHERE h.RUN_STATUS = 'Pending Approval'
 -- ═══════════════════════════════════════════════════════════════════════════
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- 8. VW_REPORT_REFRESH_STATUS — PowerBI refresh status per processed adjustment
+--
+-- Computes whether a processed adjustment's data has been reflected in
+-- PowerBI reports. Joins ADJ_HEADER.PROCESS_DATE against
+-- METADATA.POWERBI_ACTION timelines.
+--
+-- Status logic:
+--   1. Find POWERBI_ACTION rows matching scope (via INSERT_SOURCE) + COBID
+--   2. If a COMPLETED action has REQUEST_TIME >= adjustment PROCESS_DATE → Reports Ready
+--   3. If a RUNNING action has REQUEST_TIME >= PROCESS_DATE → Refreshing
+--   4. If a QUEUED action has REQUEST_TIME >= PROCESS_DATE → Queued
+--   5. If a RUNNING action with REQUEST_TIME < PROCESS_DATE → Next Cycle
+--   6. Otherwise → Awaiting
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_REPORT_REFRESH_STATUS
+    COMMENT = 'Per-adjustment PowerBI refresh status. Joins ADJ_HEADER with METADATA.POWERBI_ACTION to determine if reports reflect the adjustment.'
+AS
+WITH adj_processed AS (
+    SELECT
+        h.ADJ_ID,
+        h.COBID,
+        h.PROCESS_TYPE,
+        h.RUN_LOG_ID,
+        h.PROCESS_DATE,
+        CASE UPPER(h.PROCESS_TYPE)
+            WHEN 'VAR'         THEN 'LOAD_VAR_ADJUSTMENT'
+            WHEN 'STRESS'      THEN 'LOAD_STRESS_ADJUSTMENT'
+            WHEN 'SENSITIVITY' THEN 'LOAD_SENSITIVITY_ADJUSTMENT'
+            WHEN 'FRTB'        THEN 'LOAD_FRTB_ADJUSTMENT'
+            WHEN 'FRTBDRC'     THEN 'LOAD_FRTB_ADJUSTMENT'
+            WHEN 'FRTBRRAO'    THEN 'LOAD_FRTB_ADJUSTMENT'
+            WHEN 'FRTBALL'     THEN 'LOAD_FRTB_ADJUSTMENT'
+            ELSE 'LOAD_' || UPPER(h.PROCESS_TYPE) || '_ADJUSTMENT'
+        END AS EXPECTED_INSERT_SOURCE
+    FROM ADJUSTMENT_APP.ADJ_HEADER h
+    WHERE h.RUN_STATUS = 'Processed'
+      AND h.IS_DELETED = FALSE
+      AND h.PROCESS_DATE IS NOT NULL
+),
+pbi_match AS (
+    SELECT
+        a.ADJ_ID,
+        MAX(CASE WHEN pa.COMPLETE_TIME IS NOT NULL
+                  AND pa.REQUEST_TIME >= a.PROCESS_DATE
+             THEN pa.COMPLETE_TIME END) AS COMPLETED_AT,
+        MAX(CASE WHEN pa.START_TIME IS NOT NULL
+                  AND pa.COMPLETE_TIME IS NULL
+                  AND pa.REQUEST_TIME >= a.PROCESS_DATE
+             THEN pa.START_TIME END) AS RUNNING_SINCE,
+        MAX(CASE WHEN pa.START_TIME IS NULL
+                  AND pa.COMPLETE_TIME IS NULL
+                  AND pa.REQUEST_TIME >= a.PROCESS_DATE
+             THEN pa.REQUEST_TIME END) AS QUEUED_AT,
+        MAX(CASE WHEN pa.START_TIME IS NOT NULL
+                  AND pa.COMPLETE_TIME IS NULL
+                  AND pa.REQUEST_TIME < a.PROCESS_DATE
+             THEN pa.START_TIME END) AS STALE_RUNNING_SINCE
+    FROM adj_processed a
+    LEFT JOIN METADATA.POWERBI_ACTION pa
+        ON pa.COBID = a.COBID
+        AND pa.INSERT_SOURCE = a.EXPECTED_INSERT_SOURCE
+    GROUP BY a.ADJ_ID
+)
+SELECT
+    a.ADJ_ID,
+    a.COBID,
+    a.PROCESS_TYPE,
+    a.PROCESS_DATE,
+    a.RUN_LOG_ID,
+    m.COMPLETED_AT,
+    m.RUNNING_SINCE,
+    m.QUEUED_AT,
+    m.STALE_RUNNING_SINCE,
+    CASE
+        WHEN m.COMPLETED_AT IS NOT NULL THEN 'Reports Ready'
+        WHEN m.RUNNING_SINCE IS NOT NULL THEN 'Refreshing'
+        WHEN m.QUEUED_AT IS NOT NULL THEN 'Queued'
+        WHEN m.STALE_RUNNING_SINCE IS NOT NULL THEN 'Next Cycle'
+        ELSE 'Awaiting'
+    END AS REPORT_STATUS,
+    CASE
+        WHEN m.COMPLETED_AT IS NOT NULL
+            THEN CONVERT_TIMEZONE('UTC', 'Europe/London', m.COMPLETED_AT::TIMESTAMP_NTZ)
+        WHEN m.RUNNING_SINCE IS NOT NULL
+            THEN CONVERT_TIMEZONE('UTC', 'Europe/London', m.RUNNING_SINCE::TIMESTAMP_NTZ)
+        WHEN m.QUEUED_AT IS NOT NULL
+            THEN CONVERT_TIMEZONE('UTC', 'Europe/London', m.QUEUED_AT::TIMESTAMP_NTZ)
+    END AS REPORT_STATUS_TIME
+FROM adj_processed a
+LEFT JOIN pbi_match m ON m.ADJ_ID = a.ADJ_ID;
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- VERIFY
 -- ═══════════════════════════════════════════════════════════════════════════
 
