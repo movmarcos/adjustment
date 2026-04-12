@@ -86,6 +86,16 @@ except Exception as e:
     df_adjs = pd.DataFrame()
     st.warning(f"Could not load adjustments: {e}")
 
+# Load report refresh status for processed adjustments
+df_report_status = pd.DataFrame()
+try:
+    df_report_status = run_query_df("""
+        SELECT ADJ_ID, REPORT_STATUS, REPORT_STATUS_TIME
+        FROM ADJUSTMENT_APP.VW_REPORT_REFRESH_STATUS
+    """)
+except Exception:
+    pass
+
 # ──────────────────────────────────────────────────────────────────────────────
 # STATUS TABS
 # ──────────────────────────────────────────────────────────────────────────────
@@ -179,6 +189,43 @@ def render_adj_card(row):
                 ("Ended",        process_date),
                 ("Occurrence",   str(row.get("ADJUSTMENT_OCCURRENCE", "—"))),
             ]
+            # Report status (only for Processed adjustments)
+            if run_status == "Processed" and not df_report_status.empty:
+                rs_match = df_report_status[df_report_status["ADJ_ID"] == adj_id]
+                if not rs_match.empty:
+                    rs = rs_match.iloc[0]
+                    _rs_status = str(rs.get("REPORT_STATUS", ""))
+                    _rs_time = rs.get("REPORT_STATUS_TIME")
+                    _rs_time_str = (_rs_time.strftime("%d %b %H:%M")
+                                    if hasattr(_rs_time, "strftime") and str(_rs_time) != "NaT"
+                                    else "")
+
+                    _rs_icons = {
+                        "Reports Ready": "✅",
+                        "Refreshing": "🔄",
+                        "Queued": "⏳",
+                        "Next Cycle": "⏳",
+                        "Awaiting": "⏳",
+                    }
+                    _rs_messages = {
+                        "Reports Ready": f"Reports Ready ({_rs_time_str})",
+                        "Refreshing": f"Refreshing ({_rs_time_str})",
+                        "Queued": "Queued — next ControlM cycle ~5 min",
+                        "Next Cycle": "Current refresh won't include this — next cycle will",
+                        "Awaiting": "Awaiting report refresh",
+                    }
+                    _rs_colors = {
+                        "Reports Ready": "#2E7D32",
+                        "Refreshing": "#1565C0",
+                        "Queued": "#E65100",
+                        "Next Cycle": "#E65100",
+                        "Awaiting": "#757575",
+                    }
+                    icon = _rs_icons.get(_rs_status, "")
+                    color = _rs_colors.get(_rs_status, "#757575")
+                    msg = _rs_messages.get(_rs_status, _rs_status)
+                    meta_rows.append(("Report Status",
+                        f'<span style="color:{color};font-weight:600">{icon} {msg}</span>'))
             rows_html = "".join(
                 f'<tr><td style="color:{P["grey_700"]};padding:3px 0;font-size:0.8rem;'
                 f'white-space:nowrap;padding-right:12px">{k}</td>'
