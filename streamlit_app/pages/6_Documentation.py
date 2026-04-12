@@ -141,7 +141,7 @@ with tab_overview:
         ("✏️", "New Adjustment",    "3-step wizard: Scope & Filters → Preview → Submit"),
         ("📋", "My Work",           "All your adjustments with full history, actions, and status timeline"),
         ("✅", "Approval Queue",     "Review and approve adjustments. Only authorized approvers can act. Self-approval is blocked"),
-        ("⏳", "Processing Queue",  "Live view of the Snowflake processing pipeline and queue position"),
+        ("⏳", "Processing Queue",  "Live view of the processing pipeline, queue position, and PowerBI report refresh status"),
         ("⚙️", "Admin",             "Settings management, approvers, recurring templates, schema reference"),
         ("📖", "Documentation",     "This page — full process guide with diagrams"),
     ]
@@ -1040,6 +1040,29 @@ with tab_processing:
     </div>
     """)
 
+    # ── PowerBI Report Refresh ───────────────────────────────────────────
+    section_title("PowerBI Report Refresh", "📈")
+    st.markdown(f"""
+    After processing completes, the system automatically queues a **PowerBI dataset refresh**
+    by calling `FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS`. This writes to `METADATA.POWERBI_ACTION`,
+    which is monitored by a **ControlM job running every ~5 minutes**.
+
+    **Report Status indicators** (visible in My Work and Processing Queue):
+
+    | Status | Meaning |
+    |--------|---------|
+    | **Reports Ready** | PowerBI refresh completed — reports reflect your adjustment |
+    | **Refreshing** | PowerBI refresh is currently running |
+    | **Queued** | Refresh queued, ControlM will pick it up within ~5 min |
+    | **Next Cycle** | A refresh is running but started before your adjustment — the next cycle will include it |
+    | **Awaiting** | Refresh not yet queued |
+
+    **Important:** If a PowerBI refresh is already running when your adjustment completes,
+    that running refresh will **not** include your data (it started reading before your data was written).
+    The system detects this and shows "Next Cycle" — your data will be included in the next
+    refresh (~5 minutes).
+    """, unsafe_allow_html=True)
+
     # ── Scale Factor Computation ─────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Scale Factor Computation", "🧮")
@@ -1137,6 +1160,8 @@ with tab_objects:
         ("VW_MY_WORK",              "VIEW",            "08_views.sql",    "All adjustments — Streamlit filters by CURRENT_USER()."),
         ("VW_PROCESSING_QUEUE",     "VIEW",            "08_views.sql",    "Live queue with QUEUE_POSITION via ROW_NUMBER."),
         ("VW_APPROVAL_QUEUE",       "VIEW",            "08_views.sql",    "Adjustments awaiting approval. Filtered by RUN_STATUS = Pending Approval."),
+        ("VW_REPORT_REFRESH_STATUS", "VIEW",             "08_views.sql", "Per-adjustment PowerBI refresh status. Joins ADJ_HEADER with POWERBI_ACTION."),
+        ("METADATA.POWERBI_ACTION",  "TABLE (external)", "—",            "PowerBI refresh action queue. Written by UPDATE_POWERBI_FOR_ADJUSTMENTS, read by ControlM."),
     ]
 
     type_colors = {
