@@ -5,32 +5,37 @@
 -- Called by the 4 scope tasks via WHEN SYSTEM$STREAM_HAS_DATA(...).
 -- Parameters:
 --   scope           e.g. 'VaR', 'Stress', 'FRTB', 'Sensitivity'
---                   → maps to STREAM_QUEUE_<SCOPE>
+--                   → maps to STREAM_QUEUE_<SCOPE> (stream on VW_QUEUE_<SCOPE>)
 --   pipeline_types  JSON array of PROCESS_TYPE strings in this pipeline
 --                   e.g. '["FRTB","FRTBDRC","FRTBRRAO","FRTBALL"]'
 --
--- FLOW (stream-driven — not claim-first):
---   1. Block overlapping Pending rows against any currently-Running adjustment
---      (runs BEFORE we consume the stream, so newly-blocked rows are filtered
---       out in step 2).
---   2. Consume the stream into a TEMP table, filtered to
---        RUN_STATUS IN ('Pending','Approved')
---        AND BLOCKED_BY_ADJ_ID IS NULL
---        AND PROCESS_TYPE IN pipeline
---      The INSERT into the temp table is a DML operation that reads the
---      stream → advances the stream offset.
+-- STREAMS ARE ON QUEUE VIEWS (NOT ON ADJ_HEADER):
+--   Each stream sits on a view that already filters by PROCESS_TYPE,
+--   RUN_STATUS IN ('Pending','Approved'), BLOCKED_BY_ADJ_ID IS NULL,
+--   and IS_DELETED = FALSE. The stream tracks rows ENTERING or LEAVING
+--   that view's result set — so SYSTEM$STREAM_HAS_DATA only fires for
+--   changes relevant to THIS scope. No cross-scope noise.
+--
+-- FLOW (stream-driven — block first, not claim first):
+--   1. Block overlapping Pending rows against any currently-Running adjustment.
+--      Because Snowflake auto-commits each statement, blocked rows immediately
+--      LEAVE the queue view → the stream records them as DELETE. By the time
+--      we consume the stream in step 2, blocked rows are already excluded.
+--   2. Consume the stream into a TEMP table. We SELECT only
+--      METADATA$ACTION = 'INSERT' rows (= rows that entered the view and
+--      stayed). No JOIN to ADJ_HEADER needed — the view's WHERE clause
+--      guarantees eligibility.
 --   3. Promote only those rows to RUN_STATUS='Running' + set START_DATE.
---   4. Loop distinct (PROCESS_TYPE, ADJUSTMENT_ACTION, COBID) combos in the
---      temp table and call SP_PROCESS_ADJUSTMENT once per combo. Each call
---      processes all Running rows matching that combo in a single batched
---      SQL operation (Snowflake MPP parallelises execution internally).
---   5. Drain the stream with a no-op consume (`WHERE 1=0`) so that any
---      UPDATE events produced by steps 1/3/4 don't cause the next task run
---      to re-fire on state we've already handled.
+--   4. Submit SP_PROCESS_ADJUSTMENT calls in PARALLEL via Snowpark async
+--      (collect_nowait) — one call per distinct (PROCESS_TYPE,
+--      ADJUSTMENT_ACTION, COBID) combo. Each call processes all Running rows
+--      for its combo in a single batched SQL operation.
+--   5. Drain the stream with a no-op consume (`WHERE 1=0`) so that events
+--      from steps 1/3/4 don't cause the next task run to re-fire on state
+--      we've already handled.
 --   6. Unblock resolved — clear BLOCKED_BY_ADJ_ID for any Pending row whose
---      blocker is now Processed/Failed. The resulting UPDATEs on ADJ_HEADER
---      land in the stream → the next scheduled task run picks them up →
---      step 1 re-evaluates overlaps against whatever is still Running.
+--      blocker is now Processed/Failed. The row re-enters the queue view →
+--      the stream records an INSERT → the next task run picks it up.
 --
 -- FRTBALL note: FRTBALL has no settings row. It is applied as a fan-out
 -- during FRTB / FRTBDRC / FRTBRRAO processing. The loop skips FRTBALL as
@@ -129,16 +134,20 @@ def main(session, scope, pipeline_types):
         _block_overlapping(session, r, pipeline_in)
 
     # ── 2. CONSUME THE STREAM → TEMP TABLE ────────────────────────────────────
-    #    Create a temp holding table, then INSERT ... SELECT from the stream.
-    #    The INSERT is the DML that advances the stream offset.
+    #    The stream is on a queue VIEW (e.g. VW_QUEUE_VAR) that already filters
+    #    by PROCESS_TYPE, RUN_STATUS IN ('Pending','Approved'), BLOCKED_BY_ADJ_ID
+    #    IS NULL, and IS_DELETED = FALSE. The stream only tracks rows that ENTER
+    #    or LEAVE that view's result set:
     #
-    #    Filter:
-    #      • METADATA$ACTION = 'INSERT' → picks up new rows AND the "after"
-    #        image of UPDATEs (e.g. an unblock transitioning BLOCKED_BY_ADJ_ID
-    #        from a value to NULL)
-    #      • INNER JOIN to ADJ_HEADER → checks the CURRENT state of the row
-    #        (so a row that was inserted Pending but is now Blocked by step 1
-    #         is filtered out)
+    #      • METADATA$ACTION = 'INSERT' → row entered the view
+    #        (new submission, or unblocked adjustment re-entering the view)
+    #      • METADATA$ACTION = 'DELETE' → row left the view
+    #        (promoted to Running, blocked, or soft-deleted)
+    #
+    #    Step 1's blocking UPDATEs already committed (auto-commit). Blocked rows
+    #    LEFT the view → the stream shows them as DELETE, not INSERT. So we only
+    #    pick up rows that are still eligible after the block check — no JOIN
+    #    back to ADJ_HEADER needed.
     session.sql("""
         CREATE OR REPLACE TEMPORARY TABLE TEMP_STREAM_QUEUE (
             ADJ_ID            VARCHAR(36),
@@ -150,16 +159,9 @@ def main(session, scope, pipeline_types):
 
     session.sql(f"""
         INSERT INTO TEMP_STREAM_QUEUE (ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_ACTION)
-        SELECT DISTINCT
-               h.ADJ_ID, h.COBID, h.PROCESS_TYPE, h.ADJUSTMENT_ACTION
-        FROM {stream_name} s
-        INNER JOIN ADJUSTMENT_APP.ADJ_HEADER h
-            ON h.ADJ_ID = s.ADJ_ID
-        WHERE s.METADATA$ACTION = 'INSERT'
-          AND h.PROCESS_TYPE IN ({pipeline_in})
-          AND h.RUN_STATUS IN ('Pending', 'Approved')
-          AND h.BLOCKED_BY_ADJ_ID IS NULL
-          AND h.IS_DELETED = FALSE
+        SELECT DISTINCT ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_ACTION
+        FROM {stream_name}
+        WHERE METADATA$ACTION = 'INSERT'
     """).collect()
 
     eligible_count = session.sql(
@@ -277,13 +279,16 @@ def _drain_stream(session, stream_name):
     the stream in its FROM clause, so Snowflake advances the offset even though
     zero rows are actually written. This is the standard "drain" pattern.
 
+    This clears any events produced by our own UPDATEs (block, promote to
+    Running, mark Processed/Failed) so the next task fire only sees genuinely
+    new work (new submissions or unblock events from step 6).
+
     TEMP_STREAM_QUEUE must already exist (created in main() step 2).
     """
     session.sql(f"""
         INSERT INTO TEMP_STREAM_QUEUE (ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_ACTION)
-        SELECT h.ADJ_ID, h.COBID, h.PROCESS_TYPE, h.ADJUSTMENT_ACTION
-        FROM {stream_name} s
-        INNER JOIN ADJUSTMENT_APP.ADJ_HEADER h ON h.ADJ_ID = s.ADJ_ID
+        SELECT ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_ACTION
+        FROM {stream_name}
         WHERE 1 = 0
     """).collect()
 
