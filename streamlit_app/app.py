@@ -26,6 +26,25 @@ render_sidebar()
 user = current_user_name()
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Power BI Refresh Status — pending refreshes triggered by adjustments
+# ──────────────────────────────────────────────────────────────────────────────
+
+try:
+    df_pbi_kpi = run_query_df("""
+        SELECT
+            COALESCE(SUM(CASE WHEN START_TIME IS NULL THEN 1 ELSE 0 END), 0)                       AS PBI_QUEUED,
+            COALESCE(SUM(CASE WHEN START_TIME IS NOT NULL AND COMPLETE_TIME IS NULL THEN 1 ELSE 0 END), 0) AS PBI_RUNNING,
+            COALESCE(SUM(CASE WHEN COMPLETE_TIME IS NOT NULL THEN 1 ELSE 0 END), 0)                AS PBI_COMPLETED
+        FROM METADATA.POWERBI_ACTION
+        WHERE INSERT_SOURCE IN ('LOAD_VAR_ADJUSTMENT','LOAD_STRESS_ADJUSTMENT',
+                                'LOAD_SENSITIVITY_ADJUSTMENT','LOAD_FRTB_ADJUSTMENT')
+          AND REQUEST_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+    """)
+    pbi_pending = int(df_pbi_kpi.iloc[0]["PBI_QUEUED"]) + int(df_pbi_kpi.iloc[0]["PBI_RUNNING"]) if not df_pbi_kpi.empty else 0
+except Exception:
+    pbi_pending = 0
+
+# ──────────────────────────────────────────────────────────────────────────────
 # KPIs — load once, used in header + cards
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -112,13 +131,13 @@ kpi_items = [
     ("Awaiting Approval", int(kpis.get("PENDING_APPROVAL", 0)), "Need approval",        P["info"],      "📝"),
     ("Running",           int(kpis.get("RUNNING", 0)),          "Processing now",       P["info"],      "⚡"),
     ("Processed",         int(kpis.get("PROCESSED", 0)),        "In the data",          P["success"],   "✔"),
-    ("Failed",            int(kpis.get("FAILED", 0)),           "Need attention",       P["danger"],    "✗"),
+    ("Power BI",          pbi_pending,                           "Pending refreshes",    "#1565C0",      "📈"),
     ("Overlaps",          int(kpis.get("OVERLAPS", 0)),         "Overlap alerts",       P["purple"],    "⚠️"),
 ]
 
 cards_html = '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:10px;margin-bottom:1.4rem">'
 for label, val, sub, color, icon in kpi_items:
-    alert_style = f"box-shadow:0 0 0 2px {color}44;" if (label == "Failed" and val > 0) or (label == "Overlaps" and val > 0) else ""
+    alert_style = f"box-shadow:0 0 0 2px {color}44;" if (label == "Power BI" and val > 0) or (label == "Overlaps" and val > 0) else ""
     cards_html += f"""
     <div style="background:white;border:1px solid {P['border']};border-top:3px solid {color};
       border-radius:10px;padding:0.9rem 0.8rem;{alert_style}
