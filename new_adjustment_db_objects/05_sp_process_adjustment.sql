@@ -260,9 +260,18 @@ def main(session, process_type, adjustment_action, cobid):
             key_name   = pk_parts[0]
             pk_expr    = pk_parts[0]
 
-        # Run log ID
+        # Run log ID — insert into BATCH.RUN_LOG so UPDATE_POWERBI_FOR_ADJUSTMENTS can find it
         run_log_id = session.sql("SELECT BATCH.SEQ_RUN_LOG.NEXTVAL AS X").collect()[0]["X"]
         result["run_log_id"] = run_log_id
+        session.sql(f"""
+            CALL BATCH.LOAD_RUN_LOG(
+                {run_log_id},
+                {cobid},
+                'FACT.SP_PROCESS_ADJUSTMENT',
+                '{process_type}',
+                0, 0, 'false', ''
+            )
+        """).collect()
 
         # ── 2. READ PENDING ADJUSTMENTS ──────────────────────────────────
         df_adj = session.table(adj_base_tbl_name).filter(
@@ -376,7 +385,13 @@ def main(session, process_type, adjustment_action, cobid):
             result["rows_inserted"] = rows_count
             result["message"] = "Direct adjustments processed successfully"
 
-            # ── Trigger PowerBI refresh ─────────────────────────────────
+            # ── Close run log and trigger PowerBI refresh ──────────────
+            try:
+                session.sql(f"""
+                    CALL BATCH.LOAD_RUN_LOG_END_WITH_DETAIL({run_log_id}, '{{"status":"Processed"}}')
+                """).collect()
+            except Exception as rl_err:
+                print(f"Warning: Run log close failed: {rl_err}")
             trigger_powerbi_refresh(session, process_type, run_log_id)
 
         # ═════════════════════════════════════════════════════════════════
@@ -818,7 +833,13 @@ def main(session, process_type, adjustment_action, cobid):
 
             result["message"] = "Scale adjustments processed successfully"
 
-            # ── Trigger PowerBI refresh ─────────────────────────────────
+            # ── Close run log and trigger PowerBI refresh ──────────────
+            try:
+                session.sql(f"""
+                    CALL BATCH.LOAD_RUN_LOG_END_WITH_DETAIL({run_log_id}, '{{"status":"Processed"}}')
+                """).collect()
+            except Exception as rl_err:
+                print(f"Warning: Run log close failed: {rl_err}")
             trigger_powerbi_refresh(session, process_type, run_log_id)
 
         # ═════════════════════════════════════════════════════════════════
@@ -972,7 +993,13 @@ def main(session, process_type, adjustment_action, cobid):
             result["adj_rows_copied"]      = adj_count
             result["message"] = f"Entity Roll processed: {fact_count} fact rows + {adj_count} adjustment rows copied from COB {source_cobid} to {cobid}"
 
-            # ── Trigger PowerBI refresh ─────────────────────────────────
+            # ── Close run log and trigger PowerBI refresh ──────────────
+            try:
+                session.sql(f"""
+                    CALL BATCH.LOAD_RUN_LOG_END_WITH_DETAIL({run_log_id}, '{{"status":"Processed"}}')
+                """).collect()
+            except Exception as rl_err:
+                print(f"Warning: Run log close failed: {rl_err}")
             trigger_powerbi_refresh(session, process_type, run_log_id)
 
         else:
