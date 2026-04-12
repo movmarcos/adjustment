@@ -467,6 +467,7 @@ def render_pipeline_diagram(current_stage: int = 0):
         ("⏰", "Task Polls\n(≤1 min)"),
         ("🔄", "SP_RUN_PIPELINE\nExecutes"),
         ("📊", "Dynamic Table\nRefresh"),
+        ("📈", "Report\nRefresh"),
     ]
     nodes = []
     for i, (icon, label) in enumerate(stages, 1):
