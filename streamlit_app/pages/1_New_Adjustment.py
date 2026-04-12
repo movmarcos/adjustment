@@ -1071,20 +1071,7 @@ elif wiz["step"] == 3:
             unsafe_allow_html=True)
 
     st.markdown("<br/>", unsafe_allow_html=True)
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("➕ Create Another Adjustment", use_container_width=True,
-                     type="secondary", key="new_adj"):
-            reset_wizard()
-            safe_rerun()
-    with c2:
-        if st.button("📋 View Processing Queue", use_container_width=True,
-                     type="primary", key="go_queue"):
-            reset_wizard()
-            try:
-                st.switch_page("pages/4_Processing_Queue.py")
-            except Exception:
-                try:
-                    st.switch_page("4_Processing_Queue.py")
-                except Exception:
-                    safe_rerun()
+    if st.button("➕ Create Another Adjustment", use_container_width=True,
+                 type="secondary", key="new_adj"):
+        reset_wizard()
+        safe_rerun()

@@ -2,7 +2,7 @@ CREATE OR REPLACE PROCEDURE DVLP_RAPTOR_NEWADJ.FACT.PROCESS_ADJUSTMENTS("P_PROCE
 RETURNS VARCHAR(16777216)
 LANGUAGE JAVASCRIPT
 EXECUTE AS OWNER
-AS '
+AS $$
 
 	function executeStep(v_source_table, v_target_table, v_metric_name, v_run_log_id, v_adj_rec, v_agg_results, v_description, v_steps) {
 		var res = snowflake.execute({
@@ -371,7 +371,7 @@ AS '
 			            binds:[adjRec[''ADJUSTMENT_ID''], adjRes.error_message]
 			        });
 	
-					// update the run log id to ERROR, storing the current adjRes record in the run log table"
+					// update the run log id to ERROR, storing the current adjRes record in the run log table
 			    	snowflake.execute({
 						sqlText: `call batch.LOAD_RUN_LOG_END_WITH_DETAIL(:1, :2)`,
 						binds : [ /* 1 RUN_LOG_ID */		runLogId
@@ -407,4 +407,4 @@ AS '
 
     }
     return result;
-';
+$$;
