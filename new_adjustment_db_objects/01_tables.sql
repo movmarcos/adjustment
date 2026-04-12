@@ -86,6 +86,7 @@ CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_HEADER (
     PROCESS_DATE                TIMESTAMP_NTZ(9),                -- Set when status → Processed / Failed (processing ends)
     RECORD_COUNT                NUMBER(38,0),
     ERRORMESSAGE                VARCHAR(1000) COLLATE 'en-ci',
+    RUN_LOG_ID                  NUMBER(38,0),                    -- Set by SP_PROCESS_ADJUSTMENT from BATCH.SEQ_RUN_LOG
 
     -- Soft delete
     IS_DELETED                  BOOLEAN      DEFAULT FALSE,
