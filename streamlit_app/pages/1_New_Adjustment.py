@@ -58,7 +58,22 @@ _WIZ_DEFAULTS: dict = {
     "strategy":               None,
     "instrument_code":        None,
     "simulation_name":        None,
+    "simulation_source":      None,
     "measure_type_code":      None,
+    "trader_code":            None,
+    "var_component_id":       None,
+    "var_sub_component_id":   None,
+    "guaranteed_entity":      None,
+    "region_key":             None,
+    "scenario_date_id":       None,
+    "tenor_code":             None,
+    "underlying_tenor_code":  None,
+    "curve_code":             None,
+    "day_type":               None,
+    "product_category_attributes": None,
+    "batch_region_area":      None,
+    "murex_family":           None,
+    "murex_group":            None,
     "reason":                 "",
     "requires_approval":      False,
     # Global Adjustment
@@ -158,7 +173,12 @@ def _build_payload() -> dict:
     for key in ["entity_code", "source_system_code", "department_code",
                 "book_code", "currency_code", "trade_typology",
                 "strategy", "instrument_code", "simulation_name",
-                "measure_type_code", "trade_code"]:
+                "simulation_source", "measure_type_code", "trade_code",
+                "trader_code", "var_component_id", "var_sub_component_id",
+                "guaranteed_entity", "region_key", "scenario_date_id",
+                "tenor_code", "underlying_tenor_code", "curve_code",
+                "day_type", "product_category_attributes",
+                "batch_region_area", "murex_family", "murex_group"]:
         val = wiz.get(key)
         if val and str(val).strip():
             payload[key] = str(val).strip()
@@ -592,34 +612,122 @@ def render_scaling_form() -> None:
     st.divider()
 
     # ── Dimension Filters ────────────────────────────────────────────────
+    # Fields are organized into 3 tiers:
+    #   1. Main (always visible): common across all process types
+    #   2. Scope-specific (visible when process type selected): varies by scope
+    #   3. Additional (collapsed): rarely used, available if needed
+
+    SCOPE_FIELDS = {
+        "VaR": {
+            "custom": [],
+        },
+        "Stress": {
+            "custom": [
+                ("simulation_name",   "Simulation Name",   "e.g. MRM_GLB_Std_EQ_M_PriceDnVolUp"),
+                ("trade_typology",    "Trade Typology",    "e.g. EQTT"),
+                ("instrument_code",   "Instrument Code",   "e.g. US4642872422 US"),
+            ],
+        },
+        "Sensitivity": {
+            "custom": [
+                ("measure_type_code", "Measure Type Code", "e.g. FxDeltaExp"),
+                ("strategy",          "Strategy",          "e.g. SSA00306"),
+                ("trade_typology",    "Trade Typology",    "e.g. FEXF"),
+                ("instrument_code",   "Instrument Code",   "e.g. US46090E1038 US"),
+            ],
+        },
+        "FRTB": {
+            "custom": [
+                ("measure_type_code", "Measure Type Code", "e.g. FRTBCSRDelta"),
+                ("instrument_code",   "Instrument Code",   "e.g. US92826C8394 US"),
+                ("strategy",          "Strategy",          "e.g. SSU00332"),
+            ],
+        },
+    }
+    # FRTB sub-types share the same fields
+    for fst in FRTB_SUBTYPES:
+        if fst not in SCOPE_FIELDS:
+            SCOPE_FIELDS[fst] = SCOPE_FIELDS["FRTB"]
+
+    pt = wiz.get("process_type", "")
+
     section_title("Dimension Filters", "🎯")
     st.caption("Leave blank to include all values for that dimension.")
 
-    c1, c2, c3 = st.columns(3)
+    # ── Tier 1: Main fields (always visible) ─────────────────────────────
+    st.markdown(
+        f'<div style="font-size:0.78rem;font-weight:700;text-transform:uppercase;'
+        f'letter-spacing:0.05em;color:{P["primary"]};margin-bottom:0.3rem">'
+        f'Main Filters</div>', unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
-        wiz["entity_code"]    = st.text_input("Entity Code",    key=_k("entity"),
-                                               value=wiz.get("entity_code") or "",
-                                               placeholder="e.g. MUSI")
-        wiz["department_code"] = st.text_input("Department Code", key=_k("dept"),
-                                                value=wiz.get("department_code") or "")
-        wiz["book_code"]      = st.text_input("Book Code",      key=_k("book"),
-                                               value=wiz.get("book_code") or "")
+        wiz["entity_code"]     = st.text_input("Entity Code",      key=_k("entity"),
+                                                value=wiz.get("entity_code") or "",
+                                                placeholder="e.g. MUSI")
     with c2:
-        wiz["source_system_code"] = st.text_input("Source System Code", key=_k("src_sys"),
-                                                    value=wiz.get("source_system_code") or "")
-        wiz["currency_code"]  = st.text_input("Currency Code",  key=_k("ccy"),
-                                               value=wiz.get("currency_code") or "",
-                                               placeholder="e.g. USD")
-        wiz["trade_typology"] = st.text_input("Trade Typology", key=_k("typology"),
-                                               value=wiz.get("trade_typology") or "")
+        wiz["source_system_code"] = st.text_input("Source System",  key=_k("src_sys"),
+                                                    value=wiz.get("source_system_code") or "",
+                                                    placeholder="e.g. MS")
     with c3:
-        wiz["strategy"]        = st.text_input("Strategy",        key=_k("strategy"),
-                                                value=wiz.get("strategy") or "")
-        wiz["instrument_code"] = st.text_input("Instrument Code", key=_k("instrument"),
-                                                value=wiz.get("instrument_code") or "")
-        if wiz["process_type"] == "Stress":
-            wiz["simulation_name"] = st.text_input("Simulation Name", key=_k("sim"),
-                                                     value=wiz.get("simulation_name") or "")
+        wiz["department_code"] = st.text_input("Department Code",   key=_k("dept"),
+                                                value=wiz.get("department_code") or "")
+    with c4:
+        wiz["book_code"]       = st.text_input("Book Code",         key=_k("book"),
+                                                value=wiz.get("book_code") or "")
+
+    # ── Tier 2: Scope-specific fields ────────────────────────────────────
+    custom_fields = SCOPE_FIELDS.get(pt, {}).get("custom", [])
+    if custom_fields:
+        st.markdown(
+            f'<div style="font-size:0.78rem;font-weight:700;text-transform:uppercase;'
+            f'letter-spacing:0.05em;color:{P["info"]};margin:0.6rem 0 0.3rem">'
+            f'{pt} Filters</div>', unsafe_allow_html=True)
+        custom_cols = st.columns(min(len(custom_fields), 4))
+        for i, (field_key, field_label, placeholder) in enumerate(custom_fields):
+            with custom_cols[i % len(custom_cols)]:
+                wiz[field_key] = st.text_input(field_label, key=_k(field_key),
+                                                value=wiz.get(field_key) or "",
+                                                placeholder=placeholder)
+
+    # ── Tier 3: Additional fields (collapsed) ────────────────────────────
+    # Collect keys already shown in tier 1 + tier 2
+    shown_keys = {"entity_code", "source_system_code", "department_code", "book_code"}
+    shown_keys.update(fk for fk, _, _ in custom_fields)
+
+    ALL_EXTRA_FIELDS = [
+        ("currency_code",                "Currency Code",                "e.g. USD"),
+        ("trade_typology",               "Trade Typology",               "e.g. FEXF"),
+        ("trade_code",                   "Trade Code",                   ""),
+        ("strategy",                     "Strategy",                     ""),
+        ("instrument_code",              "Instrument Code",              ""),
+        ("simulation_name",              "Simulation Name",              ""),
+        ("simulation_source",            "Simulation Source",            ""),
+        ("measure_type_code",            "Measure Type Code",            ""),
+        ("trader_code",                  "Trader Code",                  ""),
+        ("var_component_id",             "VaR Component ID",             ""),
+        ("var_sub_component_id",         "VaR Sub-Component ID",         ""),
+        ("guaranteed_entity",            "Guaranteed Entity",            ""),
+        ("region_key",                   "Region Key",                   ""),
+        ("scenario_date_id",             "Scenario Date ID",             ""),
+        ("tenor_code",                   "Tenor Code",                   ""),
+        ("underlying_tenor_code",        "Underlying Tenor Code",        ""),
+        ("curve_code",                   "Curve Code",                   ""),
+        ("day_type",                     "Day Type",                     ""),
+        ("product_category_attributes",  "Product Category Attributes",  ""),
+        ("batch_region_area",            "Batch Region Area",            ""),
+        ("murex_family",                 "Murex Family",                 ""),
+        ("murex_group",                  "Murex Group",                  ""),
+    ]
+    extra_fields = [(k, l, p) for k, l, p in ALL_EXTRA_FIELDS if k not in shown_keys]
+
+    if extra_fields:
+        with st.expander("Additional Filters", expanded=False):
+            extra_cols = st.columns(3)
+            for i, (field_key, field_label, placeholder) in enumerate(extra_fields):
+                with extra_cols[i % 3]:
+                    wiz[field_key] = st.text_input(field_label, key=_k(field_key),
+                                                    value=wiz.get(field_key) or "",
+                                                    placeholder=placeholder)
 
     st.divider()
 
@@ -838,7 +946,13 @@ elif wiz["step"] == 2:
             }
             for key in ["entity_code", "source_system_code", "department_code",
                         "book_code", "currency_code", "trade_typology",
-                        "strategy", "instrument_code", "simulation_name"]:
+                        "strategy", "instrument_code", "simulation_name",
+                        "simulation_source", "measure_type_code", "trade_code",
+                        "trader_code", "var_component_id", "var_sub_component_id",
+                        "guaranteed_entity", "region_key", "scenario_date_id",
+                        "tenor_code", "underlying_tenor_code", "curve_code",
+                        "day_type", "product_category_attributes",
+                        "batch_region_area", "murex_family", "murex_group"]:
                 val = wiz.get(key)
                 if val and str(val).strip():
                     preview_json[key] = str(val).strip()

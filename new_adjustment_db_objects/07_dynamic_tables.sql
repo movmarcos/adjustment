@@ -83,13 +83,27 @@ WITH active_adjustments AS (
         ADJUSTMENT_ACTION,
         -- Build a normalised "filter fingerprint" for overlap detection
         -- NULL = no filter on this dimension = matches everything
-        COALESCE(ENTITY_CODE,       '*') AS ENTITY_CODE,
-        COALESCE(SOURCE_SYSTEM_CODE, '*') AS SOURCE_SYSTEM_CODE,
-        COALESCE(DEPARTMENT_CODE,   '*') AS DEPARTMENT_CODE,
-        COALESCE(BOOK_CODE,         '*') AS BOOK_CODE,
-        COALESCE(CURRENCY_CODE,     '*') AS CURRENCY_CODE,
-        COALESCE(TRADE_TYPOLOGY,    '*') AS TRADE_TYPOLOGY,
-        COALESCE(STRATEGY,          '*') AS STRATEGY,
+        COALESCE(ENTITY_CODE,                  '*') AS ENTITY_CODE,
+        COALESCE(SOURCE_SYSTEM_CODE,           '*') AS SOURCE_SYSTEM_CODE,
+        COALESCE(DEPARTMENT_CODE,              '*') AS DEPARTMENT_CODE,
+        COALESCE(BOOK_CODE,                    '*') AS BOOK_CODE,
+        COALESCE(CURRENCY_CODE,                '*') AS CURRENCY_CODE,
+        COALESCE(TRADE_TYPOLOGY,               '*') AS TRADE_TYPOLOGY,
+        COALESCE(TRADE_CODE,                   '*') AS TRADE_CODE,
+        COALESCE(STRATEGY,                     '*') AS STRATEGY,
+        COALESCE(TRADER_CODE,                  '*') AS TRADER_CODE,
+        COALESCE(INSTRUMENT_CODE,              '*') AS INSTRUMENT_CODE,
+        COALESCE(SIMULATION_NAME,              '*') AS SIMULATION_NAME,
+        COALESCE(SIMULATION_SOURCE,            '*') AS SIMULATION_SOURCE,
+        COALESCE(TENOR_CODE,                   '*') AS TENOR_CODE,
+        COALESCE(UNDERLYING_TENOR_CODE,        '*') AS UNDERLYING_TENOR_CODE,
+        COALESCE(CURVE_CODE,                   '*') AS CURVE_CODE,
+        COALESCE(MEASURE_TYPE_CODE,            '*') AS MEASURE_TYPE_CODE,
+        COALESCE(PRODUCT_CATEGORY_ATTRIBUTES,  '*') AS PRODUCT_CATEGORY_ATTRIBUTES,
+        COALESCE(BATCH_REGION_AREA,            '*') AS BATCH_REGION_AREA,
+        COALESCE(MUREX_FAMILY,                 '*') AS MUREX_FAMILY,
+        COALESCE(MUREX_GROUP,                  '*') AS MUREX_GROUP,
+        COALESCE(GUARANTEED_ENTITY,            '*') AS GUARANTEED_ENTITY,
         SCALE_FACTOR,
         USERNAME,
         CREATED_DATE,
@@ -126,14 +140,28 @@ overlaps AS (
         AND a.PROCESS_TYPE = b.PROCESS_TYPE
         AND a.ADJ_ID       < b.ADJ_ID     -- avoid self-join duplicates
         -- Overlap condition: dimensions must match OR one side is wildcard
-        -- Must match all 7 OVERLAP_DIMS used by SP_RUN_PIPELINE
-        AND (a.ENTITY_CODE       = b.ENTITY_CODE       OR a.ENTITY_CODE       = '*' OR b.ENTITY_CODE       = '*')
-        AND (a.SOURCE_SYSTEM_CODE = b.SOURCE_SYSTEM_CODE OR a.SOURCE_SYSTEM_CODE = '*' OR b.SOURCE_SYSTEM_CODE = '*')
-        AND (a.DEPARTMENT_CODE   = b.DEPARTMENT_CODE   OR a.DEPARTMENT_CODE   = '*' OR b.DEPARTMENT_CODE   = '*')
-        AND (a.BOOK_CODE         = b.BOOK_CODE         OR a.BOOK_CODE         = '*' OR b.BOOK_CODE         = '*')
-        AND (a.CURRENCY_CODE     = b.CURRENCY_CODE     OR a.CURRENCY_CODE     = '*' OR b.CURRENCY_CODE     = '*')
-        AND (a.TRADE_TYPOLOGY    = b.TRADE_TYPOLOGY    OR a.TRADE_TYPOLOGY    = '*' OR b.TRADE_TYPOLOGY    = '*')
-        AND (a.STRATEGY          = b.STRATEGY          OR a.STRATEGY          = '*' OR b.STRATEGY          = '*')
+        -- Must match all 21 OVERLAP_DIMS used by SP_RUN_PIPELINE
+        AND (a.ENTITY_CODE                 = b.ENTITY_CODE                 OR a.ENTITY_CODE                 = '*' OR b.ENTITY_CODE                 = '*')
+        AND (a.SOURCE_SYSTEM_CODE          = b.SOURCE_SYSTEM_CODE          OR a.SOURCE_SYSTEM_CODE          = '*' OR b.SOURCE_SYSTEM_CODE          = '*')
+        AND (a.DEPARTMENT_CODE             = b.DEPARTMENT_CODE             OR a.DEPARTMENT_CODE             = '*' OR b.DEPARTMENT_CODE             = '*')
+        AND (a.BOOK_CODE                   = b.BOOK_CODE                   OR a.BOOK_CODE                   = '*' OR b.BOOK_CODE                   = '*')
+        AND (a.CURRENCY_CODE               = b.CURRENCY_CODE               OR a.CURRENCY_CODE               = '*' OR b.CURRENCY_CODE               = '*')
+        AND (a.TRADE_TYPOLOGY              = b.TRADE_TYPOLOGY              OR a.TRADE_TYPOLOGY              = '*' OR b.TRADE_TYPOLOGY              = '*')
+        AND (a.TRADE_CODE                  = b.TRADE_CODE                  OR a.TRADE_CODE                  = '*' OR b.TRADE_CODE                  = '*')
+        AND (a.STRATEGY                    = b.STRATEGY                    OR a.STRATEGY                    = '*' OR b.STRATEGY                    = '*')
+        AND (a.TRADER_CODE                 = b.TRADER_CODE                 OR a.TRADER_CODE                 = '*' OR b.TRADER_CODE                 = '*')
+        AND (a.INSTRUMENT_CODE             = b.INSTRUMENT_CODE             OR a.INSTRUMENT_CODE             = '*' OR b.INSTRUMENT_CODE             = '*')
+        AND (a.SIMULATION_NAME             = b.SIMULATION_NAME             OR a.SIMULATION_NAME             = '*' OR b.SIMULATION_NAME             = '*')
+        AND (a.SIMULATION_SOURCE           = b.SIMULATION_SOURCE           OR a.SIMULATION_SOURCE           = '*' OR b.SIMULATION_SOURCE           = '*')
+        AND (a.TENOR_CODE                  = b.TENOR_CODE                  OR a.TENOR_CODE                  = '*' OR b.TENOR_CODE                  = '*')
+        AND (a.UNDERLYING_TENOR_CODE       = b.UNDERLYING_TENOR_CODE       OR a.UNDERLYING_TENOR_CODE       = '*' OR b.UNDERLYING_TENOR_CODE       = '*')
+        AND (a.CURVE_CODE                  = b.CURVE_CODE                  OR a.CURVE_CODE                  = '*' OR b.CURVE_CODE                  = '*')
+        AND (a.MEASURE_TYPE_CODE           = b.MEASURE_TYPE_CODE           OR a.MEASURE_TYPE_CODE           = '*' OR b.MEASURE_TYPE_CODE           = '*')
+        AND (a.PRODUCT_CATEGORY_ATTRIBUTES = b.PRODUCT_CATEGORY_ATTRIBUTES OR a.PRODUCT_CATEGORY_ATTRIBUTES = '*' OR b.PRODUCT_CATEGORY_ATTRIBUTES = '*')
+        AND (a.BATCH_REGION_AREA           = b.BATCH_REGION_AREA           OR a.BATCH_REGION_AREA           = '*' OR b.BATCH_REGION_AREA           = '*')
+        AND (a.MUREX_FAMILY                = b.MUREX_FAMILY                OR a.MUREX_FAMILY                = '*' OR b.MUREX_FAMILY                = '*')
+        AND (a.MUREX_GROUP                 = b.MUREX_GROUP                 OR a.MUREX_GROUP                 = '*' OR b.MUREX_GROUP                 = '*')
+        AND (a.GUARANTEED_ENTITY           = b.GUARANTEED_ENTITY           OR a.GUARANTEED_ENTITY           = '*' OR b.GUARANTEED_ENTITY           = '*')
 )
 SELECT
     ADJ_ID_A,

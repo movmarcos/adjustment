@@ -72,7 +72,13 @@ import json
 # Dimensions used for overlap detection (NULL = wildcard = matches any value)
 OVERLAP_DIMS = [
     'ENTITY_CODE', 'SOURCE_SYSTEM_CODE', 'DEPARTMENT_CODE',
-    'BOOK_CODE', 'CURRENCY_CODE', 'TRADE_TYPOLOGY', 'STRATEGY',
+    'BOOK_CODE', 'CURRENCY_CODE', 'TRADE_TYPOLOGY', 'TRADE_CODE',
+    'STRATEGY', 'TRADER_CODE', 'INSTRUMENT_CODE',
+    'SIMULATION_NAME', 'SIMULATION_SOURCE',
+    'TENOR_CODE', 'UNDERLYING_TENOR_CODE', 'CURVE_CODE',
+    'MEASURE_TYPE_CODE', 'PRODUCT_CATEGORY_ATTRIBUTES',
+    'BATCH_REGION_AREA', 'MUREX_FAMILY', 'MUREX_GROUP',
+    'GUARANTEED_ENTITY',
 ]
 
 # FRTBALL is a fan-out tag — applied within real FRTB* SP calls, not on its own.
