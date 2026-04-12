@@ -60,7 +60,13 @@ PIPELINE_TYPES = {
 
 OVERLAP_DIMS_SUBMIT = [
     'ENTITY_CODE', 'SOURCE_SYSTEM_CODE', 'DEPARTMENT_CODE',
-    'BOOK_CODE', 'CURRENCY_CODE', 'TRADE_TYPOLOGY', 'STRATEGY',
+    'BOOK_CODE', 'CURRENCY_CODE', 'TRADE_TYPOLOGY', 'TRADE_CODE',
+    'STRATEGY', 'TRADER_CODE', 'INSTRUMENT_CODE',
+    'SIMULATION_NAME', 'SIMULATION_SOURCE',
+    'TENOR_CODE', 'UNDERLYING_TENOR_CODE', 'CURVE_CODE',
+    'MEASURE_TYPE_CODE', 'PRODUCT_CATEGORY_ATTRIBUTES',
+    'BATCH_REGION_AREA', 'MUREX_FAMILY', 'MUREX_GROUP',
+    'GUARANTEED_ENTITY',
 ]
 
 
@@ -242,13 +248,27 @@ def main(session, p_adjustment):
         blocked_by_adj_id = None
         if initial_status == STATUS_PENDING:
             dim_vals = {
-                "entity_code":          adj.get("entity_code"),
-                "source_system_code":   adj.get("source_system_code"),
-                "department_code":      adj.get("department_code"),
-                "book_code":            adj.get("book_code"),
-                "currency_code":        adj.get("currency_code"),
-                "trade_typology":       adj.get("trade_typology"),
-                "strategy":             adj.get("strategy"),
+                "entity_code":                 adj.get("entity_code"),
+                "source_system_code":          adj.get("source_system_code"),
+                "department_code":             adj.get("department_code"),
+                "book_code":                   adj.get("book_code"),
+                "currency_code":               adj.get("currency_code"),
+                "trade_typology":              adj.get("trade_typology"),
+                "trade_code":                  adj.get("trade_code"),
+                "strategy":                    adj.get("strategy"),
+                "trader_code":                 adj.get("trader_code"),
+                "instrument_code":             adj.get("instrument_code"),
+                "simulation_name":             adj.get("simulation_name"),
+                "simulation_source":           adj.get("simulation_source"),
+                "tenor_code":                  adj.get("tenor_code"),
+                "underlying_tenor_code":       adj.get("underlying_tenor_code"),
+                "curve_code":                  adj.get("curve_code"),
+                "measure_type_code":           adj.get("measure_type_code"),
+                "product_category_attributes": adj.get("product_category_attributes"),
+                "batch_region_area":           adj.get("batch_region_area"),
+                "murex_family":                adj.get("murex_family"),
+                "murex_group":                 adj.get("murex_group"),
+                "guaranteed_entity":           adj.get("guaranteed_entity"),
             }
             blocked_by_adj_id = find_blocking_adj(session, process_type, cobid, dim_vals)
 
