@@ -76,11 +76,8 @@ _WIZ_DEFAULTS: dict = {
     "murex_group":            None,
     "reason":                 "",
     "requires_approval":      False,
-    # Global Adjustment
-    "ga_adjustment_type":     "inserted",
-    "ga_form_data":           "",
-    "ga_source_cobid":        None,
     # VaR Upload
+    "global_reference":       None,
     "uploaded_file_name":     None,
     "uploaded_df":            None,
     # Internal
@@ -113,21 +110,6 @@ wiz: dict = st.session_state["wiz"]
 def _build_payload() -> dict:
     cat = wiz.get("category")
 
-    if cat == "Global Adjustment":
-        return {
-            "cobid":                 wiz["cobid"],
-            "process_type":          wiz.get("process_type", "VaR"),
-            "adjustment_type":       "Direct",
-            "username":              current_user_name(),
-            "source_cobid":          wiz.get("ga_source_cobid") or wiz["cobid"],
-            "reason":                wiz.get("reason", ""),
-            "entity_code":           wiz.get("entity_code", ""),
-            "department_code":       wiz.get("department_code", ""),
-            "requires_approval":     wiz.get("requires_approval", False),
-            "adjustment_occurrence": "ADHOC",
-            "global_reference":      f"GA_{wiz['cobid']}_{wiz.get('entity_code','')}",
-        }
-
     if cat == "VaR Upload":
         return {
             "cobid":                 wiz["cobid"],
@@ -140,6 +122,7 @@ def _build_payload() -> dict:
             "requires_approval":     wiz.get("requires_approval", False),
             "adjustment_occurrence": "ADHOC",
             "file_name":             wiz.get("uploaded_file_name", ""),
+            "global_reference":      wiz.get("global_reference", ""),
         }
 
     if cat == "Entity Roll":
@@ -225,68 +208,6 @@ def _missing_info(fields: list) -> None:
         st.info(f"Complete required fields: **{', '.join(fields)}**")
 
 
-# ── Global Adjustment ─────────────────────────────────────────────────────────
-
-def render_global_adj_form() -> None:
-    section_title("Global Adjustment Details", "🌐")
-    _info_banner(
-        'Global Adjustments are metadata records tracked in '
-        '<code>ADJUSTMENT.GLOBAL_ADJUSTMENT_SF</code>. They do <strong>not</strong> '
-        'write to FACT tables — they capture an adjustment decision for audit.')
-
-    g1, g2 = st.columns(2)
-    with g1:
-        cobid_val = st.text_input("COB Date (YYYYMMDD) *", key=_k("ga_cobid"),
-                                   value=str(wiz.get("cobid") or ""),
-                                   placeholder="e.g. 20260328")
-        if cobid_val.strip().isdigit():
-            wiz["cobid"] = int(cobid_val.strip())
-
-        src_val = st.text_input("Source COB Date (optional)", key=_k("ga_src_cobid"),
-                                 value=str(wiz.get("ga_source_cobid") or ""),
-                                 placeholder="Leave blank if same as COB")
-        if src_val.strip().isdigit():
-            wiz["ga_source_cobid"] = int(src_val.strip())
-
-        opts = ["inserted", "updated", "deleted", "other"]
-        wiz["ga_adjustment_type"] = st.selectbox(
-            "Adjustment Type", opts,
-            index=opts.index(wiz.get("ga_adjustment_type") or "inserted"),
-            key=_k("ga_adj_type"))
-
-    with g2:
-        wiz["entity_code"] = st.text_input(
-            "Entity Code *", key=_k("ga_entity"),
-            value=wiz.get("entity_code") or "", placeholder="e.g. MUSI")
-        wiz["department_code"] = st.text_input(
-            "Department Code (optional)", key=_k("ga_dept"),
-            value=wiz.get("department_code") or "")
-
-    st.divider()
-    wiz["reason"] = st.text_area(
-        "Reason / Business Justification", value=wiz.get("reason", ""),
-        height=80, key=_k("ga_reason"), placeholder="e.g. EFE FX VaR correction")
-    wiz["ga_form_data"] = st.text_area(
-        "Form Data (optional — JSON or free text)", key=_k("ga_form_data"),
-        value=wiz.get("ga_form_data", ""), height=60)
-    wiz["requires_approval"] = st.checkbox(
-        "🔐 Requires Approval", value=wiz.get("requires_approval", False),
-        key=_k("ga_approval"))
-
-    st.markdown("<br/>", unsafe_allow_html=True)
-    missing = [f for f, v in [("COB Date", wiz.get("cobid")),
-                               ("Entity Code", wiz.get("entity_code"))] if not v]
-    if missing:
-        _missing_info(missing)
-    else:
-        if st.button("Continue → Preview", type="primary",
-                     use_container_width=True, key=_k("ga_continue")):
-            wiz["process_type"]    = "VaR"
-            wiz["adjustment_type"] = "Direct"
-            wiz["step"] = 2
-            safe_rerun()
-
-
 # ── VaR Upload ────────────────────────────────────────────────────────────────
 
 VAR_MEASURE_COLS = [
@@ -359,6 +280,15 @@ def render_var_upload_form() -> None:
         if entity_val.strip():
             wiz["entity_code"] = entity_val.strip()
 
+    ref_val = st.text_input(
+        "Reference *", key=_k("var_ref"),
+        value=wiz.get("global_reference") or "",
+        placeholder="e.g. CTN FX VaR",
+        help="Unique reference for this upload. If you submit again with the same COB + Reference, "
+             "the previous adjustment will be replaced.")
+    if ref_val.strip():
+        wiz["global_reference"] = ref_val.strip()
+
     wiz["reason"] = st.text_area(
         "Reason / Business Justification", value=wiz.get("reason", ""),
         height=60, key=_k("var_reason"))
@@ -366,22 +296,66 @@ def render_var_upload_form() -> None:
         "🔐 Requires Approval", value=wiz.get("requires_approval", False),
         key=_k("var_approval"))
 
+    # ── Duplicate reference check ────────────────────────────────────────
+    if wiz.get("cobid") and wiz.get("global_reference"):
+        try:
+            dup_rows = run_query(f"""
+                SELECT ADJ_ID, ENTITY_CODE, RUN_STATUS, USERNAME, CREATED_DATE
+                FROM ADJUSTMENT_APP.ADJ_HEADER
+                WHERE COBID = {wiz['cobid']}
+                  AND UPPER(GLOBAL_REFERENCE) = UPPER('{wiz["global_reference"].replace("'","''")}')
+                  AND IS_DELETED = FALSE
+                ORDER BY CREATED_DATE DESC
+            """)
+        except Exception:
+            dup_rows = []
+
+        if dup_rows:
+            dup_info = dup_rows[0]
+            st.markdown(
+                f'<div style="background:#FFF3E0;border:2px solid #FFB74D;border-radius:10px;'
+                f'padding:1rem;margin:0.8rem 0">'
+                f'<div style="font-weight:700;font-size:0.92rem;color:#E65100;margin-bottom:0.4rem">'
+                f'⚠️ Existing adjustment found with the same Reference</div>'
+                f'<div style="font-size:0.83rem;color:#BF360C">'
+                f'<strong>ADJ ID:</strong> {dup_info[0]} &nbsp;·&nbsp; '
+                f'<strong>Entity:</strong> {dup_info[1]} &nbsp;·&nbsp; '
+                f'<strong>Status:</strong> {dup_info[2]} &nbsp;·&nbsp; '
+                f'<strong>User:</strong> {dup_info[3]}<br/>'
+                f'If you continue, the previous adjustment will be <strong>soft-deleted</strong> '
+                f'and its data removed from the adjustment tables.</div></div>',
+                unsafe_allow_html=True)
+            wiz["_dup_adj_ids"] = [r[0] for r in dup_rows]
+        else:
+            wiz["_dup_adj_ids"] = []
+    else:
+        wiz["_dup_adj_ids"] = []
+
     st.markdown("<br/>", unsafe_allow_html=True)
     _checks = [
         ("CSV Data",     wiz.get("uploaded_df") is not None),
         ("COB Date",     bool(wiz.get("cobid"))),
         ("Entity Code",  bool(wiz.get("entity_code"))),
+        ("Reference",    bool(wiz.get("global_reference"))),
     ]
     missing = [f for f, present in _checks if not present]
     if missing:
         _missing_info(missing)
     else:
-        if st.button("Continue → Preview", type="primary",
-                     use_container_width=True, key=_k("var_continue")):
-            wiz["process_type"]    = "VaR"
-            wiz["adjustment_type"] = "Upload"
-            wiz["step"] = 2
-            safe_rerun()
+        if wiz.get("_dup_adj_ids"):
+            confirmed = st.checkbox(
+                "I confirm I want to replace the existing adjustment(s) with this upload",
+                key=_k("var_dup_confirm"), value=False)
+        else:
+            confirmed = True
+
+        if confirmed:
+            if st.button("Continue → Preview", type="primary",
+                         use_container_width=True, key=_k("var_continue")):
+                wiz["process_type"]    = "VaR"
+                wiz["adjustment_type"] = "Upload"
+                wiz["step"] = 2
+                safe_rerun()
 
 
 # ── Entity Roll ──────────────────────────────────────────────────────────────
@@ -814,8 +788,6 @@ if wiz["step"] == 1:
 
     if not wiz["category"]:
         st.info("👆 Select an adjustment category to continue.")
-    elif wiz["category"] == "Global Adjustment":
-        render_global_adj_form()
     elif wiz["category"] == "VaR Upload":
         render_var_upload_form()
     elif wiz["category"] == "Entity Roll":
@@ -833,36 +805,7 @@ elif wiz["step"] == 2:
     section_title("Adjustment Summary", "📋")
 
     # ── Summary banner ────────────────────────────────────────────────────
-    if cat == "Global Adjustment":
-        st.markdown(
-            f'<div class="mcard">'
-            f'<div style="display:flex;gap:16px;align-items:center">'
-            f'<span style="font-size:2rem">🌐</span>'
-            f'<div><div style="font-weight:700;font-size:1.1rem">Global Adjustment</div>'
-            f'<div style="font-size:0.85rem;color:{P["grey_700"]}">'
-            f'COB: {wiz["cobid"]} · Entity: {wiz.get("entity_code","—")} · '
-            f'Type: {wiz.get("ga_adjustment_type","—")}'
-            f'</div></div></div></div>', unsafe_allow_html=True)
-        rows_html = "".join(
-            f'<tr>'
-            f'<td style="color:{P["grey_700"]};padding:4px 12px 4px 0;font-size:0.85rem">{k}</td>'
-            f'<td style="font-weight:600;font-size:0.85rem">{v}</td>'
-            f'</tr>'
-            for k, v in {
-                "COB Date":        wiz.get("cobid"),
-                "Source COB":      wiz.get("ga_source_cobid") or "—",
-                "Entity":          wiz.get("entity_code"),
-                "Department":      wiz.get("department_code") or "—",
-                "Adjustment Type": wiz.get("ga_adjustment_type"),
-                "Reason":          wiz.get("reason") or "—",
-            }.items() if v and str(v) not in ("", "—")
-        )
-        st.markdown(
-            f'<div class="mcard" style="margin-top:0.8rem">'
-            f'<table style="width:100%;border-collapse:collapse">'
-            f'{rows_html}</table></div>', unsafe_allow_html=True)
-
-    elif cat == "VaR Upload":
+    if cat == "VaR Upload":
         df_up     = wiz.get("uploaded_df")
         row_count = len(df_up) if df_up is not None else 0
         st.markdown(
@@ -871,12 +814,26 @@ elif wiz["step"] == 2:
             f'<span style="font-size:2rem">📤</span>'
             f'<div><div style="font-weight:700;font-size:1.1rem">VaR Upload</div>'
             f'<div style="font-size:0.85rem;color:{P["grey_700"]}">'
+            f'Ref: {wiz.get("global_reference","?")} · '
             f'File: {wiz.get("uploaded_file_name","?")} · '
             f'{row_count:,} rows · COB: {wiz["cobid"]}'
             f'</div></div></div></div>', unsafe_allow_html=True)
         if df_up is not None:
             section_title(f"Data Preview ({row_count:,} rows)", "📊")
             st.dataframe(df_up.head(50), use_container_width=True, height=300)
+
+        if wiz.get("_dup_adj_ids"):
+            dup_count = len(wiz["_dup_adj_ids"])
+            st.markdown(
+                f'<div style="background:#FFF3E0;border:2px solid #FFB74D;border-radius:10px;'
+                f'padding:1rem;margin:0.8rem 0">'
+                f'<div style="font-weight:700;font-size:0.92rem;color:#E65100">'
+                f'⚠️ Replacing {dup_count} existing adjustment(s) with reference '
+                f'"{wiz.get("global_reference","")}" on COB {wiz.get("cobid","")}</div>'
+                f'<div style="font-size:0.83rem;color:#BF360C;margin-top:0.3rem">'
+                f'Previous adjustment data will be soft-deleted from ADJ_HEADER and '
+                f'DIMENSION.ADJUSTMENT, and removed from FACT adjustment tables on submission.</div>'
+                f'</div>', unsafe_allow_html=True)
 
     elif cat == "Entity Roll":
         st.markdown(

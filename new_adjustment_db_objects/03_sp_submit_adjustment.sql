@@ -277,6 +277,81 @@ def main(session, p_adjustment):
         adj_id = str(uuid.uuid4())
 
         # Map JSON keys → column names (only include non-null values)
+        # ── Duplicate reference cleanup ──────────────────────────────
+        # If GLOBAL_REFERENCE is provided, soft-delete any existing adjustments
+        # with the same COBID + GLOBAL_REFERENCE and remove their FACT data.
+        global_ref = adj.get("global_reference")
+        replaced_adj_ids = []
+        if global_ref and str(global_ref).strip():
+            dup_rows = session.sql(f"""
+                SELECT ADJ_ID, PROCESS_TYPE
+                FROM ADJUSTMENT_APP.ADJ_HEADER
+                WHERE COBID = {cobid}
+                  AND UPPER(GLOBAL_REFERENCE) = UPPER('{_esc(global_ref)}')
+                  AND IS_DELETED = FALSE
+            """).collect()
+
+            for dup in dup_rows:
+                dup_adj_id = str(dup["ADJ_ID"])
+                dup_pt     = str(dup["PROCESS_TYPE"])
+                replaced_adj_ids.append(dup_adj_id)
+
+                # Capture old status for audit trail
+                old_status_rows = session.sql(f"""
+                    SELECT RUN_STATUS FROM ADJUSTMENT_APP.ADJ_HEADER
+                    WHERE ADJ_ID = '{_esc(dup_adj_id)}'
+                """).collect()
+                old_status = old_status_rows[0]["RUN_STATUS"] if old_status_rows else "Unknown"
+
+                # Soft-delete in ADJ_HEADER
+                session.sql(f"""
+                    UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                    SET IS_DELETED = TRUE,
+                        RUN_STATUS = 'Replaced',
+                        ERRORMESSAGE = 'Replaced by new upload with same reference'
+                    WHERE ADJ_ID = '{_esc(dup_adj_id)}'
+                """).collect()
+
+                # Soft-delete in DIMENSION.ADJUSTMENT
+                session.sql(f"""
+                    UPDATE DIMENSION.ADJUSTMENT
+                    SET IS_DELETED = TRUE
+                    WHERE ADJUSTMENT_ID = '{_esc(dup_adj_id)}'
+                """).collect()
+
+                # Delete from FACT adjustment tables (lookup from settings)
+                try:
+                    settings = session.sql(f"""
+                        SELECT ADJUSTMENTS_TABLE, ADJUSTMENTS_SUMMARY_TABLE
+                        FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
+                        WHERE UPPER(PROCESS_TYPE) = UPPER('{_esc(dup_pt)}')
+                          AND IS_ACTIVE = TRUE
+                    """).collect()
+                    if settings:
+                        adj_tbl = settings[0]["ADJUSTMENTS_TABLE"]
+                        adj_sum = settings[0]["ADJUSTMENTS_SUMMARY_TABLE"]
+                        session.sql(f"""
+                            DELETE FROM {adj_tbl}
+                            WHERE ADJUSTMENT_ID = '{_esc(dup_adj_id)}'
+                        """).collect()
+                        if adj_sum:
+                            session.sql(f"""
+                                DELETE FROM {adj_sum}
+                                WHERE ADJUSTMENT_ID = '{_esc(dup_adj_id)}'
+                            """).collect()
+                except Exception as cleanup_err:
+                    pass  # Non-fatal — data may not exist yet if never processed
+
+                # Audit trail
+                session.sql(f"""
+                    INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
+                        (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
+                    VALUES
+                        ('{_esc(dup_adj_id)}', '{_esc(old_status)}', 'Replaced',
+                         '{_esc(username)}',
+                         'Replaced by new upload ADJ_ID={_esc(adj_id)}')
+                """).collect()
+
         col_map = {
             "ADJ_ID":                      adj_id,
             "COBID":                       cobid,
@@ -355,8 +430,10 @@ def main(session, p_adjustment):
             "adj_id":  adj_id,
             "status":  initial_status,
             "blocked_by": blocked_by_adj_id,
+            "replaced": replaced_adj_ids,
             "message": f"Adjustment {adj_id} created with status '{initial_status}'."
                        + (f" Blocked by ADJ #{blocked_by_adj_id}." if blocked_by_adj_id else "")
+                       + (f" Replaced {len(replaced_adj_ids)} previous adjustment(s)." if replaced_adj_ids else "")
         }
 
     except KeyError as ke:

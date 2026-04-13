@@ -412,10 +412,10 @@ with tab_workflow:
                 </div>
             </div>
             <div style="background:#E8F5E9;border:1px solid {P['success']};border-radius:8px;padding:0.75rem 1rem;min-width:200px;flex:1">
-                <div style="font-weight:700;font-size:0.88rem">🌐 Global Adjustment</div>
+                <div style="font-weight:700;font-size:0.88rem">🔄 Entity Roll</div>
                 <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:4px">
-                Apply a single value across an entire scope without dimension filtering.
-                Useful for top-level adjustments.
+                Copy all data from a source COB/entity to a target. Destructive operation
+                that requires approval before processing.
                 </div>
             </div>
         </div>
