@@ -15,8 +15,8 @@ st.set_page_config(
 
 from utils.styles import (
     inject_css, render_sidebar, render_lifecycle_bar, section_title,
-    render_filter_chips, render_status_timeline,
-    P, SCOPE_CONFIG, STAGE_CONFIG, STATUS_COLORS,
+    render_status_timeline,
+    P, SCOPE_CONFIG, STAGE_CONFIG,
 )
 from utils.snowflake_conn import run_query, run_query_df, current_user_name
 
@@ -182,7 +182,7 @@ if "TOTAL_DURATION_SEC" in df_display.columns:
     df_display["TOTAL_DURATION_SEC"] = df_display["TOTAL_DURATION_SEC"].apply(_fmt_duration)
     df_display = df_display.rename(columns={"TOTAL_DURATION_SEC": "TOTAL_DURATION"})
 
-st.dataframe(df_display, use_container_width=True, hide_index=True, height=300)
+st.dataframe(df_display.style.hide(axis='index'), use_container_width=True, height=300)
 
 # ── Deep-dive expanders ──────────────────────────────────────────────────────
 
