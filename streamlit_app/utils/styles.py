@@ -76,6 +76,20 @@ TYPE_CONFIG = {
     "Roll":    {"icon": "🔄", "desc": "Copy from prior COB and scale", "formula": "new = prior × sf"},
 }
 
+# ── Lifecycle stage colours (used by tracker board and lifecycle bar) ───────
+
+STAGE_CONFIG = {
+    "Submitted":        {"color": "#FB8C00", "icon": "📝", "bg": "#FFF3E0"},
+    "Pending Approval": {"color": "#1565C0", "icon": "🔐", "bg": "#E3F2FD"},
+    "Approved":         {"color": "#00897B", "icon": "✅", "bg": "#E0F2F1"},
+    "Processing":       {"color": "#1565C0", "icon": "⚡", "bg": "#E3F2FD"},
+    "PBI Queued":       {"color": "#6A1B9A", "icon": "⏳", "bg": "#F3E5F5"},
+    "PBI Refreshing":   {"color": "#6A1B9A", "icon": "🔄", "bg": "#F3E5F5"},
+    "Reports Ready":    {"color": "#2E7D32", "icon": "✔️", "bg": "#E8F5E9"},
+    "Failed":           {"color": "#D32F2F", "icon": "❌", "bg": "#FFEBEE"},
+    "Rejected":         {"color": "#C62828", "icon": "🚫", "bg": "#FFEBEE"},
+}
+
 # ── Adjustment Category — the first selection in the wizard ──────────────────
 
 CATEGORY_CONFIG = {
@@ -356,6 +370,128 @@ def inject_css():
     .stButton>button {{ border-radius: 7px !important; font-weight: 600 !important; font-size: 0.85rem !important; }}
     [data-testid="stDataFrame"] {{ border-radius: 8px; overflow: hidden; }}
     div[data-testid="stExpander"] {{ border: 1px solid {P["border"]}; border-radius: 8px; overflow: hidden; }}
+
+    /* Lifecycle progress bar */
+    .lifecycle-bar {{
+        display: flex;
+        align-items: flex-start;
+        gap: 0;
+        margin: 0.6rem 0 0.8rem 0;
+        padding: 0.5rem 0.8rem;
+        background: #FAFAFA;
+        border-radius: 8px;
+        overflow-x: auto;
+    }}
+    .lc-stage {{
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        min-width: 70px;
+        flex-shrink: 0;
+    }}
+    .lc-dot {{
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.65rem;
+        font-weight: 700;
+        flex-shrink: 0;
+    }}
+    .lc-dot.completed {{
+        background: #2E7D32;
+        color: white;
+    }}
+    .lc-dot.current {{
+        background: #1565C0;
+        color: white;
+        box-shadow: 0 0 0 3px rgba(21,101,192,0.25);
+    }}
+    .lc-dot.failed {{
+        background: #D32F2F;
+        color: white;
+    }}
+    .lc-dot.upcoming {{
+        background: #F5F5F5;
+        color: #BDBDBD;
+        border: 2px solid #E0E0E0;
+    }}
+    .lc-label {{
+        font-size: 0.62rem;
+        font-weight: 600;
+        margin-top: 3px;
+        text-align: center;
+        white-space: nowrap;
+    }}
+    .lc-time {{
+        font-size: 0.58rem;
+        color: #9E9E9E;
+        margin-top: 1px;
+        text-align: center;
+    }}
+    .lc-connector {{
+        width: 28px;
+        height: 2px;
+        margin-top: 10px;
+        flex-shrink: 0;
+    }}
+    .lc-connector.completed {{ background: #2E7D32; }}
+    .lc-connector.upcoming  {{ background: #E0E0E0; }}
+    .lc-connector.failed    {{ background: #D32F2F; }}
+
+    /* Tracker board */
+    .tracker-board {{
+        display: flex;
+        gap: 10px;
+        overflow-x: auto;
+        padding: 0.5rem 0;
+        margin-bottom: 1rem;
+    }}
+    .board-col {{
+        flex: 1;
+        min-width: 140px;
+        max-width: 220px;
+        background: #FAFAFA;
+        border-radius: 10px;
+        padding: 0.6rem;
+        border-top: 3px solid #E0E0E0;
+    }}
+    .board-col-header {{
+        font-size: 0.7rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .05em;
+        margin-bottom: 0.5rem;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }}
+    .board-col-count {{
+        background: white;
+        border-radius: 10px;
+        padding: 1px 7px;
+        font-size: 0.68rem;
+        font-weight: 700;
+    }}
+    .board-item {{
+        background: white;
+        border: 1px solid #E8E8EC;
+        border-radius: 6px;
+        padding: 0.4rem 0.6rem;
+        margin-bottom: 0.4rem;
+        font-size: 0.72rem;
+    }}
+    .board-item .bi-scope {{
+        font-weight: 600;
+        font-size: 0.68rem;
+    }}
+    .board-item .bi-detail {{
+        color: #616161;
+        font-size: 0.65rem;
+        margin-top: 2px;
+    }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -483,6 +619,75 @@ def render_pipeline_diagram(current_stage: int = 0):
         if i < len(stages):
             nodes.append('<div class="pipe-arrow">→</div>')
     st.markdown(f'<div class="pipeline">{"".join(nodes)}</div>', unsafe_allow_html=True)
+
+
+def render_lifecycle_bar(track_row: dict):
+    """Render a compact horizontal lifecycle progress bar for one adjustment.
+
+    track_row: a dict from VW_ADJUSTMENT_TRACK with keys like SUBMITTED_AT,
+               APPROVAL_REQUESTED_AT, APPROVED_AT, PROCESSING_STARTED_AT,
+               PROCESSING_ENDED_AT, PBI_QUEUED_AT, PBI_STARTED_AT,
+               PBI_COMPLETED_AT, CURRENT_STAGE, RUN_STATUS.
+    """
+    def _fmt_ts(val):
+        if val is None or str(val) in ("NaT", "None", ""):
+            return ""
+        if hasattr(val, "strftime"):
+            return val.strftime("%H:%M")
+        return ""
+
+    # Build adaptive stage list based on whether approval flow was used
+    stages = [("Submitted", track_row.get("SUBMITTED_AT"))]
+    if track_row.get("APPROVAL_REQUESTED_AT"):
+        stages.append(("Pending Approval", track_row.get("APPROVAL_REQUESTED_AT")))
+    if track_row.get("APPROVED_AT"):
+        stages.append(("Approved", track_row.get("APPROVED_AT")))
+    stages.append(("Processing", track_row.get("PROCESSING_STARTED_AT")))
+    stages.append(("PBI Refresh", track_row.get("PBI_QUEUED_AT") or track_row.get("PBI_STARTED_AT")))
+    stages.append(("Reports Ready", track_row.get("PBI_COMPLETED_AT")))
+
+    current_stage = str(track_row.get("CURRENT_STAGE", ""))
+    is_failed = current_stage in ("Failed", "Rejected")
+
+    # Determine which stages are completed, current, or upcoming
+    html_parts = []
+    found_current = False
+    for i, (label, ts) in enumerate(stages):
+        ts_str = _fmt_ts(ts)
+        has_ts = bool(ts_str)
+
+        if is_failed and not has_ts and not found_current:
+            dot_class = "failed"
+            label_color = "#D32F2F"
+            conn_class = "failed"
+            found_current = True
+        elif has_ts:
+            dot_class = "completed"
+            label_color = "#2E7D32"
+            conn_class = "completed"
+        elif not found_current:
+            dot_class = "current"
+            label_color = "#1565C0"
+            conn_class = "upcoming"
+            found_current = True
+        else:
+            dot_class = "upcoming"
+            label_color = "#BDBDBD"
+            conn_class = "upcoming"
+
+        icon = "✓" if dot_class == "completed" else ("✕" if dot_class == "failed" else "")
+        html_parts.append(
+            f'<div class="lc-stage">'
+            f'<div class="lc-dot {dot_class}">{icon}</div>'
+            f'<div class="lc-label" style="color:{label_color}">{label}</div>'
+            f'<div class="lc-time">{ts_str}</div>'
+            f'</div>')
+        if i < len(stages) - 1:
+            html_parts.append(f'<div class="lc-connector {conn_class}"></div>')
+
+    st.markdown(
+        f'<div class="lifecycle-bar">{"".join(html_parts)}</div>',
+        unsafe_allow_html=True)
 
 
 def render_sidebar():
