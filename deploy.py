@@ -370,12 +370,58 @@ def resume_pipeline_tasks(session):
             print(f"     ❌ Could not resume {task}: {err_msg}")
 
 
+# ─── Submit Test Adjustment ─────────────────────────────────────────────────
+
+def submit_test_adjustment(session):
+    """
+    Submit a test Flatten adjustment after every deploy to verify the
+    end-to-end pipeline without manual UI interaction.
+    """
+    import json as _json
+
+    adj_payload = _json.dumps({
+        "cobid":              20260410,
+        "process_type":       "VaR",
+        "adjustment_type":    "Flatten",
+        "source_cobid":       20260410,
+        "scale_factor":       1.0,
+        "entity_code":        "MUSI",
+        "source_system_code": "QS",
+        "book_code":          "Book-CCC",
+        "adjustment_occurrence": "ADHOC",
+        "reason":             "Post-deploy smoke test",
+    })
+
+    try:
+        rows = session.sql(f"""
+            CALL ADJUSTMENT_APP.SP_SUBMIT_ADJUSTMENT('{adj_payload}')
+        """).collect()
+        result = rows[0][0] if rows else "No result"
+        # Parse if JSON string
+        try:
+            parsed = _json.loads(result) if isinstance(result, str) else result
+            adj_id = parsed.get("adj_id", "?")
+            status = parsed.get("status", "?")
+            msg    = parsed.get("message", "")
+            print(f"     ✅ Adjustment submitted — ADJ_ID: {adj_id}, Status: {status}")
+            if msg:
+                print(f"        {msg}")
+        except Exception:
+            print(f"     ✅ Result: {str(result)[:200]}")
+        return True
+    except Exception as e:
+        err = str(e).split('\n')[0][:200]
+        print(f"     ❌ Submit failed: {err}")
+        return False
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description='Deploy Adjustment Engine to Snowflake')
     parser.add_argument('--db-only', action='store_true', help='Deploy DB objects only')
     parser.add_argument('--streamlit-only', action='store_true', help='Deploy Streamlit app only')
+    parser.add_argument('--no-test-adj', action='store_true', help='Skip test adjustment submission')
     args = parser.parse_args()
 
     deploy_db = not args.streamlit_only
@@ -421,6 +467,14 @@ def main():
         if not deploy_streamlit_app(session):
             print("\n  ⚠️  Streamlit deployment had errors — review above.")
             success = False
+
+    # ── Submit test adjustment ──────────────────────────────────────────
+    if not args.no_test_adj:
+        print("\n" + "─" * 64)
+        print("  PHASE 3: Submit Test Adjustment (VaR Flatten)")
+        print("─" * 64)
+        if not submit_test_adjustment(session):
+            print("\n  ⚠️  Test adjustment submission failed — review above.")
 
     # ── Summary ──────────────────────────────────────────────────────────
     print("\n" + "=" * 64)
