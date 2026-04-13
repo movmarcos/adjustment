@@ -245,8 +245,10 @@ def main(session, p_adjustment):
                 initial_status = STATUS_PENDING
 
         # ── Blocking check — set before INSERT ──────────────────────────
+        # Direct adjustments skip overlap checking — they are explicit value
+        # insertions. Duplicate detection is handled via GLOBAL_REFERENCE.
         blocked_by_adj_id = None
-        if initial_status == STATUS_PENDING:
+        if initial_status == STATUS_PENDING and adj_action != "Direct":
             dim_vals = {
                 "entity_code":                 adj.get("entity_code"),
                 "source_system_code":          adj.get("source_system_code"),

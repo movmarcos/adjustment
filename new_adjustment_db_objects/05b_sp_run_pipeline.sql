@@ -81,6 +81,14 @@ OVERLAP_DIMS = [
     'GUARANTEED_ENTITY',
 ]
 
+# SELECT fragment for overlap queries — always includes all OVERLAP_DIMS
+_OVERLAP_SELECT_COLS = ', '.join(['ADJ_ID', 'COBID', 'PROCESS_TYPE', 'ADJUSTMENT_ACTION'] + OVERLAP_DIMS)
+
+# Direct adjustments (Direct, Upload) don't participate in overlap checking —
+# they are explicit value insertions and their only "overlap" is same
+# COBID + GLOBAL_REFERENCE, which is handled at submission time.
+_OVERLAP_ACTION_FILTER = "AND ADJUSTMENT_ACTION NOT IN ('Direct')"
+
 # FRTBALL is a fan-out tag — applied within real FRTB* SP calls, not on its own.
 FRTBALL_SKIP = {'FRTBALL'}
 
@@ -123,37 +131,30 @@ def main(session, scope, pipeline_types):
 
     results = []
 
-    # ── 1a. BLOCK PENDING vs RUNNING ─────────────────────────────────────────
-    #    If any adjustments are still Running (stuck from a crash, or
-    #    long-running from a previous task fire), block overlapping Pending
-    #    rows against them.
-    all_running = session.sql(f"""
-        SELECT ADJ_ID, COBID, PROCESS_TYPE,
-               ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE,
-               BOOK_CODE, CURRENCY_CODE, TRADE_TYPOLOGY, STRATEGY
-        FROM ADJUSTMENT_APP.ADJ_HEADER
-        WHERE PROCESS_TYPE IN ({pipeline_in})
-          AND RUN_STATUS = 'Running'
-          AND IS_DELETED = FALSE
-    """).collect()
+    # ── 1. OVERLAP BLOCKING ─────────────────────────────────────────────────
+    #    Wrapped in try/except: overlap blocking is best-effort. If it fails,
+    #    we still proceed to consume the stream and process adjustments. The
+    #    worst case is two overlapping Scale adjustments run concurrently, but
+    #    that's better than the entire pipeline halting.
+    try:
+        # ── 1a. BLOCK PENDING vs RUNNING ─────────────────────────────────
+        all_running = session.sql(f"""
+            SELECT {_OVERLAP_SELECT_COLS}
+            FROM ADJUSTMENT_APP.ADJ_HEADER
+            WHERE PROCESS_TYPE IN ({pipeline_in})
+              AND RUN_STATUS = 'Running'
+              AND IS_DELETED = FALSE
+              {_OVERLAP_ACTION_FILTER}
+        """).collect()
 
-    for r in all_running:
-        _block_overlapping(session, r, pipeline_in)
+        for r in all_running:
+            _block_overlapping(session, r, pipeline_in)
 
-    # ── 1b. BLOCK PENDING vs PENDING (overlap serialisation) ──────────────────
-    #    Two overlapping adjustments must NOT run simultaneously, regardless
-    #    of ADJUSTMENT_TYPE or ADJUSTMENT_ACTION. Even if one is Flatten and
-    #    the other is Scale, they target the same data — processing them in
-    #    parallel would race on the fact-table rows.
-    #
-    #    Algorithm: fetch all unblocked Pending/Approved rows (oldest first).
-    #    Build a "proceeding" list. For each row:
-    #      • If it overlaps with anything already proceeding → block it
-    #      • Otherwise → add it to the proceeding list
-    #
-    #    This guarantees the oldest adjustment in each overlap group proceeds;
-    #    younger ones wait until the older one finishes.
-    _block_pending_overlaps(session, pipeline_in)
+        # ── 1b. BLOCK PENDING vs PENDING (overlap serialisation) ─────────
+        _block_pending_overlaps(session, pipeline_in)
+    except Exception as block_err:
+        results.append({"step": "overlap_blocking", "status": "failed",
+                        "error": str(block_err)[:500]})
 
     # ── 2. CONSUME THE STREAM → TEMP TABLE ────────────────────────────────────
     #    The stream is on a queue VIEW (e.g. VW_QUEUE_VAR) that already filters
@@ -280,7 +281,13 @@ def main(session, scope, pipeline_types):
     #    Any Pending row with BLOCKED_BY_ADJ_ID pointing to something we just
     #    finished → clear it (or reassign to another still-Running overlap).
     #    The UPDATE produces a stream event → next task fire re-evaluates it.
-    _unblock_resolved(session, pipeline_in)
+    #    Wrapped in try/except: if unblock fails, we still return results
+    #    and don't leave already-processed adjustments in an inconsistent state.
+    try:
+        _unblock_resolved(session, pipeline_in)
+    except Exception as ub_err:
+        results.append({"step": "unblock_resolved", "status": "failed",
+                        "error": str(ub_err)[:500]})
 
     return json.dumps({"scope": scope, "processed": results})
 
@@ -322,15 +329,13 @@ def _block_pending_overlaps(session, pipeline_in):
          Otherwise → add it to the proceeding list.
     """
     unblocked = session.sql(f"""
-        SELECT ADJ_ID, COBID, PROCESS_TYPE,
-               ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE,
-               BOOK_CODE, CURRENCY_CODE, TRADE_TYPOLOGY, STRATEGY,
-               CREATED_DATE
+        SELECT {_OVERLAP_SELECT_COLS}, CREATED_DATE
         FROM ADJUSTMENT_APP.ADJ_HEADER
         WHERE PROCESS_TYPE IN ({pipeline_in})
           AND RUN_STATUS IN ('Pending', 'Approved')
           AND BLOCKED_BY_ADJ_ID IS NULL
           AND IS_DELETED = FALSE
+          {_OVERLAP_ACTION_FILTER}
         ORDER BY CREATED_DATE ASC, ADJ_ID ASC
     """).collect()
 
@@ -408,6 +413,7 @@ def _block_overlapping(session, running_row, pipeline_in):
           AND p.BLOCKED_BY_ADJ_ID IS NULL
           AND p.IS_DELETED = FALSE
           AND p.ADJ_ID != '{adj_id}'
+          AND p.ADJUSTMENT_ACTION NOT IN ('Direct')
           AND {where_dims}
     """).collect()
 
@@ -443,13 +449,12 @@ def _unblock_resolved(session, pipeline_in):
     #    Check currently-Running adjustments and block any newly-released
     #    Pending rows that overlap with them.
     still_running = session.sql(f"""
-        SELECT ADJ_ID, COBID, PROCESS_TYPE,
-               ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE,
-               BOOK_CODE, CURRENCY_CODE, TRADE_TYPOLOGY, STRATEGY
+        SELECT {_OVERLAP_SELECT_COLS}
         FROM ADJUSTMENT_APP.ADJ_HEADER
         WHERE PROCESS_TYPE IN ({pipeline_in})
           AND RUN_STATUS = 'Running'
           AND IS_DELETED = FALSE
+          {_OVERLAP_ACTION_FILTER}
     """).collect()
 
     for r in still_running:
