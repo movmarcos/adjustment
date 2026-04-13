@@ -345,6 +345,13 @@ def main(session, process_type, adjustment_action, cobid):
             if metric_name not in fact_adj_cols:
                 metric_name = metric_usd_name
 
+            # Rename line-item columns to match fact table naming conventions
+            # ADJ_LINE_ITEM uses VAR_SUB_COMPONENT_ID; fact table uses VAR_SUBCOMPONENT_ID
+            _col_renames = {"VAR_SUB_COMPONENT_ID": "VAR_SUBCOMPONENT_ID"}
+            for _old, _new in _col_renames.items():
+                if _old in df_line_items.columns and _new not in df_line_items.columns:
+                    df_line_items = df_line_items.with_column_renamed(_old, _new)
+
             # Convert line items to pandas (preserve ADJ_ID for the ADJUSTMENT_ID mapping)
             _raw_pd = df_line_items.to_pandas()
             df_pd = check_columns(df_line_items, fact_adj_cols, metric_name, metric_usd_name)
@@ -385,7 +392,13 @@ def main(session, process_type, adjustment_action, cobid):
             update_header_status(session, df_adj_direct, cobid, "Processed")
             log_status_history(session, adj_ids, "Running", "Processed")
 
-            rows_count = len(df_pd_valid)
+            # Count rows actually inserted (query fact table, not pandas len)
+            rows_count_row = session.sql(f"""
+                SELECT COUNT(*) AS CNT FROM {fact_adj_tbl_name}
+                WHERE COBID = {cobid}
+                  AND ADJUSTMENT_ID IN ({dim_ids_str})
+            """).collect()
+            rows_count = rows_count_row[0]["CNT"] if rows_count_row else 0
             session.sql(f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER
                 SET RECORD_COUNT = {rows_count}
