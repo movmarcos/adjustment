@@ -170,6 +170,14 @@ def inject_css():
         font-size: 0.83rem !important;
         white-space: nowrap !important;
     }}
+    /* Rename "app" → "Home" for the main page nav link */
+    [data-testid="stSidebarNav"] li:first-child a span {{
+        font-size: 0 !important;
+    }}
+    [data-testid="stSidebarNav"] li:first-child a span::after {{
+        content: "Home";
+        font-size: 0.83rem !important;
+    }}
 
     /* Flex chain: sidebar inner blocks must pass flex context down so that
        the spacer div (flex:1) can actually push the user footer to the bottom. */
