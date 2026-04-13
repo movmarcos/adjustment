@@ -191,6 +191,7 @@ def _write_var_upload_line_items(adj_id: str, df_csv: pd.DataFrame) -> int:
 
     Each CSV row has 21 VaR measure columns. We melt them into individual
     rows with VAR_SUB_COMPONENT_ID resolved via DIMENSION.VAR_SUB_COMPONENT.
+    Uses a temp table + INSERT SELECT to avoid column-position mapping issues.
     Returns the number of line items written.
     """
     from utils.snowflake_conn import get_session
@@ -238,37 +239,50 @@ def _write_var_upload_line_items(adj_id: str, df_csv: pd.DataFrame) -> int:
         return 0
 
     df_lines = pd.DataFrame(rows)
+
+    # Write to temp table first, then INSERT SELECT by column name
+    # (write_pandas maps by position which breaks on tables with AUTOINCREMENT PKs)
     session.write_pandas(
         df_lines,
-        table_name="ADJ_LINE_ITEM",
+        table_name="TEMP_VAR_UPLOAD_LINES",
         schema="ADJUSTMENT_APP",
-        auto_create_table=False,
+        auto_create_table=True,
+        overwrite=True,
+        table_type="temporary",
     )
+    insert_cols = ", ".join(df_lines.columns)
+    session.sql(f"""
+        INSERT INTO ADJUSTMENT_APP.ADJ_LINE_ITEM ({insert_cols})
+        SELECT {insert_cols}
+        FROM ADJUSTMENT_APP.TEMP_VAR_UPLOAD_LINES
+    """).collect()
+
     return len(df_lines)
 
 
 def _do_submit() -> dict:
     """Call SP_SUBMIT_ADJUSTMENT. Returns result dict (never raises)."""
+    import uuid as _uuid
     try:
-        json_str = json.dumps(_build_payload()).replace("'", "\\'")
+        payload = _build_payload()
+
+        # For VaR Upload: write line items BEFORE the SP call so that
+        # navigating away can't interrupt the write. Pre-generate the
+        # ADJ_ID so both line items and header share the same ID.
+        if wiz.get("category") == "VaR Upload" and wiz.get("uploaded_df") is not None:
+            adj_id = str(_uuid.uuid4())
+            payload["adj_id"] = adj_id
+            n = _write_var_upload_line_items(adj_id, wiz["uploaded_df"])
+            if n == 0:
+                return {"status": "Error",
+                        "message": "No non-zero VaR values found in CSV data"}
+
+        json_str = json.dumps(payload).replace("'", "\\'")
         rows = run_query(f"CALL ADJUSTMENT_APP.SP_SUBMIT_ADJUSTMENT('{json_str}')")
         if not rows:
             return {"status": "Error", "message": "No response from stored procedure"}
         raw = rows[0][0]
-        result = json.loads(str(raw)) if isinstance(raw, str) else raw
-
-        # For VaR Upload: write CSV data as line items to ADJ_LINE_ITEM
-        if (wiz.get("category") == "VaR Upload"
-                and result.get("status") != "Error"
-                and wiz.get("uploaded_df") is not None):
-            try:
-                n = _write_var_upload_line_items(result["adj_id"], wiz["uploaded_df"])
-                result["line_items"] = n
-            except Exception as li_err:
-                result["status"] = "Error"
-                result["message"] = f"Header created but line items failed: {li_err}"
-
-        return result
+        return json.loads(str(raw)) if isinstance(raw, str) else raw
     except Exception as exc:
         return {"status": "Error", "message": str(exc)}
 

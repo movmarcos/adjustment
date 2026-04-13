@@ -275,8 +275,9 @@ def main(session, p_adjustment):
             blocked_by_adj_id = find_blocking_adj(session, process_type, cobid, dim_vals)
 
         # ── Build the INSERT ─────────────────────────────────────────────
-        # Generate a UUID for this adjustment — unambiguous vs DIMENSION.ADJUSTMENT.ADJUSTMENT_ID
-        adj_id = str(uuid.uuid4())
+        # Use pre-generated ADJ_ID if provided (VaR Upload writes line items first),
+        # otherwise generate a new UUID.
+        adj_id = adj.get("adj_id") or str(uuid.uuid4())
 
         # Map JSON keys → column names (only include non-null values)
         # ── Duplicate reference cleanup ──────────────────────────────
