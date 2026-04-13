@@ -364,13 +364,22 @@ def main(session, process_type, adjustment_action, cobid):
             df_pd_valid = df_pd[df_pd["IS_DELETED"] == False].drop(columns=["IS_DELETED"])
             df_pd_valid["RUN_LOG_ID"] = run_log_id
 
-            # Insert into fact adjustment table
+            # Insert into fact adjustment table via temp table + INSERT SELECT
+            # (write_pandas direct insert can fail with ON_ERROR param issues)
+            _tmp_tbl = "ADJUSTMENT_APP.TEMP_DIRECT_INSERT"
             session.write_pandas(
                 df_pd_valid,
-                auto_create_table=False,
-                table_name=fact_adj_tbl_name.split('.')[-1].upper(),
-                schema=fact_adj_tbl_name.split('.')[0].upper()
+                table_name="TEMP_DIRECT_INSERT",
+                schema="ADJUSTMENT_APP",
+                auto_create_table=True,
+                overwrite=True,
+                table_type="temporary"
             )
+            _ins_cols = ", ".join(df_pd_valid.columns)
+            session.sql(f"""
+                INSERT INTO {fact_adj_tbl_name} ({_ins_cols})
+                SELECT {_ins_cols} FROM {_tmp_tbl}
+            """).collect()
 
             # Update status
             update_header_status(session, df_adj_direct, cobid, "Processed")
@@ -1039,6 +1048,17 @@ def main(session, process_type, adjustment_action, cobid):
                 """).collect()
         except Exception as cleanup_err:
             print(f"Cleanup failed: {cleanup_err}")
+
+        # Close run log with failure status (do NOT trigger PowerBI refresh)
+        try:
+            if 'run_log_id' in dir() and run_log_id:
+                session.sql(f"""
+                    CALL BATCH.LOAD_RUN_LOG_END_WITH_DETAIL(
+                        {run_log_id}, '{{"status":"Failed","error":"{error_msg[:200]}"}}'
+                    )
+                """).collect()
+        except Exception:
+            pass
 
     return json.dumps(result)
 $$;
