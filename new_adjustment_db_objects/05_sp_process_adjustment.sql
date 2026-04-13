@@ -50,7 +50,7 @@ def check_columns(df_sf, column_list, metric_name, metric_usd_name):
         if c in df.columns:
             column_data[c] = df[c]
         else:
-            column_data[c] = -1 if c.split('_')[-1].upper() == 'KEY' else np.nan
+            column_data[c] = -1 if c.split('_')[-1].upper() in ('KEY', 'ID') else np.nan
 
     column_data[metric_name]     = df["ADJUSTMENT_VALUE"]
     column_data[metric_usd_name] = df["ADJUSTMENT_VALUE_IN_USD"]
