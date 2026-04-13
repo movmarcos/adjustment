@@ -468,7 +468,7 @@ def main(session, process_type, adjustment_action, cobid):
 
             # ── Join columns (fact ∩ adj, minus exclusions) ──────────────
             exclude_join = ['COBID', 'IS_OFFICIAL_SOURCE', 'STRATEGY',
-                            'LOAD_TIMESTAMP', 'REGION_AREA_KEY']
+                            'LOAD_TIMESTAMP', 'REGION_AREA_KEY', 'RUN_LOG_ID']
             join_cols = [c for c in fact_cols if c in adj_columns and c not in exclude_join]
 
             # ── Select columns (fact minus metrics/system cols) ──────────
