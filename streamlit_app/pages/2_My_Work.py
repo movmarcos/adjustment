@@ -11,6 +11,7 @@ st.set_page_config(page_title="My Work · MUFG", page_icon="📋", layout="wide"
 
 from utils.styles import (
     inject_css, render_sidebar, render_filter_chips, render_status_timeline,
+    render_lifecycle_bar,
     status_badge, section_title, P, SCOPE_CONFIG, STATUS_COLORS, STATUS_ICONS,
 )
 from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
@@ -86,15 +87,23 @@ except Exception as e:
     df_adjs = pd.DataFrame()
     st.warning(f"Could not load adjustments: {e}")
 
-# Load report refresh status for processed adjustments
-df_report_status = pd.DataFrame()
+# Load lifecycle tracking data for all adjustments
+df_track = pd.DataFrame()
 try:
-    df_report_status = run_query_df("""
-        SELECT ADJ_ID, REPORT_STATUS, REPORT_STATUS_TIME
-        FROM ADJUSTMENT_APP.VW_REPORT_REFRESH_STATUS
+    df_track = run_query_df("""
+        SELECT ADJ_ID, CURRENT_STAGE, REPORT_STATUS,
+               SUBMITTED_AT, APPROVAL_REQUESTED_AT, APPROVED_AT,
+               PROCESSING_STARTED_AT, PROCESSING_ENDED_AT,
+               PBI_QUEUED_AT, PBI_STARTED_AT, PBI_COMPLETED_AT,
+               PBI_REFRESH_DURATION_SEC, PBI_QUEUE_WAIT_SEC,
+               RUN_STATUS
+    FROM ADJUSTMENT_APP.VW_ADJUSTMENT_TRACK
     """)
 except Exception:
     pass
+
+# Backwards compat alias
+df_report_status = df_track
 
 # ──────────────────────────────────────────────────────────────────────────────
 # STATUS TABS
@@ -147,7 +156,16 @@ def render_adj_card(row):
 
         with col_info:
             st.markdown(status_badge(run_status), unsafe_allow_html=True)
-            st.markdown("<br/>", unsafe_allow_html=True)
+
+            # Lifecycle progress bar
+            if not df_track.empty:
+                track_match = df_track[df_track["ADJ_ID"] == adj_id]
+                if not track_match.empty:
+                    render_lifecycle_bar(track_match.iloc[0].to_dict())
+                else:
+                    st.markdown("<br/>", unsafe_allow_html=True)
+            else:
+                st.markdown("<br/>", unsafe_allow_html=True)
 
             section_title("Filters Applied", "🔍")
             render_filter_chips(row)
@@ -189,13 +207,17 @@ def render_adj_card(row):
                 ("Ended",        process_date),
                 ("Occurrence",   str(row.get("ADJUSTMENT_OCCURRENCE", "—"))),
             ]
-            # Report status (only for Processed adjustments)
-            if run_status == "Processed" and not df_report_status.empty:
-                rs_match = df_report_status[df_report_status["ADJ_ID"] == adj_id]
-                if not rs_match.empty:
-                    rs = rs_match.iloc[0]
-                    _rs_status = str(rs.get("REPORT_STATUS", ""))
-                    _rs_time = rs.get("REPORT_STATUS_TIME")
+            # Report status (for Processed adjustments)
+            if run_status == "Processed" and not df_track.empty:
+                tr_match = df_track[df_track["ADJ_ID"] == adj_id]
+                if not tr_match.empty:
+                    tr = tr_match.iloc[0]
+                    _rs_status = str(tr.get("REPORT_STATUS", "") or "")
+
+                    _pbi_completed = tr.get("PBI_COMPLETED_AT")
+                    _pbi_started = tr.get("PBI_STARTED_AT")
+                    _pbi_queued = tr.get("PBI_QUEUED_AT")
+                    _rs_time = _pbi_completed or _pbi_started or _pbi_queued
                     _rs_time_str = (_rs_time.strftime("%d %b %H:%M")
                                     if hasattr(_rs_time, "strftime") and str(_rs_time) != "NaT"
                                     else "")
@@ -204,21 +226,18 @@ def render_adj_card(row):
                         "Reports Ready": "✅",
                         "Refreshing": "🔄",
                         "Queued": "⏳",
-                        "Next Cycle": "⏳",
                         "Awaiting": "⏳",
                     }
                     _rs_messages = {
                         "Reports Ready": f"Reports Ready ({_rs_time_str})",
                         "Refreshing": f"Refreshing ({_rs_time_str})",
                         "Queued": "Queued — next ControlM cycle ~5 min",
-                        "Next Cycle": "Current refresh won't include this — next cycle will",
                         "Awaiting": "Awaiting report refresh",
                     }
                     _rs_colors = {
                         "Reports Ready": "#2E7D32",
                         "Refreshing": "#1565C0",
                         "Queued": "#E65100",
-                        "Next Cycle": "#E65100",
                         "Awaiting": "#757575",
                     }
                     icon = _rs_icons.get(_rs_status, "")
