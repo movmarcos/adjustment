@@ -347,6 +347,103 @@ LEFT JOIN pbi_match m
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- 9. VW_ADJUSTMENT_TRACK — Full lifecycle per adjustment
+--
+-- Combines ADJ_HEADER timestamps, ADJ_STATUS_HISTORY milestones,
+-- and VW_REPORT_REFRESH_STATUS PBI action data into a single
+-- denormalized row per adjustment for lifecycle tracking.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_ADJUSTMENT_TRACK
+    COMMENT = 'Full lifecycle tracking per adjustment: submission → approval → processing → PowerBI refresh → reports ready.'
+AS
+WITH status_milestones AS (
+    SELECT
+        sh.ADJ_ID::VARCHAR AS ADJ_ID,
+        MIN(CASE WHEN sh.NEW_STATUS = 'Pending Approval' THEN sh.CHANGED_AT END) AS APPROVAL_REQUESTED_AT,
+        MIN(CASE WHEN sh.NEW_STATUS = 'Pending Approval' THEN sh.CHANGED_BY END) AS APPROVAL_REQUESTED_BY,
+        MIN(CASE WHEN sh.NEW_STATUS = 'Approved'         THEN sh.CHANGED_AT END) AS APPROVED_AT,
+        MIN(CASE WHEN sh.NEW_STATUS = 'Approved'         THEN sh.CHANGED_BY END) AS APPROVED_BY,
+        MIN(CASE WHEN sh.NEW_STATUS LIKE 'Rejected%'     THEN sh.CHANGED_AT END) AS REJECTED_AT,
+        MIN(CASE WHEN sh.NEW_STATUS LIKE 'Rejected%'     THEN sh.CHANGED_BY END) AS REJECTED_BY,
+        MIN(CASE WHEN sh.NEW_STATUS LIKE 'Rejected%'     THEN sh.NEW_STATUS  END) AS REJECTED_STATUS
+    FROM ADJUSTMENT_APP.ADJ_STATUS_HISTORY sh
+    GROUP BY sh.ADJ_ID::VARCHAR
+)
+SELECT
+    h.ADJ_ID,
+    h.COBID,
+    h.PROCESS_TYPE,
+    h.ADJUSTMENT_TYPE,
+    h.ADJUSTMENT_ACTION,
+    h.ENTITY_CODE,
+    h.BOOK_CODE,
+    h.DEPARTMENT_CODE,
+    h.USERNAME           AS SUBMITTED_BY,
+    h.REASON,
+    h.RUN_STATUS,
+    h.GLOBAL_REFERENCE,
+
+    -- Stage 1: Submitted
+    h.CREATED_DATE       AS SUBMITTED_AT,
+
+    -- Stage 2: Approval (NULL if no approval flow)
+    sm.APPROVAL_REQUESTED_AT,
+    sm.APPROVAL_REQUESTED_BY,
+    sm.APPROVED_AT,
+    sm.APPROVED_BY,
+
+    -- Stage 3: Processing
+    h.START_DATE         AS PROCESSING_STARTED_AT,
+    h.PROCESS_DATE       AS PROCESSING_ENDED_AT,
+    DATEDIFF('second', h.START_DATE, h.PROCESS_DATE) AS PROCESSING_DURATION_SEC,
+
+    -- Stage 4: PowerBI Refresh
+    r.PBI_ACTION_ID,
+    r.PBI_REQUEST_TIME   AS PBI_QUEUED_AT,
+    r.PBI_START_TIME     AS PBI_STARTED_AT,
+    r.PBI_COMPLETE_TIME  AS PBI_COMPLETED_AT,
+    r.PBI_REFRESH_DURATION_SEC,
+    r.PBI_QUEUE_WAIT_SEC,
+    r.REPORT_STATUS,
+
+    -- Rejection info
+    sm.REJECTED_AT,
+    sm.REJECTED_BY,
+    sm.REJECTED_STATUS,
+
+    -- Error info
+    h.ERRORMESSAGE,
+
+    -- Computed: current lifecycle stage
+    CASE
+        WHEN h.RUN_STATUS = 'Failed'                          THEN 'Failed'
+        WHEN h.RUN_STATUS LIKE 'Rejected%'                    THEN 'Rejected'
+        WHEN r.REPORT_STATUS = 'Reports Ready'                THEN 'Reports Ready'
+        WHEN r.REPORT_STATUS = 'Refreshing'                   THEN 'PBI Refreshing'
+        WHEN r.REPORT_STATUS IN ('Queued', 'Awaiting')        THEN 'PBI Queued'
+        WHEN h.RUN_STATUS = 'Processed'                       THEN 'PBI Queued'
+        WHEN h.RUN_STATUS = 'Running'                         THEN 'Processing'
+        WHEN h.RUN_STATUS = 'Approved'                        THEN 'Approved'
+        WHEN h.RUN_STATUS = 'Pending Approval'                THEN 'Pending Approval'
+        WHEN h.RUN_STATUS = 'Pending'                         THEN 'Submitted'
+        ELSE h.RUN_STATUS
+    END AS CURRENT_STAGE,
+
+    -- Computed: total duration (submitted → reports ready), NULL if not yet complete
+    CASE
+        WHEN r.PBI_COMPLETE_TIME IS NOT NULL
+            THEN DATEDIFF('second', h.CREATED_DATE, r.PBI_COMPLETE_TIME)
+    END AS TOTAL_DURATION_SEC,
+
+    h.IS_DELETED
+
+FROM ADJUSTMENT_APP.ADJ_HEADER h
+LEFT JOIN status_milestones sm ON sm.ADJ_ID = h.ADJ_ID
+LEFT JOIN ADJUSTMENT_APP.VW_REPORT_REFRESH_STATUS r ON r.ADJ_ID = h.ADJ_ID;
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- VERIFY
 -- ═══════════════════════════════════════════════════════════════════════════
 
