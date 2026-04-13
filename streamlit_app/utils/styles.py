@@ -624,52 +624,97 @@ def render_pipeline_diagram(current_stage: int = 0):
 def render_lifecycle_bar(track_row: dict):
     """Render a compact horizontal lifecycle progress bar for one adjustment.
 
-    track_row: a dict from VW_ADJUSTMENT_TRACK with keys like SUBMITTED_AT,
-               APPROVAL_REQUESTED_AT, APPROVED_AT, PROCESSING_STARTED_AT,
-               PROCESSING_ENDED_AT, PBI_QUEUED_AT, PBI_STARTED_AT,
-               PBI_COMPLETED_AT, CURRENT_STAGE, RUN_STATUS.
+    Uses CURRENT_STAGE from VW_ADJUSTMENT_TRACK to drive the state (not timestamps).
+    Adapts the stage list: approval stages only appear if the adjustment went
+    through the approval flow.
     """
+    import pandas as _pd
+
     def _fmt_ts(val):
         if val is None or str(val) in ("NaT", "None", ""):
             return ""
         if hasattr(val, "strftime"):
-            return val.strftime("%H:%M")
+            try:
+                return val.strftime("%H:%M")
+            except Exception:
+                return ""
         return ""
 
-    # Build adaptive stage list based on whether approval flow was used
-    stages = [("Submitted", track_row.get("SUBMITTED_AT"))]
-    if track_row.get("APPROVAL_REQUESTED_AT"):
-        stages.append(("Pending Approval", track_row.get("APPROVAL_REQUESTED_AT")))
-    if track_row.get("APPROVED_AT"):
-        stages.append(("Approved", track_row.get("APPROVED_AT")))
-    stages.append(("Processing", track_row.get("PROCESSING_STARTED_AT")))
-    stages.append(("PBI Refresh", track_row.get("PBI_QUEUED_AT") or track_row.get("PBI_STARTED_AT")))
-    stages.append(("Reports Ready", track_row.get("PBI_COMPLETED_AT")))
+    def _is_set(val):
+        """True if value is a real timestamp (not None/NaT)."""
+        if val is None:
+            return False
+        if isinstance(val, float) and _pd.isna(val):
+            return False
+        if hasattr(_pd, "NaT") and val is _pd.NaT:
+            return False
+        if str(val) in ("NaT", "None", ""):
+            return False
+        return True
 
-    current_stage = str(track_row.get("CURRENT_STAGE", ""))
+    current_stage = str(track_row.get("CURRENT_STAGE", "") or "")
     is_failed = current_stage in ("Failed", "Rejected")
 
-    # Determine which stages are completed, current, or upcoming
-    html_parts = []
-    found_current = False
-    for i, (label, ts) in enumerate(stages):
-        ts_str = _fmt_ts(ts)
-        has_ts = bool(ts_str)
+    # Detect whether this adjustment used the approval flow
+    has_approval = (
+        _is_set(track_row.get("APPROVAL_REQUESTED_AT"))
+        or _is_set(track_row.get("APPROVED_AT"))
+        or current_stage in ("Pending Approval", "Approved")
+    )
 
-        if is_failed and not has_ts and not found_current:
-            dot_class = "failed"
-            label_color = "#D32F2F"
-            conn_class = "failed"
-            found_current = True
-        elif has_ts:
+    # Build adaptive stage list: (label, timestamp, stage_keys_that_map_here)
+    stages = [("Submitted", track_row.get("SUBMITTED_AT"), ["Submitted"])]
+    if has_approval:
+        stages.append(("Pending Approval", track_row.get("APPROVAL_REQUESTED_AT"),
+                        ["Pending Approval"]))
+        stages.append(("Approved", track_row.get("APPROVED_AT"),
+                        ["Approved"]))
+    stages.append(("Processing", track_row.get("PROCESSING_STARTED_AT"),
+                    ["Processing"]))
+    stages.append(("PBI Refresh",
+                    track_row.get("PBI_QUEUED_AT") if _is_set(track_row.get("PBI_QUEUED_AT"))
+                    else track_row.get("PBI_STARTED_AT"),
+                    ["PBI Queued", "PBI Refreshing"]))
+    stages.append(("Reports Ready", track_row.get("PBI_COMPLETED_AT"),
+                    ["Reports Ready"]))
+
+    # Find which stage index is the current one
+    current_idx = None
+    for idx, (_, _, keys) in enumerate(stages):
+        if current_stage in keys:
+            current_idx = idx
+            break
+    # Fallback: if CURRENT_STAGE doesn't match, find first stage without timestamp
+    if current_idx is None and not is_failed:
+        for idx, (_, ts, _) in enumerate(stages):
+            if not _is_set(ts):
+                current_idx = idx
+                break
+    if current_idx is None:
+        current_idx = len(stages) - 1
+
+    # Render each stage
+    html_parts = []
+    for i, (label, ts, _keys) in enumerate(stages):
+        ts_str = _fmt_ts(ts) if _is_set(ts) else ""
+
+        if is_failed and i >= current_idx:
+            if i == current_idx:
+                dot_class = "failed"
+                label_color = "#D32F2F"
+                conn_class = "failed"
+            else:
+                dot_class = "upcoming"
+                label_color = "#BDBDBD"
+                conn_class = "upcoming"
+        elif i < current_idx:
             dot_class = "completed"
             label_color = "#2E7D32"
             conn_class = "completed"
-        elif not found_current:
+        elif i == current_idx:
             dot_class = "current"
             label_color = "#1565C0"
             conn_class = "upcoming"
-            found_current = True
         else:
             dot_class = "upcoming"
             label_color = "#BDBDBD"
