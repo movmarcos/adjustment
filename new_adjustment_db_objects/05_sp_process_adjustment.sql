@@ -360,8 +360,8 @@ def main(session, process_type, adjustment_action, cobid):
                   AND ADJUSTMENT_ID IN ({dim_ids_str})
             """).collect()
 
-            # Exclude soft-deleted line items
-            df_pd_valid = df_pd[df_pd["IS_DELETED"] == False].drop(columns=["IS_DELETED"])
+            # Drop IS_DELETED column (already filtered at Snowpark level, line 332)
+            df_pd_valid = df_pd.drop(columns=["IS_DELETED"], errors="ignore")
             df_pd_valid["RUN_LOG_ID"] = run_log_id
 
             # Insert into fact adjustment table via temp table + INSERT SELECT
