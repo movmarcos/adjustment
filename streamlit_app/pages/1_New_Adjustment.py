@@ -81,7 +81,6 @@ _WIZ_DEFAULTS: dict = {
     "uploaded_file_name":     None,
     "uploaded_df":            None,
     # Internal
-    "submitting":             False,
     "result":                 None,
 }
 
@@ -168,6 +167,86 @@ def _build_payload() -> dict:
     return payload
 
 
+# ── VaR CSV column → Snowflake UNPIVOT name ──────────────────────────────────
+_VAR_COL_MAP = {
+    "AllVaR": "ALL_VAR", "AllVaRSkew": "ALL_VAR_SKEW",
+    "BasisVaR": "BASIS_VAR", "BondAssetSpreadVaR": "BOND_ASSET_SPREAD_VAR",
+    "CrossEffects": "CROSS_EFFECTS", "EquityPriceVaR": "EQUITY_PRICE_VAR",
+    "EquityVegaVaR": "EQUITY_VEGA_VAR", "FXRateVaR": "FX_RATE_VAR",
+    "FXVolatilityVaR": "FX_VOLATILITY_VAR", "IRCapVolVaR": "IR_CAP_VOL_VAR",
+    "IRCapVolVaRSkew": "IR_CAP_VOL_VAR_SKEW", "IRSkewVolVaR": "IR_SKEW_VOL_VAR",
+    "IRSwaptionVolVaR": "IR_SWAPTION_VOL_VAR",
+    "IRSwaptionVolVaRSkew": "IR_SWAPTION_VOL_VAR_SKEW",
+    "InflationRateCurveVaR": "INFLATION_RATE_CURVE_VAR",
+    "InflationVolVaR": "INFLATION_VOL_VAR",
+    "InterestRateCurveVaR": "INTEREST_RATE_CURVE_VAR",
+    "InterestRateVegaVaR": "INTEREST_RATE_VEGA_VAR",
+    "MTGSprdVaR": "MTG_SPRD_VAR", "OASVaR": "OAS_VAR",
+    "ParCreditSpreadVaR": "PAR_CREDIT_SPREAD_VAR",
+}
+
+
+def _write_var_upload_line_items(adj_id: str, df_csv: pd.DataFrame) -> int:
+    """UNPIVOT the VaR CSV and write line items to ADJ_LINE_ITEM.
+
+    Each CSV row has 21 VaR measure columns. We melt them into individual
+    rows with VAR_SUB_COMPONENT_ID resolved via DIMENSION.VAR_SUB_COMPONENT.
+    Returns the number of line items written.
+    """
+    from utils.snowflake_conn import get_session
+    session = get_session()
+
+    # Resolve VAR_SUB_COMPONENT_NAME → VAR_SUB_COMPONENT_ID
+    vsc_rows = session.sql("""
+        SELECT VAR_SUB_COMPONENT_ID, UPPER(VAR_SUB_COMPONENT_NAME) AS NAME
+        FROM DIMENSION.VAR_SUB_COMPONENT
+    """).collect()
+    vsc_map = {r["NAME"]: r["VAR_SUB_COMPONENT_ID"] for r in vsc_rows}
+
+    # Identify which VaR measure columns exist in the CSV
+    present_measures = {csv_col: db_col for csv_col, db_col in _VAR_COL_MAP.items()
+                        if csv_col in df_csv.columns}
+    if not present_measures:
+        return 0
+
+    # Dimension columns from the CSV
+    dim_map = {
+        "COBId": "COBID", "EntityCode": "ENTITY_CODE",
+        "SourceSystemCode": "SOURCE_SYSTEM_CODE", "BookCode": "BOOK_CODE",
+        "CurrencyCode": "CURRENCY_CODE", "ScenarioDate": "SCENARIO_DATE_ID",
+        "TradeCode": "TRADE_CODE", "Category": "CATEGORY", "Detail": "DETAIL",
+    }
+
+    rows = []
+    for _, csv_row in df_csv.iterrows():
+        base = {db_col: csv_row.get(csv_col) for csv_col, db_col in dim_map.items()
+                if csv_col in df_csv.columns}
+        base["ADJ_ID"] = adj_id
+
+        for csv_col, db_col in present_measures.items():
+            val = csv_row.get(csv_col)
+            if pd.isna(val) or val == 0:
+                continue
+            row = dict(base)
+            row["VAR_SUB_COMPONENT_ID"] = vsc_map.get(db_col.upper())
+            row["ADJUSTMENT_VALUE"] = float(val)
+            row["ADJUSTMENT_VALUE_IN_USD"] = float(val)
+            row["IS_DELETED"] = False
+            rows.append(row)
+
+    if not rows:
+        return 0
+
+    df_lines = pd.DataFrame(rows)
+    session.write_pandas(
+        df_lines,
+        table_name="ADJ_LINE_ITEM",
+        schema="ADJUSTMENT_APP",
+        auto_create_table=False,
+    )
+    return len(df_lines)
+
+
 def _do_submit() -> dict:
     """Call SP_SUBMIT_ADJUSTMENT. Returns result dict (never raises)."""
     try:
@@ -176,20 +255,24 @@ def _do_submit() -> dict:
         if not rows:
             return {"status": "Error", "message": "No response from stored procedure"}
         raw = rows[0][0]
-        return json.loads(str(raw)) if isinstance(raw, str) else raw
+        result = json.loads(str(raw)) if isinstance(raw, str) else raw
+
+        # For VaR Upload: write CSV data as line items to ADJ_LINE_ITEM
+        if (wiz.get("category") == "VaR Upload"
+                and result.get("status") != "Error"
+                and wiz.get("uploaded_df") is not None):
+            try:
+                n = _write_var_upload_line_items(result["adj_id"], wiz["uploaded_df"])
+                result["line_items"] = n
+            except Exception as li_err:
+                result["status"] = "Error"
+                result["message"] = f"Header created but line items failed: {li_err}"
+
+        return result
     except Exception as exc:
         return {"status": "Error", "message": str(exc)}
 
 
-# Handle deferred submission: button sets submitting=True + reruns,
-# then this block runs the SP inside the spinner on the NEXT pass.
-if wiz.get("submitting"):
-    with st.spinner("Submitting adjustment…"):
-        result = _do_submit()
-    wiz["submitting"] = False
-    wiz["result"]     = result
-    wiz["step"]       = 3 if result.get("status") != "Error" else 2
-    safe_rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -990,11 +1073,13 @@ elif wiz["step"] == 2:
             safe_rerun()
     with nav2:
         if st.button("🚀 Submit Adjustment", type="primary",
-                     use_container_width=True, key=_k("submit"),
-                     disabled=wiz.get("submitting", False)):
-            wiz["result"]     = None   # clear any previous error
-            wiz["submitting"] = True
-            safe_rerun()               # spinner block at top handles actual call
+                     use_container_width=True, key=_k("submit")):
+            wiz["result"] = None
+            with st.spinner("Submitting adjustment…"):
+                result = _do_submit()
+            wiz["result"] = result
+            wiz["step"]   = 3 if result.get("status") != "Error" else 2
+            safe_rerun()
 
 
 # ── STEP 3 : Success ──────────────────────────────────────────────────────────

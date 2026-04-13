@@ -333,6 +333,10 @@ def main(session, process_type, adjustment_action, cobid):
             )
 
             if df_line_items.count() == 0:
+                # Mark as Failed — don't leave stuck in Running
+                update_header_status(session, df_adj_direct, cobid, "Failed",
+                                     "No line items found in ADJ_LINE_ITEM")
+                log_status_history(session, adj_ids, "Running", "Failed")
                 result["message"] = "No line items found for Direct adjustments"
                 return json.dumps(result)
 
