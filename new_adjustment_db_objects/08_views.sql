@@ -259,21 +259,19 @@ WHERE h.RUN_STATUS = 'Pending Approval'
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 8. VW_REPORT_REFRESH_STATUS — PowerBI refresh status per processed adjustment
 --
--- Computes whether a processed adjustment's data has been reflected in
--- PowerBI reports. Joins ADJ_HEADER.PROCESS_DATE against
--- METADATA.POWERBI_ACTION timelines.
+-- Links ADJ_HEADER to METADATA.POWERBI_ACTION for precise per-adjustment
+-- matching. Joins by COBID + INSERT_SOURCE + REQUEST_TIME >= PROCESS_DATE
+-- and takes the most recent matching PBI action.
 --
 -- Status logic:
---   1. Find POWERBI_ACTION rows matching scope (via INSERT_SOURCE) + COBID
---   2. If a COMPLETED action has REQUEST_TIME >= adjustment PROCESS_DATE → Reports Ready
---   3. If a RUNNING action has REQUEST_TIME >= PROCESS_DATE → Refreshing
---   4. If a QUEUED action has REQUEST_TIME >= PROCESS_DATE → Queued
---   5. If a RUNNING action with REQUEST_TIME < PROCESS_DATE → Next Cycle
---   6. Otherwise → Awaiting
+--   1. If PBI action COMPLETE_TIME is set → Reports Ready
+--   2. If PBI action START_TIME is set (no COMPLETE) → Refreshing
+--   3. If PBI action REQUEST_TIME is set (no START) → Queued
+--   4. Otherwise → Awaiting
 -- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_REPORT_REFRESH_STATUS
-    COMMENT = 'Per-adjustment PowerBI refresh status. Joins ADJ_HEADER with METADATA.POWERBI_ACTION to determine if reports reflect the adjustment.'
+    COMMENT = 'Per-adjustment PowerBI refresh status. Links ADJ_HEADER to METADATA.POWERBI_ACTION via COBID + INSERT_SOURCE for precise matching.'
 AS
 WITH adj_processed AS (
     SELECT
@@ -300,26 +298,21 @@ WITH adj_processed AS (
 pbi_match AS (
     SELECT
         a.ADJ_ID,
-        MAX(CASE WHEN pa.COMPLETE_TIME IS NOT NULL
-                  AND pa.REQUEST_TIME >= a.PROCESS_DATE
-             THEN pa.COMPLETE_TIME END) AS COMPLETED_AT,
-        MAX(CASE WHEN pa.START_TIME IS NOT NULL
-                  AND pa.COMPLETE_TIME IS NULL
-                  AND pa.REQUEST_TIME >= a.PROCESS_DATE
-             THEN pa.START_TIME END) AS RUNNING_SINCE,
-        MAX(CASE WHEN pa.START_TIME IS NULL
-                  AND pa.COMPLETE_TIME IS NULL
-                  AND pa.REQUEST_TIME >= a.PROCESS_DATE
-             THEN pa.REQUEST_TIME END) AS QUEUED_AT,
-        MAX(CASE WHEN pa.START_TIME IS NOT NULL
-                  AND pa.COMPLETE_TIME IS NULL
-                  AND pa.REQUEST_TIME < a.PROCESS_DATE
-             THEN pa.START_TIME END) AS STALE_RUNNING_SINCE
+        pa.POWERBI_ACTION_ID   AS PBI_ACTION_ID,
+        pa.REQUEST_TIME        AS PBI_REQUEST_TIME,
+        pa.START_TIME          AS PBI_START_TIME,
+        pa.COMPLETE_TIME       AS PBI_COMPLETE_TIME,
+        DATEDIFF('second', pa.START_TIME, pa.COMPLETE_TIME) AS PBI_REFRESH_DURATION_SEC,
+        DATEDIFF('second', pa.REQUEST_TIME, pa.START_TIME)  AS PBI_QUEUE_WAIT_SEC,
+        ROW_NUMBER() OVER (
+            PARTITION BY a.ADJ_ID
+            ORDER BY pa.REQUEST_TIME DESC
+        ) AS RN
     FROM adj_processed a
     LEFT JOIN METADATA.POWERBI_ACTION pa
         ON pa.COBID = a.COBID
         AND pa.INSERT_SOURCE = a.EXPECTED_INSERT_SOURCE
-    GROUP BY a.ADJ_ID
+        AND pa.REQUEST_TIME >= a.PROCESS_DATE
 )
 SELECT
     a.ADJ_ID,
@@ -327,27 +320,30 @@ SELECT
     a.PROCESS_TYPE,
     a.PROCESS_DATE,
     a.RUN_LOG_ID,
-    m.COMPLETED_AT,
-    m.RUNNING_SINCE,
-    m.QUEUED_AT,
-    m.STALE_RUNNING_SINCE,
+    m.PBI_ACTION_ID,
+    m.PBI_REQUEST_TIME,
+    m.PBI_START_TIME,
+    m.PBI_COMPLETE_TIME,
+    m.PBI_REFRESH_DURATION_SEC,
+    m.PBI_QUEUE_WAIT_SEC,
     CASE
-        WHEN m.COMPLETED_AT IS NOT NULL THEN 'Reports Ready'
-        WHEN m.RUNNING_SINCE IS NOT NULL THEN 'Refreshing'
-        WHEN m.QUEUED_AT IS NOT NULL THEN 'Queued'
-        WHEN m.STALE_RUNNING_SINCE IS NOT NULL THEN 'Next Cycle'
+        WHEN m.PBI_COMPLETE_TIME IS NOT NULL THEN 'Reports Ready'
+        WHEN m.PBI_START_TIME IS NOT NULL    THEN 'Refreshing'
+        WHEN m.PBI_REQUEST_TIME IS NOT NULL  THEN 'Queued'
         ELSE 'Awaiting'
     END AS REPORT_STATUS,
     CASE
-        WHEN m.COMPLETED_AT IS NOT NULL
-            THEN CONVERT_TIMEZONE('UTC', 'Europe/London', m.COMPLETED_AT::TIMESTAMP_NTZ)
-        WHEN m.RUNNING_SINCE IS NOT NULL
-            THEN CONVERT_TIMEZONE('UTC', 'Europe/London', m.RUNNING_SINCE::TIMESTAMP_NTZ)
-        WHEN m.QUEUED_AT IS NOT NULL
-            THEN CONVERT_TIMEZONE('UTC', 'Europe/London', m.QUEUED_AT::TIMESTAMP_NTZ)
+        WHEN m.PBI_COMPLETE_TIME IS NOT NULL
+            THEN CONVERT_TIMEZONE('UTC', 'Europe/London', m.PBI_COMPLETE_TIME::TIMESTAMP_NTZ)
+        WHEN m.PBI_START_TIME IS NOT NULL
+            THEN CONVERT_TIMEZONE('UTC', 'Europe/London', m.PBI_START_TIME::TIMESTAMP_NTZ)
+        WHEN m.PBI_REQUEST_TIME IS NOT NULL
+            THEN CONVERT_TIMEZONE('UTC', 'Europe/London', m.PBI_REQUEST_TIME::TIMESTAMP_NTZ)
     END AS REPORT_STATUS_TIME
 FROM adj_processed a
-LEFT JOIN pbi_match m ON m.ADJ_ID = a.ADJ_ID;
+LEFT JOIN pbi_match m
+    ON m.ADJ_ID = a.ADJ_ID
+    AND m.RN = 1;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
