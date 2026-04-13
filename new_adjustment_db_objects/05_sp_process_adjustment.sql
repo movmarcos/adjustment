@@ -340,6 +340,11 @@ def main(session, process_type, adjustment_action, cobid):
                 result["message"] = "No line items found for Direct adjustments"
                 return json.dumps(result)
 
+            # Detect if local-currency metric exists in the fact adjustment table
+            # (e.g. FACT.VAR_MEASURES only has PNL_VECTOR_VALUE_IN_USD, not PNL_VECTOR_VALUE)
+            if metric_name not in fact_adj_cols:
+                metric_name = metric_usd_name
+
             # Convert line items to pandas (preserve ADJ_ID for the ADJUSTMENT_ID mapping)
             _raw_pd = df_line_items.to_pandas()
             df_pd = check_columns(df_line_items, fact_adj_cols, metric_name, metric_usd_name)
