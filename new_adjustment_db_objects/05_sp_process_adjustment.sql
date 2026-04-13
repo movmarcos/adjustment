@@ -44,11 +44,18 @@ import numpy as np
 
 def check_columns(df_sf, column_list, metric_name, metric_usd_name):
     """Map line-item columns to fact adjustment table columns."""
+    # Explicit defaults for NOT NULL columns that are never in ADJ_LINE_ITEM.
+    # Must match the values used in the legacy load procs.
+    _COLUMN_DEFAULTS = {
+        "IS_OFFICIAL_SOURCE": True,
+    }
     df = df_sf.to_pandas()
     column_data = {}
     for c in column_list:
         if c in df.columns:
             column_data[c] = df[c]
+        elif c in _COLUMN_DEFAULTS:
+            column_data[c] = _COLUMN_DEFAULTS[c]
         else:
             column_data[c] = -1 if c.split('_')[-1].upper() in ('KEY', 'ID') else np.nan
 
