@@ -229,7 +229,7 @@ def _write_var_upload_line_items(adj_id: str, df_csv: pd.DataFrame) -> int:
             if pd.isna(val) or val == 0:
                 continue
             row = dict(base)
-            row["VAR_SUB_COMPONENT_ID"] = vsc_map.get(db_col.upper())
+            row["VAR_SUB_COMPONENT_ID"] = vsc_map.get(db_col.upper().replace("_", " "))
             row["ADJUSTMENT_VALUE"] = float(val)
             row["ADJUSTMENT_VALUE_IN_USD"] = float(val)
             row["IS_DELETED"] = False
