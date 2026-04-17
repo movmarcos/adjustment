@@ -421,7 +421,7 @@ def main():
     parser = argparse.ArgumentParser(description='Deploy Adjustment Engine to Snowflake')
     parser.add_argument('--db-only', action='store_true', help='Deploy DB objects only')
     parser.add_argument('--streamlit-only', action='store_true', help='Deploy Streamlit app only')
-    parser.add_argument('--no-test-adj', action='store_true', help='Skip test adjustment submission')
+    parser.add_argument('--test-adj', action='store_true', help='Submit a test VaR Flatten adjustment after deploy')
     args = parser.parse_args()
 
     deploy_db = not args.streamlit_only
@@ -469,7 +469,7 @@ def main():
             success = False
 
     # ── Submit test adjustment ──────────────────────────────────────────
-    if not args.no_test_adj:
+    if args.test_adj:
         print("\n" + "─" * 64)
         print("  PHASE 3: Submit Test Adjustment (VaR Flatten)")
         print("─" * 64)
