@@ -29,7 +29,7 @@ USE SCHEMA ADJUSTMENT_APP;
 -- procedure can join to fact tables using the same column names.
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_HEADER (
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER (
     -- Identity
     ADJ_ID                      VARCHAR(36)  NOT NULL DEFAULT UUID_STRING(),
     COBID                       NUMBER(38,0) NOT NULL,
@@ -120,7 +120,7 @@ COMMENT = 'Single point of entry for ALL adjustments. Streamlit writes here via 
 -- directly and applies the scale factor.
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_LINE_ITEM (
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_LINE_ITEM (
     LINE_ID                     NUMBER(38,0) NOT NULL AUTOINCREMENT,
     ADJ_ID                      VARCHAR(36)  NOT NULL,  -- FK to ADJ_HEADER
 
@@ -171,7 +171,7 @@ COMMENT = 'Detail rows for Direct/Upload adjustments. Each row = one dimension c
 -- 3. ADJ_STATUS_HISTORY — Full audit trail of every status change
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_STATUS_HISTORY (
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_STATUS_HISTORY (
     HISTORY_ID                  NUMBER(38,0) NOT NULL AUTOINCREMENT,
     ADJ_ID                      VARCHAR(36)  NOT NULL,  -- FK to ADJ_HEADER
     OLD_STATUS                  VARCHAR(30),
@@ -192,7 +192,7 @@ COMMENT = 'Complete audit trail of every status transition for every adjustment.
 -- Adding a new scope = adding a new row. No code changes.
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS (
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS (
     PROCESS_TYPE                VARCHAR(30)  NOT NULL,
     FACT_TABLE                  VARCHAR(200) NOT NULL,       -- Source fact table to read from
     FACT_ADJUSTED_TABLE         VARCHAR(200),                -- Source for cross-COB (existing adj)
@@ -218,7 +218,7 @@ COMMENT = 'Config: maps each scope to its fact/adjustment tables, metrics, PKs. 
 -- ADJ_HEADER entries from them.
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_RECURRING_TEMPLATE (
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_RECURRING_TEMPLATE (
     TEMPLATE_ID                 NUMBER(38,0) NOT NULL AUTOINCREMENT,
     TEMPLATE_NAME               VARCHAR(200),
     PROCESS_TYPE                VARCHAR(30)  NOT NULL,
@@ -343,7 +343,7 @@ VALUES
 -- SP_SUBMIT_ADJUSTMENT checks this before allowing submissions.
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS (
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS (
     COBID                       NUMBER(38,0) NOT NULL,
     PROCESS_TYPE                VARCHAR(30)  NOT NULL,
     SIGN_OFF_STATUS             VARCHAR(30)  NOT NULL DEFAULT 'OPEN',   -- OPEN or SIGNED_OFF
@@ -366,7 +366,7 @@ COMMENT = 'COB sign-off status per scope. SIGN_OFF_STATUS = SIGNED_OFF means no 
 -- Self-approval is always blocked regardless of this table.
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE OR REPLACE TABLE ADJUSTMENT_APP.ADJ_APPROVERS (
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_APPROVERS (
     APPROVER_ID                 NUMBER(38,0) NOT NULL AUTOINCREMENT,
     USERNAME                    VARCHAR(50)  NOT NULL,
     PROCESS_TYPE                VARCHAR(30),            -- NULL = all scopes

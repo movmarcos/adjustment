@@ -19,7 +19,7 @@ USE SCHEMA ADJUSTMENT_APP;
 -- Refreshes every 1 minute (near real-time for ad-hoc visibility).
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE OR REPLACE DYNAMIC TABLE ADJUSTMENT_APP.DT_DASHBOARD
+CREATE OR ALTER DYNAMIC TABLE ADJUSTMENT_APP.DT_DASHBOARD
     TARGET_LAG = '1 MINUTE'
     WAREHOUSE  = DVLP_RAPTOR_WH_XS
     COMMENT    = 'Pre-aggregated dashboard view of all adjustments. Auto-refreshes every minute.'
@@ -69,7 +69,7 @@ GROUP BY
 -- quickly when the user is filling the form.
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE OR REPLACE DYNAMIC TABLE ADJUSTMENT_APP.DT_OVERLAP_ALERTS
+CREATE OR ALTER DYNAMIC TABLE ADJUSTMENT_APP.DT_OVERLAP_ALERTS
     TARGET_LAG = '1 MINUTE'
     WAREHOUSE  = DVLP_RAPTOR_WH_XS
     COMMENT    = 'Detects overlapping adjustments. Streamlit queries this to warn users before submission.'
