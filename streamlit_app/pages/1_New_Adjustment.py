@@ -109,11 +109,11 @@ wiz: dict = st.session_state["wiz"]
 def _build_payload() -> dict:
     cat = wiz.get("category")
 
-    if cat == "VaR Upload":
+    if cat == "Direct Adjustment":
         return {
             "cobid":                 wiz["cobid"],
-            "process_type":          "VaR",
-            "adjustment_type":       "Upload",
+            "process_type":          wiz["process_type"],
+            "adjustment_type":       "Direct",
             "username":              current_user_name(),
             "source_cobid":          wiz["cobid"],
             "reason":                wiz.get("reason", ""),
@@ -269,13 +269,13 @@ def _do_submit() -> dict:
         # For VaR Upload: write line items BEFORE the SP call so that
         # navigating away can't interrupt the write. Pre-generate the
         # ADJ_ID so both line items and header share the same ID.
-        if wiz.get("category") == "VaR Upload" and wiz.get("uploaded_df") is not None:
+        if wiz.get("category") == "Direct Adjustment" and wiz.get("uploaded_df") is not None:
             adj_id = str(_uuid.uuid4())
             payload["adj_id"] = adj_id
-            n = _write_var_upload_line_items(adj_id, wiz["uploaded_df"])
+            n = _write_direct_line_items(wiz["process_type"], adj_id, wiz["uploaded_df"])
             if n == 0:
                 return {"status": "Error",
-                        "message": "No non-zero VaR values found in CSV data"}
+                        "message": "No non-zero values found in CSV data"}
 
         json_str = json.dumps(payload).replace("'", "\\'")
         rows = run_query(f"CALL ADJUSTMENT_APP.SP_SUBMIT_ADJUSTMENT('{json_str}')")
