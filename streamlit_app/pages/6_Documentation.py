@@ -138,7 +138,7 @@ with tab_overview:
 
     pages = [
         ("🏠", "Command Center",   "Dashboard with KPIs, status charts, overlap alerts, and activity feed"),
-        ("✏️", "New Adjustment",    "3-step wizard: Scope & Filters → Preview → Submit"),
+        ("✏️", "New Adjustment",    "2-step wizard: Category & Details → Preview & Submit"),
         ("📋", "My Work",           "All your adjustments with full history, actions, and status timeline"),
         ("✅", "Approval Queue",     "Review and approve adjustments. Only authorized approvers can act. Self-approval is blocked"),
         ("⏳", "Processing Queue",  "Live view of the processing pipeline, queue position, and PowerBI report refresh status"),
@@ -175,7 +175,7 @@ with tab_architecture:
                 <div style="font-size:0.7rem;color:{P['grey_700']}">Streamlit UI</div>
             </div>
             <div style="font-size:0.68rem;color:{P['grey_700']};margin-top:6px;text-align:center">
-                Creates adjustment<br/>via 4-step wizard
+                Creates adjustment<br/>via 2-step wizard
             </div>
         </div>
 
@@ -507,9 +507,12 @@ with tab_workflow:
             <div style="background:#E8F5E9;border:1px solid {P['success']};border-radius:8px;padding:0.75rem 1rem">
                 <div style="font-weight:700;font-size:0.88rem;color:{P['success']}">🔄 Roll</div>
                 <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:4px">
-                Copy rows from a prior COB (Source COB) to the current COB, optionally scaled.
-                The system <strong>flattens</strong> any existing data on the target COB first,
-                then inserts the rolled values. Useful for carrying forward positions day-over-day.
+                Roll a prior COB (Source COB) forward to the current COB, optionally scaled.
+                The system <strong>flattens</strong> the target COB's existing original first,
+                then rolls in the source COB's <strong>adjusted state</strong> — its original
+                <em>plus</em> any existing adjustments. Net result: the target's adjusted value
+                becomes the source's adjusted value (× scale factor). Useful for carrying forward
+                positions day-over-day.
                 </div>
             </div>
         </div>
@@ -519,22 +522,29 @@ with tab_workflow:
         _html(f"""
         <div style="font-size:0.88rem;color:{P['grey_700']};margin-bottom:0.8rem">
         Filters narrow which rows in the fact table are affected. <strong>All filters use AND logic</strong>
-        — a row must match every filter you set. Leaving a filter empty = wildcard = applies to all values
-        for that dimension.
+        — a row must match every filter you set. An empty <em>optional</em> filter = wildcard = applies to
+        all values for that dimension. Some fields are <strong>required</strong> for Scaling Adjustments
+        (see below) and must be filled in before you can continue.
+        </div>
+        <div style="background:{P['warning_lt']};border:1px solid #FFB74D;border-radius:8px;padding:0.7rem 1rem;font-size:0.82rem;margin-bottom:0.8rem">
+        <strong>Required for Scaling Adjustments:</strong> Adjustment Type, COB Date,
+        <strong>Entity Code</strong>, <strong>Department Code or Book Code</strong> (at least one), and a
+        <strong>Reason / Business Justification</strong>. Recurring adjustments also require Start &amp; End COBID.
         </div>
         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:0.8rem">
         """ + "".join([
             f'<div style="background:{P["grey_100"]};border-radius:6px;padding:0.5rem 0.75rem;font-size:0.8rem">'
             f'<strong>{dim}</strong></div>'
-            for dim in ["Entity Code", "Source System", "Department", "Book Code",
-                        "Currency", "Trade Typology", "Strategy", "Trade Code",
-                        "Instrument", "Simulation Name", "Measure Type"]
+            for dim in ["Entity Code (required)", "Department or Book (one required)",
+                        "Source System", "Currency", "Trade Typology", "Strategy",
+                        "Trade Code", "Instrument", "Simulation Name", "Measure Type"]
         ]) + f"""
         </div>
         <div style="background:{P['warning_lt']};border:1px solid #FFB74D;border-radius:8px;padding:0.7rem 1rem;font-size:0.82rem">
-        <strong>Broad-scope adjustments</strong> (Entity set, no Book or Department) skip the preview
-        because they match millions of rows. They are subject to scope-level blocking — the system
-        waits for all other adjustments in the scope to finish before processing them.
+        <strong>Broad department-level adjustments</strong> can match very large row counts. The preview
+        is computed server-side (aggregated), so it stays fast at any scale. Broad adjustments are still
+        subject to scope-level blocking — the system waits for other adjustments in the scope to finish
+        before processing them.
         </div>
         """)
 
@@ -550,7 +560,9 @@ with tab_workflow:
                 <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:3px">
                 Shows how many rows match your filters, the total current value, and the projected
                 adjustment delta. For each type: Scale 1.1× shows +10% delta; Flatten shows −100%;
-                Roll shows the source amount carried forward.
+                Roll shows <strong>current</strong> = the target COB's original total (flattened) and
+                <strong>projected</strong> = the source COB's adjusted total (original + existing
+                adjustments) rolled forward. Computed server-side, so it is fast at any scale.
                 </div>
             </div>
             <div style="border-left:4px solid {P['warning']};padding:0.6rem 1rem;background:{P['warning_lt']};border-radius:0 8px 8px 0">
@@ -567,6 +579,11 @@ with tab_workflow:
                 that will be affected, with their current and projected values.
                 </div>
             </div>
+        </div>
+        <div style="background:{P['warning_lt']};border:1px solid #FFB74D;border-radius:8px;padding:0.7rem 1rem;font-size:0.82rem;margin-top:0.6rem">
+        <strong>Cross-COB Roll:</strong> Breakdown and Sample Rows are not offered — a per-position
+        breakdown across two COBs and two tables only makes sense after the netting engine runs.
+        The impact metrics above show the net effect.
         </div>
         <div style="background:{P['info_lt']};border:1px solid #90CAF9;border-radius:8px;padding:0.7rem 1rem;font-size:0.82rem;margin-top:0.6rem">
         <strong>Overlap warnings</strong> — if another adjustment in the same scope already covers
@@ -636,9 +653,10 @@ with tab_workflow:
             <div>
                 <div style="font-weight:700;font-size:0.86rem">SP_PROCESS_ADJUSTMENT writes the data</div>
                 <div style="font-size:0.8rem;color:{P['grey_700']}">
-                For <strong>Scale/Flatten/Roll</strong>: reads the source fact table, applies the
+                For <strong>Scale/Flatten</strong>: reads the source fact table, applies the
                 scale factor, and inserts delta rows into <code>FACT.*_ADJUSTMENT</code>.
-                The original fact data is never modified.<br/>
+                For <strong>Roll</strong>: flattens the target original and rolls in the source COB's
+                adjusted state (original + existing adjustments). The original fact data is never modified.<br/>
                 For <strong>Upload/Direct</strong>: reads line items from <code>ADJ_LINE_ITEM</code>
                 and maps them to the fact schema columns.
                 </div>
@@ -822,7 +840,7 @@ with tab_workflow:
         <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:0.82rem">
             <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">⚙️ Admin creates template</div>
             <span style="color:{P['grey_400']}">→</span>
-            <div style="background:{P['purple_lt']};border-radius:6px;padding:4px 10px;font-weight:600;color:{P['purple']}">⏰ INSTANTIATE_RECURRING_TASK</div>
+            <div style="background:{P['purple_lt']};border-radius:6px;padding:4px 10px;font-weight:600;color:{P['purple']}">⏰ External scheduler instantiates</div>
             <span style="color:{P['grey_400']}">→</span>
             <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-weight:600">Inserts ADJ_HEADER (Pending)</div>
             <span style="color:{P['grey_400']}">→</span>
@@ -834,13 +852,13 @@ with tab_workflow:
         </div>
         </div>
         <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:0.4rem">
-        <strong>Key:</strong> Recurring adjustments are fully automatic.
-        <code>INSTANTIATE_RECURRING_TASK</code> checks templates every 5 minutes and creates ADJ_HEADER
-        rows when dependencies are met. The scope pipeline task picks them up within ≤1 minute.
+        <strong>Key:</strong> An <strong>external scheduler</strong> reads
+        <code>ADJ_RECURRING_TEMPLATE</code> and creates ADJ_HEADER rows when each template's
+        dependencies are met. The scope pipeline task then picks them up within ≤1 minute.
         </div>
         """)
 
-    with st.expander("**Scenario 4: Signed-Off COB Rejection**"):
+    with st.expander("**Scenario 3: Signed-Off COB Rejection**"):
         _html(f"""
         <div style="background:{P['grey_100']};border-radius:10px;padding:1rem;margin:0.5rem 0">
         <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:0.82rem">
@@ -859,7 +877,7 @@ with tab_workflow:
         </div>
         """)
 
-    with st.expander("**Scenario 5: Entity Roll (Full Copy)**"):
+    with st.expander("**Scenario 4: Entity Roll (Full Copy)**"):
         _html(f"""
         <div style="background:{P['grey_100']};border-radius:10px;padding:1rem;margin:0.5rem 0">
         <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:0.82rem">
@@ -921,7 +939,7 @@ with tab_processing:
 
     # ── Scale Processing Flow ────────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Scale Path — 3-Way UNION ALL", "📊")
+    section_title("Scale Path — 4-Way UNION ALL", "📊")
 
     _html(f"""
     <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0;overflow-x:auto">
@@ -952,9 +970,9 @@ with tab_processing:
     <div style="display:flex;align-items:center;gap:12px">
         <div style="background:#FFEBEE;border:2px solid {P['primary']};border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;color:{P['primary']};flex-shrink:0">3</div>
         <div style="flex:1">
-            <div style="font-weight:700;font-size:0.88rem">3-Way UNION ALL</div>
+            <div style="font-weight:700;font-size:0.88rem">4-Way UNION ALL</div>
             <div style="font-size:0.78rem;color:{P['grey_700']}">
-                Build a CTE with three branches joined via dimension columns:
+                Build a CTE with four branches joined via dimension columns, netted (SUM) per position:
             </div>
             <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
                 <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-size:0.75rem;font-weight:600">
@@ -962,13 +980,22 @@ with tab_processing:
                     <span style="font-weight:400;color:{P['grey_700']}">FACT × sf_adjusted</span>
                 </div>
                 <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-size:0.75rem;font-weight:600">
-                    ② Cross-COB Scale (Roll)<br/>
-                    <span style="font-weight:400;color:{P['grey_700']}">FACT_ADJ × sf_adjusted</span>
+                    ② Roll — source original<br/>
+                    <span style="font-weight:400;color:{P['grey_700']}">FACT @ source × sf</span>
+                </div>
+                <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-size:0.75rem;font-weight:600">
+                    ②b Roll — source existing adj<br/>
+                    <span style="font-weight:400;color:{P['grey_700']}">FACT_ADJUSTED @ source × sf</span>
                 </div>
                 <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-size:0.75rem;font-weight:600">
-                    ③ Flatten current COB<br/>
+                    ③ Flatten target COB<br/>
                     <span style="font-weight:400;color:{P['grey_700']}">FACT × -1 (removes existing)</span>
                 </div>
+            </div>
+            <div style="font-size:0.72rem;color:{P['grey_700']};margin-top:6px">
+                Branches ② + ②b roll the source COB's <strong>adjusted state</strong>
+                (original + existing adjustments) forward; ③ flattens the target original.
+                Net per position: <code>sf × (original(src) + adj(src))</code>.
             </div>
         </div>
     </div>
@@ -1092,7 +1119,7 @@ with tab_processing:
         <td style="padding:10px 14px;font-weight:600">Roll (cross COB)</td>
         <td style="padding:10px 14px">1.0</td>
         <td style="padding:10px 14px;font-family:monospace;font-weight:700;color:{P['primary']}">sf = 1.0</td>
-        <td style="padding:10px 14px;color:{P['grey_700']}">Copy 100% from source COB → target COB (+ flatten existing)</td>
+        <td style="padding:10px 14px;color:{P['grey_700']}">Roll source COB's adjusted state (original + existing adj) → target COB (+ flatten target original)</td>
     </tr>
     <tr>
         <td style="padding:10px 14px;font-weight:600">Upload / Direct</td>
@@ -1110,8 +1137,9 @@ with tab_processing:
     to add the <em>incremental</em> 0.05× as a delta:
     <code>original + (original × 0.05) = original × 1.05</code>.
     <br/><br/>
-    For cross-COB (Roll), the original data on the target COB may be different,
-    so we flatten it first (branch ③) and then add the full source amount (branch ②).
+    For cross-COB (Roll), we flatten the target original first (branch ③) and then roll in
+    the source COB's full adjusted state — its original (branch ②) plus its existing
+    adjustments (branch ②b) — so the target ends up matching the source's adjusted value.
     </div>
     """)
 
@@ -1125,8 +1153,8 @@ with tab_objects:
     section_title("Complete Object Inventory", "🗄️")
 
     _html(f"""
-    All objects live in database <code>DVLP_RAPTOR_NEWADJ</code>, schema <code>ADJUSTMENT</code>
-    (except target FACT.* tables which are in existing schemas).
+    All objects live in database <code>DVLP_RAPTOR_NEWADJ</code>, schema <code>ADJUSTMENT_APP</code>
+    (except target FACT.* and DIMENSION.* tables which are in existing schemas).
     """)
 
     objects = [
@@ -1135,20 +1163,19 @@ with tab_objects:
         ("ADJ_LINE_ITEM",           "TABLE",           "01_tables.sql",   "Detail rows for Direct/Upload adjustments. Each row = one dimension combination with its adjustment value."),
         ("ADJ_STATUS_HISTORY",      "TABLE",           "01_tables.sql",   "Complete audit trail of every status transition. Append-only."),
         ("ADJUSTMENTS_SETTINGS",    "TABLE",           "01_tables.sql",   "Config: maps each scope to its fact/adjustment tables, metrics, and PKs. Adding a new scope = new row."),
-        ("ADJ_RECURRING_TEMPLATE",  "TABLE",           "01_tables.sql",   "Templates for recurring adjustments. Instantiated by INSTANTIATE_RECURRING_TASK."),
+        ("ADJ_RECURRING_TEMPLATE",  "TABLE",           "01_tables.sql",   "Templates for recurring adjustments. An external scheduler creates ADJ_HEADER rows from these when dependencies are met."),
         ("VW_QUEUE_VAR",            "VIEW",            "02_streams.sql",  "Eligible VaR adjustments: Pending + unblocked. Used by TASK_PROCESS_VAR as its poll target."),
         ("VW_QUEUE_STRESS",         "VIEW",            "02_streams.sql",  "Eligible Stress adjustments: Pending + unblocked."),
         ("VW_QUEUE_FRTB",           "VIEW",            "02_streams.sql",  "Eligible FRTB-pipeline adjustments (all sub-types): Pending + unblocked."),
         ("VW_QUEUE_SENSITIVITY",    "VIEW",            "02_streams.sql",  "Eligible Sensitivity adjustments: Pending + unblocked."),
-        ("SP_SUBMIT_ADJUSTMENT",    "PROCEDURE",       "03_sp_submit.sql","Entry point from Streamlit. Validates JSON, checks sign-off, inserts ADJ_HEADER, sets BLOCKED_BY_ADJ_ID if overlapping."),
-        ("SP_PREVIEW_ADJUSTMENT",   "PROCEDURE",       "04_sp_preview.sql","Read-only preview. Shows CURRENT, ADJUSTMENT, and PROJECTED values. RETURNS TABLE."),
-        ("SP_PROCESS_ADJUSTMENT",   "PROCEDURE",       "05_sp_process.sql","Core engine. Scale path: 3-way UNION ALL + DENSE_RANK overlap + SCD2 fix. Direct path: maps line items to fact schema."),
+        ("SP_SUBMIT_ADJUSTMENT",    "PROCEDURE",       "03_sp_submit_adjustment.sql","Entry point from Streamlit. Validates JSON, checks sign-off, inserts ADJ_HEADER, sets BLOCKED_BY_ADJ_ID if overlapping."),
+        ("SP_PREVIEW_ADJUSTMENT",   "PROCEDURE",       "04_sp_preview_adjustment.sql","Read-only preview. Server-side summary (counts/sums) + on-demand breakdown/sample modes. Roll-aware. RETURNS TABLE."),
+        ("SP_PROCESS_ADJUSTMENT",   "PROCEDURE",       "05_sp_process_adjustment.sql","Core engine. Scale path: 4-way UNION ALL (incl. Roll source adj) + DENSE_RANK overlap + SCD2 fix. Direct path: maps line items to fact schema."),
         ("TASK_PROCESS_VAR",        "TASK",            "06_tasks.sql",    "Polls every 1 min. Calls SP_RUN_PIPELINE for VaR scope. Exits fast when nothing is eligible."),
         ("TASK_PROCESS_STRESS",     "TASK",            "06_tasks.sql",    "Polls every 1 min. Calls SP_RUN_PIPELINE for Stress scope."),
         ("TASK_PROCESS_FRTB",       "TASK",            "06_tasks.sql",    "Polls every 1 min. Calls SP_RUN_PIPELINE for FRTB pipeline (FRTB, FRTBDRC, FRTBRRAO, FRTBALL)."),
         ("TASK_PROCESS_SENSITIVITY","TASK",            "06_tasks.sql",    "Polls every 1 min. Calls SP_RUN_PIPELINE for Sensitivity scope."),
         ("SP_RUN_PIPELINE",         "PROCEDURE",       "05b_sp_run_pipeline.sql", "Pipeline orchestrator. Claims Pending→Running atomically, blocks overlapping adjustments, calls SP_PROCESS_ADJUSTMENT, unblocks resolved adjustments."),
-        ("INSTANTIATE_RECURRING_TASK","TASK",           "06_tasks.sql",    "Runs every 5 min. Creates ADJ_HEADER rows from ADJ_RECURRING_TEMPLATE."),
         ("DT_DASHBOARD",            "DYNAMIC TABLE",   "07_dynamic.sql",  "Pre-aggregated metrics by scope/status/entity/user. 1-min refresh."),
         ("DT_OVERLAP_ALERTS",       "DYNAMIC TABLE",   "07_dynamic.sql",  "Self-join overlap detection with wildcard matching. 1-min refresh."),
         ("ADJ_APPROVERS",           "TABLE",           "01_tables.sql",   "Authorized approvers with optional scope restriction. Managed via Admin → Approvers tab."),
@@ -1264,9 +1291,9 @@ with tab_ops:
         st.markdown(f"""
         1. Go to **⚙️ Admin** → **Recurring Templates** tab
         2. Fill in the template form with the scope, type, and filter dimensions
-        3. The `INSTANTIATE_RECURRING_TASK` will automatically create `ADJ_HEADER` rows
-           each day (every 5 minutes it checks for templates)
-        4. Once created, the `PROCESS_PENDING_TASK` will process them
+        3. An **external scheduler** reads `ADJ_RECURRING_TEMPLATE` and creates `ADJ_HEADER`
+           rows when each template's dependencies are met
+        4. Once created, the per-scope processing task (`TASK_PROCESS_VAR`, etc.) processes them
 
         **Or via SQL:**
         ```sql
@@ -1281,23 +1308,28 @@ with tab_ops:
 
     with st.expander("**How to: Enable/disable tasks**"):
         st.markdown("""
-        Tasks are deployed in a **SUSPENDED** state. To enable:
+        Tasks are deployed in a **SUSPENDED** state. There is one processing task per scope.
+        To enable:
 
         ```sql
-        ALTER TASK ADJUSTMENT_APP.PROCESS_PENDING_TASK       RESUME;
-        ALTER TASK ADJUSTMENT_APP.INSTANTIATE_RECURRING_TASK RESUME;
+        ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_VAR         RESUME;
+        ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS      RESUME;
+        ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB        RESUME;
+        ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY RESUME;
         ```
 
         To suspend (e.g., for maintenance):
         ```sql
-        ALTER TASK ADJUSTMENT_APP.PROCESS_PENDING_TASK       SUSPEND;
-        ALTER TASK ADJUSTMENT_APP.INSTANTIATE_RECURRING_TASK SUSPEND;
+        ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_VAR         SUSPEND;
+        ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS      SUSPEND;
+        ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB        SUSPEND;
+        ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY SUSPEND;
         ```
 
         **Check task history:**
         ```sql
         SELECT * FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
-            TASK_NAME => 'PROCESS_PENDING_TASK',
+            TASK_NAME => 'TASK_PROCESS_VAR',
             SCHEDULED_TIME_RANGE_START => DATEADD('HOUR', -24, CURRENT_TIMESTAMP())
         )) ORDER BY SCHEDULED_TIME DESC;
         ```
