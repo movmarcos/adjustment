@@ -97,9 +97,9 @@ CATEGORY_CONFIG = {
         "icon": "⚖️", "color": "#D50032", "bg": "#FFF0F3",
         "desc": "Scale, flatten or roll fact table data (config-driven)",
     },
-    "VaR Upload": {
-        "icon": "📤", "color": "#6A1B9A", "bg": "#F3E5F5",
-        "desc": "Upload a CSV with 21 VaR measure columns for direct insertion",
+    "Direct Adjustment": {
+        "icon": "📥", "color": "#6A1B9A", "bg": "#F3E5F5",
+        "desc": "Upload exact adjustment values for a chosen scope (CSV)",
     },
     "Entity Roll": {
         "icon": "🔄", "color": "#E65100", "bg": "#FFF3E0",
