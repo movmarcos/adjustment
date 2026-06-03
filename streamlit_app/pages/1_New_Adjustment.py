@@ -949,8 +949,8 @@ if wiz["step"] == 1:
 
     if not wiz["category"]:
         st.info("👆 Select an adjustment category to continue.")
-    elif wiz["category"] == "VaR Upload":
-        render_var_upload_form()
+    elif wiz["category"] == "Direct Adjustment":
+        render_direct_form()
     elif wiz["category"] == "Entity Roll":
         render_entity_roll_form()
     else:
@@ -966,14 +966,15 @@ elif wiz["step"] == 2:
     section_title("Adjustment Summary", "📋")
 
     # ── Summary banner ────────────────────────────────────────────────────
-    if cat == "VaR Upload":
+    if cat == "Direct Adjustment":
         df_up     = wiz.get("uploaded_df")
         row_count = len(df_up) if df_up is not None else 0
         st.markdown(
             f'<div class="mcard">'
             f'<div style="display:flex;gap:16px;align-items:center">'
             f'<span style="font-size:2rem">📤</span>'
-            f'<div><div style="font-weight:700;font-size:1.1rem">VaR Upload</div>'
+            f'<div><div style="font-weight:700;font-size:1.1rem">'
+            f'{wiz.get("process_type","")} — Direct</div>'
             f'<div style="font-size:0.85rem;color:{P["grey_700"]}">'
             f'Ref: {wiz.get("global_reference","?")} · '
             f'File: {wiz.get("uploaded_file_name","?")} · '
