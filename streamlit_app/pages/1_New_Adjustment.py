@@ -321,6 +321,37 @@ EXPECTED_VAR_COLS = [
 ] + VAR_MEASURE_COLS + ["Category", "Detail"]
 
 
+# ── Direct Adjustment: per-scope CSV config ──────────────────────────────────
+# Each scope will eventually define its own CSV columns + line-item writer.
+# TODO: replace the placeholder entries below with each scope's real columns and
+#       a scope-specific writer. For now every scope reuses the VaR definitions,
+#       so Direct uploads are only end-to-end correct for VaR.
+_DIRECT_VAR_ENTRY = {
+    "expected": EXPECTED_VAR_COLS,
+    "measures": VAR_MEASURE_COLS,
+    "writer":   _write_var_upload_line_items,
+}
+DIRECT_SCOPE_CONFIG = {
+    "VaR":         _DIRECT_VAR_ENTRY,
+    "Stress":      _DIRECT_VAR_ENTRY,   # TODO: Stress-specific columns + writer
+    "Sensitivity": _DIRECT_VAR_ENTRY,   # TODO: Sensitivity-specific columns + writer
+    "FRTB":        _DIRECT_VAR_ENTRY,   # TODO: FRTB-specific columns + writer
+    "FRTBDRC":     _DIRECT_VAR_ENTRY,   # TODO: FRTBDRC-specific columns + writer
+    "FRTBRRAO":    _DIRECT_VAR_ENTRY,   # TODO: FRTBRRAO-specific columns + writer
+    # No FRTBALL — fan-out is not applicable to direct value uploads.
+}
+
+
+def _direct_cfg(scope: str) -> dict:
+    """Per-scope Direct config; falls back to VaR while scopes are placeholders."""
+    return DIRECT_SCOPE_CONFIG.get(scope) or _DIRECT_VAR_ENTRY
+
+
+def _write_direct_line_items(scope: str, adj_id: str, df_csv) -> int:
+    """Write Direct-upload line items for a scope using its configured writer."""
+    return _direct_cfg(scope)["writer"](adj_id, df_csv)
+
+
 def render_var_upload_form() -> None:
     section_title("VaR Upload — CSV File", "📤")
     _info_banner(
