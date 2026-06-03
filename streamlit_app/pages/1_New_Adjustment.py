@@ -76,7 +76,7 @@ _WIZ_DEFAULTS: dict = {
     "murex_group":            None,
     "reason":                 "",
     "requires_approval":      False,
-    # VaR Upload
+    # Direct Adjustment upload
     "global_reference":       None,
     "uploaded_file_name":     None,
     "uploaded_df":            None,
@@ -266,7 +266,7 @@ def _do_submit() -> dict:
     try:
         payload = _build_payload()
 
-        # For VaR Upload: write line items BEFORE the SP call so that
+        # For Direct Adjustment: write line items BEFORE the SP call so that
         # navigating away can't interrupt the write. Pre-generate the
         # ADJ_ID so both line items and header share the same ID.
         if wiz.get("category") == "Direct Adjustment" and wiz.get("uploaded_df") is not None:
@@ -305,7 +305,7 @@ def _missing_info(fields: list) -> None:
         st.info(f"Complete required fields: **{', '.join(fields)}**")
 
 
-# ── VaR Upload ────────────────────────────────────────────────────────────────
+# ── VaR column definitions (reused by Direct Adjustment for all scopes for now) ──
 
 VAR_MEASURE_COLS = [
     "AllVaR", "AllVaRSkew", "BasisVaR", "BondAssetSpreadVaR",
@@ -972,7 +972,7 @@ elif wiz["step"] == 2:
         st.markdown(
             f'<div class="mcard">'
             f'<div style="display:flex;gap:16px;align-items:center">'
-            f'<span style="font-size:2rem">📤</span>'
+            f'<span style="font-size:2rem">📥</span>'
             f'<div><div style="font-weight:700;font-size:1.1rem">'
             f'{wiz.get("process_type","")} — Direct</div>'
             f'<div style="font-size:0.85rem;color:{P["grey_700"]}">'
