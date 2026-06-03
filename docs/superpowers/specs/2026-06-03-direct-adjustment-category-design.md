@@ -52,13 +52,18 @@ to update later.
 Extract the Scaling form's scope-card + FRTB sub-type block into a reusable helper:
 
 ```python
-def _render_scope_selector() -> None:
+def _render_scope_selector(include_frtball: bool = True) -> None:
     """Render scope cards (VaR/Stress/FRTB/Sensitivity) + FRTB sub-type selector.
-    Sets wiz['process_type']. Shared by Scaling and Direct Adjustment forms."""
+    Sets wiz['process_type']. Shared by Scaling and Direct Adjustment forms.
+    include_frtball=False hides the FRTBALL sub-type (used by Direct Adjustment —
+    a fan-out tag makes no sense when uploading explicit values)."""
 ```
 
-`render_scaling_form()` calls it in place of its inline block; `render_direct_form()` reuses it.
-Behaviour (FRTB → sub-type selection, `safe_rerun` on click) is unchanged.
+`render_scaling_form()` calls it as `_render_scope_selector()` (FRTBALL kept);
+`render_direct_form()` calls it as `_render_scope_selector(include_frtball=False)`.
+When `include_frtball` is False the FRTB sub-type selector offers only
+`FRTB`, `FRTBDRC`, `FRTBRRAO`. Behaviour (FRTB → sub-type selection, `safe_rerun`
+on click) is otherwise unchanged.
 
 ### 3. Per-scope CSV configuration (the "update later" hook)
 
@@ -72,7 +77,7 @@ DIRECT_SCOPE_CONFIG = {
     "FRTB":        {... same as VaR (placeholder) ...},
     "FRTBDRC":     {... same as VaR (placeholder) ...},
     "FRTBRRAO":    {... same as VaR (placeholder) ...},
-    "FRTBALL":     {... same as VaR (placeholder) ...},
+    # NOTE: no FRTBALL — fan-out is not applicable to direct value uploads.
 }
 ```
 
@@ -86,7 +91,7 @@ def _write_direct_line_items(scope: str, adj_id: str, df_csv) -> int:
 
 ### 4. `render_direct_form()` (replaces `render_var_upload_form`)
 
-1. `_render_scope_selector()`; if no `process_type`, show "select a scope" and return.
+1. `_render_scope_selector(include_frtball=False)`; if no `process_type`, show "select a scope" and return.
 2. Look up `cfg = DIRECT_SCOPE_CONFIG[scope]`. Show an info banner listing `cfg["expected"]`.
 3. CSV paste `text_area` → `pd.read_csv` → `wiz["uploaded_df"]` (reuse the VaR parse: row/column
    metrics, head preview, missing/extra-column warnings vs `cfg["expected"]`).
