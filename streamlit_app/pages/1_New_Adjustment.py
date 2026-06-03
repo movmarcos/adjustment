@@ -1023,8 +1023,21 @@ elif wiz["step"] == 2:
                     preview_json[key] = str(val).strip()
 
             def _fmt(v):
-                try:    return f"{float(v):,.0f}"
-                except: return "—"
+                """Compact money formatting (K/M/B/T) so big totals fit the metric cards."""
+                try:
+                    n = float(v)
+                except (TypeError, ValueError):
+                    return "—"
+                a = abs(n)
+                for div, suf in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+                    if a >= div:
+                        return f"{n / div:,.2f}{suf}"
+                return f"{n:,.0f}"
+
+            def _fmt_full(v):
+                """Exact value with thousands separators — shown on hover."""
+                try:    return f"{float(v):,.2f}"
+                except (TypeError, ValueError): return "—"
 
             try:
                 # Summary is a single server-side aggregated row — safe at any
@@ -1050,9 +1063,12 @@ elif wiz["step"] == 2:
                         m1, m2, m3, m4, m5 = st.columns(5)
                         m1.metric("Rows Affected",    f"{total_rows:,}")
                         m2.metric("Non-zero Rows",    f"{nonzero:,}")
-                        m3.metric("Total Original",   _fmt(srow["TOTAL_CURRENT_VALUE"]))
-                        m4.metric("Total Adjustment", _fmt(srow["TOTAL_ADJUSTMENT_DELTA"]))
-                        m5.metric("Total Projected",  _fmt(srow["TOTAL_PROJECTED_VALUE"]))
+                        m3.metric("Total Original",   _fmt(srow["TOTAL_CURRENT_VALUE"]),
+                                  help=_fmt_full(srow["TOTAL_CURRENT_VALUE"]))
+                        m4.metric("Total Adjustment", _fmt(srow["TOTAL_ADJUSTMENT_DELTA"]),
+                                  help=_fmt_full(srow["TOTAL_ADJUSTMENT_DELTA"]))
+                        m5.metric("Total Projected",  _fmt(srow["TOTAL_PROJECTED_VALUE"]),
+                                  help=_fmt_full(srow["TOTAL_PROJECTED_VALUE"]))
 
                         st.markdown("<br/>", unsafe_allow_html=True)
 
