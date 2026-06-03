@@ -554,7 +554,13 @@ FRTB_SUBTYPE_CONFIG = {
 }
 
 
-def render_scaling_form() -> None:
+def _render_scope_selector(include_frtball: bool = True) -> None:
+    """Scope cards (VaR/Stress/FRTB/Sensitivity) + FRTB sub-type selector.
+
+    Sets wiz['process_type']. Shared by the Scaling and Direct Adjustment forms.
+    include_frtball=False hides the FRTBALL sub-type (Direct Adjustment uploads
+    explicit values, so the fan-out tag does not apply).
+    """
     # ── Scope cards ───────────────────────────────────────────────────────
     section_title("Data Scope", "🔍")
     scope_cols = st.columns(len(SCOPE_CONFIG))
@@ -583,8 +589,10 @@ def render_scaling_form() -> None:
             f'font-size:0.82rem;color:{P["success"]}">'
             f'🏛️ <strong>FRTB selected</strong> — choose a sub-type</div>',
             unsafe_allow_html=True)
-        sub_cols = st.columns(len(FRTB_SUBTYPE_CONFIG))
-        for i, (stk, stdesc) in enumerate(FRTB_SUBTYPE_CONFIG.items()):
+        subtypes = {k: v for k, v in FRTB_SUBTYPE_CONFIG.items()
+                    if include_frtball or k != "FRTBALL"}
+        sub_cols = st.columns(len(subtypes))
+        for i, (stk, stdesc) in enumerate(subtypes.items()):
             with sub_cols[i]:
                 is_sub = wiz["process_type"] == stk
                 st.markdown(
@@ -599,6 +607,11 @@ def render_scaling_form() -> None:
                              type="primary" if is_sub else "secondary"):
                     wiz["process_type"] = stk
                     safe_rerun()
+
+
+def render_scaling_form() -> None:
+    # ── Scope selection (shared with Direct Adjustment) ───────────────────
+    _render_scope_selector()
 
     st.divider()
     if not wiz["process_type"]:
