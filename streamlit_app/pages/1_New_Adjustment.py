@@ -76,7 +76,7 @@ _WIZ_DEFAULTS: dict = {
     "murex_group":            None,
     "reason":                 "",
     "requires_approval":      False,
-    # VaR Upload
+    # Direct Adjustment upload
     "global_reference":       None,
     "uploaded_file_name":     None,
     "uploaded_df":            None,
@@ -109,11 +109,11 @@ wiz: dict = st.session_state["wiz"]
 def _build_payload() -> dict:
     cat = wiz.get("category")
 
-    if cat == "VaR Upload":
+    if cat == "Direct Adjustment":
         return {
             "cobid":                 wiz["cobid"],
-            "process_type":          "VaR",
-            "adjustment_type":       "Upload",
+            "process_type":          wiz["process_type"],
+            "adjustment_type":       "Direct",
             "username":              current_user_name(),
             "source_cobid":          wiz["cobid"],
             "reason":                wiz.get("reason", ""),
@@ -266,16 +266,16 @@ def _do_submit() -> dict:
     try:
         payload = _build_payload()
 
-        # For VaR Upload: write line items BEFORE the SP call so that
+        # For Direct Adjustment: write line items BEFORE the SP call so that
         # navigating away can't interrupt the write. Pre-generate the
         # ADJ_ID so both line items and header share the same ID.
-        if wiz.get("category") == "VaR Upload" and wiz.get("uploaded_df") is not None:
+        if wiz.get("category") == "Direct Adjustment" and wiz.get("uploaded_df") is not None:
             adj_id = str(_uuid.uuid4())
             payload["adj_id"] = adj_id
-            n = _write_var_upload_line_items(adj_id, wiz["uploaded_df"])
+            n = _write_direct_line_items(wiz["process_type"], adj_id, wiz["uploaded_df"])
             if n == 0:
                 return {"status": "Error",
-                        "message": "No non-zero VaR values found in CSV data"}
+                        "message": "No non-zero values found in CSV data"}
 
         json_str = json.dumps(payload).replace("'", "\\'")
         rows = run_query(f"CALL ADJUSTMENT_APP.SP_SUBMIT_ADJUSTMENT('{json_str}')")
@@ -305,7 +305,7 @@ def _missing_info(fields: list) -> None:
         st.info(f"Complete required fields: **{', '.join(fields)}**")
 
 
-# ── VaR Upload ────────────────────────────────────────────────────────────────
+# ── VaR column definitions (reused by Direct Adjustment for all scopes for now) ──
 
 VAR_MEASURE_COLS = [
     "AllVaR", "AllVaRSkew", "BasisVaR", "BondAssetSpreadVaR",
@@ -321,17 +321,57 @@ EXPECTED_VAR_COLS = [
 ] + VAR_MEASURE_COLS + ["Category", "Detail"]
 
 
-def render_var_upload_form() -> None:
-    section_title("VaR Upload — CSV File", "📤")
+# ── Direct Adjustment: per-scope CSV config ──────────────────────────────────
+# Each scope will eventually define its own CSV columns + line-item writer.
+# TODO: replace the placeholder entries below with each scope's real columns and
+#       a scope-specific writer. For now every scope reuses the VaR definitions,
+#       so Direct uploads are only end-to-end correct for VaR.
+_DIRECT_VAR_ENTRY = {
+    "expected": EXPECTED_VAR_COLS,
+    "measures": VAR_MEASURE_COLS,
+    "writer":   _write_var_upload_line_items,
+}
+DIRECT_SCOPE_CONFIG = {
+    "VaR":         _DIRECT_VAR_ENTRY,
+    "Stress":      _DIRECT_VAR_ENTRY,   # TODO: Stress-specific columns + writer
+    "Sensitivity": _DIRECT_VAR_ENTRY,   # TODO: Sensitivity-specific columns + writer
+    "FRTB":        _DIRECT_VAR_ENTRY,   # TODO: FRTB-specific columns + writer
+    "FRTBDRC":     _DIRECT_VAR_ENTRY,   # TODO: FRTBDRC-specific columns + writer
+    "FRTBRRAO":    _DIRECT_VAR_ENTRY,   # TODO: FRTBRRAO-specific columns + writer
+    # No FRTBALL — fan-out is not applicable to direct value uploads.
+}
+
+
+def _direct_cfg(scope: str) -> dict:
+    """Per-scope Direct config; falls back to VaR while scopes are placeholders."""
+    return DIRECT_SCOPE_CONFIG.get(scope) or _DIRECT_VAR_ENTRY
+
+
+def _write_direct_line_items(scope: str, adj_id: str, df_csv) -> int:
+    """Write Direct-upload line items for a scope using its configured writer."""
+    return _direct_cfg(scope)["writer"](adj_id, df_csv)
+
+
+def render_direct_form() -> None:
+    # ── Scope selection (FRTBALL excluded — no fan-out for direct values) ──
+    _render_scope_selector(include_frtball=False)
+
+    st.divider()
+    if not wiz["process_type"]:
+        st.info("👆 Select a data scope to continue.")
+        return
+
+    cfg          = _direct_cfg(wiz["process_type"])
+    expected_cols = cfg["expected"]
+
+    section_title(f"Direct Adjustment — {wiz['process_type']} CSV", "📥")
     _info_banner(
-        'Upload a VaR adjustment CSV containing the 21 VaR measure columns. '
-        'Expected columns: <code>COBId, EntityCode, SourceSystemCode, BookCode, '
-        'CurrencyCode, ScenarioDate, TradeCode, AllVaR … ParCreditSpreadVaR, '
-        'Category, Detail</code>.')
+        'Paste a CSV of exact adjustment values. Expected columns: '
+        '<code>' + ', '.join(expected_cols) + '</code>.')
 
     csv_text = st.text_area(
-        "Paste VaR CSV Data Here", value="", height=180, key=_k("var_csv"),
-        help="Paste the full CSV content including header row.")
+        "Paste CSV Data Here", value="", height=180, key=_k("direct_csv"),
+        help="Paste the full CSV content including the header row.")
 
     if csv_text.strip():
         try:
@@ -340,8 +380,8 @@ def render_var_upload_form() -> None:
             wiz["uploaded_file_name"] = f"CSV_Pasted_{len(df)}_rows.csv"
             wiz["uploaded_df"]        = df
 
-            missing_cols = [c for c in EXPECTED_VAR_COLS if c not in df.columns]
-            extra_cols   = [c for c in df.columns   if c not in EXPECTED_VAR_COLS]
+            missing_cols = [c for c in expected_cols if c not in df.columns]
+            extra_cols   = [c for c in df.columns    if c not in expected_cols]
             if missing_cols:
                 st.warning(f"Missing expected columns: {', '.join(missing_cols)}")
             if extra_cols:
@@ -387,7 +427,7 @@ def render_var_upload_form() -> None:
         wiz["global_reference"] = ref_val.strip()
 
     wiz["reason"] = st.text_area(
-        "Reason / Business Justification", value=wiz.get("reason", ""),
+        "Reason / Business Justification *", value=wiz.get("reason", ""),
         height=60, key=_k("var_reason"))
     wiz["requires_approval"] = st.checkbox(
         "🔐 Requires Approval", value=wiz.get("requires_approval", False),
@@ -430,10 +470,12 @@ def render_var_upload_form() -> None:
 
     st.markdown("<br/>", unsafe_allow_html=True)
     _checks = [
+        ("Scope",        bool(wiz.get("process_type"))),
         ("CSV Data",     wiz.get("uploaded_df") is not None),
         ("COB Date",     bool(wiz.get("cobid"))),
         ("Entity Code",  bool(wiz.get("entity_code"))),
         ("Reference",    bool(wiz.get("global_reference"))),
+        ("Reason",       bool((wiz.get("reason") or "").strip())),
     ]
     missing = [f for f, present in _checks if not present]
     if missing:
@@ -448,9 +490,7 @@ def render_var_upload_form() -> None:
 
         if confirmed:
             if st.button("Continue → Preview", type="primary",
-                         use_container_width=True, key=_k("var_continue")):
-                wiz["process_type"]    = "VaR"
-                wiz["adjustment_type"] = "Upload"
+                         use_container_width=True, key=_k("direct_continue")):
                 wiz["step"] = 2
                 safe_rerun()
 
@@ -554,7 +594,13 @@ FRTB_SUBTYPE_CONFIG = {
 }
 
 
-def render_scaling_form() -> None:
+def _render_scope_selector(include_frtball: bool = True) -> None:
+    """Scope cards (VaR/Stress/FRTB/Sensitivity) + FRTB sub-type selector.
+
+    Sets wiz['process_type']. Shared by the Scaling and Direct Adjustment forms.
+    include_frtball=False hides the FRTBALL sub-type (Direct Adjustment uploads
+    explicit values, so the fan-out tag does not apply).
+    """
     # ── Scope cards ───────────────────────────────────────────────────────
     section_title("Data Scope", "🔍")
     scope_cols = st.columns(len(SCOPE_CONFIG))
@@ -583,8 +629,10 @@ def render_scaling_form() -> None:
             f'font-size:0.82rem;color:{P["success"]}">'
             f'🏛️ <strong>FRTB selected</strong> — choose a sub-type</div>',
             unsafe_allow_html=True)
-        sub_cols = st.columns(len(FRTB_SUBTYPE_CONFIG))
-        for i, (stk, stdesc) in enumerate(FRTB_SUBTYPE_CONFIG.items()):
+        subtypes = {k: v for k, v in FRTB_SUBTYPE_CONFIG.items()
+                    if include_frtball or k != "FRTBALL"}
+        sub_cols = st.columns(len(subtypes))
+        for i, (stk, stdesc) in enumerate(subtypes.items()):
             with sub_cols[i]:
                 is_sub = wiz["process_type"] == stk
                 st.markdown(
@@ -599,6 +647,11 @@ def render_scaling_form() -> None:
                              type="primary" if is_sub else "secondary"):
                     wiz["process_type"] = stk
                     safe_rerun()
+
+
+def render_scaling_form() -> None:
+    # ── Scope selection (shared with Direct Adjustment) ───────────────────
+    _render_scope_selector()
 
     st.divider()
     if not wiz["process_type"]:
@@ -896,8 +949,8 @@ if wiz["step"] == 1:
 
     if not wiz["category"]:
         st.info("👆 Select an adjustment category to continue.")
-    elif wiz["category"] == "VaR Upload":
-        render_var_upload_form()
+    elif wiz["category"] == "Direct Adjustment":
+        render_direct_form()
     elif wiz["category"] == "Entity Roll":
         render_entity_roll_form()
     else:
@@ -913,14 +966,15 @@ elif wiz["step"] == 2:
     section_title("Adjustment Summary", "📋")
 
     # ── Summary banner ────────────────────────────────────────────────────
-    if cat == "VaR Upload":
+    if cat == "Direct Adjustment":
         df_up     = wiz.get("uploaded_df")
         row_count = len(df_up) if df_up is not None else 0
         st.markdown(
             f'<div class="mcard">'
             f'<div style="display:flex;gap:16px;align-items:center">'
-            f'<span style="font-size:2rem">📤</span>'
-            f'<div><div style="font-weight:700;font-size:1.1rem">VaR Upload</div>'
+            f'<span style="font-size:2rem">📥</span>'
+            f'<div><div style="font-weight:700;font-size:1.1rem">'
+            f'{wiz.get("process_type","")} — Direct</div>'
             f'<div style="font-size:0.85rem;color:{P["grey_700"]}">'
             f'Ref: {wiz.get("global_reference","?")} · '
             f'File: {wiz.get("uploaded_file_name","?")} · '
