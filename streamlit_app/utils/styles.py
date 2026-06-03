@@ -73,7 +73,7 @@ SCOPE_CONFIG = {
 TYPE_CONFIG = {
     "Flatten": {"icon": "🔴", "desc": "Zero out matching positions", "formula": "new = original × 0"},
     "Scale":   {"icon": "📊", "desc": "Multiply by a scale factor", "formula": "new = original × sf"},
-    "Roll":    {"icon": "🔄", "desc": "Copy from prior COB and scale", "formula": "new = prior × sf"},
+    "Roll":    {"icon": "🔄", "desc": "Roll prior COB's adjusted state forward", "formula": "new = (prior + prior_adj) × sf"},
 }
 
 # ── Lifecycle stage colours (used by tracker board and lifecycle bar) ───────

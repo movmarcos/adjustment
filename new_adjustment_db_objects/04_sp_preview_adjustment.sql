@@ -71,8 +71,14 @@ def main(session, p_adjustment):
 
     s = settings_row[0]
     fact_tbl     = s["FACT_TABLE"]
+    fact_adj_tbl = s["FACT_ADJUSTED_TABLE"] if "FACT_ADJUSTED_TABLE" in s else None
     metric_name  = s["METRIC_NAME"].upper()
     metric_usd   = s["METRIC_USD_NAME"].upper()
+
+    # A cross-COB Roll rolls the SOURCE cob's *adjusted* state (original +
+    # existing adjustments) forward onto the target cob. The preview must mirror
+    # SP_PROCESS_ADJUSTMENT: current = target original, projected = source adjusted.
+    is_roll = (adjustment_type == "roll" and int(source_cobid) != int(cobid))
 
     # ── Discover which columns actually exist in the fact table ──────────
     fact_columns = get_table_columns(session, fact_tbl)
@@ -112,35 +118,18 @@ def main(session, p_adjustment):
             ORDER BY li.LINE_ID
         """)
 
-    # ── Build SELECT columns dynamically ─────────────────────────────────
-    select_parts = []
-    join_parts   = []
+    # ── Preview mode ─────────────────────────────────────────────────────
+    # summary   : ONE aggregated row (count + sums). No row transfer — safe
+    #             at any scale. This is the default and what the metric cards use.
+    # breakdown : server-side GROUP BY entity/book/department (small result).
+    # sample    : up to 1,000 row-level rows (LIMIT enforced server-side).
+    # Older callers that omit "mode" get the summary, which never crashes.
+    mode = str(adj.get("mode", "summary")).lower()
 
-    if has_entity_key:
-        select_parts.append("e.ENTITY_CODE")
-        join_parts.append("LEFT JOIN DIMENSION.ENTITY e ON e.ENTITY_KEY = fact.ENTITY_KEY")
-    if has_book_key:
-        select_parts.append("b.BOOK_CODE")
-        select_parts.append("b.DEPARTMENT_CODE")
-        join_parts.append("LEFT JOIN DIMENSION.BOOK b ON b.BOOK_KEY = fact.BOOK_KEY")
-    if has_currency:
-        select_parts.append("fact.CURRENCY_CODE")
-    if has_source_sys:
-        select_parts.append("fact.SOURCE_SYSTEM_CODE")
-
-    # Primary metric (USD or whichever exists)
-    select_parts.append(f"fact.{primary_metric} AS CURRENT_VALUE")
-    select_parts.append(f"fact.{primary_metric} * {sf_adjusted} AS ADJUSTMENT_DELTA")
-    select_parts.append(f"fact.{primary_metric} + (fact.{primary_metric} * {sf_adjusted}) AS PROJECTED_VALUE")
-
-    # Local currency metric (only if it exists AND is different from USD)
-    if has_metric_local:
-        select_parts.append(f"fact.{metric_name} AS CURRENT_VALUE_LOCAL")
-        select_parts.append(f"fact.{metric_name} * {sf_adjusted} AS ADJUSTMENT_LOCAL")
-        select_parts.append(f"fact.{metric_name} + (fact.{metric_name} * {sf_adjusted}) AS PROJECTED_VALUE_LOCAL")
-
-    select_sql = ",\n        ".join(select_parts)
-    join_sql   = "\n    ".join(join_parts)
+    # Metric expressions reused by every mode
+    m_cur  = f"fact.{primary_metric}"
+    m_del  = f"fact.{primary_metric} * {sf_adjusted}"
+    m_proj = f"fact.{primary_metric} + (fact.{primary_metric} * {sf_adjusted})"
 
     # ── Build WHERE filters ──────────────────────────────────────────────
     fact_source = fact_tbl
@@ -196,15 +185,147 @@ def main(session, p_adjustment):
             )
 
     where_sql = "\n      AND ".join(where_clauses)
+    base_where = f"WHERE {where_sql}\n      AND fact.{primary_metric} IS NOT NULL"
+
+    # ═════════════════════════════════════════════════════════════════════
+    # CROSS-COB ROLL — special preview
+    # The generic single-table scan cannot represent a Roll, which replaces the
+    # target cob's value with the SOURCE cob's adjusted state. Mirror
+    # SP_PROCESS_ADJUSTMENT exactly:
+    #   current   = SUM(original) at the TARGET cob   (what gets flattened)
+    #   projected = factor × ( SUM(original) + SUM(existing adj) ) at the SOURCE cob
+    #   delta     = projected − current
+    # where_clauses[0] is the COBID predicate; the rest are dimension filters
+    # that apply (alias `fact`) to the original AND adjusted source tables.
+    # ═════════════════════════════════════════════════════════════════════
+    if is_roll:
+        dim_filters = where_clauses[1:]
+        dim_sql     = ("\n      AND " + "\n      AND ".join(dim_filters)) if dim_filters else ""
+        src_where   = f"WHERE fact.COBID = {int(source_cobid)}{dim_sql}\n      AND fact.{primary_metric} IS NOT NULL"
+        tgt_where   = f"WHERE fact.COBID = {int(cobid)}{dim_sql}\n      AND fact.{primary_metric} IS NOT NULL"
+
+        has_adj_tbl = bool(fact_adj_tbl) and fact_adj_tbl != fact_tbl
+        adj_sum = (f"+ COALESCE((SELECT COALESCE(SUM(fact.{primary_metric}), 0) "
+                   f"FROM {fact_adj_tbl} fact {src_where}), 0)") if has_adj_tbl else ""
+
+        if mode in ("summary", "breakdown", "sample"):
+            roll_summary = f"""
+            SELECT
+                ROWS_AFFECTED,
+                NONZERO_ROWS,
+                TOTAL_CURRENT_VALUE,
+                TOTAL_PROJECTED_VALUE - TOTAL_CURRENT_VALUE AS TOTAL_ADJUSTMENT_DELTA,
+                TOTAL_PROJECTED_VALUE
+            FROM (
+                SELECT
+                    (SELECT COUNT(*)
+                       FROM {fact_tbl} fact {src_where})                       AS ROWS_AFFECTED,
+                    (SELECT COUNT_IF(fact.{primary_metric} != 0)
+                       FROM {fact_tbl} fact {src_where})                       AS NONZERO_ROWS,
+                    (SELECT COALESCE(SUM(fact.{primary_metric}), 0)
+                       FROM {fact_tbl} fact {tgt_where})                       AS TOTAL_CURRENT_VALUE,
+                    {scale_factor} * (
+                        (SELECT COALESCE(SUM(fact.{primary_metric}), 0)
+                           FROM {fact_tbl} fact {src_where})
+                        {adj_sum}
+                    )                                                          AS TOTAL_PROJECTED_VALUE
+            ) q
+            """
+            return session.sql(roll_summary)
+
+    # ── MODE: summary — single aggregated row, NO row transfer ───────────
+    # The dimension filters above use EXISTS sub-queries, so no joins are
+    # needed here. This runs as a server-side aggregate and returns one row
+    # regardless of how many fact rows match — the fix for large-scope
+    # (e.g. entity + department) adjustments that previously OOM'd the app.
+    if mode == "summary":
+        summary_sql = f"""
+        SELECT
+            COUNT(*)                        AS ROWS_AFFECTED,
+            COUNT_IF({m_cur} != 0)          AS NONZERO_ROWS,
+            COALESCE(SUM({m_cur}),  0)      AS TOTAL_CURRENT_VALUE,
+            COALESCE(SUM({m_del}),  0)      AS TOTAL_ADJUSTMENT_DELTA,
+            COALESCE(SUM({m_proj}), 0)      AS TOTAL_PROJECTED_VALUE
+        FROM {fact_source} fact
+        {base_where}
+        """
+        return session.sql(summary_sql)
+
+    # ── MODE: breakdown — server-side GROUP BY dimensions ────────────────
+    if mode == "breakdown":
+        dim_parts  = []
+        join_parts = []
+        if has_entity_key:
+            dim_parts.append("e.ENTITY_CODE")
+            join_parts.append("LEFT JOIN DIMENSION.ENTITY e ON e.ENTITY_KEY = fact.ENTITY_KEY")
+        if has_book_key:
+            dim_parts.append("b.BOOK_CODE")
+            dim_parts.append("b.DEPARTMENT_CODE")
+            join_parts.append("LEFT JOIN DIMENSION.BOOK b ON b.BOOK_KEY = fact.BOOK_KEY")
+        if not dim_parts:
+            dim_parts = ["'ALL' AS SCOPE"]
+
+        dim_sql  = ",\n            ".join(dim_parts)
+        join_sql = "\n    ".join(join_parts)
+        group_by = ", ".join(str(i + 1) for i in range(len(dim_parts)))
+
+        breakdown_sql = f"""
+        SELECT
+            {dim_sql},
+            COUNT(*)                        AS ROWS_AFFECTED,
+            COALESCE(SUM({m_cur}),  0)      AS CURRENT_VALUE,
+            COALESCE(SUM({m_del}),  0)      AS ADJUSTMENT_DELTA,
+            COALESCE(SUM({m_proj}), 0)      AS PROJECTED_VALUE
+        FROM {fact_source} fact
+        {join_sql}
+        {base_where}
+        GROUP BY {group_by}
+        ORDER BY {group_by}
+        """
+        return session.sql(breakdown_sql)
+
+    # ── MODE: sample — bounded row-level rows (default cap 1,000) ─────────
+    select_parts = []
+    join_parts   = []
+
+    if has_entity_key:
+        select_parts.append("e.ENTITY_CODE")
+        join_parts.append("LEFT JOIN DIMENSION.ENTITY e ON e.ENTITY_KEY = fact.ENTITY_KEY")
+    if has_book_key:
+        select_parts.append("b.BOOK_CODE")
+        select_parts.append("b.DEPARTMENT_CODE")
+        join_parts.append("LEFT JOIN DIMENSION.BOOK b ON b.BOOK_KEY = fact.BOOK_KEY")
+    if has_currency:
+        select_parts.append("fact.CURRENCY_CODE")
+    if has_source_sys:
+        select_parts.append("fact.SOURCE_SYSTEM_CODE")
+
+    select_parts.append(f"{m_cur} AS CURRENT_VALUE")
+    select_parts.append(f"{m_del} AS ADJUSTMENT_DELTA")
+    select_parts.append(f"{m_proj} AS PROJECTED_VALUE")
+
+    if has_metric_local:
+        select_parts.append(f"fact.{metric_name} AS CURRENT_VALUE_LOCAL")
+        select_parts.append(f"fact.{metric_name} * {sf_adjusted} AS ADJUSTMENT_LOCAL")
+        select_parts.append(f"fact.{metric_name} + (fact.{metric_name} * {sf_adjusted}) AS PROJECTED_VALUE_LOCAL")
+
+    select_sql = ",\n        ".join(select_parts)
+    join_sql   = "\n    ".join(join_parts)
+
+    try:
+        sample_limit = int(adj.get("sample_limit", 1000))
+    except (TypeError, ValueError):
+        sample_limit = 1000
+    sample_limit = max(1, min(sample_limit, 10000))
 
     preview_sql = f"""
     SELECT
         {select_sql}
     FROM {fact_source} fact
     {join_sql}
-    WHERE {where_sql}
-      AND fact.{primary_metric} IS NOT NULL
+    {base_where}
     ORDER BY ABS(fact.{primary_metric}) DESC
+    LIMIT {sample_limit}
     """
 
     return session.sql(preview_sql)

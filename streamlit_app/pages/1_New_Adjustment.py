@@ -367,12 +367,12 @@ def render_var_upload_form() -> None:
     st.divider()
     g1, g2 = st.columns(2)
     with g1:
-        cobid_val = st.text_input("COB Date (auto-detected)", key=_k("var_cobid"),
+        cobid_val = st.text_input("COB Date (auto-detected) *", key=_k("var_cobid"),
                                    value=str(wiz.get("cobid") or ""))
         if cobid_val.strip().isdigit():
             wiz["cobid"] = int(cobid_val.strip())
     with g2:
-        entity_val = st.text_input("Entity Code (auto-detected)", key=_k("var_entity"),
+        entity_val = st.text_input("Entity Code (auto-detected) *", key=_k("var_entity"),
                                     value=wiz.get("entity_code") or "")
         if entity_val.strip():
             wiz["entity_code"] = entity_val.strip()
@@ -527,7 +527,9 @@ def render_entity_roll_form() -> None:
     missing = [f for f, v in [("Scope", wiz.get("process_type")),
                                ("Target COB", wiz.get("cobid")),
                                ("Source COB", wiz.get("source_cobid")),
-                               ("Entity Code", (wiz.get("entity_code") or "").strip())] if not v]
+                               ("Entity Code", (wiz.get("entity_code") or "").strip()),
+                               ("Reason / Business Justification",
+                                                  (wiz.get("reason") or "").strip())] if not v]
     if wiz.get("cobid") and wiz.get("source_cobid") and wiz["cobid"] == wiz["source_cobid"]:
         st.error("Source COB and Target COB must be different for an Entity Roll.")
     elif missing:
@@ -732,7 +734,7 @@ def render_scaling_form() -> None:
         f'Main Filters</div>', unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        wiz["entity_code"]     = st.text_input("Entity Code",      key=_k("entity"),
+        wiz["entity_code"]     = st.text_input("Entity Code *",    key=_k("entity"),
                                                 value=wiz.get("entity_code") or "",
                                                 placeholder="e.g. MUSI")
     with c2:
@@ -740,11 +742,12 @@ def render_scaling_form() -> None:
                                                     value=wiz.get("source_system_code") or "",
                                                     placeholder="e.g. MS")
     with c3:
-        wiz["department_code"] = st.text_input("Department Code",   key=_k("dept"),
+        wiz["department_code"] = st.text_input("Department Code †", key=_k("dept"),
                                                 value=wiz.get("department_code") or "")
     with c4:
-        wiz["book_code"]       = st.text_input("Book Code",         key=_k("book"),
+        wiz["book_code"]       = st.text_input("Book Code †",       key=_k("book"),
                                                 value=wiz.get("book_code") or "")
+    st.caption("† Provide at least one of Department Code or Book Code.")
 
     # ── Tier 2: Scope-specific fields ────────────────────────────────────
     custom_fields = SCOPE_FIELDS.get(pt, {}).get("custom", [])
@@ -804,7 +807,7 @@ def render_scaling_form() -> None:
 
     # ── Business Context ─────────────────────────────────────────────────
     wiz["reason"] = st.text_area(
-        "Reason / Business Justification", value=wiz.get("reason", ""),
+        "Reason / Business Justification *", value=wiz.get("reason", ""),
         height=80, key=_k("reason"))
     wiz["requires_approval"] = st.checkbox(
         "🔐 Requires Approval", value=wiz.get("requires_approval", False),
@@ -812,12 +815,20 @@ def render_scaling_form() -> None:
 
     st.markdown("<br/>", unsafe_allow_html=True)
     missing = [f for f, v in [("Adjustment Type", wiz.get("adjustment_type")),
-                               ("COB Date",        wiz.get("cobid"))] if not v]
+                               ("Entity Code",     (wiz.get("entity_code") or "").strip()),
+                               ("COB Date",        wiz.get("cobid")),
+                               ("Reason / Business Justification",
+                                                   (wiz.get("reason") or "").strip())] if not v]
     if wiz.get("occurrence") == "RECURRING":
         for f, v in [("Start COBID", wiz.get("recurring_start_cobid")),
                      ("End COBID",   wiz.get("recurring_end_cobid"))]:
             if not v:
                 missing.append(f)
+
+    # At least one of Department Code or Book Code is required.
+    if not (wiz.get("department_code") or "").strip() \
+            and not (wiz.get("book_code") or "").strip():
+        missing.append("Department Code or Book Code")
 
     if missing:
         _missing_info(missing)
@@ -1011,61 +1022,86 @@ elif wiz["step"] == 2:
                 if val and str(val).strip():
                     preview_json[key] = str(val).strip()
 
+            def _fmt(v):
+                try:    return f"{float(v):,.0f}"
+                except: return "—"
+
             try:
-                df_preview = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
-                                         json.dumps(preview_json))
-                if not df_preview.empty:
-                    total_rows = len(df_preview)
-                    col_cv  = next((c for c in df_preview.columns
-                                    if "CURRENT_VALUE"    in c and "LOCAL" not in c), None)
-                    col_del = next((c for c in df_preview.columns
-                                    if "ADJUSTMENT_DELTA" in c and "LOCAL" not in c), None)
-                    col_pv  = next((c for c in df_preview.columns
-                                    if "PROJECTED_VALUE"  in c and "LOCAL" not in c), None)
+                # Summary is a single server-side aggregated row — safe at any
+                # scale. Row-level data is only fetched (capped) on demand below.
+                df_sum = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                                    json.dumps({**preview_json, "mode": "summary"}))
 
-                    def _fmt(v):
-                        try:    return f"{float(v):,.0f}"
-                        except: return "—"
-
-                    m1, m2, m3, m4, m5 = st.columns(5)
-                    m1.metric("Rows Affected",    f"{total_rows:,}")
-                    m2.metric("Non-zero Rows",    f"{int((df_preview[col_cv] != 0).sum()):,}"
-                                                   if col_cv else "—")
-                    m3.metric("Total Original",   _fmt(df_preview[col_cv].sum())  if col_cv  else "—")
-                    m4.metric("Total Adjustment", _fmt(df_preview[col_del].sum()) if col_del else "—")
-                    m5.metric("Total Projected",  _fmt(df_preview[col_pv].sum())  if col_pv  else "—")
-
-                    st.markdown("<br/>", unsafe_allow_html=True)
-
-                    grp_cols = [c for c in ["BOOK_CODE", "DEPARTMENT_CODE", "ENTITY_CODE"]
-                                if c in df_preview.columns]
-                    val_cols = [c for c in [col_cv, col_del, col_pv] if c]
-
-                    btn1, btn2, _ = st.columns([1, 1, 3])
-                    with btn1:
-                        if st.button("📊 Show Breakdown", key=_k("show_breakdown"), type="secondary", use_container_width=True):
-                            wiz["show_breakdown"] = True
-                    with btn2:
-                        if st.button("🔍 Show Sample Rows", key=_k("show_sample"), type="secondary", use_container_width=True):
-                            wiz["show_sample"] = True
-
-                    if wiz.get("show_breakdown") and grp_cols and val_cols:
-                        df_grp = (df_preview.groupby(grp_cols)[val_cols]
-                                  .sum().reset_index().sort_values(grp_cols))
-                        df_grp.rename(columns={col_cv: "Original", col_del: "Adjustment",
-                                               col_pv: "Projected"}, inplace=True)
-                        st.markdown(f"**Breakdown by {' / '.join(grp_cols)}**")
-                        st.dataframe(df_grp, use_container_width=True,
-                                     height=min(300, 38 + 35 * len(df_grp)))
-
-                    if wiz.get("show_sample"):
-                        st.markdown(f"**Sample rows (up to 1,000 of {total_rows:,})**")
-                        st.dataframe(df_preview.head(1000), use_container_width=True,
-                                     height=300)
+                if df_sum.empty or "ROWS_AFFECTED" not in df_sum.columns:
+                    msg_col = next((c for c in df_sum.columns if "MESSAGE" in c.upper()), None)
+                    if msg_col and not df_sum.empty:
+                        st.warning(f"Preview not available: {df_sum.iloc[0][msg_col]}")
+                    else:
+                        st.info("No matching rows found for this filter combination.")
                 else:
-                    st.info("No matching rows found for this filter combination.")
+                    srow       = df_sum.iloc[0]
+                    total_rows = int(srow["ROWS_AFFECTED"] or 0)
 
-                with st.expander("🔍 Debug — request params", expanded=df_preview.empty):
+                    if total_rows == 0:
+                        st.info("No matching rows found for this filter combination.")
+                    else:
+                        nonzero = int(srow["NONZERO_ROWS"] or 0)
+
+                        m1, m2, m3, m4, m5 = st.columns(5)
+                        m1.metric("Rows Affected",    f"{total_rows:,}")
+                        m2.metric("Non-zero Rows",    f"{nonzero:,}")
+                        m3.metric("Total Original",   _fmt(srow["TOTAL_CURRENT_VALUE"]))
+                        m4.metric("Total Adjustment", _fmt(srow["TOTAL_ADJUSTMENT_DELTA"]))
+                        m5.metric("Total Projected",  _fmt(srow["TOTAL_PROJECTED_VALUE"]))
+
+                        st.markdown("<br/>", unsafe_allow_html=True)
+
+                        # A cross-COB Roll replaces the target value with the
+                        # source cob's adjusted state — the metric cards above
+                        # reflect that. A per-position breakdown/sample would
+                        # need the netting engine to be meaningful, so they are
+                        # not offered here.
+                        _is_roll = (wiz.get("adjustment_type") == "Roll"
+                                    and wiz.get("source_cobid")
+                                    and int(wiz.get("source_cobid")) != int(wiz["cobid"]))
+
+                        if _is_roll:
+                            st.caption(
+                                "Roll preview shows the net impact: **current** = the target "
+                                "COB's original total (flattened), **projected** = the source "
+                                "COB's adjusted total rolled forward. Per-row breakdown is not "
+                                "shown for cross-COB rolls.")
+                        else:
+                            btn1, btn2, _ = st.columns([1, 1, 3])
+                            with btn1:
+                                if st.button("📊 Show Breakdown", key=_k("show_breakdown"), type="secondary", use_container_width=True):
+                                    wiz["show_breakdown"] = True
+                            with btn2:
+                                if st.button("🔍 Show Sample Rows", key=_k("show_sample"), type="secondary", use_container_width=True):
+                                    wiz["show_sample"] = True
+
+                        if not _is_roll and wiz.get("show_breakdown"):
+                            df_grp = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                                                json.dumps({**preview_json, "mode": "breakdown"}))
+                            grp_cols = [c for c in ["BOOK_CODE", "DEPARTMENT_CODE", "ENTITY_CODE"]
+                                        if c in df_grp.columns]
+                            if not df_grp.empty:
+                                df_grp = df_grp.rename(columns={"CURRENT_VALUE": "Original",
+                                                                "ADJUSTMENT_DELTA": "Adjustment",
+                                                                "PROJECTED_VALUE": "Projected"})
+                                label = (f"by {' / '.join(grp_cols)}" if grp_cols else "")
+                                st.markdown(f"**Breakdown {label}**")
+                                st.dataframe(df_grp, use_container_width=True,
+                                             height=min(300, 38 + 35 * len(df_grp)))
+
+                        if not _is_roll and wiz.get("show_sample"):
+                            df_sample = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                                                   json.dumps({**preview_json, "mode": "sample"}))
+                            st.markdown(f"**Sample rows (up to 1,000 of {total_rows:,})**")
+                            st.dataframe(df_sample, use_container_width=True, height=300)
+
+                with st.expander("🔍 Debug — request params",
+                                 expanded=("ROWS_AFFECTED" not in df_sum.columns)):
                     st.code(json.dumps(preview_json, indent=2), language="json")
 
             except Exception as exc:
