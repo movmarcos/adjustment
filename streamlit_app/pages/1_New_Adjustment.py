@@ -490,9 +490,7 @@ def render_direct_form() -> None:
 
         if confirmed:
             if st.button("Continue → Preview", type="primary",
-                         use_container_width=True, key=_k("var_continue")):
-                wiz["process_type"]    = "VaR"
-                wiz["adjustment_type"] = "Upload"
+                         use_container_width=True, key=_k("direct_continue")):
                 wiz["step"] = 2
                 safe_rerun()
 
