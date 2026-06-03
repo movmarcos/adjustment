@@ -352,17 +352,26 @@ def _write_direct_line_items(scope: str, adj_id: str, df_csv) -> int:
     return _direct_cfg(scope)["writer"](adj_id, df_csv)
 
 
-def render_var_upload_form() -> None:
-    section_title("VaR Upload — CSV File", "📤")
+def render_direct_form() -> None:
+    # ── Scope selection (FRTBALL excluded — no fan-out for direct values) ──
+    _render_scope_selector(include_frtball=False)
+
+    st.divider()
+    if not wiz["process_type"]:
+        st.info("👆 Select a data scope to continue.")
+        return
+
+    cfg          = _direct_cfg(wiz["process_type"])
+    expected_cols = cfg["expected"]
+
+    section_title(f"Direct Adjustment — {wiz['process_type']} CSV", "📥")
     _info_banner(
-        'Upload a VaR adjustment CSV containing the 21 VaR measure columns. '
-        'Expected columns: <code>COBId, EntityCode, SourceSystemCode, BookCode, '
-        'CurrencyCode, ScenarioDate, TradeCode, AllVaR … ParCreditSpreadVaR, '
-        'Category, Detail</code>.')
+        'Paste a CSV of exact adjustment values. Expected columns: '
+        '<code>' + ', '.join(expected_cols) + '</code>.')
 
     csv_text = st.text_area(
-        "Paste VaR CSV Data Here", value="", height=180, key=_k("var_csv"),
-        help="Paste the full CSV content including header row.")
+        "Paste CSV Data Here", value="", height=180, key=_k("direct_csv"),
+        help="Paste the full CSV content including the header row.")
 
     if csv_text.strip():
         try:
@@ -371,8 +380,8 @@ def render_var_upload_form() -> None:
             wiz["uploaded_file_name"] = f"CSV_Pasted_{len(df)}_rows.csv"
             wiz["uploaded_df"]        = df
 
-            missing_cols = [c for c in EXPECTED_VAR_COLS if c not in df.columns]
-            extra_cols   = [c for c in df.columns   if c not in EXPECTED_VAR_COLS]
+            missing_cols = [c for c in expected_cols if c not in df.columns]
+            extra_cols   = [c for c in df.columns    if c not in expected_cols]
             if missing_cols:
                 st.warning(f"Missing expected columns: {', '.join(missing_cols)}")
             if extra_cols:
@@ -418,7 +427,7 @@ def render_var_upload_form() -> None:
         wiz["global_reference"] = ref_val.strip()
 
     wiz["reason"] = st.text_area(
-        "Reason / Business Justification", value=wiz.get("reason", ""),
+        "Reason / Business Justification *", value=wiz.get("reason", ""),
         height=60, key=_k("var_reason"))
     wiz["requires_approval"] = st.checkbox(
         "🔐 Requires Approval", value=wiz.get("requires_approval", False),
@@ -461,10 +470,12 @@ def render_var_upload_form() -> None:
 
     st.markdown("<br/>", unsafe_allow_html=True)
     _checks = [
+        ("Scope",        bool(wiz.get("process_type"))),
         ("CSV Data",     wiz.get("uploaded_df") is not None),
         ("COB Date",     bool(wiz.get("cobid"))),
         ("Entity Code",  bool(wiz.get("entity_code"))),
         ("Reference",    bool(wiz.get("global_reference"))),
+        ("Reason",       bool((wiz.get("reason") or "").strip())),
     ]
     missing = [f for f, present in _checks if not present]
     if missing:
