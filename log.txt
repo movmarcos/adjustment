@@ -1,74 +1,24 @@
-(1304): 01c4d369-0109-561d-0000-46e9a942d51e: 000904 (42000): SQL compilation error: error line 75 at position 464
-invalid identifier ''CURRENCY_CODE''
-There are existing quoted column identifiers: [''"status"'']. Please use one of them to reference the column. See more details on Snowflake identifier requirements https://docs.snowflake.com/en/sql-reference/identifiers-syntax
-
-
-reason:  Not consistent with desk position. Trade not feeding from murex
-
-
-FACT_TABLE,FACT_AJUSTED_TABLE,ADJUSTMENTS_TABLE,ADJUSTMENTS_SUMMARY_TABLE,ADJUSTMENT_BASE_TABLE,METRIC_NAME,METRIC_USD_NAME,PROCESS_TYPE,FACT_TABLE_PK
-fact.sensitivity_measures,fact.sensitivity_measures_adjusted,fact.sensitivity_measures_adjustment,fact.sensitivity_measures_adjustment_summary,adjustment.adjustments_base_sensitivity,measure_value,measure_value_usd,Sensitivity,"cobid;entity_key;source_system_code;trade_key;book_key;tenor_currency_key;underlying_tenor_currency_key;currency_code;curve_currency_key;counterparty_key;measure_type_key;common_instrument_key;common_instrument_fcd_key;currency_pair_key;skew_key;is_official_source;correlation_key;region_area_key;product_category_attributes_key;trade_index_key"
-fact.frtbsa_sensitivity_measures,fact.frtbsa_sensitivity_measures_adjusted,fact.frtbsa_sensitivity_measures_adjustment,,adjustment.adjustments_base_frtb,amount,amount_in_usd,FRTB,frtbsa_sensitivity_key
-fact.frtbsa_drc_measures,fact.frtbsa_drc_measures_adjusted,fact.frtbsa_drc_measures_adjustment,,adjustment.adjustments_base_frtb,jtd_loss,jtd_loss_usd,FRTBDRC,frtbsa_drc_key
-fact.frtbsa_rrao_measures,fact.frtbsa_rrao_measures_adjusted,fact.frtbsa_rrao_measures_adjustment,,adjustment.adjustments_base_frtb,notional_amount,notional_amount_usd,FRTBRRAO,frtbsa_rrao_key
-
-
-
-
-
-
 ────────────────────────────────────────────────────────────────
   PHASE: Validate schema (combined view vs _ADJUSTMENT table)
 ────────────────────────────────────────────────────────────────
-     ✅ FRTB  (adjusted=FACT.FRTBSA_SENSITIVITY_MEASURES_ADJUSTED vs delta=FACT.FRTBSA_SENSITIVITY_MEASURES_ADJUSTMENT)
-     ✅ FRTBDRC  (adjusted=FACT.FRTBSA_DRC_MEASURES_ADJUSTED vs delta=FACT.FRTBSA_DRC_MEASURES_ADJUSTMENT)
-     ✅ FRTBRRAO  (adjusted=FACT.FRTBSA_RRAO_MEASURES_ADJUSTED vs delta=FACT.FRTBSA_RRAO_MEASURES_ADJUSTMENT)
-     ✅ Sensitivity  (adjusted=FACT.SENSITIVITY_MEASURES_ADJUSTED vs delta=FACT.SENSITIVITY_MEASURES_ADJUSTMENT)
-     ✅ Stress  (adjusted=FACT.STRESS_MEASURES_COMBINED vs delta=FACT.STRESS_MEASURES_ADJUSTMENT)
+     ❌ FRTB
+          • ADJUSTMENT_BASE_TABLE 'ADJUSTMENT_APP.ADJUSTMENTS_BASE_FRTB' does not exist / not accessible
+     ❌ FRTBDRC
+          • ADJUSTMENT_BASE_TABLE 'ADJUSTMENT_APP.ADJUSTMENTS_BASE_FRTB' does not exist / not accessible
+     ❌ FRTBRRAO
+          • ADJUSTMENT_BASE_TABLE 'ADJUSTMENT_APP.ADJUSTMENTS_BASE_FRTB' does not exist / not accessible
+     ❌ Sensitivity
+          • ADJUSTMENT_BASE_TABLE 'ADJUSTMENT_APP.ADJUSTMENTS_BASE_SENSITIVITY' does not exist / not accessible
+     ⚠️  Stress  (adjusted=FACT.STRESS_MEASURES_COMBINED vs delta=FACT.STRESS_MEASURES_ADJUSTMENT)
+          • METRIC_NAME 'SIMULATION_PL' not in FACT_TABLE 'FACT.STRESS_MEASURES' — the engine will treat this scope as USD-only (local adjustments collapsed). If the local metric exists under another name, fix METRIC_NAME.
      ❌ VaR
-          • FACT_ADJUSTED_TABLE 'FACT.VAR_MEASURES_COMBINED' is missing 2 column(s) that the Roll leg copies into 'FACT.VAR_MEASURES_ADJUSTMENT' (name+case): INFLATION_INDEX_ID, UNDERLYING_COMMON_INSTRUMENT_KEY
+          • FACT_ADJUSTED_TABLE 'FACT.VAR_MEASURES_COMBINED' lacks 2 KEY/ID column(s) the Roll copies into 'FACT.VAR_MEASURES_ADJUSTMENT' — Roll would write -1 placeholder keys: INFLATION_INDEX_ID, UNDERLYING_COMMON_INSTRUMENT_KEY
+          • (warn) METRIC_NAME 'PNL_VECTOR_VALUE' not in FACT_TABLE 'FACT.VAR_MEASURES' — the engine will treat this scope as USD-only (local adjustments collapsed). If the local metric exists under another name, fix METRIC_NAME.
 
   Schema validation: FAILED — fix the items above before running adjustments
 
-  ⚠️  Schema validation FAILED — adjustments may error until fixed
+  ⚠️  Schema validation FAILED — adjustments may error until fixed.
 
-
-
-
-
-
-
-
-(1304): 01c4d3fa-0109-561d-0000-46e9a94bf482: 000904 (42000): SQL compilation error: error line 41 at position 464
-invalid identifier ''CURRENCY_CODE''
-There are existing quoted column identifiers: [''"status"'']. Please use one of them to reference the column. See more details on Snowflake identifier requirements https://docs.snowflake.com/en/sql-reference/identifiers-syntax
-
-ADJ_ID,PROCESS_TYPE,ADJUSTMENT_TYPE,RUN_STATUS,ERRORMESSAGE
-c88511e4-622e-4438-9c86-7312397aa67d,Stress,Flatten,Failed,"(1304): 01c4d3fa-0109-561d-0000-46e9a94bf482: 000904 (42000): SQL compilation error: error line 41 at position 464
-invalid identifier ''CURRENCY_CODE''
-There are existing quoted column identifiers: [''""status""'']. Please use one of them to reference the column. See more details on Snowflake identifier requirements https://docs.snowflake.com/en/sql-reference/identifiers-syntax"
-
-
-
-QUERY_TEXT,ERROR_MESSAGE,START_TIME
-<redacted>,"SQL compilation error: error line 41 at position 464
-invalid identifier 'CURRENCY_CODE'",2026-06-04 16:58:06.689 Z
-<redacted>,"SQL compilation error: error line 41 at position 464
-invalid identifier 'CURRENCY_CODE'",2026-06-04 16:46:45.660 Z
-<redacted>,"SQL compilation error: error line 75 at position 464
-invalid identifier 'CURRENCY_CODE'",2026-06-04 15:02:44.683 Z
-<redacted>,"SQL compilation error: error line 75 at position 464
-invalid identifier 'CURRENCY_CODE'",2026-06-04 14:33:57.004 Z
-
-
-
-
-
- Verify (no schema drop needed — CREATE OR ALTER replaces in place):
-  1. Redeploy just the proc (run your deploy, or CREATE OR ALTER from 05_sp_process_adjustment.sql).
-  2. Reset the failed one so the task re-picks it:
-  UPDATE ADJUSTMENT_APP.ADJ_HEADER
-  SET RUN_STATUS='Pending', ERRORMESSAGE=NULL
-  WHERE ADJ_ID='c88511e4-622e-4438-9c86-7312397aa67d';
-  3. Within ~1 min it should reach Processed. Check the proc log for the new Warning: FACT_TABLE_PK column(s) 
-  ['CURRENCY_C
+────────────────────────────────────────────────────────────────
+  PHASE 2: Streamlit Application
+────────────────────────────────────────────────────────────────
