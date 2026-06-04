@@ -61,3 +61,14 @@ invalid identifier 'CURRENCY_CODE'",2026-06-04 15:02:44.683 Z
 invalid identifier 'CURRENCY_CODE'",2026-06-04 14:33:57.004 Z
 
 
+
+
+
+ Verify (no schema drop needed — CREATE OR ALTER replaces in place):
+  1. Redeploy just the proc (run your deploy, or CREATE OR ALTER from 05_sp_process_adjustment.sql).
+  2. Reset the failed one so the task re-picks it:
+  UPDATE ADJUSTMENT_APP.ADJ_HEADER
+  SET RUN_STATUS='Pending', ERRORMESSAGE=NULL
+  WHERE ADJ_ID='c88511e4-622e-4438-9c86-7312397aa67d';
+  3. Within ~1 min it should reach Processed. Check the proc log for the new Warning: FACT_TABLE_PK column(s) 
+  ['CURRENCY_C
