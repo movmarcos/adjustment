@@ -42,29 +42,6 @@ import pandas as pd
 import numpy as np
 
 
-def check_columns(df_sf, column_list, metric_name, metric_usd_name):
-    """Map line-item columns to fact adjustment table columns."""
-    # Explicit defaults for NOT NULL columns that are never in ADJ_LINE_ITEM.
-    # Must match the values used in the legacy load procs.
-    _COLUMN_DEFAULTS = {
-        "IS_OFFICIAL_SOURCE": True,
-    }
-    df = df_sf.to_pandas()
-    column_data = {}
-    for c in column_list:
-        if c in df.columns:
-            column_data[c] = df[c]
-        elif c in _COLUMN_DEFAULTS:
-            column_data[c] = _COLUMN_DEFAULTS[c]
-        else:
-            column_data[c] = -1 if c.split('_')[-1].upper() in ('KEY', 'ID') else np.nan
-
-    column_data[metric_name]     = df["ADJUSTMENT_VALUE"]
-    column_data[metric_usd_name] = df["ADJUSTMENT_VALUE_IN_USD"]
-    column_data["IS_DELETED"]    = df["IS_DELETED"]
-    return pd.DataFrame(column_data)
-
-
 def _cfg_list(val):
     """Coerce a VARIANT config value (str or list/dict) to a Python list."""
     if val is None:
@@ -127,7 +104,6 @@ def build_direct_extract_sql(cfg, adj_ids_str):
     if unpivot:
         legs = []
         name_field  = unpivot["measure_name_field"]
-        value_field = unpivot["value_field"]
         for csv_col, measure_value in unpivot["measure_map"].items():
             sel = [f"j.ADJ_ID AS ADJ_ID"]
             for pf, tc, ty in carried:
@@ -482,7 +458,7 @@ def main(session, process_type, adjustment_action, cobid):
                     target_cols.append("LOAD_TIMESTAMP"); select_exprs.append("CURRENT_TIMESTAMP() AS LOAD_TIMESTAMP")
 
                 # Default every remaining surrogate-key/id fact column to -1, mirroring
-                # the legacy check_columns behaviour (these are NOT NULL in the fact
+                # the legacy key-default behaviour (these are NOT NULL in the fact
                 # tables and must be present even when a Direct upload doesn't supply
                 # them). Non-key columns left unlisted default/NULL as before.
                 _managed = set(target_cols)

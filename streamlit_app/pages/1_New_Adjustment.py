@@ -167,25 +167,6 @@ def _build_payload() -> dict:
     return payload
 
 
-# ── VaR CSV column → Snowflake UNPIVOT name ──────────────────────────────────
-_VAR_COL_MAP = {
-    "AllVaR": "ALL_VAR", "AllVaRSkew": "ALL_VAR_SKEW",
-    "BasisVaR": "BASIS_VAR", "BondAssetSpreadVaR": "BOND_ASSET_SPREAD_VAR",
-    "CrossEffects": "CROSS_EFFECTS", "EquityPriceVaR": "EQUITY_PRICE_VAR",
-    "EquityVegaVaR": "EQUITY_VEGA_VAR", "FXRateVaR": "FX_RATE_VAR",
-    "FXVolatilityVaR": "FX_VOLATILITY_VAR", "IRCapVolVaR": "IR_CAP_VOL_VAR",
-    "IRCapVolVaRSkew": "IR_CAP_VOL_VAR_SKEW", "IRSkewVolVaR": "IR_SKEW_VOL_VAR",
-    "IRSwaptionVolVaR": "IR_SWAPTION_VOL_VAR",
-    "IRSwaptionVolVaRSkew": "IR_SWAPTION_VOL_VAR_SKEW",
-    "InflationRateCurveVaR": "INFLATION_RATE_CURVE_VAR",
-    "InflationVolVaR": "INFLATION_VOL_VAR",
-    "InterestRateCurveVaR": "INTEREST_RATE_CURVE_VAR",
-    "InterestRateVegaVaR": "INTEREST_RATE_VEGA_VAR",
-    "MTGSprdVaR": "MTG_SPRD_VAR", "OASVaR": "OAS_VAR",
-    "ParCreditSpreadVaR": "PAR_CREDIT_SPREAD_VAR",
-}
-
-
 # ── Direct Adjustment: config-driven schema + JSON upload writer ──────────────
 def _direct_expected_columns(scope: str) -> list:
     """Return the ordered expected CSV column names for a scope from DIRECT_SCOPE_SCHEMA.
@@ -276,22 +257,6 @@ def _info_banner(text: str) -> None:
 def _missing_info(fields: list) -> None:
     if fields:
         st.info(f"Complete required fields: **{', '.join(fields)}**")
-
-
-# ── VaR column definitions (reused by Direct Adjustment for all scopes for now) ──
-
-VAR_MEASURE_COLS = [
-    "AllVaR", "AllVaRSkew", "BasisVaR", "BondAssetSpreadVaR",
-    "CrossEffects", "EquityPriceVaR", "EquityVegaVaR", "FXRateVaR",
-    "FXVolatilityVaR", "IRCapVolVaR", "IRCapVolVaRSkew", "IRSkewVolVaR",
-    "IRSwaptionVolVaR", "IRSwaptionVolVaRSkew", "InflationRateCurveVaR",
-    "InflationVolVaR", "InterestRateCurveVaR", "InterestRateVegaVaR",
-    "MTGSprdVaR", "OASVaR", "ParCreditSpreadVaR",
-]
-EXPECTED_VAR_COLS = [
-    "COBId", "EntityCode", "SourceSystemCode", "BookCode", "CurrencyCode",
-    "ScenarioDate", "TradeCode",
-] + VAR_MEASURE_COLS + ["Category", "Detail"]
 
 
 def render_direct_form() -> None:
