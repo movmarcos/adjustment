@@ -168,6 +168,111 @@ COMMENT = 'Detail rows for Direct/Upload adjustments. Each row = one dimension c
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- ADJ_LINE_ITEM_JSON — Direct Adjustment uploads (semi-structured)
+-- One row per uploaded CSV line; raw fields live in PAYLOAD (VARIANT).
+-- Per-scope interpretation is driven by DIRECT_SCOPE_SCHEMA at processing time.
+-- ═══════════════════════════════════════════════════════════════════════════
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_LINE_ITEM_JSON (
+    LINE_ID      NUMBER(38,0) NOT NULL AUTOINCREMENT,
+    ADJ_ID       VARCHAR(36)  NOT NULL,            -- FK to ADJ_HEADER
+    ROW_NUM      NUMBER(38,0),                     -- 1-based line order within the upload
+    PAYLOAD      VARIANT,                          -- the raw CSV row as a JSON object
+    IS_DELETED   BOOLEAN          DEFAULT FALSE,
+    RUN_STATUS   VARCHAR(30)      DEFAULT 'Pending',
+    CREATED_DATE TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
+    CONSTRAINT PK_ADJ_LINE_ITEM_JSON PRIMARY KEY (LINE_ID)
+)
+COMMENT = 'Direct Adjustment uploads: one row per CSV line, raw fields in PAYLOAD (VARIANT).';
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- DIRECT_SCOPE_SCHEMA — per-scope Direct Adjustment schema (dev-maintained)
+-- Declares how to extract/resolve/map a scope's JSON payload into its fact table.
+-- ═══════════════════════════════════════════════════════════════════════════
+CREATE OR ALTER TABLE ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA (
+    PROCESS_TYPE      VARCHAR(30)  NOT NULL,
+    EXPECTED_COLUMNS  VARIANT,      -- [{ "name":..., "type":..., "required":bool }]
+    UNPIVOT           VARIANT,      -- nullable {measure_map:{csv_col:measure_value}, measure_name_field, value_field}
+    FACT_MAPPING      VARIANT,      -- [{ "payload_field":..., "target_column":..., "type":... }]
+    RESOLUTIONS       VARIANT,      -- [{ "source_field":..., "dimension_table":..., "match_column":..., "key_column":..., "target_column":... }]
+    METRIC_FIELD      VARCHAR(100),
+    METRIC_USD_FIELD  VARCHAR(100),
+    WRITER_OVERRIDE   VARCHAR(100),
+    IS_ACTIVE         BOOLEAN          DEFAULT TRUE,
+    CREATED_DATE      TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
+    CONSTRAINT PK_DIRECT_SCOPE_SCHEMA PRIMARY KEY (PROCESS_TYPE)
+)
+COMMENT = 'Per-scope Direct Adjustment schema: how to extract/resolve/map JSON payload into the scope fact table.';
+
+DELETE FROM ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA WHERE PROCESS_TYPE = 'VaR';
+INSERT INTO ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
+    (PROCESS_TYPE, EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS,
+     METRIC_FIELD, METRIC_USD_FIELD, WRITER_OVERRIDE, IS_ACTIVE)
+SELECT
+    'VaR',
+    PARSE_JSON('[
+        {"name":"COBId","type":"number","required":true},
+        {"name":"EntityCode","type":"string","required":true},
+        {"name":"SourceSystemCode","type":"string","required":false},
+        {"name":"BookCode","type":"string","required":false},
+        {"name":"CurrencyCode","type":"string","required":false},
+        {"name":"ScenarioDate","type":"number","required":false},
+        {"name":"TradeCode","type":"string","required":false},
+        {"name":"AllVaR","type":"number","required":false},
+        {"name":"AllVaRSkew","type":"number","required":false},
+        {"name":"BasisVaR","type":"number","required":false},
+        {"name":"BondAssetSpreadVaR","type":"number","required":false},
+        {"name":"CrossEffects","type":"number","required":false},
+        {"name":"EquityPriceVaR","type":"number","required":false},
+        {"name":"EquityVegaVaR","type":"number","required":false},
+        {"name":"FXRateVaR","type":"number","required":false},
+        {"name":"FXVolatilityVaR","type":"number","required":false},
+        {"name":"IRCapVolVaR","type":"number","required":false},
+        {"name":"IRCapVolVaRSkew","type":"number","required":false},
+        {"name":"IRSkewVolVaR","type":"number","required":false},
+        {"name":"IRSwaptionVolVaR","type":"number","required":false},
+        {"name":"IRSwaptionVolVaRSkew","type":"number","required":false},
+        {"name":"InflationRateCurveVaR","type":"number","required":false},
+        {"name":"InflationVolVaR","type":"number","required":false},
+        {"name":"InterestRateCurveVaR","type":"number","required":false},
+        {"name":"InterestRateVegaVaR","type":"number","required":false},
+        {"name":"MTGSprdVaR","type":"number","required":false},
+        {"name":"OASVaR","type":"number","required":false},
+        {"name":"ParCreditSpreadVaR","type":"number","required":false},
+        {"name":"Category","type":"string","required":false},
+        {"name":"Detail","type":"string","required":false}
+    ]'),
+    PARSE_JSON('{
+        "measure_map":{
+            "AllVaR":"ALL VAR","AllVaRSkew":"ALL VAR SKEW","BasisVaR":"BASIS VAR",
+            "BondAssetSpreadVaR":"BOND ASSET SPREAD VAR","CrossEffects":"CROSS EFFECTS",
+            "EquityPriceVaR":"EQUITY PRICE VAR","EquityVegaVaR":"EQUITY VEGA VAR",
+            "FXRateVaR":"FX RATE VAR","FXVolatilityVaR":"FX VOLATILITY VAR",
+            "IRCapVolVaR":"IR CAP VOL VAR","IRCapVolVaRSkew":"IR CAP VOL VAR SKEW",
+            "IRSkewVolVaR":"IR SKEW VOL VAR","IRSwaptionVolVaR":"IR SWAPTION VOL VAR",
+            "IRSwaptionVolVaRSkew":"IR SWAPTION VOL VAR SKEW",
+            "InflationRateCurveVaR":"INFLATION RATE CURVE VAR","InflationVolVaR":"INFLATION VOL VAR",
+            "InterestRateCurveVaR":"INTEREST RATE CURVE VAR","InterestRateVegaVaR":"INTEREST RATE VEGA VAR",
+            "MTGSprdVaR":"MTG SPRD VAR","OASVaR":"OAS VAR","ParCreditSpreadVaR":"PAR CREDIT SPREAD VAR"
+        },
+        "measure_name_field":"VAR_SUB_COMPONENT_NAME",
+        "value_field":"ADJ_VALUE"
+    }'),
+    PARSE_JSON('[
+        {"payload_field":"COBId","target_column":"COBID","type":"number"},
+        {"payload_field":"EntityCode","target_column":"ENTITY_CODE","type":"string"},
+        {"payload_field":"SourceSystemCode","target_column":"SOURCE_SYSTEM_CODE","type":"string"},
+        {"payload_field":"CurrencyCode","target_column":"CURRENCY_CODE","type":"string"},
+        {"payload_field":"ScenarioDate","target_column":"SCENARIO_DATE_ID","type":"number"}
+    ]'),
+    PARSE_JSON('[
+        {"source_field":"VAR_SUB_COMPONENT_NAME","dimension_table":"DIMENSION.VAR_SUB_COMPONENT",
+         "match_column":"VAR_SUB_COMPONENT_NAME","key_column":"VAR_SUB_COMPONENT_ID",
+         "target_column":"VAR_SUBCOMPONENT_ID"}
+    ]'),
+    'ADJ_VALUE', 'ADJ_VALUE', NULL, TRUE;
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- 3. ADJ_STATUS_HISTORY — Full audit trail of every status change
 -- ═══════════════════════════════════════════════════════════════════════════
 
