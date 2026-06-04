@@ -768,10 +768,33 @@ def main(session, process_type, adjustment_action, cobid):
             # Roll — never all scaling.
             roll_leg = ""
             if has_cross_cob and fact_adjusted_tbl_name and fact_adjusted_tbl_name != fact_tbl_name:
+                # The combined/adjusted view may not expose every column the
+                # _ADJUSTMENT table expects. Match columns: select the ones the
+                # view HAS, and default the rest to -1 (KEY/ID) or NULL — same
+                # convention as the Direct path's check_columns. This keeps the
+                # UNION column list aligned and lets Roll proceed even when the
+                # combined view is a partial projection of the fact.
+                try:
+                    _view_cols = set(session.table(fact_adjusted_tbl_name).columns)
+                except Exception:
+                    _view_cols = set()
+
+                def _adj_default(c):
+                    return "-1" if c.split('_')[-1].upper() in ('KEY', 'ID') else "NULL"
+
+                select_non_metric_adj = ', '.join(
+                    (f"fact.{c}" if c in _view_cols else f"{_adj_default(c)} AS {c}")
+                    for c in fact_non_metric_matched
+                )
+                select_scale_adj = (
+                    select_scale.replace(select_non_metric, select_non_metric_adj, 1)
+                    if select_non_metric else select_scale
+                )
                 roll_leg = f"""
                 UNION ALL
                 -- ② Roll cross-COB: source COB's ADJUSTED value from FACT_ADJUSTED_TABLE
-                {select_scale} {from_where_adj}
+                --    (columns the combined view lacks default to -1 / NULL)
+                {select_scale_adj} {from_where_adj}
                 AND fact.COBID = adjust.SOURCE_COBID
                 AND adjust.COBID <> adjust.SOURCE_COBID
                 {join_cond}"""

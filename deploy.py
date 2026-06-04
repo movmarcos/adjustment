@@ -543,13 +543,15 @@ def validate_schema(session):
         return True
 
     all_ok = True
+    had_warnings = False
     for r in rows:
         pt         = r["PROCESS_TYPE"]
         fact       = r["FACT_TABLE"]
         adjusted   = r["FACT_ADJUSTED_TABLE"]      # combined / _adjusted / _combined view
         adj_tbl    = r["ADJUSTMENTS_TABLE"]        # _adjustment delta (write target)
         metric_usd = (r["METRIC_USD_NAME"] or "").upper()
-        problems   = []
+        problems   = []   # hard failures (block)
+        warnings   = []   # informational (Roll will default these to -1/NULL)
 
         fact_cols = _object_columns(session, fact) if fact else None
         view_cols = _object_columns(session, adjusted) if adjusted else None
@@ -572,9 +574,11 @@ def validate_schema(session):
             missing = [c for c in selected if c not in view_set]
             if missing:
                 shown = ', '.join(missing[:12]) + (' …' if len(missing) > 12 else '')
-                problems.append(
-                    f"FACT_ADJUSTED_TABLE '{adjusted}' is missing {len(missing)} column(s) "
-                    f"that the Roll leg copies into '{adj_tbl}' (name+case): {shown}")
+                # Not fatal: the Roll leg defaults these to -1 (KEY/ID) or NULL.
+                # Surface them so you know those keys won't carry real values.
+                warnings.append(
+                    f"FACT_ADJUSTED_TABLE '{adjusted}' lacks {len(missing)} column(s) "
+                    f"present in '{adj_tbl}' — Roll will default them to -1/NULL: {shown}")
 
         # 3. Metric column present in the fact and the combined view
         if fact_cols is not None and metric_usd and metric_usd not in {c.upper() for c in fact_cols}:
@@ -582,15 +586,29 @@ def validate_schema(session):
         if view_cols is not None and metric_usd and metric_usd not in {c.upper() for c in view_cols}:
             problems.append(f"METRIC_USD_NAME '{metric_usd}' not found in FACT_ADJUSTED_TABLE '{adjusted}'")
 
+        if warnings:
+            had_warnings = True
         if problems:
             all_ok = False
             print(f"     ❌ {pt}")
             for p in problems:
                 print(f"          • {p}")
+            for w in warnings:
+                print(f"          • (warn) {w}")
+        elif warnings:
+            print(f"     ⚠️  {pt}  (adjusted={adjusted} vs delta={adj_tbl})")
+            for w in warnings:
+                print(f"          • {w}")
         else:
             print(f"     ✅ {pt}  (adjusted={adjusted} vs delta={adj_tbl})")
 
-    print(f"\n  Schema validation: {'PASS' if all_ok else 'FAILED — fix the items above before running adjustments'}")
+    if all_ok:
+        summary = "PASS"
+        if had_warnings:
+            summary += " (with warnings — Roll defaults some keys to -1/NULL)"
+    else:
+        summary = "FAILED — fix the items above before running adjustments"
+    print(f"\n  Schema validation: {summary}")
     return all_ok
 
 
