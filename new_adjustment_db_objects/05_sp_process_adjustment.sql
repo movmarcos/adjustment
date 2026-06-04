@@ -65,6 +65,93 @@ def check_columns(df_sf, column_list, metric_name, metric_usd_name):
     return pd.DataFrame(column_data)
 
 
+def _cfg_list(val):
+    """Coerce a VARIANT config value (str or list/dict) to a Python list."""
+    if val is None:
+        return []
+    if isinstance(val, str):
+        val = json.loads(val)
+    return val if isinstance(val, list) else [val]
+
+
+def _cfg_obj(val):
+    """Coerce a VARIANT config value to a Python dict (or None)."""
+    if val is None:
+        return None
+    if isinstance(val, str):
+        val = json.loads(val)
+    return val if isinstance(val, dict) else None
+
+
+def load_direct_schema(session, process_type):
+    """Read the DIRECT_SCOPE_SCHEMA row for a scope. Returns a dict or None."""
+    rows = session.sql(f"""
+        SELECT EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS,
+               METRIC_FIELD, METRIC_USD_FIELD, WRITER_OVERRIDE
+        FROM ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
+        WHERE UPPER(PROCESS_TYPE) = UPPER('{process_type}') AND IS_ACTIVE = TRUE
+    """).collect()
+    if not rows:
+        return None
+    r = rows[0]
+    return {
+        "unpivot":      _cfg_obj(r["UNPIVOT"]),
+        "fact_mapping": _cfg_list(r["FACT_MAPPING"]),
+        "resolutions":  _cfg_list(r["RESOLUTIONS"]),
+        "metric_field": r["METRIC_FIELD"],
+        "metric_usd_field": r["METRIC_USD_FIELD"],
+        "writer_override":  r["WRITER_OVERRIDE"],
+    }
+
+
+def _payload_expr(field, ftype):
+    """SQL expression to read PAYLOAD:<field> as a typed value."""
+    f = field.replace('"', '')
+    if ftype == "number":
+        return f'TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"{f}"))'
+    return f'TO_VARCHAR(j.PAYLOAD:"{f}")'
+
+
+def build_direct_extract_sql(cfg, adj_ids_str):
+    """Build a SELECT over ADJ_LINE_ITEM_JSON that yields one row per output line
+    with: ADJ_ID, each mapped target_column, each resolution source_field, and
+    METRIC_VALUE. Applies the optional unpivot (UNION ALL per measure)."""
+    fm = cfg["fact_mapping"]
+    unpivot = cfg["unpivot"]
+    carried = [(m["payload_field"], m["target_column"], m.get("type", "string"))
+               for m in fm]
+
+    base_from = (f"FROM ADJUSTMENT_APP.ADJ_LINE_ITEM_JSON j "
+                 f"WHERE j.ADJ_ID IN ({adj_ids_str}) AND j.IS_DELETED = FALSE")
+
+    if unpivot:
+        legs = []
+        name_field  = unpivot["measure_name_field"]
+        value_field = unpivot["value_field"]
+        for csv_col, measure_value in unpivot["measure_map"].items():
+            sel = [f"j.ADJ_ID AS ADJ_ID"]
+            for pf, tc, ty in carried:
+                sel.append(f"{_payload_expr(pf, ty)} AS {tc}")
+            mv = str(measure_value).replace("'", "''")
+            sel.append(f"'{mv}' AS {name_field}")
+            sel.append(f"{_payload_expr(csv_col, 'number')} AS METRIC_VALUE")
+            # METRIC_VALUE = TRY_TO_NUMBER(payload:col); rows where it is 0 or NULL
+            # are excluded (NULL <> 0 is NULL → filtered), matching the legacy
+            # writer which skipped NaN/zero measures.
+            legs.append(
+                "SELECT " + ", ".join(sel) + " " + base_from +
+                f" AND {_payload_expr(csv_col, 'number')} <> 0")
+        return "\n  UNION ALL\n  ".join(legs)
+    else:
+        sel = ["j.ADJ_ID AS ADJ_ID"]
+        for pf, tc, ty in carried:
+            sel.append(f"{_payload_expr(pf, ty)} AS {tc}")
+        metric_pf = cfg["metric_field"]
+        sel.append(f"{_payload_expr(metric_pf, 'number')} AS METRIC_VALUE")
+        return "SELECT " + ", ".join(sel) + " " + base_from + \
+               f" AND {_payload_expr(metric_pf, 'number')} <> 0"
+
+
 def update_header_status(session, df_adjustments, cobid, new_status, error_msg=None):
     """Update ADJ_HEADER.RUN_STATUS for the processed adjustments."""
     london_now = session.sql(
@@ -308,122 +395,141 @@ def main(session, process_type, adjustment_action, cobid):
                 (col('ADJUSTMENT_ACTION') == 'Direct') &
                 (col('IS_POSITIVE_ADJUSTMENT') == True)
             )
-
             if df_adj_direct.count() == 0:
-                result["message"] = f'No Running Direct adjustments found'
+                result["message"] = 'No Running Direct adjustments found'
                 return json.dumps(result)
 
-            # Collect ADJ_IDs for line-item lookup
             adj_ids = [row["ADJ_ID"] for row in df_adj_direct.select("ADJ_ID").collect()]
             adj_ids_str = ", ".join(f"'{a}'" for a in adj_ids)
 
-            # Store RUN_LOG_ID in ADJ_HEADER for traceability
             session.sql(f"""
-                UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                SET RUN_LOG_ID = {run_log_id}
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER SET RUN_LOG_ID = {run_log_id}
                 WHERE ADJ_ID IN ({adj_ids_str})
             """).collect()
 
-            # ── Insert into DIMENSION.ADJUSTMENT FIRST ───────────────────
-            # We need DIMENSION.ADJUSTMENT.ADJUSTMENT_ID before writing to FACT,
-            # so that FACT.ADJUSTMENT_ID = DIMENSION.ADJUSTMENT.ADJUSTMENT_ID (NUMBER).
+            # DIMENSION.ADJUSTMENT first → get NUMBER ADJUSTMENT_ID per adj
             dim_adj_map = {}
             try:
                 dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str)
             except Exception as dim_err:
-                print(f"Warning: could not insert into DIMENSION.ADJUSTMENT: {dim_err}")
+                print(f"Warning: DIMENSION.ADJUSTMENT insert failed: {dim_err}")
+            dim_ids_str = ', '.join(str(v) for v in dim_adj_map.values()) if dim_adj_map else "0"
 
-            # Read line items for these adjustments
-            df_line_items = session.table("ADJUSTMENT_APP.ADJ_LINE_ITEM").filter(
-                (col("ADJ_ID").isin(adj_ids)) &
-                (col("IS_DELETED") == False)
-            )
-
-            if df_line_items.count() == 0:
-                # Mark as Failed — don't leave stuck in Running
+            # Load per-scope schema config
+            cfg = load_direct_schema(session, process_type)
+            if cfg is None:
                 update_header_status(session, df_adj_direct, cobid, "Failed",
-                                     "No line items found in ADJ_LINE_ITEM")
+                                     f"No DIRECT_SCOPE_SCHEMA for scope {process_type}")
                 log_status_history(session, adj_ids, "Running", "Failed")
-                result["message"] = "No line items found for Direct adjustments"
+                result["message"] = f"No upload schema configured for {process_type}"
                 return json.dumps(result)
 
-            # Detect if local-currency metric exists in the fact adjustment table
-            # (e.g. FACT.VAR_MEASURES only has PNL_VECTOR_VALUE_IN_USD, not PNL_VECTOR_VALUE)
-            if metric_name not in fact_adj_cols:
-                metric_name = metric_usd_name
+            # Escape hatch: named per-scope writer
+            if cfg.get("writer_override"):
+                fn = globals().get(cfg["writer_override"])
+                if fn is None:
+                    update_header_status(session, df_adj_direct, cobid, "Failed",
+                                         f"WRITER_OVERRIDE {cfg['writer_override']} not found")
+                    log_status_history(session, adj_ids, "Running", "Failed")
+                    result["message"] = f"Writer override {cfg['writer_override']} not found"
+                    return json.dumps(result)
+                rows_count = fn(session, adj_ids, adj_ids_str, dim_adj_map, cobid,
+                                fact_adj_tbl_name, metric_name, metric_usd_name, run_log_id)
+            else:
+                # ── Declarative engine ───────────────────────────────────
+                extract_sql = build_direct_extract_sql(cfg, adj_ids_str)
 
-            # Rename line-item columns to match fact table naming conventions
-            # ADJ_LINE_ITEM uses VAR_SUB_COMPONENT_ID; fact table uses VAR_SUBCOMPONENT_ID
-            _col_renames = {"VAR_SUB_COMPONENT_ID": "VAR_SUBCOMPONENT_ID"}
-            for _old, _new in _col_renames.items():
-                if _old in df_line_items.columns and _new not in df_line_items.columns:
-                    df_line_items = df_line_items.with_column_renamed(_old, _new)
+                # Build the resolution joins + final SELECT columns
+                fact_adj_cols_set = set(fact_adj_tbl.columns)
+                target_cols = []      # columns we will INSERT
+                select_exprs = []     # matching SELECT expressions over the extract CTE `x`
+                join_sql = ""
+                ri = 0
+                resolved_targets = set()
+                for res in cfg["resolutions"]:
+                    alias = f"d{ri}"; ri += 1
+                    src = res["source_field"]
+                    tgt = res["target_column"]
+                    join_sql += (f"\n  LEFT JOIN {res['dimension_table']} {alias} "
+                                 f"ON UPPER({alias}.{res['match_column']}) = UPPER(x.{src})")
+                    if tgt in fact_adj_cols_set:
+                        target_cols.append(tgt)
+                        select_exprs.append(f"COALESCE({alias}.{res['key_column']}, -1) AS {tgt}")
+                        resolved_targets.add(tgt)
 
-            # Convert line items to pandas (preserve ADJ_ID for the ADJUSTMENT_ID mapping)
-            _raw_pd = df_line_items.to_pandas()
-            df_pd = check_columns(df_line_items, fact_adj_cols, metric_name, metric_usd_name)
-            # Set ADJUSTMENT_ID = DIMENSION.ADJUSTMENT.ADJUSTMENT_ID (NUMBER, not our UUID)
-            if "ADJUSTMENT_ID" in df_pd.columns and dim_adj_map:
-                df_pd["ADJUSTMENT_ID"] = _raw_pd["ADJ_ID"].map(dim_adj_map)
+                # Mapped (carried) columns that exist in the fact adj table
+                for m in cfg["fact_mapping"]:
+                    tc = m["target_column"]
+                    if tc in fact_adj_cols_set and tc not in resolved_targets and tc != "COBID":
+                        target_cols.append(tc); select_exprs.append(f"x.{tc} AS {tc}")
 
-            # Delete existing fact rows for these DIMENSION ADJUSTMENT_IDs
-            dim_ids_str = ', '.join(str(v) for v in dim_adj_map.values()) if dim_adj_map else "''"
+                # COBID, ADJUSTMENT_ID, metric, system columns
+                target_cols.append("COBID");          select_exprs.append(f"{cobid} AS COBID")
+                target_cols.append("ADJUSTMENT_ID")
+                select_exprs.append("h.DIMENSION_ADJ_ID AS ADJUSTMENT_ID")
+                if metric_name in fact_adj_cols_set:
+                    target_cols.append(metric_name);     select_exprs.append(f"x.METRIC_VALUE AS {metric_name}")
+                if metric_usd_name in fact_adj_cols_set and metric_usd_name != metric_name:
+                    target_cols.append(metric_usd_name); select_exprs.append(f"x.METRIC_VALUE AS {metric_usd_name}")
+                elif metric_usd_name in fact_adj_cols_set:
+                    if metric_usd_name not in target_cols:
+                        target_cols.append(metric_usd_name); select_exprs.append(f"x.METRIC_VALUE AS {metric_usd_name}")
+                if "IS_OFFICIAL_SOURCE" in fact_adj_cols_set:
+                    target_cols.append("IS_OFFICIAL_SOURCE"); select_exprs.append("TRUE AS IS_OFFICIAL_SOURCE")
+                if "RUN_LOG_ID" in fact_adj_cols_set:
+                    target_cols.append("RUN_LOG_ID"); select_exprs.append(f"{run_log_id} AS RUN_LOG_ID")
+                if "LOAD_TIMESTAMP" in fact_adj_cols_set:
+                    target_cols.append("LOAD_TIMESTAMP"); select_exprs.append("CURRENT_TIMESTAMP() AS LOAD_TIMESTAMP")
+
+                # Default every remaining surrogate-key/id fact column to -1, mirroring
+                # the legacy check_columns behaviour (these are NOT NULL in the fact
+                # tables and must be present even when a Direct upload doesn't supply
+                # them). Non-key columns left unlisted default/NULL as before.
+                _managed = set(target_cols)
+                for c in fact_adj_tbl.columns:
+                    if c in _managed:
+                        continue
+                    if c.split('_')[-1].upper() in ('KEY', 'ID'):
+                        target_cols.append(c); select_exprs.append(f"-1 AS {c}")
+
+                # Remove any existing rows for this batch's adjustments, then insert
+                session.sql(f"""
+                    DELETE FROM {fact_adj_tbl_name}
+                    WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
+                """).collect()
+
+                insert_sql = f"""
+                    INSERT INTO {fact_adj_tbl_name} ({', '.join(target_cols)})
+                    WITH x AS (
+                        {extract_sql}
+                    )
+                    SELECT {', '.join(select_exprs)}
+                    FROM x
+                    INNER JOIN ADJUSTMENT_APP.ADJ_HEADER h ON h.ADJ_ID = x.ADJ_ID
+                    {join_sql}
+                """
+                session.sql(insert_sql).collect()
+
+                rows_count = session.sql(f"""
+                    SELECT COUNT(*) AS CNT FROM {fact_adj_tbl_name}
+                    WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
+                """).collect()[0]["CNT"]
+
+            # ── Common post-processing ───────────────────────────────────
             session.sql(f"""
-                DELETE FROM {fact_adj_tbl_name}
-                WHERE COBID = {cobid}
-                  AND ADJUSTMENT_ID IN ({dim_ids_str})
-            """).collect()
-
-            # Drop IS_DELETED column (already filtered at Snowpark level, line 332)
-            df_pd_valid = df_pd.drop(columns=["IS_DELETED"], errors="ignore")
-            df_pd_valid["RUN_LOG_ID"] = run_log_id
-
-            # Insert into fact adjustment table via temp table + INSERT SELECT
-            # (write_pandas direct insert can fail with ON_ERROR param issues)
-            _tmp_tbl = "ADJUSTMENT_APP.TEMP_DIRECT_INSERT"
-            session.write_pandas(
-                df_pd_valid,
-                table_name="TEMP_DIRECT_INSERT",
-                schema="ADJUSTMENT_APP",
-                auto_create_table=True,
-                overwrite=True,
-                table_type="temporary"
-            )
-            _ins_cols = ", ".join(df_pd_valid.columns)
-            session.sql(f"""
-                INSERT INTO {fact_adj_tbl_name} ({_ins_cols})
-                SELECT {_ins_cols} FROM {_tmp_tbl}
-            """).collect()
-
-            # Update status
-            update_header_status(session, df_adj_direct, cobid, "Processed")
-            log_status_history(session, adj_ids, "Running", "Processed")
-
-            # Count rows actually inserted (query fact table, not pandas len)
-            rows_count_row = session.sql(f"""
-                SELECT COUNT(*) AS CNT FROM {fact_adj_tbl_name}
-                WHERE COBID = {cobid}
-                  AND ADJUSTMENT_ID IN ({dim_ids_str})
-            """).collect()
-            rows_count = rows_count_row[0]["CNT"] if rows_count_row else 0
-            session.sql(f"""
-                UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                SET RECORD_COUNT = {rows_count}
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER SET RECORD_COUNT = {rows_count}
                 WHERE ADJ_ID IN ({adj_ids_str})
             """).collect()
-            # Update RECORD_COUNT + RUN_STATUS in DIMENSION.ADJUSTMENT
             if dim_adj_map:
                 session.sql(f"""
                     UPDATE DIMENSION.ADJUSTMENT
-                    SET RECORD_COUNT = {rows_count},
-                        RUN_STATUS   = 'Processed'
+                    SET RECORD_COUNT = {rows_count}, RUN_STATUS = 'Processed'
                     WHERE ADJUSTMENT_ID IN ({dim_ids_str})
                 """).collect()
-
+            update_header_status(session, df_adj_direct, cobid, "Processed")
+            log_status_history(session, adj_ids, "Running", "Processed")
             result["rows_inserted"] = rows_count
             result["message"] = "Direct adjustments processed successfully"
-
-            # ── Close run log and trigger PowerBI refresh ──────────────
             try:
                 session.sql(f"""
                     CALL BATCH.LOAD_RUN_LOG_END_WITH_DETAIL({run_log_id}, '{{"status":"Processed"}}')
