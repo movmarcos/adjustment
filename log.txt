@@ -30,4 +30,16 @@ fact.frtbsa_rrao_measures,fact.frtbsa_rrao_measures_adjusted,fact.frtbsa_rrao_me
 
   Schema validation: FAILED — fix the items above before running adjustments
 
-  ⚠️  Schema validation FAILED — adjustments may error until fixed.
+  ⚠️  Schema validation FAILED — adjustments may error until fixed
+
+
+
+
+
+
+
+
+(1304): 01c4d3fa-0109-561d-0000-46e9a94bf482: 000904 (42000): SQL compilation error: error line 41 at position 464
+invalid identifier ''CURRENCY_CODE''
+There are existing quoted column identifiers: [''"status"'']. Please use one of them to reference the column. See more details on Snowflake identifier requirements https://docs.snowflake.com/en/sql-reference/identifiers-syntax
+.
