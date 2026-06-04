@@ -15,17 +15,19 @@ fact.frtbsa_rrao_measures,fact.frtbsa_rrao_measures_adjusted,fact.frtbsa_rrao_me
 
 
 
-  PHASE: Validate schema (ADJUSTMENTS_SETTINGS objects + Roll invariant)
+
+
 ────────────────────────────────────────────────────────────────
-     ❌ FRTB
-          • ADJUSTMENT_BASE_TABLE 'ADJUSTMENT_APP.ADJUSTMENTS_BASE_FRTB' does not exist / not accessible
-     ❌ FRTBDRC
-          • ADJUSTMENT_BASE_TABLE 'ADJUSTMENT_APP.ADJUSTMENTS_BASE_FRTB' does not exist / not accessible
-     ❌ FRTBRRAO
-          • ADJUSTMENT_BASE_TABLE 'ADJUSTMENT_APP.ADJUSTMENTS_BASE_FRTB' does not exist / not accessible
-     ❌ Sensitivity
-          • ADJUSTMENT_BASE_TABLE 'ADJUSTMENT_APP.ADJUSTMENTS_BASE_SENSITIVITY' does not exist / not accessible
-     ❌ Stress
-          • FACT_ADJUSTED_TABLE 'FACT.STRESS_MEASURES_COMBINED' is missing 2 column(s) that the Roll leg needs (must match FACT_TABLE name+case — a combined/_adjusted view, not the delta table): STRESS_LOAD_TYPE, STAGING_SOURCE_SYSTEM_CODE
+  PHASE: Validate schema (combined view vs _ADJUSTMENT table)
+────────────────────────────────────────────────────────────────
+     ✅ FRTB  (adjusted=FACT.FRTBSA_SENSITIVITY_MEASURES_ADJUSTED vs delta=FACT.FRTBSA_SENSITIVITY_MEASURES_ADJUSTMENT)
+     ✅ FRTBDRC  (adjusted=FACT.FRTBSA_DRC_MEASURES_ADJUSTED vs delta=FACT.FRTBSA_DRC_MEASURES_ADJUSTMENT)
+     ✅ FRTBRRAO  (adjusted=FACT.FRTBSA_RRAO_MEASURES_ADJUSTED vs delta=FACT.FRTBSA_RRAO_MEASURES_ADJUSTMENT)
+     ✅ Sensitivity  (adjusted=FACT.SENSITIVITY_MEASURES_ADJUSTED vs delta=FACT.SENSITIVITY_MEASURES_ADJUSTMENT)
+     ✅ Stress  (adjusted=FACT.STRESS_MEASURES_COMBINED vs delta=FACT.STRESS_MEASURES_ADJUSTMENT)
      ❌ VaR
-          • FACT_ADJUSTED_TABLE 'FACT.VAR_MEASURES_COMBINED' is missing 4 column(s) that the Roll leg needs (must match FACT_TABLE name+case — a combined/_adjusted view, not the delta table): PNL_VECTOR_PROPERTIES_ID, INFLATION_INDEX_ID, UNDERLYING_COMMON_INSTRUMENT_KEY, VAR_LOAD_TYPE
+          • FACT_ADJUSTED_TABLE 'FACT.VAR_MEASURES_COMBINED' is missing 2 column(s) that the Roll leg copies into 'FACT.VAR_MEASURES_ADJUSTMENT' (name+case): INFLATION_INDEX_ID, UNDERLYING_COMMON_INSTRUMENT_KEY
+
+  Schema validation: FAILED — fix the items above before running adjustments
+
+  ⚠️  Schema validation FAILED — adjustments may error until fixed.
