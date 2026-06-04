@@ -479,6 +479,112 @@ def clean_schema(session):
     return True
 
 
+# ─── Schema validation ────────────────────────────────────────────────────────
+
+# Fact-table columns the Scale/Roll proc never references on the adjusted view,
+# so they don't need to exist there.
+_VALIDATE_IGNORE_COLS = {
+    "LOAD_TIMESTAMP", "RUN_LOG_ID", "RAVEN_FILENAME", "RAVEN_FILE_ROW_NUMBER",
+}
+
+
+def _object_columns(session, fqname):
+    """Return the column names of a table/view exactly as Snowflake reports them
+    (case-sensitive — a quoted lowercase column comes back lowercase), or None if
+    the object does not exist / is not accessible."""
+    try:
+        rows = session.sql(f"SHOW COLUMNS IN {fqname}").collect()
+        return [r["column_name"] for r in rows]
+    except Exception:
+        return None
+
+
+def validate_schema(session):
+    """Validate the objects referenced by ADJUSTMENTS_SETTINGS before adjustments run.
+
+    Checks, per active scope:
+      1. FACT_TABLE / FACT_ADJUSTED_TABLE / ADJUSTMENTS_TABLE / ADJUSTMENT_BASE_TABLE exist.
+      2. Roll invariant: FACT_ADJUSTED_TABLE exposes every FACT_TABLE column with the
+         SAME name + case. The cross-COB Roll leg reads the adjusted view using the
+         original fact's (unquoted) column references, so a missing or quoted-lowercase
+         column there breaks all scaling for that scope (the CURRENCY_CODE / "status" bug).
+      3. METRIC_USD_NAME exists in both the fact table and the adjusted view.
+
+    Prints a per-scope report. Returns True if every scope passes.
+    """
+    print("\n" + "─" * 64)
+    print("  PHASE: Validate schema (ADJUSTMENTS_SETTINGS objects + Roll invariant)")
+    print("─" * 64)
+    try:
+        rows = session.sql("""
+            SELECT PROCESS_TYPE, FACT_TABLE, FACT_ADJUSTED_TABLE, ADJUSTMENTS_TABLE,
+                   ADJUSTMENT_BASE_TABLE, METRIC_USD_NAME
+            FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
+            WHERE IS_ACTIVE = TRUE
+            ORDER BY PROCESS_TYPE
+        """).collect()
+    except Exception as e:
+        print(f"     ❌ Could not read ADJUSTMENTS_SETTINGS: {str(e).splitlines()[0][:120]}")
+        return False
+
+    if not rows:
+        print("     ⚠️  No active rows in ADJUSTMENTS_SETTINGS — nothing to validate.")
+        return True
+
+    all_ok = True
+    for r in rows:
+        pt         = r["PROCESS_TYPE"]
+        fact       = r["FACT_TABLE"]
+        adjusted   = r["FACT_ADJUSTED_TABLE"]
+        adj_tbl    = r["ADJUSTMENTS_TABLE"]
+        base_tbl   = r["ADJUSTMENT_BASE_TABLE"]
+        metric_usd = (r["METRIC_USD_NAME"] or "").upper()
+        problems   = []
+
+        fact_cols = _object_columns(session, fact) if fact else None
+        adj_cols  = _object_columns(session, adjusted) if adjusted else None
+
+        # 1. Existence
+        if not fact or fact_cols is None:
+            problems.append(f"FACT_TABLE '{fact}' does not exist / not accessible")
+        if not adjusted or adj_cols is None:
+            problems.append(f"FACT_ADJUSTED_TABLE '{adjusted}' does not exist / not accessible")
+        if adj_tbl and _object_columns(session, adj_tbl) is None:
+            problems.append(f"ADJUSTMENTS_TABLE '{adj_tbl}' does not exist / not accessible")
+        if base_tbl and _object_columns(session, base_tbl) is None:
+            problems.append(f"ADJUSTMENT_BASE_TABLE '{base_tbl}' does not exist / not accessible")
+
+        # 2. Roll invariant — adjusted view must expose every fact column (name + case)
+        if fact_cols is not None and adj_cols is not None and adjusted != fact:
+            adj_set = set(adj_cols)
+            missing = [c for c in fact_cols
+                       if c not in adj_set and c.upper() not in _VALIDATE_IGNORE_COLS]
+            if missing:
+                shown = ', '.join(missing[:12]) + (' …' if len(missing) > 12 else '')
+                problems.append(
+                    f"FACT_ADJUSTED_TABLE '{adjusted}' is missing {len(missing)} column(s) "
+                    f"that the Roll leg needs (must match FACT_TABLE name+case — a "
+                    f"combined/_adjusted view, not the delta table): {shown}")
+
+        # 3. Metric column present in both
+        if fact_cols is not None and metric_usd and metric_usd not in {c.upper() for c in fact_cols}:
+            problems.append(f"METRIC_USD_NAME '{metric_usd}' not found in FACT_TABLE '{fact}'")
+        if (adj_cols is not None and adjusted != fact and metric_usd
+                and metric_usd not in {c.upper() for c in adj_cols}):
+            problems.append(f"METRIC_USD_NAME '{metric_usd}' not found in FACT_ADJUSTED_TABLE '{adjusted}'")
+
+        if problems:
+            all_ok = False
+            print(f"     ❌ {pt}")
+            for p in problems:
+                print(f"          • {p}")
+        else:
+            print(f"     ✅ {pt}  (fact={fact} · adjusted={adjusted})")
+
+    print(f"\n  Schema validation: {'PASS' if all_ok else 'FAILED — fix the items above before running adjustments'}")
+    return all_ok
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -491,12 +597,17 @@ def main():
                              '(incl. ADJ_HEADER and all adjustment/approver/sign-off data) '
                              'before deploying from scratch. Preserves external base tables '
                              '(ADJUSTMENTS_BASE_*).')
+    parser.add_argument('--validate-only', action='store_true',
+                        help='Only run the schema validation (ADJUSTMENTS_SETTINGS objects + '
+                             'Roll invariant) and exit non-zero on failure. No deploy.')
     args = parser.parse_args()
 
     deploy_db = not args.streamlit_only
     deploy_st = not args.db_only
     if args.rebuild:
         deploy_db = True   # rebuild always reapplies DB objects after teardown
+    if args.validate_only:
+        deploy_db = deploy_st = False
 
     print("=" * 64)
     print("  Adjustment Engine — Snowflake Deployment")
@@ -516,6 +627,12 @@ def main():
 
     success = True
 
+    # ── Validate-only mode ───────────────────────────────────────────────
+    if args.validate_only:
+        ok = validate_schema(session)
+        session.close()
+        return 0 if ok else 1
+
     # ── Clean (rebuild only) ─────────────────────────────────────────────
     if args.rebuild:
         clean_schema(session)
@@ -533,6 +650,13 @@ def main():
         print("  PHASE 1b: Resume pipeline tasks")
         print("─" * 64)
         resume_pipeline_tasks(session)
+
+        print("\n" + "─" * 64)
+        print("  PHASE 1c: Validate schema")
+        print("─" * 64)
+        if not validate_schema(session):
+            print("\n  ⚠️  Schema validation FAILED — adjustments may error until fixed.")
+            success = False
 
     # ── Deploy Streamlit app ─────────────────────────────────────────────
     if deploy_st:
