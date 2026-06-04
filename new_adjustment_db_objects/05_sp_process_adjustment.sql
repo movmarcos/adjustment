@@ -531,6 +531,15 @@ def main(session, process_type, adjustment_action, cobid):
             adj_ids     = [row["ADJ_ID"] for row in df_adj_scale.select("ADJ_ID").collect()]
             adj_ids_str = ", ".join(f"'{a}'" for a in adj_ids)
 
+            # Does this batch contain a cross-COB Roll? Only then do we read the
+            # adjusted view (FACT_ADJUSTED_TABLE). Keeping the adjusted-view leg
+            # out of same-COB Scale/Flatten batches means those never depend on a
+            # combined view existing/being correctly shaped — so a misconfigured
+            # adjusted view can only ever affect Rolls, never all scaling.
+            has_cross_cob = df_adj_scale.filter(
+                col('COBID') != col('SOURCE_COBID')
+            ).count() > 0
+
             # Store RUN_LOG_ID in ADJ_HEADER for traceability
             session.sql(f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER
@@ -749,6 +758,24 @@ def main(session, process_type, adjustment_action, cobid):
                 else from_where
             )
 
+            # Cross-COB Roll leg ② — ONLY included when the batch has a cross-COB
+            # roll AND a distinct adjusted view is configured. It reads the source
+            # COB's adjusted value (× factor) from FACT_ADJUSTED_TABLE; netted with
+            # leg ③ (flatten of the target original) →
+            #   adjusted(target) = factor × adjusted(source).
+            # Omitting it for same-COB batches means Scale/Flatten never reference
+            # the adjusted view, so a misconfigured combined view can only break
+            # Roll — never all scaling.
+            roll_leg = ""
+            if has_cross_cob and fact_adjusted_tbl_name and fact_adjusted_tbl_name != fact_tbl_name:
+                roll_leg = f"""
+                UNION ALL
+                -- ② Roll cross-COB: source COB's ADJUSTED value from FACT_ADJUSTED_TABLE
+                {select_scale} {from_where_adj}
+                AND fact.COBID = adjust.SOURCE_COBID
+                AND adjust.COBID <> adjust.SOURCE_COBID
+                {join_cond}"""
+
             # Build the key expression
             select_with_keys = "*" if key_name == pk_expr else f"{pk_expr}, *"
             exclude_keys = "*" if key_name == pk_expr else f"* EXCLUDE ({key_name})"
@@ -765,14 +792,7 @@ def main(session, process_type, adjustment_action, cobid):
                 {select_scale} {from_where}
                 AND fact.COBID = adjust.SOURCE_COBID
                 AND adjust.COBID = adjust.SOURCE_COBID
-                {join_cond}
-                UNION ALL
-                -- ② Roll/Scale cross-COB: reads the source COB's ADJUSTED value
-                --    (original + existing adjustments) from FACT_ADJUSTED_TABLE
-                {select_scale} {from_where_adj}
-                AND fact.COBID = adjust.SOURCE_COBID
-                AND adjust.COBID <> adjust.SOURCE_COBID
-                {join_cond}
+                {join_cond}{roll_leg}
                 UNION ALL
                 -- ③ Flatten current COB (offsets existing values at target COB for cross-COB roll)
                 {select_flatten} {from_where}
