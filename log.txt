@@ -11,3 +11,21 @@ fact.sensitivity_measures,fact.sensitivity_measures_adjusted,fact.sensitivity_me
 fact.frtbsa_sensitivity_measures,fact.frtbsa_sensitivity_measures_adjusted,fact.frtbsa_sensitivity_measures_adjustment,,adjustment.adjustments_base_frtb,amount,amount_in_usd,FRTB,frtbsa_sensitivity_key
 fact.frtbsa_drc_measures,fact.frtbsa_drc_measures_adjusted,fact.frtbsa_drc_measures_adjustment,,adjustment.adjustments_base_frtb,jtd_loss,jtd_loss_usd,FRTBDRC,frtbsa_drc_key
 fact.frtbsa_rrao_measures,fact.frtbsa_rrao_measures_adjusted,fact.frtbsa_rrao_measures_adjustment,,adjustment.adjustments_base_frtb,notional_amount,notional_amount_usd,FRTBRRAO,frtbsa_rrao_key
+
+
+
+
+  PHASE: Validate schema (ADJUSTMENTS_SETTINGS objects + Roll invariant)
+────────────────────────────────────────────────────────────────
+     ❌ FRTB
+          • ADJUSTMENT_BASE_TABLE 'ADJUSTMENT_APP.ADJUSTMENTS_BASE_FRTB' does not exist / not accessible
+     ❌ FRTBDRC
+          • ADJUSTMENT_BASE_TABLE 'ADJUSTMENT_APP.ADJUSTMENTS_BASE_FRTB' does not exist / not accessible
+     ❌ FRTBRRAO
+          • ADJUSTMENT_BASE_TABLE 'ADJUSTMENT_APP.ADJUSTMENTS_BASE_FRTB' does not exist / not accessible
+     ❌ Sensitivity
+          • ADJUSTMENT_BASE_TABLE 'ADJUSTMENT_APP.ADJUSTMENTS_BASE_SENSITIVITY' does not exist / not accessible
+     ❌ Stress
+          • FACT_ADJUSTED_TABLE 'FACT.STRESS_MEASURES_COMBINED' is missing 2 column(s) that the Roll leg needs (must match FACT_TABLE name+case — a combined/_adjusted view, not the delta table): STRESS_LOAD_TYPE, STAGING_SOURCE_SYSTEM_CODE
+     ❌ VaR
+          • FACT_ADJUSTED_TABLE 'FACT.VAR_MEASURES_COMBINED' is missing 4 column(s) that the Roll leg needs (must match FACT_TABLE name+case — a combined/_adjusted view, not the delta table): PNL_VECTOR_PROPERTIES_ID, INFLATION_INDEX_ID, UNDERLYING_COMMON_INSTRUMENT_KEY, VAR_LOAD_TYPE
