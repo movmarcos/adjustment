@@ -214,9 +214,30 @@ def _write_direct_json_rows(adj_id: str, df_csv: pd.DataFrame) -> int:
     return len(payloads)
 
 
+def _delete_direct_json_rows(adj_id: str) -> None:
+    """Remove pre-written Direct line items for an adj_id. Used to roll back when
+    the header submission is rejected/fails, so line items aren't left orphaned."""
+    from utils.snowflake_conn import get_session
+    safe = str(adj_id).replace("'", "''")
+    get_session().sql(
+        f"DELETE FROM ADJUSTMENT_APP.ADJ_LINE_ITEM_JSON WHERE ADJ_ID = '{safe}'"
+    ).collect()
+
+
+# Statuses SP_SUBMIT_ADJUSTMENT returns when the adjustment was actually accepted
+# into the workflow. NB: a sign-off rejection returns "Rejected - SignedOff"
+# (not "Error"), so checking `status != "Error"` would wrongly show success.
+_SUBMIT_SUCCESS_STATUSES = ("Pending", "Pending Approval", "Approved")
+
+
+def _is_submit_success(result: dict) -> bool:
+    return (result or {}).get("status") in _SUBMIT_SUCCESS_STATUSES
+
+
 def _do_submit() -> dict:
     """Call SP_SUBMIT_ADJUSTMENT. Returns result dict (never raises)."""
     import uuid as _uuid
+    wrote_line_items_for = None
     try:
         payload = _build_payload()
 
@@ -230,15 +251,28 @@ def _do_submit() -> dict:
             if n == 0:
                 return {"status": "Error",
                         "message": "No rows found in CSV data"}
+            wrote_line_items_for = adj_id
 
-        json_str = json.dumps(payload).replace("'", "\\'")
+        # Snowflake escapes a single quote by DOUBLING it (''), not with a
+        # backslash. A backslash leaves the quote active → broken/injectable CALL.
+        json_str = json.dumps(payload).replace("'", "''")
         rows = run_query(f"CALL ADJUSTMENT_APP.SP_SUBMIT_ADJUSTMENT('{json_str}')")
         if not rows:
-            return {"status": "Error", "message": "No response from stored procedure"}
-        raw = rows[0][0]
-        return json.loads(str(raw)) if isinstance(raw, str) else raw
+            result = {"status": "Error", "message": "No response from stored procedure"}
+        else:
+            raw = rows[0][0]
+            result = json.loads(str(raw)) if isinstance(raw, str) else raw
     except Exception as exc:
-        return {"status": "Error", "message": str(exc)}
+        result = {"status": "Error", "message": str(exc)}
+
+    # Roll back pre-written Direct line items if the header was NOT accepted,
+    # so a rejection/failure doesn't leave orphaned rows in ADJ_LINE_ITEM_JSON.
+    if wrote_line_items_for and not _is_submit_success(result):
+        try:
+            _delete_direct_json_rows(wrote_line_items_for)
+        except Exception:
+            pass
+    return result
 
 
 
@@ -1088,9 +1122,17 @@ elif wiz["step"] == 2:
             except Exception as exc:
                 st.warning(f"Preview not available: {exc}")
 
-    # ── Error from previous attempt ────────────────────────────────────────
-    if (wiz.get("result") or {}).get("status") == "Error":
-        st.error(f"❌ {wiz['result'].get('message', 'Submission failed')}")
+    # ── Error / rejection from previous attempt ─────────────────────────────
+    # Any non-success result (Error OR a workflow rejection like
+    # "Rejected - SignedOff") must surface here — never on the success screen.
+    _res = wiz.get("result") or {}
+    if _res and not _is_submit_success(_res):
+        _status = _res.get("status", "")
+        _msg = _res.get("message", "Submission was not accepted.")
+        if _status and _status != "Error":
+            st.error(f"❌ Not submitted — {_status}: {_msg}")
+        else:
+            st.error(f"❌ {_msg}")
 
     # ── Navigation ─────────────────────────────────────────────────────────
     st.divider()
@@ -1109,7 +1151,7 @@ elif wiz["step"] == 2:
             with st.spinner("Submitting adjustment…"):
                 result = _do_submit()
             wiz["result"] = result
-            wiz["step"]   = 3 if result.get("status") != "Error" else 2
+            wiz["step"]   = 3 if _is_submit_success(result) else 2
             safe_rerun()
 
 

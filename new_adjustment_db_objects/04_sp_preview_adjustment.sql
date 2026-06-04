@@ -27,6 +27,12 @@ from snowflake.snowpark.functions import col, lit, upper
 from snowflake.snowpark import DataFrame
 
 
+def _esc(v):
+    """Escape a value for inlining as a Snowflake single-quoted string literal.
+    Snowflake escapes a quote by doubling it ('' ), NOT with a backslash."""
+    return str(v).replace("'", "''")
+
+
 def get_table_columns(session, table_name):
     """Return the set of column names (UPPER) for a given table."""
     parts = table_name.upper().split('.')
@@ -55,10 +61,10 @@ def main(session, p_adjustment):
     """
     adj = json.loads(p_adjustment) if isinstance(p_adjustment, str) else p_adjustment
 
-    cobid          = adj["cobid"]
+    cobid          = int(adj["cobid"])
     process_type   = adj["process_type"]
     adjustment_type = adj["adjustment_type"].lower()
-    source_cobid   = adj.get("source_cobid", cobid)
+    source_cobid   = int(adj.get("source_cobid", cobid))
     scale_factor   = float(adj.get("scale_factor", 1.0))
 
     # ── Get settings ─────────────────────────────────────────────────────
@@ -114,7 +120,7 @@ def main(session, p_adjustment):
         return session.sql(f"""
             SELECT li.*, 'Uploaded value' AS PREVIEW_NOTE
             FROM ADJUSTMENT_APP.ADJ_LINE_ITEM li
-            WHERE li.ADJ_ID = {adj.get("adj_id", -1)}
+            WHERE li.ADJ_ID = '{_esc(adj.get("adj_id", -1))}'
               AND li.IS_DELETED = FALSE
             ORDER BY li.LINE_ID
         """)
@@ -136,15 +142,18 @@ def main(session, p_adjustment):
     fact_source = fact_tbl
     cob_filter  = source_cobid
 
-    where_clauses = [f"fact.COBID = {cob_filter}"]
+    where_clauses = [f"fact.COBID = {int(cob_filter)}"]
 
-    # Dimension filters (only apply if the join column exists)
+    # Dimension filters (only apply if the join column exists).
+    # All user-supplied values are escaped via _esc — these are EXECUTE AS CALLER
+    # procs, so an unescaped value is both an injection vector and breaks on any
+    # apostrophe in a code/name.
     if has_entity_key:
         val = adj.get("entity_code")
         if val:
             where_clauses.append(
                 f"EXISTS (SELECT 1 FROM DIMENSION.ENTITY d "
-                f"WHERE d.ENTITY_KEY = fact.ENTITY_KEY AND d.ENTITY_CODE = '{val}')"
+                f"WHERE d.ENTITY_KEY = fact.ENTITY_KEY AND d.ENTITY_CODE = '{_esc(val)}')"
             )
 
     if has_book_key:
@@ -152,24 +161,24 @@ def main(session, p_adjustment):
         if val:
             where_clauses.append(
                 f"EXISTS (SELECT 1 FROM DIMENSION.BOOK d "
-                f"WHERE d.BOOK_KEY = fact.BOOK_KEY AND d.BOOK_CODE = '{val}')"
+                f"WHERE d.BOOK_KEY = fact.BOOK_KEY AND d.BOOK_CODE = '{_esc(val)}')"
             )
         dept = adj.get("department_code")
         if dept:
             where_clauses.append(
                 f"EXISTS (SELECT 1 FROM DIMENSION.BOOK bk "
-                f"WHERE bk.BOOK_KEY = fact.BOOK_KEY AND bk.DEPARTMENT_CODE = '{dept}')"
+                f"WHERE bk.BOOK_KEY = fact.BOOK_KEY AND bk.DEPARTMENT_CODE = '{_esc(dept)}')"
             )
 
     if has_currency:
         val = adj.get("currency_code")
         if val:
-            where_clauses.append(f"fact.CURRENCY_CODE = '{val}'")
+            where_clauses.append(f"fact.CURRENCY_CODE = '{_esc(val)}'")
 
     if has_source_sys:
         val = adj.get("source_system_code")
         if val:
-            where_clauses.append(f"fact.SOURCE_SYSTEM_CODE = '{val}'")
+            where_clauses.append(f"fact.SOURCE_SYSTEM_CODE = '{_esc(val)}'")
 
     if has_trade_key:
         strategy = adj.get("strategy")
@@ -177,9 +186,9 @@ def main(session, p_adjustment):
         if strategy or typology:
             trade_cond = "1=1"
             if strategy:
-                trade_cond += f" AND td.STRATEGY = '{strategy}'"
+                trade_cond += f" AND td.STRATEGY = '{_esc(strategy)}'"
             if typology:
-                trade_cond += f" AND td.TRADE_TYPOLOGY = '{typology}'"
+                trade_cond += f" AND td.TRADE_TYPOLOGY = '{_esc(typology)}'"
             where_clauses.append(
                 f"EXISTS (SELECT 1 FROM DIMENSION.TRADE td "
                 f"WHERE td.TRADE_KEY = fact.TRADE_KEY AND {trade_cond})"

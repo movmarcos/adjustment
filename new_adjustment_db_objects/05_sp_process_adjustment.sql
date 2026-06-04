@@ -384,12 +384,16 @@ def main(session, process_type, adjustment_action, cobid):
             """).collect()
 
             # DIMENSION.ADJUSTMENT first → get NUMBER ADJUSTMENT_ID per adj
-            dim_adj_map = {}
-            try:
-                dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str)
-            except Exception as dim_err:
-                print(f"Warning: DIMENSION.ADJUSTMENT insert failed: {dim_err}")
-            dim_ids_str = ', '.join(str(v) for v in dim_adj_map.values()) if dim_adj_map else "0"
+            # Must succeed: dim_ids_str drives the supersede/delete WHERE clauses.
+            # A failure here previously fell through to dim_ids_str="0", which made
+            # `DELETE ... WHERE ADJUSTMENT_ID NOT IN (0)` wipe real adjustments while
+            # still reporting Processed. Let it raise so the batch is marked Failed.
+            dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str)
+            if not dim_adj_map:
+                raise Exception("DIMENSION.ADJUSTMENT insert returned no ADJUSTMENT_IDs; "
+                                "aborting before fact writes to avoid corrupting the "
+                                "adjustment table with placeholder id 0.")
+            dim_ids_str = ', '.join(str(v) for v in dim_adj_map.values())
 
             # Load per-scope schema config
             cfg = load_direct_schema(session, process_type)
@@ -550,12 +554,16 @@ def main(session, process_type, adjustment_action, cobid):
             # ── Insert into DIMENSION.ADJUSTMENT FIRST ───────────────────
             # Get DIMENSION.ADJUSTMENT.ADJUSTMENT_ID (NUMBER) before building
             # the TEMP table so FACT.ADJUSTMENT_ID = DIMENSION.ADJUSTMENT.ADJUSTMENT_ID.
-            dim_adj_map = {}
-            try:
-                dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str)
-            except Exception as dim_err:
-                print(f"Warning: could not insert into DIMENSION.ADJUSTMENT: {dim_err}")
-            dim_ids_str = ', '.join(str(v) for v in dim_adj_map.values()) if dim_adj_map else "0"
+            # Must succeed: dim_ids_str drives the supersede/delete WHERE clauses.
+            # A failure here previously fell through to dim_ids_str="0", which made
+            # `DELETE ... WHERE ADJUSTMENT_ID NOT IN (0)` wipe real adjustments while
+            # still reporting Processed. Let it raise so the batch is marked Failed.
+            dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str)
+            if not dim_adj_map:
+                raise Exception("DIMENSION.ADJUSTMENT insert returned no ADJUSTMENT_IDs; "
+                                "aborting before fact writes to avoid corrupting the "
+                                "adjustment table with placeholder id 0.")
+            dim_ids_str = ', '.join(str(v) for v in dim_adj_map.values())
 
             # ── Join columns (fact ∩ adj, minus exclusions) ──────────────
             exclude_join = ['COBID', 'IS_OFFICIAL_SOURCE', 'STRATEGY',
@@ -828,21 +836,29 @@ def main(session, process_type, adjustment_action, cobid):
                 FROM cte
             ),
             netted AS (
-                -- Collapse cross-COB roll pairs (legs ② + ③) into one net-delta row per
-                -- position: e.g. -1.0 (flatten) + 1.5 (scale) → 0.5.
-                -- Same-COB rows (leg ①) are already one row per position; GROUP BY is a no-op.
-                -- ANY_VALUE is safe for non-metric dimension columns because legs ② and ③
-                -- represent the same position; SCD2 key discrepancies are fixed post-insert.
+                -- Net WITHIN a single adjustment, per position. Group by (position
+                -- key, ADJUSTMENT_ID) so the two legs of one cross-COB roll (leg ②
+                -- scale of source + leg ③ flatten of target — same ADJUSTMENT_ID)
+                -- collapse to one net-delta row (e.g. -1.0 + 1.5 → 0.5), while
+                -- DIFFERENT adjustments that touch the same position stay as
+                -- separate rows. That is essential: the `ranked` DENSE_RANK below
+                -- enforces "overlap = keep the most recent adjustment" (design P6).
+                -- Grouping by key alone would SUM across distinct adjustments and
+                -- make that DENSE_RANK a no-op (double-counting). Same-COB rows
+                -- (leg ①) are already one row per (position, adjustment).
+                -- ANY_VALUE is safe for non-metric dimension columns because all
+                -- rows in a group share position + adjustment; SCD2 key
+                -- discrepancies are fixed post-insert.
                 -- HAVING <> 0 drops positions whose net change is exactly zero.
                 SELECT
                     {key_name},
                     ANY_VALUE(COBID)                          AS COBID,
-                    ANY_VALUE(ADJUSTMENT_ID)                  AS ADJUSTMENT_ID,
+                    ADJUSTMENT_ID,
                     ANY_VALUE(ADJUSTMENT_CREATED_TIMESTAMP)   AS ADJUSTMENT_CREATED_TIMESTAMP,
                     {non_metric_any},
                     {metric_sums}
                 FROM fact_key
-                GROUP BY {key_name}
+                GROUP BY {key_name}, ADJUSTMENT_ID
                 HAVING SUM({metric_usd_name}) <> 0
             ),
             ranked AS (
@@ -1062,88 +1078,72 @@ def main(session, process_type, adjustment_action, cobid):
             esc_entity = str(entity_code).replace("'", "''")
 
             # ── Insert into DIMENSION.ADJUSTMENT ────────────────────────
-            dim_adj_map = {}
-            try:
-                dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str)
-            except Exception as dim_err:
-                print(f"Warning: could not insert into DIMENSION.ADJUSTMENT: {dim_err}")
-
-            # The single DIMENSION.ADJUSTMENT.ADJUSTMENT_ID for the new roll
+            # Must succeed: its ADJUSTMENT_ID is consolidated onto every copied
+            # adjustment row. Let a failure raise (→ batch Failed) rather than
+            # copying rows with a NULL id.
+            dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str)
             new_dim_adj_id = list(dim_adj_map.values())[0] if dim_adj_map else None
+            if new_dim_adj_id is None:
+                raise Exception("EntityRoll: DIMENSION.ADJUSTMENT insert returned no "
+                                "ADJUSTMENT_ID; aborting before any delete/copy.")
 
             # ── Detect entity column name ───────────────────────────────
-            # FACT tables use ENTITY_CODE or ENTITY_KEY — detect which exists
-            entity_col = None
-            for candidate in ['ENTITY_CODE', 'ENTITY_KEY']:
-                if candidate in fact_cols:
-                    entity_col = candidate
-                    break
+            # FACT tables use ENTITY_CODE (text) or ENTITY_KEY (numeric surrogate).
+            entity_col = next((c for c in ('ENTITY_CODE', 'ENTITY_KEY') if c in fact_cols), None)
             if not entity_col:
                 raise Exception(f"Cannot find entity column (ENTITY_CODE or ENTITY_KEY) in {fact_tbl_name}")
-
-            entity_adj_col = None
-            for candidate in ['ENTITY_CODE', 'ENTITY_KEY']:
-                if candidate in fact_adj_cols:
-                    entity_adj_col = candidate
-                    break
+            entity_adj_col = next((c for c in ('ENTITY_CODE', 'ENTITY_KEY') if c in fact_adj_cols), None)
             if not entity_adj_col:
                 raise Exception(f"Cannot find entity column in {fact_adj_tbl_name}")
 
-            # ── STEP 1: Delete target COB+entity from FACT_TABLE ────────
-            del_fact_sql = f"""
-                DELETE FROM {fact_tbl_name}
-                WHERE COBID = {int(cobid)}
-                  AND {entity_col} = '{esc_entity}'
-            """
-            session.sql(del_fact_sql).collect()
-            print(f"EntityRoll: deleted from {fact_tbl_name} WHERE COBID={cobid}, {entity_col}={entity_code}")
+            # Build the entity predicate. A numeric ENTITY_KEY column must be
+            # resolved from the entity CODE via DIMENSION.ENTITY — comparing
+            # ENTITY_KEY directly to the code string matches nothing (or errors),
+            # which previously made EntityRoll a silent no-op on Stress/Sensitivity
+            # while still reporting Processed (and after wiping the target).
+            def _entity_pred(col_name):
+                if col_name == 'ENTITY_CODE':
+                    return f"{col_name} = '{esc_entity}'"
+                return (f"{col_name} IN (SELECT ENTITY_KEY FROM DIMENSION.ENTITY "
+                        f"WHERE ENTITY_CODE = '{esc_entity}')")
+            fact_pred = _entity_pred(entity_col)
+            adj_pred  = _entity_pred(entity_adj_col)
 
-            # ── STEP 2: Delete target COB+entity from FACT_ADJUSTED_TABLE
-            del_adj_sql = f"""
-                DELETE FROM {fact_adjusted_tbl_name}
-                WHERE COBID = {int(cobid)}
-                  AND {entity_adj_col} = '{esc_entity}'
-            """
-            session.sql(del_adj_sql).collect()
-            print(f"EntityRoll: deleted from {fact_adjusted_tbl_name} WHERE COBID={cobid}, {entity_adj_col}={entity_code}")
+            fact_select_cols = ', '.join([c for c in fact_cols if c != 'COBID'])
+            adj_select_cols  = ', '.join([c for c in fact_adj_cols if c not in ('COBID', 'ADJUSTMENT_ID')])
 
-            # ── STEP 3: Copy source → target in FACT_TABLE ──────────────
-            # All columns except COBID are copied as-is; COBID is replaced
-            fact_copy_cols = [c for c in fact_cols if c != 'COBID']
-            fact_select_cols = ', '.join(fact_copy_cols)
-            insert_fact_sql = f"""
-                INSERT INTO {fact_tbl_name} (COBID, {fact_select_cols})
-                SELECT {int(cobid)}, {fact_select_cols}
-                FROM {fact_tbl_name}
-                WHERE COBID = {int(source_cobid)}
-                  AND {entity_col} = '{esc_entity}'
-            """
-            session.sql(insert_fact_sql).collect()
-            fact_count = session.sql(f"""
-                SELECT COUNT(*) AS CNT FROM {fact_tbl_name}
-                WHERE COBID = {int(cobid)} AND {entity_col} = '{esc_entity}'
-            """).collect()[0]["CNT"]
-            print(f"EntityRoll: copied {fact_count} rows into {fact_tbl_name}")
+            # ── Atomic delete + copy ────────────────────────────────────
+            # A failure after the deletes must NOT leave the target COB+entity
+            # wiped, so all four statements run inside one transaction.
+            session.sql("BEGIN").collect()
+            try:
+                session.sql(f"DELETE FROM {fact_tbl_name} "
+                            f"WHERE COBID = {int(cobid)} AND {fact_pred}").collect()
+                session.sql(f"DELETE FROM {fact_adjusted_tbl_name} "
+                            f"WHERE COBID = {int(cobid)} AND {adj_pred}").collect()
+                session.sql(f"""
+                    INSERT INTO {fact_tbl_name} (COBID, {fact_select_cols})
+                    SELECT {int(cobid)}, {fact_select_cols}
+                    FROM {fact_tbl_name}
+                    WHERE COBID = {int(source_cobid)} AND {fact_pred}
+                """).collect()
+                session.sql(f"""
+                    INSERT INTO {fact_adjusted_tbl_name} (COBID, ADJUSTMENT_ID, {adj_select_cols})
+                    SELECT {int(cobid)}, {int(new_dim_adj_id)}, {adj_select_cols}
+                    FROM {fact_adjusted_tbl_name}
+                    WHERE COBID = {int(source_cobid)} AND {adj_pred}
+                """).collect()
+                session.sql("COMMIT").collect()
+            except Exception:
+                session.sql("ROLLBACK").collect()
+                raise
 
-            # ── STEP 4: Copy source → target in FACT_ADJUSTED_TABLE ─────
-            # Replace COBID and consolidate all ADJUSTMENT_IDs → single new ID
-            adj_copy_cols = [c for c in fact_adj_cols if c not in ('COBID', 'ADJUSTMENT_ID')]
-            adj_select_cols = ', '.join(adj_copy_cols)
-
-            adj_id_expr = str(new_dim_adj_id) if new_dim_adj_id else 'NULL'
-            insert_adj_sql = f"""
-                INSERT INTO {fact_adjusted_tbl_name} (COBID, ADJUSTMENT_ID, {adj_select_cols})
-                SELECT {int(cobid)}, {adj_id_expr}, {adj_select_cols}
-                FROM {fact_adjusted_tbl_name}
-                WHERE COBID = {int(source_cobid)}
-                  AND {entity_adj_col} = '{esc_entity}'
-            """
-            session.sql(insert_adj_sql).collect()
-            adj_count = session.sql(f"""
-                SELECT COUNT(*) AS CNT FROM {fact_adjusted_tbl_name}
-                WHERE COBID = {int(cobid)} AND {entity_adj_col} = '{esc_entity}'
-            """).collect()[0]["CNT"]
-            print(f"EntityRoll: copied {adj_count} rows into {fact_adjusted_tbl_name}")
+            fact_count = session.sql(f"SELECT COUNT(*) AS CNT FROM {fact_tbl_name} "
+                                     f"WHERE COBID = {int(cobid)} AND {fact_pred}").collect()[0]["CNT"]
+            adj_count = session.sql(f"SELECT COUNT(*) AS CNT FROM {fact_adjusted_tbl_name} "
+                                    f"WHERE COBID = {int(cobid)} AND {adj_pred}").collect()[0]["CNT"]
+            print(f"EntityRoll: copied {fact_count} fact rows + {adj_count} adjustment rows "
+                  f"for entity {entity_code} from COB {source_cobid} to {cobid}")
 
             # ── Update RECORD_COUNT in DIMENSION.ADJUSTMENT ─────────────
             total_count = fact_count + adj_count
