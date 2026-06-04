@@ -415,6 +415,70 @@ def submit_test_adjustment(session):
         return False
 
 
+# ─── Clean (rebuild from scratch) ─────────────────────────────────────────────
+
+# External base tables the repo does NOT recreate — must be preserved on rebuild.
+_PRESERVE_TABLES = {'ADJUSTMENTS_BASE_SENSITIVITY', 'ADJUSTMENTS_BASE_FRTB'}
+
+def clean_schema(session):
+    """DROP all repo-managed objects in ADJUSTMENT_APP for a from-scratch rebuild.
+
+    DESTRUCTIVE: removes ADJ_HEADER (incl. any corrupted/quoted version),
+    ADJ_LINE_ITEM(_JSON), status history, settings, approvers, sign-off, etc.
+    PRESERVES the external base tables in _PRESERVE_TABLES (ADJUSTMENTS_BASE_*),
+    which the deploy does not recreate. Drops in dependency order; each DROP is
+    IF EXISTS and isolated so one failure doesn't halt the teardown.
+    """
+    print("\n" + "─" * 64)
+    print("  PHASE 0: Clean ADJUSTMENT_APP (DROP repo-managed objects)")
+    print("─" * 64)
+    print(f"  Preserving external base tables: {', '.join(sorted(_PRESERVE_TABLES))}")
+
+    drops = []
+    # 1. Tasks (consume streams + call procedures)
+    for t in ('TASK_PROCESS_VAR', 'TASK_PROCESS_STRESS',
+              'TASK_PROCESS_FRTB', 'TASK_PROCESS_SENSITIVITY'):
+        drops.append(f"DROP TASK IF EXISTS ADJUSTMENT_APP.{t}")
+    # 2. Streams (sit on the queue views)
+    for s in ('STREAM_QUEUE_VAR', 'STREAM_QUEUE_STRESS',
+              'STREAM_QUEUE_FRTB', 'STREAM_QUEUE_SENSITIVITY'):
+        drops.append(f"DROP STREAM IF EXISTS ADJUSTMENT_APP.{s}")
+    # 3. Dynamic tables
+    for d in ('DT_DASHBOARD', 'DT_OVERLAP_ALERTS'):
+        drops.append(f"DROP DYNAMIC TABLE IF EXISTS ADJUSTMENT_APP.{d}")
+    # 4. Views
+    for v in ('VW_QUEUE_VAR', 'VW_QUEUE_STRESS', 'VW_QUEUE_FRTB', 'VW_QUEUE_SENSITIVITY',
+              'VW_DASHBOARD_KPI', 'VW_SIGNOFF_STATUS', 'VW_RECENT_ACTIVITY', 'VW_ERRORS',
+              'VW_MY_WORK', 'VW_PROCESSING_QUEUE', 'VW_APPROVAL_QUEUE',
+              'VW_REPORT_REFRESH_STATUS', 'VW_ADJUSTMENT_TRACK'):
+        drops.append(f"DROP VIEW IF EXISTS ADJUSTMENT_APP.{v}")
+    # 5. Procedures (exact signatures)
+    drops += [
+        "DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_SUBMIT_ADJUSTMENT(VARCHAR)",
+        "DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT(VARCHAR)",
+        "DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT(VARCHAR, VARCHAR, NUMBER)",
+        "DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_RUN_PIPELINE(VARCHAR, VARCHAR)",
+    ]
+    # 6. Tables (repo-managed only — NEVER the preserved base tables)
+    for tbl in ('ADJ_HEADER', 'ADJ_LINE_ITEM', 'ADJ_LINE_ITEM_JSON', 'ADJ_STATUS_HISTORY',
+                'ADJUSTMENTS_SETTINGS', 'ADJ_RECURRING_TEMPLATE', 'DIRECT_SCOPE_SCHEMA',
+                'ADJ_APPROVERS', 'ADJ_SIGNOFF_STATUS'):
+        assert tbl not in _PRESERVE_TABLES
+        drops.append(f"DROP TABLE IF EXISTS ADJUSTMENT_APP.{tbl}")
+
+    ok = 0
+    for stmt in drops:
+        obj = stmt.replace('DROP ', '').replace('IF EXISTS ', '')
+        try:
+            session.sql(stmt).collect()
+            print(f"     ✅ {obj}")
+            ok += 1
+        except Exception as e:
+            print(f"     ⚠️  {obj}: {str(e).splitlines()[0][:100]}")
+    print(f"  Teardown: {ok}/{len(drops)} drops succeeded")
+    return True
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -422,10 +486,17 @@ def main():
     parser.add_argument('--db-only', action='store_true', help='Deploy DB objects only')
     parser.add_argument('--streamlit-only', action='store_true', help='Deploy Streamlit app only')
     parser.add_argument('--test-adj', action='store_true', help='Submit a test VaR Flatten adjustment after deploy')
+    parser.add_argument('--rebuild', action='store_true',
+                        help='DESTRUCTIVE: DROP all repo-managed ADJUSTMENT_APP objects '
+                             '(incl. ADJ_HEADER and all adjustment/approver/sign-off data) '
+                             'before deploying from scratch. Preserves external base tables '
+                             '(ADJUSTMENTS_BASE_*).')
     args = parser.parse_args()
 
     deploy_db = not args.streamlit_only
     deploy_st = not args.db_only
+    if args.rebuild:
+        deploy_db = True   # rebuild always reapplies DB objects after teardown
 
     print("=" * 64)
     print("  Adjustment Engine — Snowflake Deployment")
@@ -444,6 +515,10 @@ def main():
         sys.exit(1)
 
     success = True
+
+    # ── Clean (rebuild only) ─────────────────────────────────────────────
+    if args.rebuild:
+        clean_schema(session)
 
     # ── Deploy DB objects ────────────────────────────────────────────────
     if deploy_db:
