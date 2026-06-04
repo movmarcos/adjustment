@@ -75,9 +75,10 @@ def main(session, p_adjustment):
     metric_name  = s["METRIC_NAME"].upper()
     metric_usd   = s["METRIC_USD_NAME"].upper()
 
-    # A cross-COB Roll rolls the SOURCE cob's *adjusted* state (original +
-    # existing adjustments) forward onto the target cob. The preview must mirror
-    # SP_PROCESS_ADJUSTMENT: current = target original, projected = source adjusted.
+    # A cross-COB Roll carries the source COB's *adjusted* value forward,
+    # mirroring SP_PROCESS_ADJUSTMENT leg ② (which reads FACT_ADJUSTED_TABLE —
+    # the combined view, same schema as the fact). Preview: current = target
+    # original, projected = factor × source adjusted.
     is_roll = (adjustment_type == "roll" and int(source_cobid) != int(cobid))
 
     # ── Discover which columns actually exist in the fact table ──────────
@@ -188,50 +189,41 @@ def main(session, p_adjustment):
     base_where = f"WHERE {where_sql}\n      AND fact.{primary_metric} IS NOT NULL"
 
     # ═════════════════════════════════════════════════════════════════════
-    # CROSS-COB ROLL — special preview
-    # The generic single-table scan cannot represent a Roll, which replaces the
-    # target cob's value with the SOURCE cob's adjusted state. Mirror
-    # SP_PROCESS_ADJUSTMENT exactly:
-    #   current   = SUM(original) at the TARGET cob   (what gets flattened)
-    #   projected = factor × ( SUM(original) + SUM(existing adj) ) at the SOURCE cob
+    # CROSS-COB ROLL — preview mirrors SP_PROCESS_ADJUSTMENT:
+    #   current   = SUM(original) at the TARGET cob   (what leg ③ flattens)
+    #   projected = factor × SUM(adjusted) at the SOURCE cob   (leg ②, reads
+    #               FACT_ADJUSTED_TABLE — the combined view incl. existing adj)
     #   delta     = projected − current
     # where_clauses[0] is the COBID predicate; the rest are dimension filters
-    # that apply (alias `fact`) to the original AND adjusted source tables.
+    # that apply (alias `fact`) to both the original fact and the combined
+    # adjusted view (the adjusted view has the same schema as the fact table).
     # ═════════════════════════════════════════════════════════════════════
-    if is_roll:
+    if is_roll and fact_adj_tbl and fact_adj_tbl != fact_tbl:
         dim_filters = where_clauses[1:]
         dim_sql     = ("\n      AND " + "\n      AND ".join(dim_filters)) if dim_filters else ""
         src_where   = f"WHERE fact.COBID = {int(source_cobid)}{dim_sql}\n      AND fact.{primary_metric} IS NOT NULL"
         tgt_where   = f"WHERE fact.COBID = {int(cobid)}{dim_sql}\n      AND fact.{primary_metric} IS NOT NULL"
 
-        has_adj_tbl = bool(fact_adj_tbl) and fact_adj_tbl != fact_tbl
-        adj_sum = (f"+ COALESCE((SELECT COALESCE(SUM(fact.{primary_metric}), 0) "
-                   f"FROM {fact_adj_tbl} fact {src_where}), 0)") if has_adj_tbl else ""
-
-        if mode in ("summary", "breakdown", "sample"):
-            roll_summary = f"""
+        roll_summary = f"""
+        SELECT
+            ROWS_AFFECTED,
+            NONZERO_ROWS,
+            TOTAL_CURRENT_VALUE,
+            TOTAL_PROJECTED_VALUE - TOTAL_CURRENT_VALUE AS TOTAL_ADJUSTMENT_DELTA,
+            TOTAL_PROJECTED_VALUE
+        FROM (
             SELECT
-                ROWS_AFFECTED,
-                NONZERO_ROWS,
-                TOTAL_CURRENT_VALUE,
-                TOTAL_PROJECTED_VALUE - TOTAL_CURRENT_VALUE AS TOTAL_ADJUSTMENT_DELTA,
-                TOTAL_PROJECTED_VALUE
-            FROM (
-                SELECT
-                    (SELECT COUNT(*)
-                       FROM {fact_tbl} fact {src_where})                       AS ROWS_AFFECTED,
-                    (SELECT COUNT_IF(fact.{primary_metric} != 0)
-                       FROM {fact_tbl} fact {src_where})                       AS NONZERO_ROWS,
-                    (SELECT COALESCE(SUM(fact.{primary_metric}), 0)
-                       FROM {fact_tbl} fact {tgt_where})                       AS TOTAL_CURRENT_VALUE,
-                    {scale_factor} * (
-                        (SELECT COALESCE(SUM(fact.{primary_metric}), 0)
-                           FROM {fact_tbl} fact {src_where})
-                        {adj_sum}
-                    )                                                          AS TOTAL_PROJECTED_VALUE
-            ) q
-            """
-            return session.sql(roll_summary)
+                (SELECT COUNT(*)
+                   FROM {fact_adj_tbl} fact {src_where})                    AS ROWS_AFFECTED,
+                (SELECT COUNT_IF(fact.{primary_metric} != 0)
+                   FROM {fact_adj_tbl} fact {src_where})                    AS NONZERO_ROWS,
+                (SELECT COALESCE(SUM(fact.{primary_metric}), 0)
+                   FROM {fact_tbl} fact {tgt_where})                        AS TOTAL_CURRENT_VALUE,
+                {scale_factor} * (SELECT COALESCE(SUM(fact.{primary_metric}), 0)
+                   FROM {fact_adj_tbl} fact {src_where})                    AS TOTAL_PROJECTED_VALUE
+        ) q
+        """
+        return session.sql(roll_summary)
 
     # ── MODE: summary — single aggregated row, NO row transfer ───────────
     # The dimension filters above use EXISTS sub-queries, so no joins are

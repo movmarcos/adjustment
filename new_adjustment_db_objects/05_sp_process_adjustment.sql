@@ -735,30 +735,19 @@ def main(session, process_type, adjustment_action, cobid):
                 'adjust.SCALE_FACTOR_ADJUSTED', '-1'
             )
 
-            # ── Roll: carry the SOURCE cob's EXISTING adjustments forward ──
-            # A cross-COB Roll must reproduce the source COB's *adjusted* state
-            # (original + existing adjustments), not just its raw original.
-            # Leg ② already reads the source ORIGINAL from FACT_TABLE; leg ②b
-            # below adds the source's existing adjustment deltas from
-            # FACT_ADJUSTED_TABLE so they roll forward too. All legs are netted
-            # (SUM per position) together with leg ③ (flatten of the target
-            # original), giving:
-            #   adjusted(target) = SCALE_FACTOR × ( original(src) + adj(src) )
-            # NOTE: no DISTINCT here — a single position can have several source
-            # adjustment rows (one per prior ADJUSTMENT_ID) that must all be
-            # summed, not de-duplicated.
-            roll_adj_leg = ""
-            if fact_adjusted_tbl_name and fact_adjusted_tbl_name != fact_tbl_name:
-                from_where_adj       = from_where.replace(fact_tbl_name, fact_adjusted_tbl_name, 1)
-                select_scale_src_adj = select_scale.replace("SELECT DISTINCT", "SELECT", 1)
-                roll_adj_leg = f"""
-                UNION ALL
-                -- ②b Roll cross-COB: source COB's EXISTING adjustment deltas
-                {select_scale_src_adj} {from_where_adj}
-                AND fact.COBID = adjust.SOURCE_COBID
-                AND adjust.COBID <> adjust.SOURCE_COBID
-                {join_cond}
-                """
+            # ── Cross-COB (Roll) reads the ADJUSTED view ─────────────────────
+            # A cross-COB Roll must carry the source COB's *adjusted* value
+            # (original + existing adjustments) forward, not the raw original.
+            # So leg ② reads from FACT_ADJUSTED_TABLE — a combined view with the
+            # SAME schema as the fact table (e.g. FACT.VAR_MEASURES_COMBINED,
+            # FACT.SENSITIVITY_MEASURES_ADJUSTED). Mirrors the reference proc's
+            # `replace(fact_tbl_name, fact_ajusted_tbl_name)`. Falls back to the
+            # original fact table when no distinct adjusted view is configured.
+            from_where_adj = (
+                from_where.replace(fact_tbl_name, fact_adjusted_tbl_name)
+                if fact_adjusted_tbl_name and fact_adjusted_tbl_name != fact_tbl_name
+                else from_where
+            )
 
             # Build the key expression
             select_with_keys = "*" if key_name == pk_expr else f"{pk_expr}, *"
@@ -778,12 +767,12 @@ def main(session, process_type, adjustment_action, cobid):
                 AND adjust.COBID = adjust.SOURCE_COBID
                 {join_cond}
                 UNION ALL
-                -- ② Roll/Scale cross-COB: reads ORIGINAL positions from SOURCE_COBID, applies factor
-                {select_scale} {from_where}
+                -- ② Roll/Scale cross-COB: reads the source COB's ADJUSTED value
+                --    (original + existing adjustments) from FACT_ADJUSTED_TABLE
+                {select_scale} {from_where_adj}
                 AND fact.COBID = adjust.SOURCE_COBID
                 AND adjust.COBID <> adjust.SOURCE_COBID
                 {join_cond}
-                {roll_adj_leg}
                 UNION ALL
                 -- ③ Flatten current COB (offsets existing values at target COB for cross-COB roll)
                 {select_flatten} {from_where}
