@@ -1,8 +1,6 @@
-Python Interpreter Error: Traceback (most recent call last): File "_udf_code.py", line 219, in main _unblock_resolved(session, pipeline_in) File "_udf_code.py", line 392, in _unblock_resolved _block_overlapping(session, r, pipeline_in) File "_udf_code.py", line 327, in _block_overlapping val = running_row[dim] ~~~~~~~~~~~^^^^^ File "<site-packages>/snowflake/snowpark/row.py", line 151, in __getitem__ return self._named_values[item] ~~~~~~~~~~~~~~~~~~^^^^^^ KeyError: 'TRADE_CODE' in function SP_RUN_PIPELINE with handler main
-
-
-
-(1304): 01c4d30b-0109-561e-0000-46e9a93cdade: 000904 (42000): SQL compilation error: error line 75 at position 464
+(1304): 01c4d369-0109-561d-0000-46e9a942d51e: 000904 (42000): SQL compilation error: error line 75 at position 464
 invalid identifier ''CURRENCY_CODE''
 There are existing quoted column identifiers: [''"status"'']. Please use one of them to reference the column. See more details on Snowflake identifier requirements https://docs.snowflake.com/en/sql-reference/identifiers-syntax
 
+
+reason:  Not consistent with desk position. Trade not feeding from murex
