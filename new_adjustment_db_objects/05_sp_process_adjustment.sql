@@ -4,7 +4,7 @@
 --
 -- Adapted from the existing ADJUSTMENT_APP.PROCESS_ADJUSTMENT procedure.
 -- Key changes:
---   ① Reads from ADJUSTMENT_APP.ADJ_HEADER (via config ADJUSTMENT_BASE_TABLE)
+--   ① Reads from ADJUSTMENT_APP.ADJ_HEADER (the single source of truth for all scopes)
 --   ② For Direct: reads values from ADJUSTMENT_APP.ADJ_LINE_ITEM
 --   ③ Updates ADJ_HEADER status (not DIMENSION.ADJUSTMENT)
 --   ④ Records status transitions in ADJ_STATUS_HISTORY
@@ -317,7 +317,7 @@ def main(session, process_type, adjustment_action, cobid):
         fact_tbl_pk             = s["FACT_TABLE_PK"]
         fact_adj_tbl_name       = s["ADJUSTMENTS_TABLE"]
         fact_adj_summary_name   = s.get("ADJUSTMENTS_SUMMARY_TABLE")
-        adj_base_tbl_name       = s["ADJUSTMENT_BASE_TABLE"]   # → ADJUSTMENT_APP.ADJ_HEADER
+        adj_base_tbl_name       = 'ADJUSTMENT_APP.ADJ_HEADER'  # single source of truth for every scope
         metric_name             = s["METRIC_NAME"].upper()
         metric_usd_name         = s["METRIC_USD_NAME"].upper()
 

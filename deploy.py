@@ -519,14 +519,11 @@ def validate_schema(session):
          and ADJUSTMENTS_TABLE — i.e. it survives into the processing CTE the
          surrogate dedup/overlap key is built over. A phantom PK column compiles
          to an invalid identifier at runtime, so this is a hard failure.
-      5. METRIC_NAME (local metric), if distinct and configured, exists in
-         FACT_TABLE — warning only (the engine legitimately collapses to USD when
-         a scope is single-metric).
-      6. ADJUSTMENTS_SUMMARY_TABLE (if set) exists and its non-metric columns all
+      5. ADJUSTMENTS_SUMMARY_TABLE (if set) exists and its non-metric columns all
          exist in the _ADJUSTMENT table (the summary rebuild SELECTs them there).
-      7. ADJUSTMENT_BASE_TABLE exists and carries the columns the engine reads
-         from it (it drives every Scale join and often points at an external,
-         deploy-preserved table — the highest-risk unvalidated object).
+
+    METRIC_NAME is intentionally NOT validated: single-metric (USD-only) scopes
+    legitimately have no local METRIC_NAME and the engine collapses to USD.
 
     Prints a per-scope report. Returns True if every scope passes.
     """
@@ -536,7 +533,7 @@ def validate_schema(session):
     try:
         rows = session.sql("""
             SELECT PROCESS_TYPE, FACT_TABLE, FACT_ADJUSTED_TABLE,
-                   ADJUSTMENTS_TABLE, ADJUSTMENTS_SUMMARY_TABLE, ADJUSTMENT_BASE_TABLE,
+                   ADJUSTMENTS_TABLE, ADJUSTMENTS_SUMMARY_TABLE,
                    METRIC_NAME, METRIC_USD_NAME, FACT_TABLE_PK
             FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
             WHERE IS_ACTIVE = TRUE
@@ -558,7 +555,6 @@ def validate_schema(session):
         adjusted   = r["FACT_ADJUSTED_TABLE"]      # combined / _adjusted / _combined view
         adj_tbl    = r["ADJUSTMENTS_TABLE"]        # _adjustment delta (write target)
         summary_tbl = r["ADJUSTMENTS_SUMMARY_TABLE"]   # optional rollup (write target)
-        base_tbl    = r["ADJUSTMENT_BASE_TABLE"]       # adjustment source (join driver)
         metric_name = (r["METRIC_NAME"] or "").upper()
         metric_usd = (r["METRIC_USD_NAME"] or "").upper()
         problems   = []   # hard failures (block)
@@ -568,7 +564,6 @@ def validate_schema(session):
         view_cols = _object_columns(session, adjusted) if adjusted else None
         adj_cols  = _object_columns(session, adj_tbl) if adj_tbl else None
         summary_cols = _object_columns(session, summary_tbl) if summary_tbl else None
-        base_cols    = _object_columns(session, base_tbl) if base_tbl else None
 
         # Columns that form the dedup/overlap key — used to decide which missing
         # combined-view columns are fatal (key) vs tolerable (non-key, -1/NULL).
@@ -645,18 +640,7 @@ def validate_schema(session):
                         f"FACT_TABLE_PK column '{k}' is missing from {' and '.join(where)} "
                         f"— the dedup/overlap key cannot be built; processing will fail to compile")
 
-        # 5. METRIC_NAME (local-currency metric). The proc collapses to USD when
-        #    it's absent from the fact table — legitimate for single-metric tables,
-        #    but a typo would silently lose local-currency adjustments. Warn (not
-        #    fail) when a distinct local metric is configured yet missing.
-        if (fact_cols is not None and metric_name and metric_name != metric_usd
-                and metric_name not in {c.upper() for c in fact_cols}):
-            warnings.append(
-                f"METRIC_NAME '{metric_name}' not in FACT_TABLE '{fact}' — the engine "
-                f"will treat this scope as USD-only (local adjustments collapsed). "
-                f"If the local metric exists under another name, fix METRIC_NAME.")
-
-        # 6. ADJUSTMENTS_SUMMARY_TABLE (optional). The summary rebuild SELECTs the
+        # 5. ADJUSTMENTS_SUMMARY_TABLE (optional). The summary rebuild SELECTs the
         #    summary table's non-metric columns FROM the _ADJUSTMENT table, so each
         #    such column must exist there or the INSERT fails to compile.
         if summary_tbl:
@@ -673,24 +657,6 @@ def validate_schema(session):
                         f"ADJUSTMENTS_SUMMARY_TABLE '{summary_tbl}' has column(s) not in "
                         f"'{adj_tbl}' — the summary rebuild SELECTs them from the delta "
                         f"table and will fail to compile: {shown}")
-
-        # 7. ADJUSTMENT_BASE_TABLE (the join driver for all Scale processing). It
-        #    may live in another schema and is often an external/preserved table,
-        #    so it is the highest-risk unvalidated object. Check it exists and has
-        #    the columns the engine reads from it.
-        if base_tbl:
-            if base_cols is None:
-                problems.append(f"ADJUSTMENT_BASE_TABLE '{base_tbl}' does not exist / not accessible")
-            else:
-                base_ci = {c.upper() for c in base_cols}
-                need = ['ADJ_ID', 'COBID', 'PROCESS_TYPE', 'ADJUSTMENT_ACTION',
-                        'RUN_STATUS', 'IS_DELETED', 'SOURCE_COBID',
-                        'DIMENSION_ADJ_ID', 'SCALE_FACTOR_ADJUSTED', 'CREATED_DATE']
-                miss = [c for c in need if c not in base_ci]
-                if miss:
-                    problems.append(
-                        f"ADJUSTMENT_BASE_TABLE '{base_tbl}' is missing column(s) the "
-                        f"processing engine reads: {', '.join(miss)}")
 
         if warnings:
             had_warnings = True
