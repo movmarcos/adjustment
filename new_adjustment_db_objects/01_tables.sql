@@ -168,6 +168,24 @@ COMMENT = 'Detail rows for Direct/Upload adjustments. Each row = one dimension c
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- ADJ_LINE_ITEM_JSON — Direct Adjustment uploads (semi-structured)
+-- One row per uploaded CSV line; raw fields live in PAYLOAD (VARIANT).
+-- Per-scope interpretation is driven by DIRECT_SCOPE_SCHEMA at processing time.
+-- ═══════════════════════════════════════════════════════════════════════════
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_LINE_ITEM_JSON (
+    LINE_ID      NUMBER(38,0) NOT NULL AUTOINCREMENT,
+    ADJ_ID       VARCHAR(36)  NOT NULL,            -- FK to ADJ_HEADER
+    ROW_NUM      NUMBER(38,0),                     -- 1-based line order within the upload
+    PAYLOAD      VARIANT,                          -- the raw CSV row as a JSON object
+    IS_DELETED   BOOLEAN          DEFAULT FALSE,
+    RUN_STATUS   VARCHAR(30)      DEFAULT 'Pending',
+    CREATED_DATE TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
+    CONSTRAINT PK_ADJ_LINE_ITEM_JSON PRIMARY KEY (LINE_ID)
+)
+COMMENT = 'Direct Adjustment uploads: one row per CSV line, raw fields in PAYLOAD (VARIANT).';
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- 3. ADJ_STATUS_HISTORY — Full audit trail of every status change
 -- ═══════════════════════════════════════════════════════════════════════════
 
