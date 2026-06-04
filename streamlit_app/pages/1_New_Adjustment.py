@@ -186,78 +186,51 @@ _VAR_COL_MAP = {
 }
 
 
-def _write_var_upload_line_items(adj_id: str, df_csv: pd.DataFrame) -> int:
-    """UNPIVOT the VaR CSV and write line items to ADJ_LINE_ITEM.
+# ── Direct Adjustment: config-driven schema + JSON upload writer ──────────────
+def _direct_expected_columns(scope: str) -> list:
+    """Return the ordered expected CSV column names for a scope from DIRECT_SCOPE_SCHEMA.
+    Empty list if the scope has no config row yet."""
+    try:
+        rows = run_query(f"""
+            SELECT EXPECTED_COLUMNS
+            FROM ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
+            WHERE UPPER(PROCESS_TYPE) = UPPER('{scope.replace("'", "''")}')
+              AND IS_ACTIVE = TRUE
+        """)
+        if not rows or rows[0][0] is None:
+            return []
+        spec = rows[0][0]
+        spec = json.loads(spec) if isinstance(spec, str) else spec
+        return [c["name"] for c in spec]
+    except Exception:
+        return []
 
-    Each CSV row has 21 VaR measure columns. We melt them into individual
-    rows with VAR_SUB_COMPONENT_ID resolved via DIMENSION.VAR_SUB_COMPONENT.
-    Uses a temp table + INSERT SELECT to avoid column-position mapping issues.
-    Returns the number of line items written.
-    """
+
+def _write_direct_json_rows(adj_id: str, df_csv: pd.DataFrame) -> int:
+    """Store each CSV row verbatim as a JSON object in ADJ_LINE_ITEM_JSON.
+    Returns the number of rows written."""
     from utils.snowflake_conn import get_session
     session = get_session()
-
-    # Resolve VAR_SUB_COMPONENT_NAME → VAR_SUB_COMPONENT_ID
-    vsc_rows = session.sql("""
-        SELECT VAR_SUB_COMPONENT_ID, UPPER(VAR_SUB_COMPONENT_NAME) AS NAME
-        FROM DIMENSION.VAR_SUB_COMPONENT
-    """).collect()
-    vsc_map = {r["NAME"]: r["VAR_SUB_COMPONENT_ID"] for r in vsc_rows}
-
-    # Identify which VaR measure columns exist in the CSV
-    present_measures = {csv_col: db_col for csv_col, db_col in _VAR_COL_MAP.items()
-                        if csv_col in df_csv.columns}
-    if not present_measures:
+    if df_csv is None or len(df_csv) == 0:
         return 0
 
-    # Dimension columns from the CSV
-    dim_map = {
-        "COBId": "COBID", "EntityCode": "ENTITY_CODE",
-        "SourceSystemCode": "SOURCE_SYSTEM_CODE", "BookCode": "BOOK_CODE",
-        "CurrencyCode": "CURRENCY_CODE", "ScenarioDate": "SCENARIO_DATE_ID",
-        "TradeCode": "TRADE_CODE", "Category": "CATEGORY", "Detail": "DETAIL",
-    }
+    payloads = pd.DataFrame({
+        "ADJ_ID":  adj_id,
+        "ROW_NUM": range(1, len(df_csv) + 1),
+        # one JSON string per row; NaN → None so PARSE_JSON yields null
+        "PAYLOAD_TEXT": [json.dumps({k: (None if pd.isna(v) else v) for k, v in rec.items()})
+                         for rec in df_csv.to_dict(orient="records")],
+    })
 
-    rows = []
-    for _, csv_row in df_csv.iterrows():
-        base = {db_col: csv_row.get(csv_col) for csv_col, db_col in dim_map.items()
-                if csv_col in df_csv.columns}
-        base["ADJ_ID"] = adj_id
-
-        for csv_col, db_col in present_measures.items():
-            val = csv_row.get(csv_col)
-            if pd.isna(val) or val == 0:
-                continue
-            row = dict(base)
-            row["VAR_SUB_COMPONENT_ID"] = vsc_map.get(db_col.upper().replace("_", " "))
-            row["ADJUSTMENT_VALUE"] = float(val)
-            row["ADJUSTMENT_VALUE_IN_USD"] = float(val)
-            row["IS_DELETED"] = False
-            rows.append(row)
-
-    if not rows:
-        return 0
-
-    df_lines = pd.DataFrame(rows)
-
-    # Write to temp table first, then INSERT SELECT by column name
-    # (write_pandas maps by position which breaks on tables with AUTOINCREMENT PKs)
     session.write_pandas(
-        df_lines,
-        table_name="TEMP_VAR_UPLOAD_LINES",
-        schema="ADJUSTMENT_APP",
-        auto_create_table=True,
-        overwrite=True,
-        table_type="temporary",
-    )
-    insert_cols = ", ".join(df_lines.columns)
-    session.sql(f"""
-        INSERT INTO ADJUSTMENT_APP.ADJ_LINE_ITEM ({insert_cols})
-        SELECT {insert_cols}
-        FROM ADJUSTMENT_APP.TEMP_VAR_UPLOAD_LINES
+        payloads, table_name="TEMP_DIRECT_JSON_ROWS", schema="ADJUSTMENT_APP",
+        auto_create_table=True, overwrite=True, table_type="temporary")
+    session.sql("""
+        INSERT INTO ADJUSTMENT_APP.ADJ_LINE_ITEM_JSON (ADJ_ID, ROW_NUM, PAYLOAD)
+        SELECT ADJ_ID, ROW_NUM, PARSE_JSON(PAYLOAD_TEXT)
+        FROM ADJUSTMENT_APP.TEMP_DIRECT_JSON_ROWS
     """).collect()
-
-    return len(df_lines)
+    return len(payloads)
 
 
 def _do_submit() -> dict:
@@ -272,10 +245,10 @@ def _do_submit() -> dict:
         if wiz.get("category") == "Direct Adjustment" and wiz.get("uploaded_df") is not None:
             adj_id = str(_uuid.uuid4())
             payload["adj_id"] = adj_id
-            n = _write_direct_line_items(wiz["process_type"], adj_id, wiz["uploaded_df"])
+            n = _write_direct_json_rows(adj_id, wiz["uploaded_df"])
             if n == 0:
                 return {"status": "Error",
-                        "message": "No non-zero values found in CSV data"}
+                        "message": "No rows found in CSV data"}
 
         json_str = json.dumps(payload).replace("'", "\\'")
         rows = run_query(f"CALL ADJUSTMENT_APP.SP_SUBMIT_ADJUSTMENT('{json_str}')")
@@ -321,37 +294,6 @@ EXPECTED_VAR_COLS = [
 ] + VAR_MEASURE_COLS + ["Category", "Detail"]
 
 
-# ── Direct Adjustment: per-scope CSV config ──────────────────────────────────
-# Each scope will eventually define its own CSV columns + line-item writer.
-# TODO: replace the placeholder entries below with each scope's real columns and
-#       a scope-specific writer. For now every scope reuses the VaR definitions,
-#       so Direct uploads are only end-to-end correct for VaR.
-_DIRECT_VAR_ENTRY = {
-    "expected": EXPECTED_VAR_COLS,
-    "measures": VAR_MEASURE_COLS,
-    "writer":   _write_var_upload_line_items,
-}
-DIRECT_SCOPE_CONFIG = {
-    "VaR":         _DIRECT_VAR_ENTRY,
-    "Stress":      _DIRECT_VAR_ENTRY,   # TODO: Stress-specific columns + writer
-    "Sensitivity": _DIRECT_VAR_ENTRY,   # TODO: Sensitivity-specific columns + writer
-    "FRTB":        _DIRECT_VAR_ENTRY,   # TODO: FRTB-specific columns + writer
-    "FRTBDRC":     _DIRECT_VAR_ENTRY,   # TODO: FRTBDRC-specific columns + writer
-    "FRTBRRAO":    _DIRECT_VAR_ENTRY,   # TODO: FRTBRRAO-specific columns + writer
-    # No FRTBALL — fan-out is not applicable to direct value uploads.
-}
-
-
-def _direct_cfg(scope: str) -> dict:
-    """Per-scope Direct config; falls back to VaR while scopes are placeholders."""
-    return DIRECT_SCOPE_CONFIG.get(scope) or _DIRECT_VAR_ENTRY
-
-
-def _write_direct_line_items(scope: str, adj_id: str, df_csv) -> int:
-    """Write Direct-upload line items for a scope using its configured writer."""
-    return _direct_cfg(scope)["writer"](adj_id, df_csv)
-
-
 def render_direct_form() -> None:
     # ── Scope selection (FRTBALL excluded — no fan-out for direct values) ──
     _render_scope_selector(include_frtball=False)
@@ -361,13 +303,17 @@ def render_direct_form() -> None:
         st.info("👆 Select a data scope to continue.")
         return
 
-    cfg          = _direct_cfg(wiz["process_type"])
-    expected_cols = cfg["expected"]
+    expected_cols = _direct_expected_columns(wiz["process_type"])
 
     section_title(f"Direct Adjustment — {wiz['process_type']} CSV", "📥")
-    _info_banner(
-        'Paste a CSV of exact adjustment values. Expected columns: '
-        '<code>' + ', '.join(expected_cols) + '</code>.')
+    if expected_cols:
+        _info_banner(
+            'Paste a CSV of exact adjustment values. Expected columns: '
+            '<code>' + ', '.join(expected_cols) + '</code>.')
+    else:
+        _info_banner(
+            f'No upload schema is configured for the <b>{wiz["process_type"]}</b> scope yet. '
+            'Paste a CSV; columns will be stored as-is.')
 
     csv_text = st.text_area(
         "Paste CSV Data Here", value="", height=180, key=_k("direct_csv"),
