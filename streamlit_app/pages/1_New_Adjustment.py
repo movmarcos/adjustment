@@ -293,6 +293,20 @@ def _missing_info(fields: list) -> None:
         st.info(f"Complete required fields: **{', '.join(fields)}**")
 
 
+def _render_approval_flag(key_suffix: str) -> bool:
+    """Render the 'Requires Approval' toggle, separated from the field above by a
+    gap + divider and slightly indented, so clicking just below the Reason box
+    lands on empty space rather than flipping the flag by accident."""
+    st.markdown("<br/>", unsafe_allow_html=True)
+    st.divider()
+    _, c = st.columns([0.04, 0.96])
+    with c:
+        return st.checkbox(
+            "🔐 Requires Approval",
+            value=wiz.get("requires_approval", False),
+            key=_k(key_suffix))
+
+
 def render_direct_form() -> None:
     # ── Scope selection (FRTBALL excluded — no fan-out for direct values) ──
     _render_scope_selector(include_frtball=False)
@@ -374,9 +388,7 @@ def render_direct_form() -> None:
     wiz["reason"] = st.text_area(
         "Reason / Business Justification *", value=wiz.get("reason", ""),
         height=60, key=_k("var_reason"))
-    wiz["requires_approval"] = st.checkbox(
-        "🔐 Requires Approval", value=wiz.get("requires_approval", False),
-        key=_k("var_approval"))
+    wiz["requires_approval"] = _render_approval_flag("var_approval")
 
     # ── Duplicate reference check ────────────────────────────────────────
     if wiz.get("cobid") and wiz.get("global_reference"):
@@ -807,9 +819,7 @@ def render_scaling_form() -> None:
     wiz["reason"] = st.text_area(
         "Reason / Business Justification *", value=wiz.get("reason", ""),
         height=80, key=_k("reason"))
-    wiz["requires_approval"] = st.checkbox(
-        "🔐 Requires Approval", value=wiz.get("requires_approval", False),
-        key=_k("approval"))
+    wiz["requires_approval"] = _render_approval_flag("approval")
 
     st.markdown("<br/>", unsafe_allow_html=True)
     missing = [f for f, v in [("Adjustment Type", wiz.get("adjustment_type")),
