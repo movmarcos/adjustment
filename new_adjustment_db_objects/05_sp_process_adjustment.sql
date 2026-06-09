@@ -757,8 +757,17 @@ def main(session, process_type, adjustment_action, cobid):
             # ── 3-way UNION ALL ──────────────────────────────────────────
             # ADJUSTMENT_ID = DIMENSION.ADJUSTMENT.ADJUSTMENT_ID (NUMBER), not our UUID.
             # ADJ_HEADER.DIMENSION_ADJ_ID was populated above by insert_to_dimension_and_get_ids.
+            #
+            # NOTE: NO `DISTINCT` here. The fact tables carry many rows per
+            # position that become identical once the non-adjustment columns are
+            # projected away; SELECT DISTINCT would collapse N such rows to one,
+            # under-counting the flatten leg (the dropped rows are negative) and
+            # leaving the original under-cancelled → inflated combined value.
+            # Aggregation is the `netted` CTE's job (GROUP BY key + SUM), which
+            # correctly sums all contributions per position. (Confirmed live: a
+            # VaR roll summed 217.5M with DISTINCT vs the correct 213.16M without.)
             select_scale = (
-                f"SELECT DISTINCT adjust.COBID, adjust.DIMENSION_ADJ_ID AS ADJUSTMENT_ID, "
+                f"SELECT adjust.COBID, adjust.DIMENSION_ADJ_ID AS ADJUSTMENT_ID, "
                 f"adjust.CREATED_DATE AS ADJUSTMENT_CREATED_TIMESTAMP, "
                 f"{select_non_metric}, {select_measure}"
             )
