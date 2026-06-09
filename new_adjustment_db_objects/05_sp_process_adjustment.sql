@@ -43,34 +43,47 @@ import pandas as pd
 import numpy as np
 
 
-def _log_sql(session, ctx, label, sql, status, rows_affected, err_txt, dur_ms):
-    """Write one row to ADJUSTMENT_APP.ADJ_SQL_LOG. Uses bind params so the SQL
-    text (quotes, $$, etc.) needs no escaping. Best-effort: never raises."""
+def _log_sql(ctx, label, sql, status, rows_affected, err_txt, dur_ms):
+    """Buffer ONE ADJ_SQL_LOG row in memory. Nothing is written to the database
+    here — _flush_log() writes the whole buffer in a single INSERT at the end,
+    so logging adds no per-statement round-trips. Best-effort: never raises."""
     try:
-        session.sql(
-            """
-            INSERT INTO ADJUSTMENT_APP.ADJ_SQL_LOG
-                (RUN_LOG_ID, PROCESS_TYPE, ADJUSTMENT_ACTION, COBID, SEQ_NO,
-                 STEP_LABEL, SQL_TEXT, STATUS, ROWS_AFFECTED, ERROR_MESSAGE,
-                 DURATION_MS, USERNAME)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            params=[
-                ctx.get('run_log_id'), ctx.get('process_type'),
-                ctx.get('adjustment_action'), ctx.get('cobid'), ctx.get('seq'),
-                label, sql, status, rows_affected,
-                (err_txt[:5000] if err_txt else None), dur_ms, ctx.get('username'),
-            ],
-        ).collect()
+        ctx.setdefault('buf', []).append((
+            ctx.get('run_log_id'), ctx.get('process_type'),
+            ctx.get('adjustment_action'), ctx.get('cobid'), ctx.get('seq'),
+            label, sql, status, rows_affected,
+            (err_txt[:5000] if err_txt else None), dur_ms, ctx.get('username'),
+        ))
     except Exception as log_err:
-        # Logging must never break processing.
-        print(f"ADJ_SQL_LOG write failed for step '{label}': {log_err}")
+        print(f"ADJ_SQL_LOG buffer failed for step '{label}': {log_err}")
+
+
+def _flush_log(session, ctx):
+    """Write all buffered ADJ_SQL_LOG rows in ONE multi-row INSERT (bind params,
+    so SQL text needs no escaping). Best-effort: never raises. Idempotent."""
+    rows = ctx.get('buf') or []
+    if not rows:
+        return
+    try:
+        cols = ("RUN_LOG_ID, PROCESS_TYPE, ADJUSTMENT_ACTION, COBID, SEQ_NO, "
+                "STEP_LABEL, SQL_TEXT, STATUS, ROWS_AFFECTED, ERROR_MESSAGE, "
+                "DURATION_MS, USERNAME")
+        one = "(" + ", ".join(["?"] * 12) + ")"
+        values_sql = ", ".join([one] * len(rows))
+        params = [v for row in rows for v in row]
+        session.sql(
+            f"INSERT INTO ADJUSTMENT_APP.ADJ_SQL_LOG ({cols}) VALUES {values_sql}",
+            params=params,
+        ).collect()
+        ctx['buf'] = []
+    except Exception as flush_err:
+        print(f"ADJ_SQL_LOG flush failed: {flush_err}")
 
 
 def _exec(session, sql, label, ctx):
-    """Execute a SQL statement, record it in ADJ_SQL_LOG, and return the
+    """Execute a SQL statement, buffer it for ADJ_SQL_LOG, and return the
     collected rows (same as session.sql(sql).collect()). On error the failing
-    statement is logged with its full text before the exception propagates."""
+    statement is buffered with its full text before the exception propagates."""
     ctx['seq'] = ctx.get('seq', 0) + 1
     start = time.time()
     status, err_txt, rows_affected, out = 'SUCCESS', None, None, None
@@ -90,7 +103,7 @@ def _exec(session, sql, label, ctx):
         raise
     finally:
         dur_ms = int((time.time() - start) * 1000)
-        _log_sql(session, ctx, label, sql, status, rows_affected, err_txt, dur_ms)
+        _log_sql(ctx, label, sql, status, rows_affected, err_txt, dur_ms)
 
 
 def _cfg_list(val):
@@ -1274,6 +1287,11 @@ def main(session, process_type, adjustment_action, cobid):
                 """).collect()
         except Exception:
             pass
+
+    # Flush the buffered SQL log in ONE insert (covers both success and the
+    # handled-error path above, which falls through to here).
+    if 'log_ctx' in dir():
+        _flush_log(session, log_ctx)
 
     return json.dumps(result)
 $$;
