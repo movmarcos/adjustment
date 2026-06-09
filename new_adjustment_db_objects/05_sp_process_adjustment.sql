@@ -287,10 +287,10 @@ def main(session, process_type, adjustment_action, cobid):
          → store in ADJ_HEADER.DIMENSION_ADJ_ID
       4. For Direct  → read ADJ_LINE_ITEM, set ADJUSTMENT_ID = DIMENSION_ADJ_ID,
                         delete old FACT rows, insert
-      5. For Scale   → 3-way UNION ALL (same-COB scale/flatten + cross-COB roll legs),
-                        netted into one delta row per position (cross-COB pairs collapsed),
-                        DENSE_RANK overlap resolution, supersede delete,
-                        SCD2 key fix, summary rebuild
+      5. For Scale   → 3-way UNION ALL (same-COB scale/flatten + cross-COB roll legs)
+                        inserted as-is (roll = copy source forward, NOT netted by key),
+                        DENSE_RANK overlap resolution across adjustments, supersede
+                        delete, SCD2 key fix, summary rebuild
       6. Update RECORD_COUNT in ADJ_HEADER + DIMENSION.ADJUSTMENT
       7. Update ADJ_HEADER status; log to ADJ_STATUS_HISTORY
     """
@@ -601,19 +601,6 @@ def main(session, process_type, adjustment_action, cobid):
                 metric_sum_list = (f"SUM({metric_name}) AS {metric_name}, "
                                    f"SUM({metric_usd_name}) AS {metric_usd_name}")
 
-            # ── Netting: collapse cross-COB pairs into one delta row per position ──
-            # A cross-COB roll produces 2 CTE rows per position (leg ② scale +
-            # leg ③ flatten). Grouping by the surrogate/PK key and summing the
-            # metric collapses them into a single net-delta row (e.g. -1 + 1.5 → 0.5).
-            # Same-COB rows are already one row per position; grouping is a no-op.
-            # HAVING <> 0 drops positions whose net change is exactly zero.
-            non_metric_any = ', '.join([f"ANY_VALUE({c}) AS {c}" for c in fact_non_metric_matched])
-            if metric_name == metric_usd_name:
-                metric_sums = f"SUM({metric_usd_name}) AS {metric_usd_name}"
-            else:
-                metric_sums = (f"SUM({metric_name}) AS {metric_name}, "
-                               f"SUM({metric_usd_name}) AS {metric_usd_name}")
-
             # ── Build perm INSERT column list (only cols in target adj table) ───
             _adj_set = set(fact_adj_cols)
             _perm = (['COBID', 'ADJUSTMENT_ID']
@@ -768,9 +755,12 @@ def main(session, process_type, adjustment_action, cobid):
 
             # Cross-COB Roll leg ② — ONLY included when the batch has a cross-COB
             # roll AND a distinct adjusted view is configured. It reads the source
-            # COB's adjusted value (× factor) from FACT_ADJUSTED_TABLE; netted with
-            # leg ③ (flatten of the target original) →
-            #   adjusted(target) = factor × adjusted(source).
+            # COB's adjusted value (× factor) from FACT_ADJUSTED_TABLE and is
+            # UNION ALL'd with leg ③ (flatten of the target original) — the two are
+            # NOT paired/summed by key. Downstream this gives
+            #   adjusted(target) = factor × adjusted(source) - original(target),
+            # carrying EVERY source position forward even when the target FACT_TABLE
+            # is missing it (the usual reason a roll is requested).
             # Omitting it for same-COB batches means Scale/Flatten never reference
             # the adjusted view, so a misconfigured combined view can only break
             # Roll — never all scaling.
@@ -835,32 +825,20 @@ def main(session, process_type, adjustment_action, cobid):
                 SELECT {select_with_keys}
                 FROM cte
             ),
-            netted AS (
-                -- Net WITHIN a single adjustment, per position. Group by (position
-                -- key, ADJUSTMENT_ID) so the two legs of one cross-COB roll (leg ②
-                -- scale of source + leg ③ flatten of target — same ADJUSTMENT_ID)
-                -- collapse to one net-delta row (e.g. -1.0 + 1.5 → 0.5), while
-                -- DIFFERENT adjustments that touch the same position stay as
-                -- separate rows. That is essential: the `ranked` DENSE_RANK below
-                -- enforces "overlap = keep the most recent adjustment" (design P6).
-                -- Grouping by key alone would SUM across distinct adjustments and
-                -- make that DENSE_RANK a no-op (double-counting). Same-COB rows
-                -- (leg ①) are already one row per (position, adjustment).
-                -- ANY_VALUE is safe for non-metric dimension columns because all
-                -- rows in a group share position + adjustment; SCD2 key
-                -- discrepancies are fixed post-insert.
-                -- HAVING <> 0 drops positions whose net change is exactly zero.
-                SELECT
-                    {key_name},
-                    ANY_VALUE(COBID)                          AS COBID,
-                    ADJUSTMENT_ID,
-                    ANY_VALUE(ADJUSTMENT_CREATED_TIMESTAMP)   AS ADJUSTMENT_CREATED_TIMESTAMP,
-                    {non_metric_any},
-                    {metric_sums}
-                FROM fact_key
-                GROUP BY {key_name}, ADJUSTMENT_ID
-                HAVING SUM({metric_usd_name}) <> 0
-            ),
+            -- A roll is a COPY: the legs are UNION ALL'd and inserted as-is, never
+            -- paired/netted by surrogate key. The whole point of a roll is to carry
+            -- the SOURCE COB forward regardless of what the target FACT_TABLE holds
+            -- (the request often exists *because* the target file is missing/late).
+            -- A previous "single net delta row" optimization grouped the source-copy
+            -- leg (②) and the target-flatten leg (③) by {key_name} and SUMmed them;
+            -- that surrogate-key pairing silently dropped/merged source positions
+            -- that have no counterpart in the target. So there is NO netting here —
+            -- ② (+source) and ③ (-target) stay as separate rows.
+            --
+            -- DENSE_RANK still runs, but only to resolve overlap BETWEEN DIFFERENT
+            -- adjustments (keep the most recent). The two legs of a SINGLE roll share
+            -- ADJUSTMENT_CREATED_TIMESTAMP + ADJUSTMENT_ID, so they tie at ROW_NUM = 1
+            -- and are both kept — never collapsed into one another.
             ranked AS (
                 SELECT
                     {exclude_keys},
@@ -868,7 +846,7 @@ def main(session, process_type, adjustment_action, cobid):
                         PARTITION BY {key_name}
                         ORDER BY ADJUSTMENT_CREATED_TIMESTAMP DESC, ADJUSTMENT_ID DESC
                     ) AS ROW_NUM
-                FROM netted
+                FROM fact_key
             )
             SELECT
                 ranked.* EXCLUDE (ROW_NUM),
@@ -876,6 +854,7 @@ def main(session, process_type, adjustment_action, cobid):
                 CURRENT_TIMESTAMP() AS LOAD_TIMESTAMP
             FROM ranked
             WHERE ROW_NUM = 1
+              AND {metric_usd_name} <> 0
             """
 
             session.sql(insert_sql).collect()
