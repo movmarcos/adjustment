@@ -45,3 +45,42 @@ group by all;
     AND EXISTS (SELECT 1 FROM DIMENSION.BOOK bk
                 WHERE bk.BOOK_KEY = COALESCE(fact.BOOK_KEY, -1)
                   AND bk.BOOK_CODE = 'BOOK-GEF');                  
+
+
+-----------------------------------
+
+A single‑book roll feeding 70,021,163 rows through MD5 surrogate‑key + DENSE_RANK + SCD2 join, inserted as separate
+  rows (I removed the netting that used to collapse them), is very likely timing out or partially failing — which would
+  leave an incomplete result that looks like "only some match." So before anything, check whether the roll actually
+  finished:
+
+  SELECT DIMENSION_ADJ_ID, RUN_STATUS, RECORD_COUNT, ERRORMESSAGE, START_DATE, PROCESS_DATE
+  FROM ADJUSTMENT_APP.ADJ_HEADER
+  WHERE COBID = 20260608 AND PROCESS_TYPE = 'VaR'
+  ORDER BY CREATED_DATE DESC LIMIT 5;
+
+  If RUN_STATUS is Failed/Running (not Processed), or ERRORMESSAGE is set, or RECORD_COUNT ≪ ~70M — that's the answer:
+  the roll is dying on volume, not logic.
+
+  Then: what did the engine actually write vs. what's correct
+
+  A — the adjustment table itself (did it get all 20?):
+  SELECT COUNT(*) AS rows, COUNT(DISTINCT VAR_SUBCOMPONENT_ID) AS subcomps,
+         SUM(PNL_VECTOR_VALUE_IN_USD) AS total
+  FROM FACT.VAR_MEASURES_ADJUSTMENT
+  WHERE COBID = 20260608
+    AND ADJUSTMENT_ID = <the DIMENSION_ADJ_ID from the query above>;
+
+  B — dev vs prod combined at 20260608, per subcomponent (shows exactly which are missing/wrong):
+  SELECT COALESCE(d.sc, p.sc) AS var_subcomponent_id, d.dev_total, p.prod_total
+  FROM (
+    SELECT m.VAR_SUBCOMPONENT_ID sc, SUM(m.PNL_VECTOR_VALUE_IN_USD) dev_total
+    FROM fact.var_measures_combined m JOIN dimension.book b ON m.book_key=b.book_key
+    WHERE m.cobid=20260608 AND b.entity_code='MUSI' AND b.book_code='BOOK-GEF' GROUP BY 1
+  ) d
+  FULL OUTER JOIN (
+    SELECT m.VAR_SUBCOMPONENT_ID sc, SUM(m.PNL_VECTOR_VALUE_IN_USD) prod_total
+    FROM prod_raptor.fact.var_measures_combined m JOIN dimension.book b ON m.book_key=b.book_key
+    WHERE m.cobid=20260608 AND b.entity_code='MUSI' AND b.book_code='BOOK-GEF' GROUP BY 1
+  ) p ON d.sc=p.sc
+  ORDER BY 1;
