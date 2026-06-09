@@ -59,24 +59,54 @@ def _log_sql(ctx, label, sql, status, rows_affected, err_txt, dur_ms):
 
 
 def _flush_log(session, ctx):
-    """Write all buffered ADJ_SQL_LOG rows in ONE multi-row INSERT (bind params,
-    so SQL text needs no escaping). Best-effort: never raises. Idempotent."""
+    """Write all buffered ADJ_SQL_LOG rows in ONE multi-row INSERT.
+
+    Values are inlined (this codebase does not rely on bind params, which may
+    not work in this Snowpark stored-proc context). String fields are single-
+    quote-escaped; SQL_TEXT is dollar-quoted so its quotes/newlines need no
+    escaping. Best-effort: never raises; records the reason in ctx on failure."""
     rows = ctx.get('buf') or []
     if not rows:
         return
+
+    def _lit(v):
+        if v is None:
+            return "NULL"
+        if isinstance(v, bool):
+            return "TRUE" if v else "FALSE"
+        if isinstance(v, (int, float)):
+            return str(v)
+        return "'" + str(v).replace("'", "''") + "'"
+
+    def _sqltext_lit(v):
+        if v is None:
+            return "NULL"
+        s = str(v)
+        # Dollar-quote to avoid escaping the generated SQL's many quotes.
+        if "$sqllog$" in s:
+            return "'" + s.replace("'", "''") + "'"   # fallback if tag collides
+        return "$sqllog$" + s + "$sqllog$"
+
     try:
         cols = ("RUN_LOG_ID, PROCESS_TYPE, ADJUSTMENT_ACTION, COBID, SEQ_NO, "
                 "STEP_LABEL, SQL_TEXT, STATUS, ROWS_AFFECTED, ERROR_MESSAGE, "
                 "DURATION_MS, USERNAME")
-        one = "(" + ", ".join(["?"] * 12) + ")"
-        values_sql = ", ".join([one] * len(rows))
-        params = [v for row in rows for v in row]
+        values = []
+        for (rl, pt, act, cob, seq, label, sqltext, status, raff, err, dur, usr) in rows:
+            values.append(
+                "(" + ", ".join([
+                    _lit(rl), _lit(pt), _lit(act), _lit(cob), _lit(seq),
+                    _lit(label), _sqltext_lit(sqltext), _lit(status), _lit(raff),
+                    _lit(err), _lit(dur), _lit(usr),
+                ]) + ")"
+            )
         session.sql(
-            f"INSERT INTO ADJUSTMENT_APP.ADJ_SQL_LOG ({cols}) VALUES {values_sql}",
-            params=params,
+            f"INSERT INTO ADJUSTMENT_APP.ADJ_SQL_LOG ({cols}) VALUES "
+            + ", ".join(values)
         ).collect()
         ctx['buf'] = []
     except Exception as flush_err:
+        ctx['flush_error'] = str(flush_err)
         print(f"ADJ_SQL_LOG flush failed: {flush_err}")
 
 
@@ -945,6 +975,9 @@ def main(session, process_type, adjustment_action, cobid):
               AND {metric_usd_name} <> 0
             """
 
+            # Also return the generated statement directly (robust even if the
+            # ADJ_SQL_LOG write fails) — this is the roll's leg ② to diff.
+            result["scale_insert_sql"] = insert_sql
             _exec(session, insert_sql, "scale: build _TEMP (3-leg UNION ALL)", log_ctx)
 
             # ── Supersede: delete older adjustments for positions in TEMP ──
@@ -1289,9 +1322,14 @@ def main(session, process_type, adjustment_action, cobid):
             pass
 
     # Flush the buffered SQL log in ONE insert (covers both success and the
-    # handled-error path above, which falls through to here).
+    # handled-error path above, which falls through to here). Surface the
+    # buffered statement count and any flush failure in the return so an empty
+    # ADJ_SQL_LOG is never a silent mystery.
     if 'log_ctx' in dir():
+        result["sql_log_buffered"] = len(log_ctx.get('buf') or [])
         _flush_log(session, log_ctx)
+        if log_ctx.get('flush_error'):
+            result["sql_log_flush_error"] = log_ctx['flush_error']
 
     return json.dumps(result)
 $$;
