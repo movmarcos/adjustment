@@ -1,24 +1,26 @@
-────────────────────────────────────────────────────────────────
-  PHASE: Validate schema (combined view vs _ADJUSTMENT table)
-────────────────────────────────────────────────────────────────
-     ❌ FRTB
-          • ADJUSTMENT_BASE_TABLE 'ADJUSTMENT_APP.ADJUSTMENTS_BASE_FRTB' does not exist / not accessible
-     ❌ FRTBDRC
-          • ADJUSTMENT_BASE_TABLE 'ADJUSTMENT_APP.ADJUSTMENTS_BASE_FRTB' does not exist / not accessible
-     ❌ FRTBRRAO
-          • ADJUSTMENT_BASE_TABLE 'ADJUSTMENT_APP.ADJUSTMENTS_BASE_FRTB' does not exist / not accessible
-     ❌ Sensitivity
-          • ADJUSTMENT_BASE_TABLE 'ADJUSTMENT_APP.ADJUSTMENTS_BASE_SENSITIVITY' does not exist / not accessible
-     ⚠️  Stress  (adjusted=FACT.STRESS_MEASURES_COMBINED vs delta=FACT.STRESS_MEASURES_ADJUSTMENT)
-          • METRIC_NAME 'SIMULATION_PL' not in FACT_TABLE 'FACT.STRESS_MEASURES' — the engine will treat this scope as USD-only (local adjustments collapsed). If the local metric exists under another name, fix METRIC_NAME.
-     ❌ VaR
-          • FACT_ADJUSTED_TABLE 'FACT.VAR_MEASURES_COMBINED' lacks 2 KEY/ID column(s) the Roll copies into 'FACT.VAR_MEASURES_ADJUSTMENT' — Roll would write -1 placeholder keys: INFLATION_INDEX_ID, UNDERLYING_COMMON_INSTRUMENT_KEY
-          • (warn) METRIC_NAME 'PNL_VECTOR_VALUE' not in FACT_TABLE 'FACT.VAR_MEASURES' — the engine will treat this scope as USD-only (local adjustments collapsed). If the local metric exists under another name, fix METRIC_NAME.
-
-  Schema validation: FAILED — fix the items above before running adjustments
-
-  ⚠️  Schema validation FAILED — adjustments may error until fixed.
-
-────────────────────────────────────────────────────────────────
-  PHASE 2: Streamlit Application
-────────────────────────────────────────────────────────────────
+-- COMBINED FACT
+select 
+    'dev' as env,
+    m.cobid,
+    b.book_code,
+    SUM(PNL_VECTOR_VALUE_IN_USD)   AS TOTAL_PNL_VECTOR_VALUE_IN_USD 
+from fact.var_measures_combined m
+inner join dimension.book b on m.book_key = b.book_key
+where cobid in (20260605,20260608)
+and b.entity_code = 'MUSI'
+and b.book_code = 'BOOK-GEF'
+and b.department_code = 'EFE'
+group by all
+union all
+select 
+    'prod' as env,
+    m.cobid,
+    b.book_code,
+    SUM(PNL_VECTOR_VALUE_IN_USD)   AS TOTAL_PNL_VECTOR_VALUE_IN_USD 
+from prod_raptor.fact.var_measures_combined m
+inner join dimension.book b on m.book_key = b.book_key
+where cobid in (20260605,20260608)
+and b.entity_code = 'MUSI'
+and b.book_code = 'BOOK-GEF'
+and b.department_code = 'EFE'
+group by all;
