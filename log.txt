@@ -37,3 +37,48 @@ SELECT ADJ_ID, DIMENSION_ADJ_ID, RUN_STATUS, ADJUSTMENT_ACTION,
 
 1	530213
 2	795
+
+
+-----
+------
+-------
+
+  1 — does the adjustment table for this run contain entities other than MUSI?
+  SELECT ENTITY_CODE, COUNT(*) AS rows, SUM(PNL_VECTOR_VALUE_IN_USD) AS total
+  FROM FACT.VAR_MEASURES_ADJUSTMENT
+  WHERE COBID = 20260608 AND ADJUSTMENT_ID = 733288 AND VAR_SUBCOMPONENT_ID = 7
+  GROUP BY 1 ORDER BY 1;
+  - If you see more than MUSI (or the MUSI row = 213.16M and others make up the +4.33M) → the engine rolled BOOK-GEF for
+  every entity, not just MUSI. Query A (no entity filter) summed them all; your validation filtered
+  b.entity_code='MUSI', so the gap is other entities leaking in. Fix = the entity filter isn't actually constraining the
+  roll.
+  
+  2 — faithful leg reproduction (joins the real ADJ_HEADER row, so it scopes exactly like the engine):
+
+  WITH cte AS (
+    SELECT fact.PNL_VECTOR_VALUE_IN_USD * adjust.SCALE_FACTOR_ADJUSTED AS v
+    FROM FACT.VAR_MEASURES_COMBINED fact
+    WHERE fact.COBID = adjust.SOURCE_COBID
+      AND fact.PNL_VECTOR_VALUE_IN_USD IS NOT NULL
+      AND EXISTS (SELECT 1 FROM DIMENSION.BOOK bk WHERE bk.BOOK_KEY = COALESCE(fact.BOOK_KEY,-1)
+                  AND (bk.BOOK_CODE = adjust.BOOK_CODE OR adjust.BOOK_CODE IS NULL)
+                  AND (bk.DEPARTMENT_CODE = adjust.DEPARTMENT_CODE OR adjust.DEPARTMENT_CODE IS NULL))
+      AND (adjust.ENTITY_CODE = fact.ENTITY_CODE OR adjust.ENTITY_CODE IS NULL)
+      AND fact.VAR_SUBCOMPONENT_ID = 7
+    UNION ALL
+    SELECT fact.PNL_VECTOR_VALUE_IN_USD * -1 AS v
+    FROM FACT.VAR_MEASURES fact
+    INNER JOIN ADJUSTMENT_APP.ADJ_HEADER adjust ON adjust.DIMENSION_ADJ_ID = 733288
+    WHERE fact.COBID = adjust.COBID
+      AND fact.PNL_VECTOR_VALUE_IN_USD IS NOT NULL
+      AND EXISTS (SELECT 1 FROM DIMENSION.BOOK bk WHERE bk.BOOK_KEY = COALESCE(fact.BOOK_KEY,-1)
+                  AND (bk.BOOK_CODE = adjust.BOOK_CODE OR adjust.BOOK_CODE IS NULL)
+                  AND (bk.DEPARTMENT_CODE = adjust.DEPARTMENT_CODE OR adjust.DEPARTMENT_CODE IS NULL))
+      AND (adjust.ENTITY_CODE = fact.ENTITY_CODE OR adjust.ENTITY_CODE IS NULL)
+      AND fact.VAR_SUBCOMPONENT_ID = 7
+  )
+  SELECT SUM(v) AS cte_total, COUNT(*) AS rows FROM cte;
+  - If cte_total ≈ 217.5M → reproduced; the engine's scope genuinely pulls 217.5M and I can see exactly why (entity join
+  via fact.ENTITY_CODE, which evidently doesn't restrict to MUSI alone).
+  - If cte_total ≈ 213.16M → the legs are fine and the inflation is purely post‑CTE, which would point at the deployed
+  build not matching my code.
