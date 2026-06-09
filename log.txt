@@ -116,3 +116,19 @@ VAR_SUBCOMPONENT_ID,ADJUSTMENT_ID,ROWSS,TOTAL
 7,733287,7445621,217487713.9045
 25,733287,11664445,216135162.0176
 73,733287,9927975,-651271.7138
+
+
+
+ -- leg ② SHOULD equal this: source combined at 20260605
+  SELECT m.VAR_SUBCOMPONENT_ID AS sc, SUM(m.PNL_VECTOR_VALUE_IN_USD) AS src_combined_605
+  FROM fact.var_measures_combined m JOIN dimension.book b ON m.book_key=b.book_key
+  WHERE m.cobid=20260605 AND b.entity_code='MUSI' AND b.book_code='BOOK-GEF'
+    AND m.VAR_SUBCOMPONENT_ID IN (7,25,73)
+  GROUP BY 1 ORDER BY 1;
+
+  -- leg ③ flattens this (negated): raw original at 20260608
+  SELECT m.VAR_SUBCOMPONENT_ID AS sc, SUM(m.PNL_VECTOR_VALUE_IN_USD) AS orig_608
+  FROM fact.var_measures m JOIN dimension.book b ON m.book_key=b.book_key
+  WHERE m.cobid=20260608 AND b.entity_code='MUSI' AND b.book_code='BOOK-GEF'
+    AND m.VAR_SUBCOMPONENT_ID IN (7,25,73)
+  GROUP BY 1 ORDER BY 1;
