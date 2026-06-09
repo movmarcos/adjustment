@@ -38,8 +38,72 @@ from snowflake.snowpark.types import IntegerType, StringType, StructType, Struct
 from datetime import datetime
 import pytz
 import json
+import time
 import pandas as pd
 import numpy as np
+
+
+def _log_sql(ctx, label, sql, status, rows_affected, err_txt, dur_ms):
+    """Buffer ONE ADJ_SQL_LOG row in memory. Nothing is written to the database
+    here — _flush_log() writes the whole buffer in a single INSERT at the end,
+    so logging adds no per-statement round-trips. Best-effort: never raises."""
+    try:
+        ctx.setdefault('buf', []).append((
+            ctx.get('run_log_id'), ctx.get('process_type'),
+            ctx.get('adjustment_action'), ctx.get('cobid'), ctx.get('seq'),
+            label, sql, status, rows_affected,
+            (err_txt[:5000] if err_txt else None), dur_ms, ctx.get('username'),
+        ))
+    except Exception as log_err:
+        print(f"ADJ_SQL_LOG buffer failed for step '{label}': {log_err}")
+
+
+def _flush_log(session, ctx):
+    """Write all buffered ADJ_SQL_LOG rows in ONE multi-row INSERT (bind params,
+    so SQL text needs no escaping). Best-effort: never raises. Idempotent."""
+    rows = ctx.get('buf') or []
+    if not rows:
+        return
+    try:
+        cols = ("RUN_LOG_ID, PROCESS_TYPE, ADJUSTMENT_ACTION, COBID, SEQ_NO, "
+                "STEP_LABEL, SQL_TEXT, STATUS, ROWS_AFFECTED, ERROR_MESSAGE, "
+                "DURATION_MS, USERNAME")
+        one = "(" + ", ".join(["?"] * 12) + ")"
+        values_sql = ", ".join([one] * len(rows))
+        params = [v for row in rows for v in row]
+        session.sql(
+            f"INSERT INTO ADJUSTMENT_APP.ADJ_SQL_LOG ({cols}) VALUES {values_sql}",
+            params=params,
+        ).collect()
+        ctx['buf'] = []
+    except Exception as flush_err:
+        print(f"ADJ_SQL_LOG flush failed: {flush_err}")
+
+
+def _exec(session, sql, label, ctx):
+    """Execute a SQL statement, buffer it for ADJ_SQL_LOG, and return the
+    collected rows (same as session.sql(sql).collect()). On error the failing
+    statement is buffered with its full text before the exception propagates."""
+    ctx['seq'] = ctx.get('seq', 0) + 1
+    start = time.time()
+    status, err_txt, rows_affected, out = 'SUCCESS', None, None, None
+    try:
+        out = session.sql(sql).collect()
+        # For DML, Snowflake returns the affected-row count in the first cell.
+        try:
+            if out and out[0] is not None:
+                v0 = out[0][0]
+                if isinstance(v0, (int, float)):
+                    rows_affected = int(v0)
+        except Exception:
+            rows_affected = None
+        return out
+    except Exception as e:
+        status, err_txt = 'ERROR', str(e)
+        raise
+    finally:
+        dur_ms = int((time.time() - start) * 1000)
+        _log_sql(ctx, label, sql, status, rows_affected, err_txt, dur_ms)
 
 
 def _cfg_list(val):
@@ -197,7 +261,7 @@ def trigger_powerbi_refresh(session, process_type, run_log_id):
         print(f"Warning: PowerBI refresh trigger failed: {pbi_err}")
 
 
-def insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str):
+def insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str, log_ctx=None):
     """
     1. Insert one row per ADJ_ID into DIMENSION.ADJUSTMENT (RECORD_COUNT = NULL,
        updated later once fact-table row counts are known).
@@ -208,8 +272,15 @@ def insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str):
 
     Match uses COBID + PROCESS_TYPE + USERNAME + CREATED_DATE — the four columns
     that are always present and inserted verbatim from ADJ_HEADER.
+
+    Writes are recorded in ADJ_SQL_LOG when log_ctx is supplied.
     """
-    session.sql(f"""
+    def _run(sql, label):
+        if log_ctx is not None:
+            return _exec(session, sql, label, log_ctx)
+        return session.sql(sql).collect()
+
+    _run(f"""
         INSERT INTO DIMENSION.ADJUSTMENT (
             COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, SOURCE_COBID,
             ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE, BOOK_CODE,
@@ -239,7 +310,7 @@ def insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str):
             SIMULATION_SOURCE, DAY_TYPE
         FROM ADJUSTMENT_APP.ADJ_HEADER
         WHERE ADJ_ID IN ({adj_ids_str})
-    """).collect()
+    """, "dimension: insert ADJUSTMENT rows")
 
     dim_adj_map = {}
     for aid in adj_ids:
@@ -259,11 +330,11 @@ def insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str):
             if row:
                 dim_adj_id = row[0]['ADJUSTMENT_ID']
                 dim_adj_map[aid] = dim_adj_id
-                session.sql(f"""
+                _run(f"""
                     UPDATE ADJUSTMENT_APP.ADJ_HEADER
                     SET DIMENSION_ADJ_ID = {dim_adj_id}
                     WHERE ADJ_ID = '{aid}'
-                """).collect()
+                """, f"dimension: set ADJ_HEADER.DIMENSION_ADJ_ID={dim_adj_id}")
         except Exception as e:
             print(f"Warning: could not retrieve DIMENSION_ADJ_ID for {aid}: {e}")
     return dim_adj_map
@@ -287,10 +358,10 @@ def main(session, process_type, adjustment_action, cobid):
          → store in ADJ_HEADER.DIMENSION_ADJ_ID
       4. For Direct  → read ADJ_LINE_ITEM, set ADJUSTMENT_ID = DIMENSION_ADJ_ID,
                         delete old FACT rows, insert
-      5. For Scale   → 3-way UNION ALL (same-COB scale/flatten + cross-COB roll legs),
-                        netted into one delta row per position (cross-COB pairs collapsed),
-                        DENSE_RANK overlap resolution, supersede delete,
-                        SCD2 key fix, summary rebuild
+      5. For Scale   → 3-way UNION ALL (same-COB scale/flatten + cross-COB roll legs)
+                        inserted as-is (roll = copy source forward, NOT netted by key),
+                        DENSE_RANK overlap resolution across adjustments, supersede
+                        delete, SCD2 key fix, summary rebuild
       6. Update RECORD_COUNT in ADJ_HEADER + DIMENSION.ADJUSTMENT
       7. Update ADJ_HEADER status; log to ADJ_STATUS_HISTORY
     """
@@ -333,7 +404,24 @@ def main(session, process_type, adjustment_action, cobid):
         # Run log ID — insert into BATCH.RUN_LOG so UPDATE_POWERBI_FOR_ADJUSTMENTS can find it
         run_log_id = session.sql("SELECT BATCH.SEQ_RUN_LOG.NEXTVAL AS X").collect()[0]["X"]
         result["run_log_id"] = run_log_id
-        session.sql(f"""
+
+        # ── SQL execution log context ────────────────────────────────────
+        # Every statement run through _exec(...) is recorded in ADJ_SQL_LOG
+        # against this run_log_id, in execution order (SEQ_NO).
+        try:
+            _username = session.sql("SELECT CURRENT_USER() AS U").collect()[0]["U"]
+        except Exception:
+            _username = None
+        log_ctx = {
+            "run_log_id": run_log_id,
+            "process_type": process_type,
+            "adjustment_action": adjustment_action,
+            "cobid": cobid,
+            "username": _username,
+            "seq": 0,
+        }
+
+        _exec(session, f"""
             CALL BATCH.LOAD_RUN_LOG(
                 {run_log_id},
                 {cobid},
@@ -341,7 +429,7 @@ def main(session, process_type, adjustment_action, cobid):
                 '{process_type}',
                 0, 0, 'false', ''
             )
-        """).collect()
+        """, "run log: open", log_ctx)
 
         # ── 2. READ PENDING ADJUSTMENTS ──────────────────────────────────
         df_adj = session.table(adj_base_tbl_name).filter(
@@ -378,17 +466,17 @@ def main(session, process_type, adjustment_action, cobid):
             adj_ids = [row["ADJ_ID"] for row in df_adj_direct.select("ADJ_ID").collect()]
             adj_ids_str = ", ".join(f"'{a}'" for a in adj_ids)
 
-            session.sql(f"""
+            _exec(session, f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER SET RUN_LOG_ID = {run_log_id}
                 WHERE ADJ_ID IN ({adj_ids_str})
-            """).collect()
+            """, "direct: tag ADJ_HEADER with run_log_id", log_ctx)
 
             # DIMENSION.ADJUSTMENT first → get NUMBER ADJUSTMENT_ID per adj
             # Must succeed: dim_ids_str drives the supersede/delete WHERE clauses.
             # A failure here previously fell through to dim_ids_str="0", which made
             # `DELETE ... WHERE ADJUSTMENT_ID NOT IN (0)` wipe real adjustments while
             # still reporting Processed. Let it raise so the batch is marked Failed.
-            dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str)
+            dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str, log_ctx)
             if not dim_adj_map:
                 raise Exception("DIMENSION.ADJUSTMENT insert returned no ADJUSTMENT_IDs; "
                                 "aborting before fact writes to avoid corrupting the "
@@ -473,10 +561,10 @@ def main(session, process_type, adjustment_action, cobid):
                         target_cols.append(c); select_exprs.append(f"-1 AS {c}")
 
                 # Remove any existing rows for this batch's adjustments, then insert
-                session.sql(f"""
+                _exec(session, f"""
                     DELETE FROM {fact_adj_tbl_name}
                     WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
-                """).collect()
+                """, "direct: delete this batch's previous rows", log_ctx)
 
                 insert_sql = f"""
                     INSERT INTO {fact_adj_tbl_name} ({', '.join(target_cols)})
@@ -488,32 +576,32 @@ def main(session, process_type, adjustment_action, cobid):
                     INNER JOIN ADJUSTMENT_APP.ADJ_HEADER h ON h.ADJ_ID = x.ADJ_ID
                     {join_sql}
                 """
-                session.sql(insert_sql).collect()
+                _exec(session, insert_sql, "direct: insert uploaded rows into ADJUSTMENTS_TABLE", log_ctx)
 
-                rows_count = session.sql(f"""
+                rows_count = _exec(session, f"""
                     SELECT COUNT(*) AS CNT FROM {fact_adj_tbl_name}
                     WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
-                """).collect()[0]["CNT"]
+                """, "direct: count inserted rows", log_ctx)[0]["CNT"]
 
             # ── Common post-processing ───────────────────────────────────
-            session.sql(f"""
+            _exec(session, f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER SET RECORD_COUNT = {rows_count}
                 WHERE ADJ_ID IN ({adj_ids_str})
-            """).collect()
+            """, "direct: update ADJ_HEADER record_count", log_ctx)
             if dim_adj_map:
-                session.sql(f"""
+                _exec(session, f"""
                     UPDATE DIMENSION.ADJUSTMENT
                     SET RECORD_COUNT = {rows_count}, RUN_STATUS = 'Processed'
                     WHERE ADJUSTMENT_ID IN ({dim_ids_str})
-                """).collect()
+                """, "direct: update DIMENSION.ADJUSTMENT record_count/status", log_ctx)
             update_header_status(session, df_adj_direct, cobid, "Processed")
             log_status_history(session, adj_ids, "Running", "Processed")
             result["rows_inserted"] = rows_count
             result["message"] = "Direct adjustments processed successfully"
             try:
-                session.sql(f"""
+                _exec(session, f"""
                     CALL BATCH.LOAD_RUN_LOG_END_WITH_DETAIL({run_log_id}, '{{"status":"Processed"}}')
-                """).collect()
+                """, "direct: close run log", log_ctx)
             except Exception as rl_err:
                 print(f"Warning: Run log close failed: {rl_err}")
             trigger_powerbi_refresh(session, process_type, run_log_id)
@@ -545,11 +633,11 @@ def main(session, process_type, adjustment_action, cobid):
             ).count() > 0
 
             # Store RUN_LOG_ID in ADJ_HEADER for traceability
-            session.sql(f"""
+            _exec(session, f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER
                 SET RUN_LOG_ID = {run_log_id}
                 WHERE ADJ_ID IN ({adj_ids_str})
-            """).collect()
+            """, "scale: tag ADJ_HEADER with run_log_id", log_ctx)
 
             # ── Insert into DIMENSION.ADJUSTMENT FIRST ───────────────────
             # Get DIMENSION.ADJUSTMENT.ADJUSTMENT_ID (NUMBER) before building
@@ -558,7 +646,7 @@ def main(session, process_type, adjustment_action, cobid):
             # A failure here previously fell through to dim_ids_str="0", which made
             # `DELETE ... WHERE ADJUSTMENT_ID NOT IN (0)` wipe real adjustments while
             # still reporting Processed. Let it raise so the batch is marked Failed.
-            dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str)
+            dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str, log_ctx)
             if not dim_adj_map:
                 raise Exception("DIMENSION.ADJUSTMENT insert returned no ADJUSTMENT_IDs; "
                                 "aborting before fact writes to avoid corrupting the "
@@ -600,19 +688,6 @@ def main(session, process_type, adjustment_action, cobid):
                 metric_col_list = f"{metric_name}, {metric_usd_name}"
                 metric_sum_list = (f"SUM({metric_name}) AS {metric_name}, "
                                    f"SUM({metric_usd_name}) AS {metric_usd_name}")
-
-            # ── Netting: collapse cross-COB pairs into one delta row per position ──
-            # A cross-COB roll produces 2 CTE rows per position (leg ② scale +
-            # leg ③ flatten). Grouping by the surrogate/PK key and summing the
-            # metric collapses them into a single net-delta row (e.g. -1 + 1.5 → 0.5).
-            # Same-COB rows are already one row per position; grouping is a no-op.
-            # HAVING <> 0 drops positions whose net change is exactly zero.
-            non_metric_any = ', '.join([f"ANY_VALUE({c}) AS {c}" for c in fact_non_metric_matched])
-            if metric_name == metric_usd_name:
-                metric_sums = f"SUM({metric_usd_name}) AS {metric_usd_name}"
-            else:
-                metric_sums = (f"SUM({metric_name}) AS {metric_name}, "
-                               f"SUM({metric_usd_name}) AS {metric_usd_name}")
 
             # ── Build perm INSERT column list (only cols in target adj table) ───
             _adj_set = set(fact_adj_cols)
@@ -768,9 +843,12 @@ def main(session, process_type, adjustment_action, cobid):
 
             # Cross-COB Roll leg ② — ONLY included when the batch has a cross-COB
             # roll AND a distinct adjusted view is configured. It reads the source
-            # COB's adjusted value (× factor) from FACT_ADJUSTED_TABLE; netted with
-            # leg ③ (flatten of the target original) →
-            #   adjusted(target) = factor × adjusted(source).
+            # COB's adjusted value (× factor) from FACT_ADJUSTED_TABLE and is
+            # UNION ALL'd with leg ③ (flatten of the target original) — the two are
+            # NOT paired/summed by key. Downstream this gives
+            #   adjusted(target) = factor × adjusted(source) - original(target),
+            # carrying EVERY source position forward even when the target FACT_TABLE
+            # is missing it (the usual reason a roll is requested).
             # Omitting it for same-COB batches means Scale/Flatten never reference
             # the adjusted view, so a misconfigured combined view can only break
             # Roll — never all scaling.
@@ -835,32 +913,20 @@ def main(session, process_type, adjustment_action, cobid):
                 SELECT {select_with_keys}
                 FROM cte
             ),
-            netted AS (
-                -- Net WITHIN a single adjustment, per position. Group by (position
-                -- key, ADJUSTMENT_ID) so the two legs of one cross-COB roll (leg ②
-                -- scale of source + leg ③ flatten of target — same ADJUSTMENT_ID)
-                -- collapse to one net-delta row (e.g. -1.0 + 1.5 → 0.5), while
-                -- DIFFERENT adjustments that touch the same position stay as
-                -- separate rows. That is essential: the `ranked` DENSE_RANK below
-                -- enforces "overlap = keep the most recent adjustment" (design P6).
-                -- Grouping by key alone would SUM across distinct adjustments and
-                -- make that DENSE_RANK a no-op (double-counting). Same-COB rows
-                -- (leg ①) are already one row per (position, adjustment).
-                -- ANY_VALUE is safe for non-metric dimension columns because all
-                -- rows in a group share position + adjustment; SCD2 key
-                -- discrepancies are fixed post-insert.
-                -- HAVING <> 0 drops positions whose net change is exactly zero.
-                SELECT
-                    {key_name},
-                    ANY_VALUE(COBID)                          AS COBID,
-                    ADJUSTMENT_ID,
-                    ANY_VALUE(ADJUSTMENT_CREATED_TIMESTAMP)   AS ADJUSTMENT_CREATED_TIMESTAMP,
-                    {non_metric_any},
-                    {metric_sums}
-                FROM fact_key
-                GROUP BY {key_name}, ADJUSTMENT_ID
-                HAVING SUM({metric_usd_name}) <> 0
-            ),
+            -- A roll is a COPY: the legs are UNION ALL'd and inserted as-is, never
+            -- paired/netted by surrogate key. The whole point of a roll is to carry
+            -- the SOURCE COB forward regardless of what the target FACT_TABLE holds
+            -- (the request often exists *because* the target file is missing/late).
+            -- A previous "single net delta row" optimization grouped the source-copy
+            -- leg (②) and the target-flatten leg (③) by {key_name} and SUMmed them;
+            -- that surrogate-key pairing silently dropped/merged source positions
+            -- that have no counterpart in the target. So there is NO netting here —
+            -- ② (+source) and ③ (-target) stay as separate rows.
+            --
+            -- DENSE_RANK still runs, but only to resolve overlap BETWEEN DIFFERENT
+            -- adjustments (keep the most recent). The two legs of a SINGLE roll share
+            -- ADJUSTMENT_CREATED_TIMESTAMP + ADJUSTMENT_ID, so they tie at ROW_NUM = 1
+            -- and are both kept — never collapsed into one another.
             ranked AS (
                 SELECT
                     {exclude_keys},
@@ -868,7 +934,7 @@ def main(session, process_type, adjustment_action, cobid):
                         PARTITION BY {key_name}
                         ORDER BY ADJUSTMENT_CREATED_TIMESTAMP DESC, ADJUSTMENT_ID DESC
                     ) AS ROW_NUM
-                FROM netted
+                FROM fact_key
             )
             SELECT
                 ranked.* EXCLUDE (ROW_NUM),
@@ -876,9 +942,10 @@ def main(session, process_type, adjustment_action, cobid):
                 CURRENT_TIMESTAMP() AS LOAD_TIMESTAMP
             FROM ranked
             WHERE ROW_NUM = 1
+              AND {metric_usd_name} <> 0
             """
 
-            session.sql(insert_sql).collect()
+            _exec(session, insert_sql, "scale: build _TEMP (3-leg UNION ALL)", log_ctx)
 
             # ── Supersede: delete older adjustments for positions in TEMP ──
             # The DENSE_RANK in the CTE only sees the *current* Running batch.
@@ -895,7 +962,7 @@ def main(session, process_type, adjustment_action, cobid):
                 _pos_join = " AND ".join(
                     [f"fa.{k} = tmp.{k}" for k in _supersede_dims]
                 )
-                session.sql(f"""
+                _exec(session, f"""
                     DELETE FROM {fact_adj_tbl_name} fa
                     WHERE fa.COBID = {cobid}
                       AND fa.ADJUSTMENT_ID NOT IN ({dim_ids_str})
@@ -903,14 +970,14 @@ def main(session, process_type, adjustment_action, cobid):
                           SELECT 1 FROM {fact_adj_tbl_name}_TEMP tmp
                           WHERE {_pos_join}
                       )
-                """).collect()
+                """, "scale: supersede older adjustments at TEMP positions", log_ctx)
 
             # ── Delete current batch's own previous rows (re-run scenario) ─
-            session.sql(f"""
+            _exec(session, f"""
                 DELETE FROM {fact_adj_tbl_name}
                 WHERE COBID = {cobid}
                   AND ADJUSTMENT_ID IN ({dim_ids_str})
-            """).collect()
+            """, "scale: delete this batch's previous rows", log_ctx)
 
             # Delete from summary table
             if fact_adj_summary_name:
@@ -926,8 +993,9 @@ def main(session, process_type, adjustment_action, cobid):
             SELECT {perm_col_list}
             FROM {fact_adj_tbl_name}_TEMP
             """
-            session.sql(perm_insert).collect()
-            session.sql(f"DROP TABLE IF EXISTS {fact_adj_tbl_name}_TEMP").collect()
+            _exec(session, perm_insert, "scale: insert _TEMP into ADJUSTMENTS_TABLE", log_ctx)
+            _exec(session, f"DROP TABLE IF EXISTS {fact_adj_tbl_name}_TEMP",
+                  "scale: drop _TEMP", log_ctx)
 
             # ── SCD2 key fix for cross-COB (Roll) adjustments ────────────
             scd2_update = f"""
@@ -979,7 +1047,7 @@ def main(session, process_type, adjustment_action, cobid):
               AND tgt.COMMON_INSTRUMENT_FCD_KEY = src.COMMON_INSTRUMENT_FCD_KEY
               AND tgt.COBID = src.COBID
             """
-            session.sql(scd2_update).collect()
+            _exec(session, scd2_update, "scale: SCD2 key remap (cross-COB roll)", log_ctx)
 
             # ── Rebuild summary ──────────────────────────────────────────
             if fact_adj_summary_name:
@@ -996,29 +1064,29 @@ def main(session, process_type, adjustment_action, cobid):
                 WHERE COBID = {cobid}
                 GROUP BY ALL
                 """
-                session.sql(summary_insert).collect()
+                _exec(session, summary_insert, "scale: rebuild summary table", log_ctx)
 
             # ── Count rows inserted and update RECORD_COUNT ──────────────
-            rows_count_row = session.sql(f"""
+            rows_count_row = _exec(session, f"""
                 SELECT COUNT(*) AS CNT
                 FROM {fact_adj_tbl_name}
                 WHERE COBID = {cobid}
                   AND ADJUSTMENT_ID IN ({dim_ids_str})
-            """).collect()
+            """, "scale: count inserted rows", log_ctx)
             rows_count = rows_count_row[0]["CNT"] if rows_count_row else 0
-            session.sql(f"""
+            _exec(session, f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER
                 SET RECORD_COUNT = {rows_count}
                 WHERE ADJ_ID IN ({adj_ids_str})
-            """).collect()
+            """, "scale: update ADJ_HEADER record_count", log_ctx)
             # Update RECORD_COUNT + RUN_STATUS in DIMENSION.ADJUSTMENT
             if dim_adj_map:
-                session.sql(f"""
+                _exec(session, f"""
                     UPDATE DIMENSION.ADJUSTMENT
                     SET RECORD_COUNT = {rows_count},
                         RUN_STATUS   = 'Processed'
                     WHERE ADJUSTMENT_ID IN ({dim_ids_str})
-                """).collect()
+                """, "scale: update DIMENSION.ADJUSTMENT record_count/status", log_ctx)
             result["rows_inserted"] = rows_count
 
             # ── Update status ────────────────────────────────────────────
@@ -1029,9 +1097,9 @@ def main(session, process_type, adjustment_action, cobid):
 
             # ── Close run log and trigger PowerBI refresh ──────────────
             try:
-                session.sql(f"""
+                _exec(session, f"""
                     CALL BATCH.LOAD_RUN_LOG_END_WITH_DETAIL({run_log_id}, '{{"status":"Processed"}}')
-                """).collect()
+                """, "scale: close run log", log_ctx)
             except Exception as rl_err:
                 print(f"Warning: Run log close failed: {rl_err}")
             trigger_powerbi_refresh(session, process_type, run_log_id)
@@ -1081,7 +1149,7 @@ def main(session, process_type, adjustment_action, cobid):
             # Must succeed: its ADJUSTMENT_ID is consolidated onto every copied
             # adjustment row. Let a failure raise (→ batch Failed) rather than
             # copying rows with a NULL id.
-            dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str)
+            dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str, log_ctx)
             new_dim_adj_id = list(dim_adj_map.values())[0] if dim_adj_map else None
             if new_dim_adj_id is None:
                 raise Exception("EntityRoll: DIMENSION.ADJUSTMENT insert returned no "
@@ -1219,6 +1287,11 @@ def main(session, process_type, adjustment_action, cobid):
                 """).collect()
         except Exception:
             pass
+
+    # Flush the buffered SQL log in ONE insert (covers both success and the
+    # handled-error path above, which falls through to here).
+    if 'log_ctx' in dir():
+        _flush_log(session, log_ctx)
 
     return json.dumps(result)
 $$;

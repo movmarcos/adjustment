@@ -291,6 +291,37 @@ COMMENT = 'Complete audit trail of every status transition for every adjustment.
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- 3b. ADJ_SQL_LOG — Every SQL statement the processing engine executes
+--
+-- One row per dynamic statement run by SP_PROCESS_ADJUSTMENT (and friends),
+-- with the full SQL text, status, rows affected, duration, and error.
+-- Purpose: production observability + debugging. To inspect a run:
+--   SELECT * FROM ADJUSTMENT_APP.ADJ_SQL_LOG
+--   WHERE RUN_LOG_ID = <id> ORDER BY SEQ_NO;
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_SQL_LOG (
+    LOG_ID            NUMBER(38,0) NOT NULL AUTOINCREMENT,
+    RUN_LOG_ID        NUMBER(38,0),                       -- ties to BATCH.RUN_LOG / ADJ_HEADER.RUN_LOG_ID
+    PROCESS_TYPE      VARCHAR(30),
+    ADJUSTMENT_ACTION VARCHAR(20),
+    COBID             NUMBER(38,0),
+    SEQ_NO            NUMBER(38,0),                        -- execution order within a single SP call
+    STEP_LABEL        VARCHAR(200),                        -- human-readable step name
+    SQL_TEXT          VARCHAR,                             -- the exact statement executed (full text)
+    STATUS            VARCHAR(10),                         -- SUCCESS | ERROR
+    ROWS_AFFECTED     NUMBER(38,0),                        -- DML row count when available
+    ERROR_MESSAGE     VARCHAR(5000),
+    DURATION_MS       NUMBER(38,0),
+    LOGGED_AT         TIMESTAMP_NTZ(9) DEFAULT CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9),
+    USERNAME          VARCHAR(50),
+
+    CONSTRAINT PK_ADJ_SQL_LOG PRIMARY KEY (LOG_ID)
+)
+COMMENT = 'Every dynamic SQL statement executed by the processing engine: full text, status, rows, duration. For prod debugging.';
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- 4. ADJUSTMENTS_SETTINGS — Config table (scope → table mapping)
 --
 -- Drives the processing engine. One row per scope.
@@ -496,6 +527,7 @@ ALTER TABLE ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
 SELECT 'ADJ_HEADER' AS OBJECT, COUNT(*) AS ROW_COUNT FROM ADJUSTMENT_APP.ADJ_HEADER
 UNION ALL SELECT 'ADJ_LINE_ITEM', COUNT(*) FROM ADJUSTMENT_APP.ADJ_LINE_ITEM
 UNION ALL SELECT 'ADJ_STATUS_HISTORY', COUNT(*) FROM ADJUSTMENT_APP.ADJ_STATUS_HISTORY
+UNION ALL SELECT 'ADJ_SQL_LOG', COUNT(*) FROM ADJUSTMENT_APP.ADJ_SQL_LOG
 UNION ALL SELECT 'ADJUSTMENTS_SETTINGS', COUNT(*) FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
 UNION ALL SELECT 'ADJ_RECURRING_TEMPLATE', COUNT(*) FROM ADJUSTMENT_APP.ADJ_RECURRING_TEMPLATE
 UNION ALL SELECT 'ADJ_SIGNOFF_STATUS', COUNT(*) FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
