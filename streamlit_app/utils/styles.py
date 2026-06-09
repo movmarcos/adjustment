@@ -131,7 +131,7 @@ def inject_css():
     }}
     [data-testid="stSidebar"] > div:first-child {{
         background: #3C3D3E !important;
-        overflow: hidden !important;   /* prevent sidebar scroll */
+        overflow-y: auto !important;   /* scroll if the nav is taller than the viewport */
         height: 100vh !important;
         display: flex !important;
         flex-direction: column !important;
@@ -193,25 +193,18 @@ def inject_css():
         font-size: 0.83rem !important;
     }}
 
-    /* Flex chain: sidebar inner blocks must pass flex context down so that
-       the spacer div (flex:1) can actually push the user footer to the bottom. */
-    [data-testid="stSidebar"] > div:first-child > div,
-    [data-testid="stSidebar"] > div:first-child > div > div,
-    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {{
-        display: flex !important;
-        flex-direction: column !important;
-        flex: 1 !important;
-        min-height: 0 !important;
-    }}
-    /* stSidebarNav must not stretch — it's a fixed-size block */
+    /* Sidebar content flows top-to-bottom (logo → nav → footer) and scrolls if
+       it's taller than the viewport. Nothing is force-stretched — that stretch
+       previously let the logo block expand over the top nav links. */
     [data-testid="stSidebarNav"] {{
         flex: 0 0 auto !important;
     }}
 
-    /* Sidebar user footer — pushed to bottom */
+    /* Sidebar user footer */
     .sidebar-user-footer {{
         border-top: 1px solid rgba(255,255,255,0.1);
         padding: 0.65rem 1rem;
+        margin-top: 0.75rem;
         background: #343536;
         flex-shrink: 0 !important;
     }}
@@ -744,7 +737,7 @@ def render_sidebar():
     with st.sidebar:
         # ── MUFG Logo (SVG inline, white text for dark background) ──────────
         st.markdown("""
-        <div style="padding:0.8rem 1rem 0.6rem;border-bottom:1px solid rgba(255,255,255,0.08)">
+        <div style="padding:0.8rem 1rem 0.6rem;border-bottom:1px solid rgba(255,255,255,0.08);pointer-events:none">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 80"
                style="width:100%;max-width:170px;height:auto;display:block">
             <circle cx="40" cy="40" r="34" fill="#D50032"/>
