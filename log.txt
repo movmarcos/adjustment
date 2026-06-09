@@ -24,3 +24,24 @@ and b.entity_code = 'MUSI'
 and b.book_code = 'BOOK-GEF'
 and b.department_code = 'EFE'
 group by all;
+
+
+-----------
+
+  SELECT COUNT(*) AS rows_returned, COUNT(DISTINCT fact.VAR_SUBCOMPONENT_ID) AS subcomps
+  FROM FACT.VAR_MEASURES_COMBINED fact
+  WHERE fact.COBID = 20260605                              -- SOURCE cob
+    AND fact.PNL_VECTOR_VALUE_IN_USD IS NOT NULL
+    AND fact.ENTITY_CODE = 'MUSI'                          -- engine's join_cond on ENTITY_CODE
+    AND EXISTS (SELECT 1 FROM DIMENSION.BOOK bk
+                WHERE bk.BOOK_KEY = COALESCE(fact.BOOK_KEY, -1)
+                  AND bk.BOOK_CODE = 'BOOK-GEF');          -- engine's BOOK EXISTS
+
+  -- same query but WITHOUT the ENTITY_CODE line — does subcomps jump to 10?
+  SELECT COUNT(DISTINCT fact.VAR_SUBCOMPONENT_ID) AS subcomps
+  FROM FACT.VAR_MEASURES_COMBINED fact
+  WHERE fact.COBID = 20260605
+    AND fact.PNL_VECTOR_VALUE_IN_USD IS NOT NULL
+    AND EXISTS (SELECT 1 FROM DIMENSION.BOOK bk
+                WHERE bk.BOOK_KEY = COALESCE(fact.BOOK_KEY, -1)
+                  AND bk.BOOK_CODE = 'BOOK-GEF');                  
