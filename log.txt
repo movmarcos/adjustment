@@ -175,3 +175,33 @@ SC,ORIG_608
 7	-212814634.8685
 25	-125054553.4505
 73	791701.5916
+
+-----------
+-----------
+
+SELECT SQL_TEXT
+  FROM ADJUSTMENT_APP.ADJ_SQL_LOG
+  WHERE STEP_LABEL = 'scale: build _TEMP (3-leg UNION ALL)'
+  ORDER BY LOG_ID DESC
+  LIMIT 1;
+
+  (or SELECT GET_DDL('PROCEDURE','ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT(VARCHAR,VARCHAR,NUMBER)'); if the log is still
+  empty — that tells me whether the deployed body is even my version.)
+
+  What I'm looking for in that text, and why it would inflate exactly like this:
+  - A surviving netted/GROUP BY or a 4th UNION leg (the doc still says "4‑way UNION ALL") — if the deployed body
+  predates my fix, it sums differently than I think.
+  - SCALE_FACTOR_ADJUSTED's value in leg ② — if it isn't 1, leg ② is scaled.
+  - An extra join that fans out — anything beyond FROM …_COMBINED fact INNER JOIN ADJ_HEADER adjust on the source leg.
+
+  One quick parallel check that would also localize it — does the detail table have duplicate rows per position for sc
+  7?
+
+  SELECT cnt, COUNT(*) AS positions FROM (
+    SELECT BOOK_KEY, TRADE_KEY, COMMON_INSTRUMENT_KEY, COMMON_INSTRUMENT_FCD_KEY,
+           CURRENCY_CODE, SOURCE_SYSTEM_CODE, SCENARIO_DATE_ID, IS_OFFICIAL_SOURCE,
+           COUNT(*) AS cnt
+    FROM FACT.VAR_MEASURES_ADJUSTMENT
+    WHERE COBID=20260608 AND ADJUSTMENT_ID=733287 AND VAR_SUBCOMPONENT_ID=7
+    GROUP BY 1,2,3,4,5,6,7,8
+  ) GROUP BY cnt ORDER BY cnt;
