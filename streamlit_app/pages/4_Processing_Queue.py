@@ -14,7 +14,12 @@ from utils.styles import (
     inject_css, render_sidebar, render_pipeline_diagram,
     section_title, P, SCOPE_CONFIG, STATUS_COLORS,
 )
-from utils.snowflake_conn import run_query_df, safe_rerun
+from utils.snowflake_conn import run_query, run_query_df, safe_rerun
+
+# A Pending/Approved item older than this (minutes) is flagged as possibly stuck
+# — the scope tasks poll every minute, so anything beyond a couple of cycles is
+# suspicious and the "Force process" action is emphasised.
+STUCK_AFTER_MIN = 3
 
 inject_css()
 render_sidebar()
@@ -37,8 +42,11 @@ section_title("Snowflake Processing Pipeline", "🔧")
 
 try:
     df_q = run_query_df("""
-        SELECT * FROM ADJUSTMENT_APP.VW_PROCESSING_QUEUE
-        ORDER BY QUEUE_POSITION
+        SELECT q.*,
+               DATEDIFF('minute', q.SUBMITTED_AT,
+                        CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9)) AS WAIT_MIN
+        FROM ADJUSTMENT_APP.VW_PROCESSING_QUEUE q
+        ORDER BY q.QUEUE_POSITION
     """)
 except Exception as e:
     df_q = pd.DataFrame()
@@ -151,6 +159,43 @@ else:
             f'</div>'
             f'</div>',
             unsafe_allow_html=True)
+
+        # ── Force-process action (Pending/Approved only) ────────────────────
+        # The tasks poll every minute; if a row is stranded (stream/unblock
+        # event missed) the user can push it through immediately.
+        if run_status in ("Pending", "Approved"):
+            try:
+                wait_min = int(qi.get("WAIT_MIN")) if pd.notna(qi.get("WAIT_MIN")) else None
+            except (TypeError, ValueError):
+                wait_min = None
+            stuck = wait_min is not None and wait_min >= STUCK_AFTER_MIN
+
+            wcol, bcol = st.columns([3, 1])
+            with wcol:
+                if wait_min is not None:
+                    if stuck:
+                        st.markdown(
+                            f"<span style='color:{P['danger']};font-size:0.76rem;font-weight:600'>"
+                            f"⚠ In queue {wait_min} min — task may have missed it; force it through.</span>",
+                            unsafe_allow_html=True)
+                    else:
+                        st.markdown(
+                            f"<span style='color:{P['grey_700']};font-size:0.76rem'>"
+                            f"In queue {wait_min} min — the task polls every minute.</span>",
+                            unsafe_allow_html=True)
+            with bcol:
+                if st.button("⏵ Force process", key=f"force_{adj_id}",
+                             type="primary" if stuck else "secondary",
+                             use_container_width=True,
+                             help="Bypass the task and process this adjustment now."):
+                    with st.spinner("Forcing through the pipeline…"):
+                        try:
+                            res = run_query(
+                                f"CALL ADJUSTMENT_APP.SP_FORCE_PROCESS_ADJUSTMENT('{adj_id}')")
+                            st.success(f"ADJ #{adj_id} forced. {res[0][0] if res else ''}")
+                        except Exception as fe:
+                            st.error(f"Force failed: {fe}")
+                    safe_rerun()
 
     st.markdown("<br/>", unsafe_allow_html=True)
     if st.button("🔄 Refresh Queue", type="primary"):
