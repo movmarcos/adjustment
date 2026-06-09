@@ -38,102 +38,17 @@ from snowflake.snowpark.types import IntegerType, StringType, StructType, Struct
 from datetime import datetime
 import pytz
 import json
-import time
 import pandas as pd
 import numpy as np
 
 
-def _log_sql(ctx, label, sql, status, rows_affected, err_txt, dur_ms):
-    """Buffer ONE ADJ_SQL_LOG row in memory. Nothing is written to the database
-    here — _flush_log() writes the whole buffer in a single INSERT at the end,
-    so logging adds no per-statement round-trips. Best-effort: never raises."""
-    try:
-        ctx.setdefault('buf', []).append((
-            ctx.get('run_log_id'), ctx.get('process_type'),
-            ctx.get('adjustment_action'), ctx.get('cobid'), ctx.get('seq'),
-            label, sql, status, rows_affected,
-            (err_txt[:5000] if err_txt else None), dur_ms, ctx.get('username'),
-        ))
-    except Exception as log_err:
-        print(f"ADJ_SQL_LOG buffer failed for step '{label}': {log_err}")
+def _exec(session, sql, label=None, ctx=None):
+    """Execute a SQL statement and return the collected rows.
 
-
-def _flush_log(session, ctx):
-    """Write all buffered ADJ_SQL_LOG rows in ONE multi-row INSERT.
-
-    Values are inlined (this codebase does not rely on bind params, which may
-    not work in this Snowpark stored-proc context). String fields are single-
-    quote-escaped; SQL_TEXT is dollar-quoted so its quotes/newlines need no
-    escaping. Best-effort: never raises; records the reason in ctx on failure."""
-    rows = ctx.get('buf') or []
-    if not rows:
-        return
-
-    def _lit(v):
-        if v is None:
-            return "NULL"
-        if isinstance(v, bool):
-            return "TRUE" if v else "FALSE"
-        if isinstance(v, (int, float)):
-            return str(v)
-        return "'" + str(v).replace("'", "''") + "'"
-
-    def _sqltext_lit(v):
-        if v is None:
-            return "NULL"
-        s = str(v)
-        # Dollar-quote to avoid escaping the generated SQL's many quotes.
-        if "$sqllog$" in s:
-            return "'" + s.replace("'", "''") + "'"   # fallback if tag collides
-        return "$sqllog$" + s + "$sqllog$"
-
-    try:
-        cols = ("RUN_LOG_ID, PROCESS_TYPE, ADJUSTMENT_ACTION, COBID, SEQ_NO, "
-                "STEP_LABEL, SQL_TEXT, STATUS, ROWS_AFFECTED, ERROR_MESSAGE, "
-                "DURATION_MS, USERNAME")
-        values = []
-        for (rl, pt, act, cob, seq, label, sqltext, status, raff, err, dur, usr) in rows:
-            values.append(
-                "(" + ", ".join([
-                    _lit(rl), _lit(pt), _lit(act), _lit(cob), _lit(seq),
-                    _lit(label), _sqltext_lit(sqltext), _lit(status), _lit(raff),
-                    _lit(err), _lit(dur), _lit(usr),
-                ]) + ")"
-            )
-        session.sql(
-            f"INSERT INTO ADJUSTMENT_APP.ADJ_SQL_LOG ({cols}) VALUES "
-            + ", ".join(values)
-        ).collect()
-        ctx['buf'] = []
-    except Exception as flush_err:
-        ctx['flush_error'] = str(flush_err)
-        print(f"ADJ_SQL_LOG flush failed: {flush_err}")
-
-
-def _exec(session, sql, label, ctx):
-    """Execute a SQL statement, buffer it for ADJ_SQL_LOG, and return the
-    collected rows (same as session.sql(sql).collect()). On error the failing
-    statement is buffered with its full text before the exception propagates."""
-    ctx['seq'] = ctx.get('seq', 0) + 1
-    start = time.time()
-    status, err_txt, rows_affected, out = 'SUCCESS', None, None, None
-    try:
-        out = session.sql(sql).collect()
-        # For DML, Snowflake returns the affected-row count in the first cell.
-        try:
-            if out and out[0] is not None:
-                v0 = out[0][0]
-                if isinstance(v0, (int, float)):
-                    rows_affected = int(v0)
-        except Exception:
-            rows_affected = None
-        return out
-    except Exception as e:
-        status, err_txt = 'ERROR', str(e)
-        raise
-    finally:
-        dur_ms = int((time.time() - start) * 1000)
-        _log_sql(ctx, label, sql, status, rows_affected, err_txt, dur_ms)
+    Thin wrapper kept so call sites read with a step label; SQL-log-table
+    logging was removed (it never wrote reliably and added overhead). The
+    `label`/`ctx` args are accepted but ignored."""
+    return session.sql(sql).collect()
 
 
 def _cfg_list(val):
@@ -302,12 +217,8 @@ def insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str, log_ctx=None)
 
     Match uses COBID + PROCESS_TYPE + USERNAME + CREATED_DATE — the four columns
     that are always present and inserted verbatim from ADJ_HEADER.
-
-    Writes are recorded in ADJ_SQL_LOG when log_ctx is supplied.
     """
     def _run(sql, label):
-        if log_ctx is not None:
-            return _exec(session, sql, label, log_ctx)
         return session.sql(sql).collect()
 
     _run(f"""
@@ -435,21 +346,9 @@ def main(session, process_type, adjustment_action, cobid):
         run_log_id = session.sql("SELECT BATCH.SEQ_RUN_LOG.NEXTVAL AS X").collect()[0]["X"]
         result["run_log_id"] = run_log_id
 
-        # ── SQL execution log context ────────────────────────────────────
-        # Every statement run through _exec(...) is recorded in ADJ_SQL_LOG
-        # against this run_log_id, in execution order (SEQ_NO).
-        try:
-            _username = session.sql("SELECT CURRENT_USER() AS U").collect()[0]["U"]
-        except Exception:
-            _username = None
-        log_ctx = {
-            "run_log_id": run_log_id,
-            "process_type": process_type,
-            "adjustment_action": adjustment_action,
-            "cobid": cobid,
-            "username": _username,
-            "seq": 0,
-        }
+        # log_ctx is accepted by _exec()/the dimension helper but no longer used
+        # (SQL-log-table logging was removed).
+        log_ctx = None
 
         _exec(session, f"""
             CALL BATCH.LOAD_RUN_LOG(
@@ -995,9 +894,6 @@ def main(session, process_type, adjustment_action, cobid):
             WHERE ROW_NUM = 1
             """
 
-            # Also return the generated statement directly (robust even if the
-            # ADJ_SQL_LOG write fails) — this is the roll's leg ② to diff.
-            result["scale_insert_sql"] = insert_sql
             _exec(session, insert_sql, "scale: build _TEMP (3-leg UNION ALL)", log_ctx)
 
             # ── Supersede: delete older adjustments for positions in TEMP ──
@@ -1340,16 +1236,6 @@ def main(session, process_type, adjustment_action, cobid):
                 """).collect()
         except Exception:
             pass
-
-    # Flush the buffered SQL log in ONE insert (covers both success and the
-    # handled-error path above, which falls through to here). Surface the
-    # buffered statement count and any flush failure in the return so an empty
-    # ADJ_SQL_LOG is never a silent mystery.
-    if 'log_ctx' in dir():
-        result["sql_log_buffered"] = len(log_ctx.get('buf') or [])
-        _flush_log(session, log_ctx)
-        if log_ctx.get('flush_error'):
-            result["sql_log_flush_error"] = log_ctx['flush_error']
 
     return json.dumps(result)
 $$;
