@@ -901,27 +901,6 @@ def main(session, process_type, adjustment_action, cobid):
 
             session.sql(insert_sql).collect()
 
-            # ── Supersede older adjustments at the positions this batch touches ──
-            # The DENSE_RANK above only ranks within the current batch; adjustments
-            # written by earlier runs are already in the fact table. For every
-            # position the TEMP table covers, delete any row belonging to a
-            # different adjustment so the current (newest) batch wins.
-            _supersede_dims = [k for k in pk_parts if k.upper() != 'COBID']
-            if _supersede_dims:
-                # dim_ids_str contains DIMENSION.ADJUSTMENT NUMBERs — no quoting needed
-                _pos_join = " AND ".join(
-                    [f"fa.{k} = tmp.{k}" for k in _supersede_dims]
-                )
-                session.sql(f"""
-                    DELETE FROM {fact_adj_tbl_name} fa
-                    WHERE fa.COBID = {cobid}
-                      AND fa.ADJUSTMENT_ID NOT IN ({dim_ids_str})
-                      AND EXISTS (
-                          SELECT 1 FROM {fact_adj_tbl_name}_TEMP tmp
-                          WHERE {_pos_join}
-                      )
-                """).collect()
-
             # ── Delete current batch's own previous rows (re-run scenario) ─
             session.sql(f"""
                 DELETE FROM {fact_adj_tbl_name}
@@ -997,6 +976,40 @@ def main(session, process_type, adjustment_action, cobid):
               AND tgt.COBID = src.COBID
             """
             session.sql(scd2_update).collect()
+
+            # ── Supersede older adjustments at the positions this batch occupies ──
+            # MUST run AFTER the SCD2 key-fix: for a cross-COB Roll the rows just
+            # written now carry source-COB TRADE/INSTRUMENT keys, exactly like any
+            # earlier Roll already stored. Matching the newly-written rows (cur,
+            # this batch) against the existing rows (fa, other adjustments) on the
+            # full position key therefore lines up — including rolled positions
+            # whose trade/instrument SCD2 version drifts between source and target
+            # COB, which the previous (pre-SCD2, TEMP-based) supersede missed and
+            # left stranded on the old adjustment ID.
+            #
+            # The DENSE_RANK in the CTE only resolves overlaps WITHIN this batch;
+            # this step resolves overlaps ACROSS batches. For every position this
+            # batch now occupies, delete the row belonging to any OTHER adjustment
+            # so the current (newest) batch wins — the overlapping positions
+            # migrate to this adjustment's ID. Non-overlapping positions of older
+            # adjustments are untouched (they are not in this batch's row set).
+            _supersede_dims = [k for k in pk_parts if k.upper() != 'COBID']
+            if _supersede_dims:
+                # dim_ids_str holds DIMENSION.ADJUSTMENT NUMBERs — no quoting needed
+                _pos_join = " AND ".join(
+                    [f"fa.{k} = cur.{k}" for k in _supersede_dims]
+                )
+                session.sql(f"""
+                    DELETE FROM {fact_adj_tbl_name} fa
+                    WHERE fa.COBID = {cobid}
+                      AND fa.ADJUSTMENT_ID NOT IN ({dim_ids_str})
+                      AND EXISTS (
+                          SELECT 1 FROM {fact_adj_tbl_name} cur
+                          WHERE cur.COBID = {cobid}
+                            AND cur.ADJUSTMENT_ID IN ({dim_ids_str})
+                            AND {_pos_join}
+                      )
+                """).collect()
 
             # ── Rebuild summary ──────────────────────────────────────────
             if fact_adj_summary_name:
