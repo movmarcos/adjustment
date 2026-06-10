@@ -63,4 +63,3 @@ AS
 -- VERIFY
 -- ═══════════════════════════════════════════════════════════════════════════
 SHOW TASKS LIKE 'TASK_PROCESS_%' IN SCHEMA ADJUSTMENT_APP;
-</content>
