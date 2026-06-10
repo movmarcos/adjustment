@@ -975,7 +975,14 @@ def main(session, process_type, adjustment_action, cobid):
               AND tgt.COMMON_INSTRUMENT_FCD_KEY = src.COMMON_INSTRUMENT_FCD_KEY
               AND tgt.COBID = src.COBID
             """
-            session.sql(scd2_update).collect()
+            # Only cross-COB Rolls rewrite SCD2 keys. For same-COB Scale/Flatten
+            # batches (the common case) the inner adj_cte is empty (ad.COBID =
+            # ad.SOURCE_COBID), so this UPDATE is a no-op — but Snowflake still
+            # runs the whole multi-dimension join plan. Skip it entirely when the
+            # batch has no cross-COB Roll; earlier Rolls were already SCD2-fixed
+            # when they were processed.
+            if has_cross_cob:
+                session.sql(scd2_update).collect()
 
             # ── Supersede older adjustments at the positions this batch occupies ──
             # MUST run AFTER the SCD2 key-fix: for a cross-COB Roll the rows just
