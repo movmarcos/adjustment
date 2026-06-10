@@ -90,10 +90,16 @@ if dev_scope != prod_scope:
 
 # ── Header comparison ─────────────────────────────────────────────────────────
 def _val(v):
-    if v is None or (hasattr(v, "__float__") and pd.isna(v)):
-        return "—"
+    try:
+        if v is None or pd.isna(v):   # catches None, NaN and NaT
+            return "—"
+    except (TypeError, ValueError):
+        pass
     if hasattr(v, "strftime"):
-        return v.strftime("%d %b %Y %H:%M")
+        try:
+            return v.strftime("%d %b %Y %H:%M")
+        except Exception:
+            return "—"
     return str(v)
 
 # Every column from DIMENSION.ADJUSTMENT — dev order first, then any prod-only.
