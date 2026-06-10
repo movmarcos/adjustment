@@ -28,11 +28,8 @@ ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER SET CHANGE_TRACKING = TRUE;
 --   • Not blocked (BLOCKED_BY_ADJ_ID IS NULL)
 --   • Not soft-deleted
 --
--- These views serve two purposes:
---   1. Source for the per-scope streams (stream tracks rows entering/leaving)
---   2. Monitoring — easy to query directly in Snowflake or from Streamlit
---
--- IMPORTANT: Views must be created BEFORE the streams that reference them.
+-- Used for monitoring and as the documented "eligible set" definition; the
+-- pipeline applies the same filter directly against ADJ_HEADER when it polls.
 -- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_QUEUE_VAR
