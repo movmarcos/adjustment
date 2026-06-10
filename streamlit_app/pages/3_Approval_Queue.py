@@ -165,6 +165,7 @@ if df_queue.empty:
 else:
     for _, row in df_queue.iterrows():
         adj_id      = row.get("ADJ_ID", "?")
+        adj_short   = f"#{str(adj_id)[:8]}…"   # no DIMENSION_ADJ_ID yet (pre-approval); short hash keeps rows distinct
         scope       = str(row.get("PROCESS_TYPE", ""))
         adj_type    = str(row.get("ADJUSTMENT_TYPE", ""))
         entity      = str(row.get("ENTITY_CODE", "")) or "—"
@@ -182,10 +183,10 @@ else:
             (df_overlaps["ADJ_ID_B"] == adj_id).any()
         ))
         expander_label = (
-            f'⚠️ ADJ #{adj_id} · {scope_cfg.get("icon","📊")} {scope} · '
+            f'⚠️ ADJ {adj_short} · {scope_cfg.get("icon","📊")} {scope} · '
             f'{adj_type} · by {submitted_by}  — OVERLAP'
             if has_overlap else
-            f'ADJ #{adj_id} · {scope_cfg.get("icon","📊")} {scope} · '
+            f'ADJ {adj_short} · {scope_cfg.get("icon","📊")} {scope} · '
             f'{adj_type} · by {submitted_by}'
         )
         with st.expander(expander_label, expanded=has_overlap):
@@ -232,7 +233,7 @@ else:
                             f'<tr>'
                             f'<td style="padding:3px 10px 3px 0;font-size:0.78rem;'
                             f'font-weight:700;white-space:nowrap">'
-                            f'ADJ #{r["ADJ_ID_B"] if r["ADJ_ID_A"] == adj_id else r["ADJ_ID_A"]}'
+                            f'ADJ #{str(r["ADJ_ID_B"] if r["ADJ_ID_A"] == adj_id else r["ADJ_ID_A"])[:8]}…'
                             f'</td>'
                             f'<td style="padding:3px 0;font-size:0.78rem;color:{P["grey_700"]}">'
                             f'{str(r.get("ALERT_MESSAGE","")).strip() or "Overlapping filters on same COB"}'
@@ -319,7 +320,7 @@ else:
                             VALUES ('{_esc(adj_id)}', 'Pending Approval', 'Approved',
                                     '{_esc(user)}', 'Approved by {_esc(user)}')
                         """)
-                        st.success(f"ADJ #{adj_id} approved!")
+                        st.success(f"ADJ {adj_short} approved!")
                         safe_rerun()
                     except Exception as ex:
                         st.error(str(ex))
@@ -347,7 +348,7 @@ else:
                             VALUES ('{_esc(adj_id)}', 'Pending Approval', 'Rejected',
                                     '{_esc(user)}', '{_esc(comment)}')
                         """)
-                        st.success(f"ADJ #{adj_id} rejected.")
+                        st.success(f"ADJ {adj_short} rejected.")
                         safe_rerun()
                     except Exception as ex:
                         st.error(str(ex))
@@ -382,7 +383,7 @@ try:
             st.markdown(
                 f'<div class="queue-item" style="border-left:3px solid {color}">'
                 f'<div style="display:flex;justify-content:space-between">'
-                f'<span style="font-weight:700;font-size:0.85rem">ADJ #{row["ADJ_ID"]} · '
+                f'<span style="font-weight:700;font-size:0.85rem">ADJ #{str(row["ADJ_ID"])[:8]}… · '
                 f'{row.get("PROCESS_TYPE","")} · {row.get("ADJUSTMENT_TYPE","")}</span>'
                 f'<span style="font-size:0.75rem;color:{color};font-weight:600">'
                 f'{row.get("RUN_STATUS","")}</span></div>'

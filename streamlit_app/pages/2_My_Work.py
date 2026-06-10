@@ -13,6 +13,7 @@ from utils.styles import (
     inject_css, render_sidebar, render_filter_chips, render_status_timeline,
     render_lifecycle_bar,
     status_badge, section_title, P, SCOPE_CONFIG, STATUS_COLORS, STATUS_ICONS,
+    fmt_adj_id,
 )
 from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
 
@@ -135,6 +136,7 @@ tabs      = st.tabs(tab_names)
 def render_adj_card(row):
     """Render one adjustment as an expandable card."""
     adj_id      = row.get("ADJ_ID", "?")
+    adj_label   = fmt_adj_id(row.get("DIMENSION_ADJ_ID"))
     scope       = str(row.get("PROCESS_TYPE", ""))
     adj_type    = str(row.get("ADJUSTMENT_TYPE", ""))
     run_status  = str(row.get("RUN_STATUS", ""))
@@ -148,7 +150,7 @@ def render_adj_card(row):
     scope_cfg   = SCOPE_CONFIG.get(scope, {})
 
     with st.expander(
-        f'ADJ #{adj_id} · {scope_cfg.get("icon","📊")} {scope} · '
+        f'ADJ {adj_label} · {scope_cfg.get("icon","📊")} {scope} · '
         f'{adj_type} · {run_status} · {record_cnt} rows',
         expanded=False,
     ):

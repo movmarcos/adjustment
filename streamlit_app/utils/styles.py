@@ -528,6 +528,23 @@ def fmt_currency(v) -> str:
     return f"${v:+,.0f}"
 
 
+def fmt_adj_id(dimension_adj_id, prefix: str = "#") -> str:
+    """Business-facing adjustment identifier.
+
+    Shows DIMENSION_ADJ_ID (the numeric DIMENSION.ADJUSTMENT id) — never the
+    internal ADJ_ID hash. Returns "Pending" while the adjustment has not been
+    processed yet (DIMENSION_ADJ_ID is set by SP_PROCESS_ADJUSTMENT, so it is
+    NULL for Pending/Running/Failed rows)."""
+    import pandas as pd
+    if dimension_adj_id is None or (isinstance(dimension_adj_id, float) and pd.isna(dimension_adj_id)):
+        return "Pending"
+    try:
+        return f"{prefix}{int(dimension_adj_id)}"
+    except (TypeError, ValueError):
+        s = str(dimension_adj_id).strip()
+        return f"{prefix}{s}" if s else "Pending"
+
+
 def render_step_bar(current_step: int, steps: list):
     dots = []
     for i, label in enumerate(steps, 1):

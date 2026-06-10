@@ -20,7 +20,7 @@ st.set_page_config(
 
 from utils.styles import (
     inject_css, render_sidebar, section_title,
-    P, SCOPE_CONFIG,
+    P, SCOPE_CONFIG, fmt_adj_id,
 )
 from utils.snowflake_conn import run_query, run_query_df
 
@@ -217,7 +217,7 @@ with tab_activity:
             SELECT
                 EVENT_TIME, EVENT_TYPE, CURRENT_STATUS,
                 PROCESS_TYPE, ADJUSTMENT_TYPE, ENTITY_CODE, BOOK_CODE,
-                ACTOR, ADJ_ID, EVENT_DETAIL
+                ACTOR, DIMENSION_ADJ_ID, EVENT_DETAIL
             FROM ADJUSTMENT_APP.VW_RECENT_ACTIVITY
             WHERE 1=1 {_cob_filter()}{_scope_filter()}
             ORDER BY EVENT_TIME DESC
@@ -230,6 +230,8 @@ with tab_activity:
     if df_act.empty:
         st.info("No activity matches the filters.")
     else:
+        df_act["DIMENSION_ADJ_ID"] = df_act["DIMENSION_ADJ_ID"].apply(fmt_adj_id)
+        df_act = df_act.rename(columns={"DIMENSION_ADJ_ID": "ADJ_ID"})
         st.dataframe(df_act.style.hide(axis="index"),
                      use_container_width=True, height=560)
 
@@ -248,7 +250,7 @@ with tab_errors:
         df_err = run_query_df(f"""
             SELECT
                 ERROR_TIME, COBID, PROCESS_TYPE, ADJUSTMENT_TYPE,
-                ENTITY_CODE, BOOK_CODE, USERNAME, ADJ_ID, REASON, ERRORMESSAGE
+                ENTITY_CODE, BOOK_CODE, USERNAME, DIMENSION_ADJ_ID, REASON, ERRORMESSAGE
             FROM ADJUSTMENT_APP.VW_ERRORS
             WHERE 1=1 {_cob_filter()}{_scope_filter()}
             ORDER BY ERROR_TIME DESC
@@ -278,7 +280,7 @@ with tab_errors:
                     ("Entity", str(e.get("ENTITY_CODE", "")) or "—"),
                     ("Book", str(e.get("BOOK_CODE", "")) or "—"),
                     ("User", str(e.get("USERNAME", "")) or "—"),
-                    ("ADJ_ID", str(e.get("ADJ_ID", "")) or "—"),
+                    ("Adj ID", fmt_adj_id(e.get("DIMENSION_ADJ_ID"))),
                     ("Reason", str(e.get("REASON", "")) or "—"),
                 ]
                 st.markdown(
