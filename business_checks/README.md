@@ -1,10 +1,11 @@
 # Business Number Checks — DVLP vs PROD tie-out
 
 > **Easier option:** the app's **Validation** page (`9_Validation.py`) does the
-> dev‑vs‑prod comparison automatically — enter COB + scope (+ optional
-> entity/book) and it shows `DEV`, `PROD`, `DIFF` and a ✅/❌ flag per dimension,
-> no Excel needed. It requires a session that can read **both** databases. These
-> per‑DB SQL files remain as a fallback for users who only have single‑DB access.
+> dev‑vs‑prod comparison automatically — enter the **two adjustment IDs** (the
+> dev one and the prod one) and it shows the header diff plus `DEV`, `PROD`,
+> `DIFF` and a ✅/❌ flag per dimension, no Excel needed. It requires a session
+> that can read **both** databases. These per‑DB SQL files remain as a fallback
+> for users who only have single‑DB access.
 
 ---
 
