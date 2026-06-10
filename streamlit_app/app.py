@@ -17,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from utils.styles import inject_css, render_sidebar, section_title, P, SCOPE_CONFIG
+from utils.styles import inject_css, render_sidebar, section_title, P, SCOPE_CONFIG, fmt_adj_id
 from utils.snowflake_conn import run_query_df, current_user_name
 
 inject_css()
@@ -376,7 +376,7 @@ with col_alerts:
     section_title("Current Errors", "❌")
     try:
         df_errors = run_query_df("""
-            SELECT ADJ_ID, PROCESS_TYPE, ENTITY_CODE, ERRORMESSAGE, USERNAME, ERROR_TIME
+            SELECT DIMENSION_ADJ_ID, PROCESS_TYPE, ENTITY_CODE, ERRORMESSAGE, USERNAME, ERROR_TIME
             FROM ADJUSTMENT_APP.VW_ERRORS
             ORDER BY ERROR_TIME DESC
             LIMIT 100
@@ -400,11 +400,11 @@ with col_alerts:
         rows_html = ""
         for _, r in df_errors.iterrows():
             msg = str(r.get("ERRORMESSAGE", "") or "").strip()[:70]
-            adj_id = str(r.get("ADJ_ID", ""))
+            adj_label = fmt_adj_id(r.get("DIMENSION_ADJ_ID"))
             rows_html += (
                 f'<tr style="border-bottom:1px solid #FFEBEE">'
                 f'<td style="padding:7px 8px;font-size:0.75rem;font-weight:700;'
-                f'color:{P["danger"]};white-space:nowrap">#{adj_id[:8]}…</td>'
+                f'color:{P["danger"]};white-space:nowrap">{adj_label}</td>'
                 f'<td style="padding:7px 6px;font-size:0.73rem;color:{P["grey_700"]}">'
                 f'{r.get("PROCESS_TYPE","")}</td>'
                 f'<td style="padding:7px 6px;font-size:0.72rem;color:{P["grey_700"]};'
@@ -496,7 +496,7 @@ try:
     # which can fail if ADJ_STATUS_HISTORY.ADJ_ID type differs from ADJ_HEADER.ADJ_ID.
     df_activity = run_query_df("""
         SELECT
-            ADJ_ID                                                      AS "Adj ID",
+            DIMENSION_ADJ_ID                                            AS "Adj ID",
             COBID                                                       AS "COB",
             PROCESS_TYPE                                                AS "Scope",
             ADJUSTMENT_TYPE                                             AS "Type",
@@ -515,6 +515,7 @@ try:
     """)
 
     if not df_activity.empty:
+        df_activity["Adj ID"] = df_activity["Adj ID"].apply(fmt_adj_id)
         df_activity["Duration"] = df_activity["DURATION_SECONDS"].apply(
             lambda v: _fmt_duration(v) if pd.notna(v) else "—"
         )

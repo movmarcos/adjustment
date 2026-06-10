@@ -9,7 +9,6 @@
 --   CALL ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT('{ ... JSON ... }');
 -- =============================================================================
 
-USE DATABASE DVLP_RAPTOR_NEWADJ;
 USE SCHEMA ADJUSTMENT_APP;
 
 CREATE OR ALTER PROCEDURE ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT(p_adjustment VARCHAR)

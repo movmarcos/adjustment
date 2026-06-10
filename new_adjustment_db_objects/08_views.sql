@@ -9,7 +9,6 @@
 --   • These are read primarily from Streamlit pages
 -- =============================================================================
 
-USE DATABASE DVLP_RAPTOR_NEWADJ;
 USE SCHEMA ADJUSTMENT_APP;
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -80,6 +79,7 @@ CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_RECENT_ACTIVITY
 AS
 SELECT
     h.ADJ_ID,
+    h.DIMENSION_ADJ_ID,
     h.COBID,
     h.PROCESS_TYPE,
     h.ADJUSTMENT_TYPE,
@@ -101,6 +101,7 @@ UNION ALL
 
 SELECT
     h.ADJ_ID,
+    h.DIMENSION_ADJ_ID,
     h.COBID,
     h.PROCESS_TYPE,
     h.ADJUSTMENT_TYPE,
@@ -131,6 +132,7 @@ CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_ERRORS
 AS
 SELECT
     h.ADJ_ID,
+    h.DIMENSION_ADJ_ID,
     h.COBID,
     h.PROCESS_TYPE,
     h.ADJUSTMENT_TYPE,
@@ -157,6 +159,7 @@ CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_MY_WORK
 AS
 SELECT
     h.ADJ_ID,
+    h.DIMENSION_ADJ_ID,
     h.COBID,
     h.PROCESS_TYPE,
     h.ADJUSTMENT_TYPE,
@@ -194,6 +197,7 @@ CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_PROCESSING_QUEUE
 AS
 SELECT
     h.ADJ_ID,
+    h.DIMENSION_ADJ_ID,
     h.COBID,
     h.PROCESS_TYPE,
     h.ADJUSTMENT_TYPE,
@@ -226,6 +230,7 @@ CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_APPROVAL_QUEUE
 AS
 SELECT
     h.ADJ_ID,
+    h.DIMENSION_ADJ_ID,
     h.COBID,
     h.PROCESS_TYPE,
     h.ADJUSTMENT_TYPE,
@@ -372,6 +377,7 @@ WITH status_milestones AS (
 )
 SELECT
     h.ADJ_ID,
+    h.DIMENSION_ADJ_ID,
     h.COBID,
     h.PROCESS_TYPE,
     h.ADJUSTMENT_TYPE,

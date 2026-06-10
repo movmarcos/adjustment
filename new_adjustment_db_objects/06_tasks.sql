@@ -18,7 +18,6 @@
 -- FRTBALL is a fan-out tag applied within each real FRTB sub-type call.
 -- =============================================================================
 
-USE DATABASE DVLP_RAPTOR_NEWADJ;
 USE SCHEMA ADJUSTMENT_APP;
 
 -- ─── VaR ───────────────────────────────────────────────────────────────────

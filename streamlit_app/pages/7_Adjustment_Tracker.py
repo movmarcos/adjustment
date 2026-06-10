@@ -16,6 +16,7 @@ st.set_page_config(
 from utils.styles import (
     inject_css, render_sidebar, render_lifecycle_bar, section_title,
     render_status_timeline,
+    fmt_adj_id,
     P, SCOPE_CONFIG, STAGE_CONFIG,
 )
 from utils.snowflake_conn import run_query, run_query_df, current_user_name
@@ -163,11 +164,15 @@ if not failed_df.empty:
 section_title("Adjustment Details", "📋")
 
 display_cols = [
-    "ADJ_ID", "PROCESS_TYPE", "ADJUSTMENT_TYPE", "ENTITY_CODE",
+    "DIMENSION_ADJ_ID", "PROCESS_TYPE", "ADJUSTMENT_TYPE", "ENTITY_CODE",
     "CURRENT_STAGE", "SUBMITTED_BY", "SUBMITTED_AT", "TOTAL_DURATION_SEC",
 ]
 available_cols = [c for c in display_cols if c in df_track.columns]
 df_display = df_track[available_cols].copy()
+
+if "DIMENSION_ADJ_ID" in df_display.columns:
+    df_display["DIMENSION_ADJ_ID"] = df_display["DIMENSION_ADJ_ID"].apply(fmt_adj_id)
+    df_display = df_display.rename(columns={"DIMENSION_ADJ_ID": "ADJ_ID"})
 
 if "TOTAL_DURATION_SEC" in df_display.columns:
     def _fmt_duration(sec):
@@ -190,6 +195,7 @@ section_title("Deep Dive", "🔎")
 
 for _, row in df_track.iterrows():
     adj_id = row.get("ADJ_ID", "?")
+    adj_label = fmt_adj_id(row.get("DIMENSION_ADJ_ID"))
     scope = str(row.get("PROCESS_TYPE", ""))
     current_stage = str(row.get("CURRENT_STAGE", ""))
     scope_cfg = SCOPE_CONFIG.get(scope, {})
@@ -197,7 +203,7 @@ for _, row in df_track.iterrows():
 
     with st.expander(
         f'{scope_cfg.get("icon", "")} {scope} · {row.get("ADJUSTMENT_TYPE", "")} · '
-        f'{stage_cfg["icon"]} {current_stage} · ADJ #{adj_id}',
+        f'{stage_cfg["icon"]} {current_stage} · ADJ {adj_label}',
         expanded=False,
     ):
         render_lifecycle_bar(row.to_dict())

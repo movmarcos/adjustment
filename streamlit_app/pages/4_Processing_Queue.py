@@ -12,7 +12,7 @@ st.set_page_config(page_title="Processing Queue · MUFG", page_icon="⏳", layou
 
 from utils.styles import (
     inject_css, render_sidebar, render_pipeline_diagram,
-    section_title, P, SCOPE_CONFIG, STATUS_COLORS,
+    section_title, P, SCOPE_CONFIG, STATUS_COLORS, fmt_adj_id,
 )
 from utils.snowflake_conn import run_query, run_query_df, safe_rerun
 
@@ -146,7 +146,7 @@ else:
             f'<div class="queue-item {run_status.lower()}">'
             f'<div style="display:flex;justify-content:space-between;align-items:flex-start">'
             f'  <div>'
-            f'    <span style="font-weight:700;font-size:0.92rem">#{queue_pos} — ADJ #{adj_id}</span>'
+            f'    <span style="font-weight:700;font-size:0.92rem">#{queue_pos} — ADJ #{str(adj_id)[:8]}…</span>'
             f'    &nbsp;<span style="font-size:0.75rem;color:{P["grey_700"]}">'
             f'    {scope_cfg.get("icon","")} {scope} · {adj_type} · Entity: {entity}</span>'
             f'  </div>'
@@ -192,7 +192,7 @@ else:
                         try:
                             res = run_query(
                                 f"CALL ADJUSTMENT_APP.SP_FORCE_PROCESS_ADJUSTMENT('{adj_id}')")
-                            st.success(f"ADJ #{adj_id} forced. {res[0][0] if res else ''}")
+                            st.success(f"ADJ #{str(adj_id)[:8]}… forced. {res[0][0] if res else ''}")
                         except Exception as fe:
                             st.error(f"Force failed: {fe}")
                     safe_rerun()
@@ -211,7 +211,7 @@ section_title("Recently Processed", "📜")
 try:
     df_recent = run_query_df("""
         SELECT
-            ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, ENTITY_CODE,
+            DIMENSION_ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, ENTITY_CODE,
             RUN_STATUS, USERNAME, RECORD_COUNT,
             CREATED_DATE, START_DATE, PROCESS_DATE,
             DATEDIFF('second', START_DATE, PROCESS_DATE) AS DURATION_SECONDS,
@@ -240,6 +240,8 @@ try:
             lambda v: _fmt_dur(v) if pd.notna(v) else "—"
         )
         df_recent = df_recent.drop(columns=["DURATION_SECONDS"])
+        df_recent["DIMENSION_ADJ_ID"] = df_recent["DIMENSION_ADJ_ID"].apply(fmt_adj_id)
+        df_recent = df_recent.rename(columns={"DIMENSION_ADJ_ID": "ADJ_ID"})
 
         def color_status(val):
             if val == "Processed": return f"color:{P['success']};font-weight:600"

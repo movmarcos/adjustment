@@ -13,7 +13,6 @@
 -- PREREQUISITE: 01_tables.sql first (ADJ_HEADER + BLOCKED_BY_ADJ_ID).
 -- =============================================================================
 
-USE DATABASE DVLP_RAPTOR_NEWADJ;
 USE SCHEMA ADJUSTMENT_APP;
 
 -- Change tracking stays on (cheap, and dynamic tables on ADJ_HEADER rely on it).
