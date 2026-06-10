@@ -17,7 +17,7 @@ WITH app_adj AS (
     -- Every app adjustment that finished processing (not deleted).
     SELECT
         h.DIMENSION_ADJ_ID                                AS DEV_ADJ_ID,
-        TRY_TO_NUMBER(REGEXP_SUBSTR(h.REASON, '[0-9]+'))  AS PROD_ADJ_ID,  -- prod id from Reason
+        TRY_TO_NUMBER(REGEXP_SUBSTR(COLLATE(h.REASON, ''), '[0-9]+'))  AS PROD_ADJ_ID,  -- prod id from Reason (COLLATE '' drops the en-ci collation REGEXP_SUBSTR rejects)
         h.COBID, h.SOURCE_COBID,
         h.ENTITY_CODE                                     AS ENTITY,
         h.PROCESS_TYPE, h.ADJUSTMENT_TYPE
