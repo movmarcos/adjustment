@@ -1,0 +1,36 @@
+version: 2
+
+models:
+  - name: adjustment__frtb_adjustment_hist
+    description: History for frtb adjustments
+    config:
+      tags: ['python', 'frtbsa_adjustment','adjustment']
+      cobid: "{{ var('cobid') }}"
+      process_type: "frtb"
+      adjustment_actions: ['direct', 'scale']
+  - name: adjustment__frtbdrc_adjustment_hist
+    description: History for frtb adjustments
+    config:
+      tags: ['python', 'frtbsa_adjustment','adjustment']
+      cobid: "{{ var('cobid') }}"
+      process_type: "frtbdrc"
+      adjustment_actions: ['direct', 'scale']
+  - name: adjustment__frtbrrao_adjustment_hist
+    description: History for frtb adjustments
+    config:
+      tags: ['python', 'frtbsa_adjustment','adjustment']
+      cobid: "{{ var('cobid') }}"
+      process_type: "frtbrrao"
+      adjustment_actions: ['direct', 'scale']
+  - name: adjustment__sensitivity_adjustment_hist
+    description: History for frtb adjustments
+    config:
+      tags: ['python', 'sensitivity_adjustment','publish_mrm_rm_adjustment','adjustment']
+      cobid: "{{ var('cobid') }}"
+      process_type: "sensitivity"
+      adjustment_actions: ['direct', 'scale']
+  - name: adjustment__rm_adjustment_hist
+    description: History for frtb adjustments
+    config:
+      tags: ['python', 'publish_mrm_rm_adjustment','sensitivity_adjustment','adjustment']
+      cobid: "{{ var('cobid') }}"
