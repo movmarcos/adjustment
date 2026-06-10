@@ -165,27 +165,57 @@ section_title("Adjustment Details", "📋")
 
 display_cols = [
     "DIMENSION_ADJ_ID", "PROCESS_TYPE", "ADJUSTMENT_TYPE", "ENTITY_CODE",
-    "CURRENT_STAGE", "SUBMITTED_BY", "SUBMITTED_AT", "TOTAL_DURATION_SEC",
+    "CURRENT_STAGE", "SUBMITTED_BY", "SUBMITTED_AT",
 ]
 available_cols = [c for c in display_cols if c in df_track.columns]
 df_display = df_track[available_cols].copy()
 
 if "DIMENSION_ADJ_ID" in df_display.columns:
     df_display["DIMENSION_ADJ_ID"] = df_display["DIMENSION_ADJ_ID"].apply(fmt_adj_id)
-    df_display = df_display.rename(columns={"DIMENSION_ADJ_ID": "ADJ_ID"})
 
-if "TOTAL_DURATION_SEC" in df_display.columns:
-    def _fmt_duration(sec):
-        if sec is None or pd.isna(sec):
-            return "—"
-        sec = int(sec)
-        if sec < 60:
-            return f"{sec}s"
-        if sec < 3600:
-            return f"{sec // 60}m {sec % 60}s"
-        return f"{sec // 3600}h {(sec % 3600) // 60}m"
-    df_display["TOTAL_DURATION_SEC"] = df_display["TOTAL_DURATION_SEC"].apply(_fmt_duration)
-    df_display = df_display.rename(columns={"TOTAL_DURATION_SEC": "TOTAL_DURATION"})
+if "SUBMITTED_AT" in df_display.columns:
+    df_display["SUBMITTED_AT"] = (
+        pd.to_datetime(df_display["SUBMITTED_AT"], errors="coerce")
+          .dt.strftime("%d %b %Y %H:%M").fillna("—")
+    )
+
+# Total duration = submitted → reports ready; falls back to submitted → processed
+# (VW_ADJUSTMENT_TRACK.TOTAL_DURATION_SEC is NULL until PowerBI reports complete,
+# which left this column blank for every still-in-flight adjustment).
+def _fmt_duration(sec):
+    if sec is None or pd.isna(sec):
+        return "—"
+    sec = int(sec)
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec // 60}m {sec % 60}s"
+    return f"{sec // 3600}h {(sec % 3600) // 60}m"
+
+def _row_total_sec(r):
+    start = r.get("SUBMITTED_AT")
+    end = r.get("PBI_COMPLETED_AT")
+    if end is None or pd.isna(end):
+        end = r.get("PROCESSING_ENDED_AT")
+    if start is None or pd.isna(start) or end is None or pd.isna(end):
+        return None
+    try:
+        return (pd.Timestamp(end) - pd.Timestamp(start)).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+df_display["TOTAL_DURATION"] = df_track.apply(_row_total_sec, axis=1).apply(_fmt_duration)
+
+df_display = df_display.rename(columns={
+    "DIMENSION_ADJ_ID": "Adj ID",
+    "PROCESS_TYPE":     "Scope",
+    "ADJUSTMENT_TYPE":  "Type",
+    "ENTITY_CODE":      "Entity",
+    "CURRENT_STAGE":    "Stage",
+    "SUBMITTED_BY":     "Submitted By",
+    "SUBMITTED_AT":     "Submitted",
+    "TOTAL_DURATION":   "Total Duration",
+})
 
 st.dataframe(df_display.style.hide(axis='index'), use_container_width=True, height=300)
 
