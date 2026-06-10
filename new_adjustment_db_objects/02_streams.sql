@@ -19,6 +19,14 @@ USE SCHEMA ADJUSTMENT_APP;
 -- Change tracking stays on (cheap, and dynamic tables on ADJ_HEADER rely on it).
 ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER SET CHANGE_TRACKING = TRUE;
 
+-- Drop the old per-scope streams FIRST — the pipeline polls now and nothing
+-- consumes them; left in place they pin change data on ADJ_HEADER, and they must
+-- be gone before the queue views they sit on can be replaced below.
+DROP STREAM IF EXISTS ADJUSTMENT_APP.STREAM_QUEUE_VAR;
+DROP STREAM IF EXISTS ADJUSTMENT_APP.STREAM_QUEUE_STRESS;
+DROP STREAM IF EXISTS ADJUSTMENT_APP.STREAM_QUEUE_FRTB;
+DROP STREAM IF EXISTS ADJUSTMENT_APP.STREAM_QUEUE_SENSITIVITY;
+
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- QUEUE VIEWS
@@ -67,16 +75,6 @@ WHERE PROCESS_TYPE = 'Sensitivity'
   AND RUN_STATUS IN ('Pending', 'Approved')
   AND BLOCKED_BY_ADJ_ID IS NULL
   AND IS_DELETED = FALSE;
-
-
--- ═══════════════════════════════════════════════════════════════════════════
--- DROP the old per-scope streams — the pipeline polls now and nothing consumes
--- them; left in place they would pin change data on ADJ_HEADER.
--- ═══════════════════════════════════════════════════════════════════════════
-DROP STREAM IF EXISTS ADJUSTMENT_APP.STREAM_QUEUE_VAR;
-DROP STREAM IF EXISTS ADJUSTMENT_APP.STREAM_QUEUE_STRESS;
-DROP STREAM IF EXISTS ADJUSTMENT_APP.STREAM_QUEUE_FRTB;
-DROP STREAM IF EXISTS ADJUSTMENT_APP.STREAM_QUEUE_SENSITIVITY;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
