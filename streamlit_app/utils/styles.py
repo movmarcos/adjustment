@@ -562,20 +562,42 @@ def render_step_bar(current_step: int, steps: list):
 
 
 def render_filter_chips(row: dict):
-    """Render filter dimension chips from an adjustment row (dict or pandas row)."""
+    """Render filter dimension chips from an adjustment row (dict or pandas row).
+
+    Covers every filter dimension ADJ_HEADER captures, in form order. The source
+    view must expose these columns (VW_MY_WORK / VW_APPROVAL_QUEUE) or the value
+    reads as missing and the chip is skipped."""
     dim_labels = {
         "ENTITY_CODE": "Entity", "SOURCE_SYSTEM_CODE": "Source",
         "DEPARTMENT_CODE": "Dept", "BOOK_CODE": "Book",
         "CURRENCY_CODE": "Ccy", "TRADE_TYPOLOGY": "Typology",
         "TRADE_CODE": "Trade", "STRATEGY": "Strategy",
         "INSTRUMENT_CODE": "Instrument", "SIMULATION_NAME": "Simulation",
-        "MEASURE_TYPE_CODE": "Measure",
+        "SIMULATION_SOURCE": "Sim Source", "MEASURE_TYPE_CODE": "Measure",
+        "TRADER_CODE": "Trader", "VAR_COMPONENT_ID": "VaR Comp",
+        "VAR_SUB_COMPONENT_ID": "VaR Sub-Comp", "GUARANTEED_ENTITY": "Guaranteed Entity",
+        "REGION_KEY": "Region", "SCENARIO_DATE_ID": "Scenario Date",
+        "TENOR_CODE": "Tenor", "UNDERLYING_TENOR_CODE": "Underlying Tenor",
+        "CURVE_CODE": "Curve", "DAY_TYPE": "Day Type",
+        "PRODUCT_CATEGORY_ATTRIBUTES": "Product Cat", "BATCH_REGION_AREA": "Region Area",
+        "MUREX_FAMILY": "Murex Family", "MUREX_GROUP": "Murex Group",
     }
+
+    def _fmt(v):
+        # NUMBER columns arrive from pandas as float (e.g. 5.0) when the column is
+        # nullable — show integral values without the trailing ".0".
+        if isinstance(v, float) and v.is_integer():
+            return str(int(v))
+        return str(v).strip()
+
     chips = []
     for col, label in dim_labels.items():
         val = row.get(col)
-        if val and str(val).strip() and str(val) != "None":
-            chips.append(f'<span class="filter-chip">{label}: {val}</span>')
+        if val is None:
+            continue
+        text = _fmt(val)
+        if text and text.lower() != "none" and text.lower() != "nan":
+            chips.append(f'<span class="filter-chip">{label}: {text}</span>')
     if chips:
         st.markdown(f'<div class="adj-filters">{"".join(chips)}</div>', unsafe_allow_html=True)
     else:
