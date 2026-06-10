@@ -23,12 +23,6 @@ render_sidebar()
 DEV_DB  = "DVLP_RAPTOR_NEWADJ"
 PROD_DB_DEFAULT = "PROD_RAPTOR"
 
-# Header attributes compared side by side.
-HEADER_COLS = [
-    "PROCESS_TYPE", "COBID", "SOURCE_COBID", "ADJUSTMENT_TYPE", "SCALE_FACTOR",
-    "ENTITY_CODE", "BOOK_CODE", "CURRENCY_CODE", "RECORD_COUNT",
-    "ADJUSTMENT_VALUE_IN_USD", "RUN_STATUS", "USERNAME", "CREATED_DATE",
-]
 # Preferred breakdown columns, in order — first that exists in the table wins.
 _PREFERRED_BREAKDOWN = [
     "VAR_SUBCOMPONENT_ID", "STRESS_SIMULATION_KEY", "MEASURE_TYPE_KEY",
@@ -37,8 +31,9 @@ _PREFERRED_BREAKDOWN = [
 
 
 def _header(db: str, adj_id: int):
+    """Full DIMENSION.ADJUSTMENT row (all columns) for the id, or None."""
     df = run_query_df(f"""
-        SELECT {", ".join(HEADER_COLS)}
+        SELECT *
         FROM {db}.DIMENSION.ADJUSTMENT
         WHERE ADJUSTMENT_ID = {int(adj_id)}
     """)
@@ -101,19 +96,24 @@ def _val(v):
         return v.strftime("%d %b %Y %H:%M")
     return str(v)
 
+# Every column from DIMENSION.ADJUSTMENT — dev order first, then any prod-only.
+all_cols = list(dev_h.index) + [c for c in prod_h.index if c not in set(dev_h.index)]
+
 hdr_rows = []
-for col in HEADER_COLS:
-    dv, pv = _val(dev_h[col]), _val(prod_h[col])
+for col in all_cols:
+    dv, pv = _val(dev_h.get(col)), _val(prod_h.get(col))
     hdr_rows.append({"Field": col, "Dev": dv, "Prod": pv,
                      "": "" if dv == pv else "≠"})
 hdr_df = pd.DataFrame(hdr_rows)
 
 st.markdown("##### Header")
+only_hdr_diff = st.checkbox("Show only differing fields", value=False, key="val_hdr_diff")
+hdr_show = hdr_df[hdr_df[""] == "≠"] if only_hdr_diff else hdr_df
 st.dataframe(
-    hdr_df.style.apply(
+    hdr_show.style.apply(
         lambda r: ['background-color:#FFEBEE' if r[""] == "≠" else '' for _ in r], axis=1
     ).hide(axis="index"),
-    use_container_width=True, height=min(60 + 32 * len(hdr_df), 480))
+    use_container_width=True, height=min(60 + 30 * len(hdr_show), 700))
 
 # ── Delta comparison ──────────────────────────────────────────────────────────
 scope = dev_scope
