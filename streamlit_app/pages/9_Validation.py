@@ -111,8 +111,9 @@ hdr_df = pd.DataFrame(hdr_rows)
 st.markdown("##### Header")
 st.dataframe(
     hdr_df.style.apply(
-        lambda r: ['background-color:#FFEBEE' if r[""] == "≠" else '' for _ in r], axis=1),
-    use_container_width=True, height=min(60 + 32 * len(hdr_df), 480), hide_index=True)
+        lambda r: ['background-color:#FFEBEE' if r[""] == "≠" else '' for _ in r], axis=1
+    ).hide(axis="index"),
+    use_container_width=True, height=min(60 + 32 * len(hdr_df), 480))
 
 # ── Delta comparison ──────────────────────────────────────────────────────────
 scope = dev_scope
@@ -216,8 +217,8 @@ show = mism if (only_diff and not mism.empty) else res
 st.dataframe(
     show.style.apply(
         lambda r: ['background-color:#FFEBEE' if r["MATCH"] == "❌" else '' for _ in r], axis=1
-    ).format({"DEV": "{:,.2f}", "PROD": "{:,.2f}", "DIFF": "{:,.2f}"}),
-    use_container_width=True, height=min(80 + 32 * len(show), 480), hide_index=True)
+    ).format({"DEV": "{:,.2f}", "PROD": "{:,.2f}", "DIFF": "{:,.2f}"}).hide(axis="index"),
+    use_container_width=True, height=min(80 + 32 * len(show), 480))
 
 st.download_button(
     "⬇ Download comparison (CSV)",
