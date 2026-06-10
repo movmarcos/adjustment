@@ -16,7 +16,15 @@
 3. Run a query, export to Excel. Repeat in the other DB and compare.
    The one that should match is **FINAL** (`*_COMBINED` / `*_ADJUSTED`).
 
-## What each file gives you
+## One query for everything
+
+`00_ALL_scopes_dev_vs_prod.sql` (needs both DBs in the same session) returns
+**every processed app adjustment** with its delta total + row count in **dev and
+prod** — one row per source. It reads the prod id from the **Reason** field (put
+the prod adjustment id there). Export and pivot: rows = `COBID / ENTITY /
+PROCESS_TYPE / PROD_ADJ_ID`, columns = `SOURCE`, values = `TOTAL_ADJUSTMENT`.
+
+## What each per-scope file gives you
 
 One file per scope (`01_VaR_check.sql` … `06_FRTB_RRAO_check.sql`), each with a
 ready query per table:
