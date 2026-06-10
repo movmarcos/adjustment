@@ -1,50 +1,37 @@
 -- =============================================================================
 -- 05B_SP_RUN_PIPELINE.SQL
--- Stream-driven pipeline orchestrator.
+-- Polling pipeline orchestrator.
 --
--- Called by the 4 scope tasks via WHEN SYSTEM$STREAM_HAS_DATA(...).
+-- Called every minute by the 4 scope tasks (06_tasks.sql). It POLLS the queue
+-- (reads ADJ_HEADER directly) rather than consuming a stream — so every eligible
+-- adjustment is found on every run regardless of when it was submitted, and
+-- nothing can be stranded by a stream drain (the previous design lost rows that
+-- arrived mid-run, which got worse with concurrent users).
+--
 -- Parameters:
 --   scope           e.g. 'VaR', 'Stress', 'FRTB', 'Sensitivity'
---                   → maps to STREAM_QUEUE_<SCOPE> (stream on VW_QUEUE_<SCOPE>)
 --   pipeline_types  JSON array of PROCESS_TYPE strings in this pipeline
 --                   e.g. '["FRTB","FRTBDRC","FRTBRRAO","FRTBALL"]'
 --
--- STREAMS ARE ON QUEUE VIEWS (NOT ON ADJ_HEADER):
---   Each stream sits on a view that already filters by PROCESS_TYPE,
---   RUN_STATUS IN ('Pending','Approved'), BLOCKED_BY_ADJ_ID IS NULL,
---   and IS_DELETED = FALSE. The stream tracks rows ENTERING or LEAVING
---   that view's result set — so SYSTEM$STREAM_HAS_DATA only fires for
---   changes relevant to THIS scope. No cross-scope noise.
---
--- FLOW (stream-driven — block first, not claim first):
+-- FLOW (block first, then claim):
 --   1a. Block overlapping Pending rows against any currently-Running adjustment.
 --   1b. Block overlapping Pending rows against EACH OTHER (oldest proceeds,
---       newer ones wait). Overlap is based purely on data scope (COBID +
---       dimensions) — NOT on ADJUSTMENT_TYPE or ADJUSTMENT_ACTION. A Flatten
---       and a Scale targeting the same entity/book/COB DO overlap.
---       Because Snowflake auto-commits each statement, blocked rows immediately
---       LEAVE the queue view → the stream records them as DELETE. By the time
---       we consume the stream in step 2, blocked rows are already excluded.
---   2. Consume the stream into a TEMP table. We SELECT only
---      METADATA$ACTION = 'INSERT' rows (= rows that entered the view and
---      stayed). No JOIN to ADJ_HEADER needed — the view's WHERE clause
---      guarantees eligibility.
---   3. Promote only those rows to RUN_STATUS='Running' + set START_DATE.
---   4. Submit SP_PROCESS_ADJUSTMENT calls in PARALLEL via Snowpark async
---      (collect_nowait) — one call per distinct (PROCESS_TYPE,
---      ADJUSTMENT_ACTION, COBID) combo. Each call processes all Running rows
---      for its combo in a single batched SQL operation.
---   5. Drain the stream with a no-op consume (`WHERE 1=0`) so that events
---      from steps 1/3/4 don't cause the next task run to re-fire on state
---      we've already handled.
---   6. Unblock resolved — clear BLOCKED_BY_ADJ_ID for any Pending row whose
---      blocker is now Processed/Failed. The row re-enters the queue view →
---      the stream records an INSERT → the next task run picks it up.
+--       newer ones wait). Overlap is purely data scope (COBID + dimensions),
+--       NOT ADJUSTMENT_TYPE/ADJUSTMENT_ACTION — a Flatten and a Scale on the same
+--       entity/book/COB overlap and must serialise.
+--   2. Enumerate the eligible set: Pending/Approved, unblocked, not deleted, in
+--      this pipeline. Read straight from ADJ_HEADER into a TEMP table.
+--   3. Claim: promote those rows to RUN_STATUS='Running' (+ START_DATE),
+--      re-checking eligibility in the WHERE so the claim is atomic per row.
+--   4. Process each distinct (PROCESS_TYPE, ADJUSTMENT_ACTION, COBID) combo in
+--      parallel via Snowpark async (collect_nowait); each call processes all
+--      Running rows for its combo in one batched operation.
+--   5. Unblock resolved — clear BLOCKED_BY_ADJ_ID for any Pending row whose
+--      blocker just finished; the next 1-minute poll picks it up.
 --
--- FRTBALL note: FRTBALL has no settings row. It is applied as a fan-out
--- during FRTB / FRTBDRC / FRTBRRAO processing. The loop skips FRTBALL as
--- a standalone call target — SP_PROCESS_ADJUSTMENT picks it up automatically
--- when processing any real FRTB sub-type.
+-- FRTBALL note: FRTBALL has no settings row. It is applied as a fan-out during
+-- FRTB / FRTBDRC / FRTBRRAO processing, so it is skipped as a standalone call
+-- target — SP_PROCESS_ADJUSTMENT picks it up when processing any real FRTB type.
 -- =============================================================================
 
 USE DATABASE DVLP_RAPTOR_NEWADJ;
@@ -59,7 +46,7 @@ LANGUAGE PYTHON
 RUNTIME_VERSION = '3.11'
 PACKAGES = ('snowflake-snowpark-python')
 HANDLER = 'main'
-COMMENT = 'Stream-driven pipeline orchestrator. Blocks overlapping rows first, consumes STREAM_QUEUE_<scope> into a temp table, promotes to Running, processes via SP_PROCESS_ADJUSTMENT, drains the stream, and unblocks resolved rows.'
+COMMENT = 'Polling pipeline orchestrator. Blocks overlapping rows, enumerates the eligible Pending/Approved queue from ADJ_HEADER, claims them to Running, processes via SP_PROCESS_ADJUSTMENT, and unblocks resolved rows. Polled every minute by the scope tasks; no streams.'
 EXECUTE AS CALLER
 AS
 $$
@@ -92,13 +79,8 @@ _OVERLAP_ACTION_FILTER = "AND ADJUSTMENT_ACTION NOT IN ('Direct')"
 # FRTBALL is a fan-out tag — applied within real FRTB* SP calls, not on its own.
 FRTBALL_SKIP = {'FRTBALL'}
 
-# scope → stream name (matches streams defined in 02_streams.sql)
-STREAM_MAP = {
-    'VAR':         'ADJUSTMENT_APP.STREAM_QUEUE_VAR',
-    'STRESS':      'ADJUSTMENT_APP.STREAM_QUEUE_STRESS',
-    'FRTB':        'ADJUSTMENT_APP.STREAM_QUEUE_FRTB',
-    'SENSITIVITY': 'ADJUSTMENT_APP.STREAM_QUEUE_SENSITIVITY',
-}
+# Scopes a task can drive (matches the per-scope tasks in 06_tasks.sql).
+QUEUE_SCOPES = {'VAR', 'STRESS', 'FRTB', 'SENSITIVITY'}
 
 ALLOWED_TYPES = {'VaR', 'Stress', 'Sensitivity',
                  'FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL'}
@@ -114,10 +96,9 @@ def main(session, scope, pipeline_types):
         if t not in ALLOWED_TYPES:
             raise ValueError(f"Unknown pipeline_type: {repr(t)}")
 
-    stream_name = STREAM_MAP.get(scope.upper())
-    if stream_name is None:
+    if scope.upper() not in QUEUE_SCOPES:
         raise ValueError(
-            f"Unknown scope: {repr(scope)}. Expected one of {list(STREAM_MAP.keys())}"
+            f"Unknown scope: {repr(scope)}. Expected one of {sorted(QUEUE_SCOPES)}"
         )
 
     pipeline_in = ", ".join(f"'{t}'" for t in types)
@@ -133,9 +114,9 @@ def main(session, scope, pipeline_types):
 
     # ── 1. OVERLAP BLOCKING ─────────────────────────────────────────────────
     #    Wrapped in try/except: overlap blocking is best-effort. If it fails,
-    #    we still proceed to consume the stream and process adjustments. The
-    #    worst case is two overlapping Scale adjustments run concurrently, but
-    #    that's better than the entire pipeline halting.
+    #    we still proceed to enumerate and process adjustments. The worst case
+    #    is two overlapping Scale adjustments run concurrently, but that's better
+    #    than the entire pipeline halting.
     try:
         # ── 1a. BLOCK PENDING vs RUNNING ─────────────────────────────────
         all_running = session.sql(f"""
@@ -156,23 +137,15 @@ def main(session, scope, pipeline_types):
         results.append({"step": "overlap_blocking", "status": "failed",
                         "error": str(block_err)[:500]})
 
-    # ── 2. CONSUME THE STREAM → TEMP TABLE ────────────────────────────────────
-    #    The stream is on a queue VIEW (e.g. VW_QUEUE_VAR) that already filters
-    #    by PROCESS_TYPE, RUN_STATUS IN ('Pending','Approved'), BLOCKED_BY_ADJ_ID
-    #    IS NULL, and IS_DELETED = FALSE. The stream only tracks rows that ENTER
-    #    or LEAVE that view's result set:
-    #
-    #      • METADATA$ACTION = 'INSERT' → row entered the view
-    #        (new submission, or unblocked adjustment re-entering the view)
-    #      • METADATA$ACTION = 'DELETE' → row left the view
-    #        (promoted to Running, blocked, or soft-deleted)
-    #
-    #    Step 1's blocking UPDATEs already committed (auto-commit). Blocked rows
-    #    LEFT the view → the stream shows them as DELETE, not INSERT. So we only
-    #    pick up rows that are still eligible after the block check — no JOIN
-    #    back to ADJ_HEADER needed.
+    # ── 2. ENUMERATE ELIGIBLE ROWS (poll the queue — NOT a stream) ────────────
+    #    The eligible set is just ADJ_HEADER filtered the same way as the queue
+    #    views: in this pipeline, Pending/Approved, unblocked, not deleted. Step 1
+    #    already blocked overlapping rows (they fail BLOCKED_BY_ADJ_ID IS NULL),
+    #    so they are excluded here. Reading directly from the table (instead of
+    #    consuming a stream) means every eligible row is found on every run — no
+    #    matter when it was submitted — so nothing can be stranded by a drain.
     session.sql("""
-        CREATE OR REPLACE TEMPORARY TABLE TEMP_STREAM_QUEUE (
+        CREATE OR REPLACE TEMPORARY TABLE TEMP_QUEUE (
             ADJ_ID            VARCHAR(36),
             COBID             NUMBER(38,0),
             PROCESS_TYPE      VARCHAR(30),
@@ -181,33 +154,36 @@ def main(session, scope, pipeline_types):
     """).collect()
 
     session.sql(f"""
-        INSERT INTO TEMP_STREAM_QUEUE (ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_ACTION)
-        SELECT DISTINCT ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_ACTION
-        FROM {stream_name}
-        WHERE METADATA$ACTION = 'INSERT'
+        INSERT INTO TEMP_QUEUE (ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_ACTION)
+        SELECT ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_ACTION
+        FROM ADJUSTMENT_APP.ADJ_HEADER
+        WHERE PROCESS_TYPE IN ({pipeline_in})
+          AND RUN_STATUS IN ('Pending', 'Approved')
+          AND BLOCKED_BY_ADJ_ID IS NULL
+          AND IS_DELETED = FALSE
     """).collect()
 
     eligible_count = session.sql(
-        "SELECT COUNT(*) AS C FROM TEMP_STREAM_QUEUE"
+        "SELECT COUNT(*) AS C FROM TEMP_QUEUE"
     ).collect()[0]["C"]
 
     if eligible_count == 0:
-        # Nothing to promote — but the block step in (1) and the stream consume
-        # in (2) may have left UPDATE events in the stream. Drain and unblock,
-        # then exit cleanly.
-        _drain_stream(session, stream_name)
+        # Nothing eligible — still try to release anything whose blocker finished
+        # so it is picked up next run, then exit fast.
         _unblock_resolved(session, pipeline_in)
-        return json.dumps({
-            "scope": scope,
-            "message": "No eligible adjustments in stream (all blocked or empty)",
-        })
+        return json.dumps({"scope": scope, "message": "No eligible adjustments"})
 
-    # ── 3. PROMOTE TEMP-TABLE ROWS TO Running ────────────────────────────────
+    # ── 3. CLAIM: PROMOTE ELIGIBLE ROWS TO Running ───────────────────────────
+    #    Re-check eligibility in the WHERE so the claim is atomic per row — only
+    #    rows still Pending/Approved + unblocked are promoted.
     session.sql("""
         UPDATE ADJUSTMENT_APP.ADJ_HEADER h
         SET RUN_STATUS = 'Running',
             START_DATE = CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9)
-        WHERE h.ADJ_ID IN (SELECT ADJ_ID FROM TEMP_STREAM_QUEUE)
+        WHERE h.ADJ_ID IN (SELECT ADJ_ID FROM TEMP_QUEUE)
+          AND h.RUN_STATUS IN ('Pending', 'Approved')
+          AND h.BLOCKED_BY_ADJ_ID IS NULL
+          AND h.IS_DELETED = FALSE
     """).collect()
 
     # ── 4. PROCESS EACH DISTINCT (pt, action, cob) COMBO — IN PARALLEL ──────
@@ -229,7 +205,7 @@ def main(session, scope, pipeline_types):
     #      • (VaR, Scale,   20260325)  ─┘
     to_process = session.sql(f"""
         SELECT DISTINCT PROCESS_TYPE, ADJUSTMENT_ACTION, COBID
-        FROM TEMP_STREAM_QUEUE
+        FROM TEMP_QUEUE
         WHERE PROCESS_TYPE IN ({real_in})
         ORDER BY PROCESS_TYPE, ADJUSTMENT_ACTION, COBID
     """).collect()
@@ -268,21 +244,11 @@ def main(session, scope, pipeline_types):
             """).collect()
             results.append({"process_type": pt, "cobid": cob, "status": "failed", "error": err})
 
-    # ── 5. DRAIN THE STREAM ──────────────────────────────────────────────────
-    #    Between step 2 and now, ADJ_HEADER has been UPDATEd repeatedly:
-    #      • Pending → Running (step 3)
-    #      • Running → Processed/Failed (step 4)
-    #    Every one of those UPDATEs landed in the stream. We drain with a
-    #    no-op DML (`WHERE 1=0`) so the next task fire only sees genuinely
-    #    new work (either new submissions or unblock events from step 6).
-    _drain_stream(session, stream_name)
-
-    # ── 6. UNBLOCK RESOLVED ──────────────────────────────────────────────────
-    #    Any Pending row with BLOCKED_BY_ADJ_ID pointing to something we just
-    #    finished → clear it (or reassign to another still-Running overlap).
-    #    The UPDATE produces a stream event → next task fire re-evaluates it.
-    #    Wrapped in try/except: if unblock fails, we still return results
-    #    and don't leave already-processed adjustments in an inconsistent state.
+    # ── 5. UNBLOCK RESOLVED ──────────────────────────────────────────────────
+    #    Any Pending row whose blocker just finished → clear BLOCKED_BY_ADJ_ID
+    #    (or reassign to another still-Running overlap). The next 1-minute run
+    #    re-polls the queue and picks it up. Best-effort: a failure here doesn't
+    #    undo the work already done above.
     try:
         _unblock_resolved(session, pipeline_in)
     except Exception as ub_err:
@@ -295,21 +261,6 @@ def main(session, scope, pipeline_types):
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _drain_stream(session, stream_name):
-    """
-    Consume the stream with a CTAS `WHERE 1=0`. The SELECT still references
-    the stream in its FROM clause, so Snowflake advances the offset even though
-    zero rows materialise. This is the standard "drain" pattern.
-
-    Uses a standalone CTAS instead of inserting into TEMP_STREAM_QUEUE so it
-    works even if the temp table was never created (e.g. early error path).
-    """
-    session.sql(f"""
-        CREATE OR REPLACE TEMPORARY TABLE _DRAIN_SINK AS
-        SELECT * FROM {stream_name} WHERE 1 = 0
-    """).collect()
-
 
 def _block_pending_overlaps(session, pipeline_in):
     """

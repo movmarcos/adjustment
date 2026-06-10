@@ -1,26 +1,15 @@
 -- =============================================================================
 -- 06_TASKS.SQL
--- Four independent scope-pipeline tasks, stream-guarded + time-based schedule.
--- Each task:
---   • Runs every 1 minute on schedule
---   • Only executes the body WHEN the corresponding stream has data
---     (captures INSERT + UPDATE + DELETE — standard streams, not APPEND_ONLY)
---   • Calls SP_RUN_PIPELINE with its scope name and pipeline type list
+-- Four scope-pipeline tasks. Each runs every 1 minute and calls SP_RUN_PIPELINE,
+-- which POLLS the queue (reads ADJ_HEADER) and processes whatever is eligible.
 --
--- WHY STANDARD STREAMS (NOT APPEND_ONLY):
---   Standard streams capture INSERTs and UPDATEs. This means that when a
---   blocked adjustment is unblocked (_unblock_resolved sets BLOCKED_BY_ADJ_ID
---   = NULL), that UPDATE is visible to SYSTEM$STREAM_HAS_DATA and the task
---   fires correctly. APPEND_ONLY would miss those updates entirely.
+-- No stream guard (no WHEN clause): the task fires every minute unconditionally.
+-- SP_RUN_PIPELINE exits in milliseconds when nothing is eligible. Polling — not
+-- stream-gating — is what guarantees an adjustment is never stranded in Pending,
+-- including under concurrent submissions. (A stream guard + drain raced with
+-- rows that arrived mid-run and silently dropped them.)
 --
--- NOTE: SP_RUN_PIPELINE reads from ADJ_HEADER directly (not from the stream).
---   The stream is consumed inside the task body via the SP call's implicit
---   DML context — Snowflake advances the stream offset when the task runs.
---   If SP_RUN_PIPELINE does not consume the stream explicitly, the offset will
---   not advance and SYSTEM$STREAM_HAS_DATA will remain TRUE after the first run.
---   Ensure SP_RUN_PIPELINE (or a wrapper SELECT) consumes the stream.
---
--- FRTB pipeline covers: FRTB, FRTBDRC, FRTBRRAO, FRTBALL
+-- FRTB pipeline covers: FRTB, FRTBDRC, FRTBRRAO, FRTBALL.
 -- FRTBALL is a fan-out tag applied within each real FRTB sub-type call.
 -- =============================================================================
 
@@ -32,8 +21,7 @@ USE SCHEMA ADJUSTMENT_APP;
 CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_VAR
     WAREHOUSE = DVLP_RAVEN_WH_M
     SCHEDULE  = '1 MINUTE'
-    COMMENT   = 'Fires when STREAM_QUEUE_VAR has data (INSERT or UPDATE on ADJ_HEADER). Processes eligible VaR adjustments via SP_RUN_PIPELINE.'
-    WHEN SYSTEM$STREAM_HAS_DATA('ADJUSTMENT_APP.STREAM_QUEUE_VAR')
+    COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible VaR adjustments.'
 AS
     CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('VaR', '["VaR"]');
 
@@ -43,8 +31,7 @@ AS
 CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS
     WAREHOUSE = DVLP_RAVEN_WH_M
     SCHEDULE  = '1 MINUTE'
-    COMMENT   = 'Fires when STREAM_QUEUE_STRESS has data (INSERT or UPDATE on ADJ_HEADER). Processes eligible Stress adjustments via SP_RUN_PIPELINE.'
-    WHEN SYSTEM$STREAM_HAS_DATA('ADJUSTMENT_APP.STREAM_QUEUE_STRESS')
+    COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible Stress adjustments.'
 AS
     CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('Stress', '["Stress"]');
 
@@ -54,8 +41,7 @@ AS
 CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB
     WAREHOUSE = DVLP_RAVEN_WH_M
     SCHEDULE  = '1 MINUTE'
-    COMMENT   = 'Fires when STREAM_QUEUE_FRTB has data (INSERT or UPDATE on ADJ_HEADER). Processes eligible FRTB-pipeline adjustments (FRTB, FRTBDRC, FRTBRRAO, FRTBALL).'
-    WHEN SYSTEM$STREAM_HAS_DATA('ADJUSTMENT_APP.STREAM_QUEUE_FRTB')
+    COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible FRTB-pipeline adjustments (FRTB, FRTBDRC, FRTBRRAO, FRTBALL).'
 AS
     CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('FRTB', '["FRTB","FRTBDRC","FRTBRRAO","FRTBALL"]');
 
@@ -65,8 +51,7 @@ AS
 CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY
     WAREHOUSE = DVLP_RAVEN_WH_M
     SCHEDULE  = '1 MINUTE'
-    COMMENT   = 'Fires when STREAM_QUEUE_SENSITIVITY has data (INSERT or UPDATE on ADJ_HEADER). Processes eligible Sensitivity adjustments via SP_RUN_PIPELINE.'
-    WHEN SYSTEM$STREAM_HAS_DATA('ADJUSTMENT_APP.STREAM_QUEUE_SENSITIVITY')
+    COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible Sensitivity adjustments.'
 AS
     CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('Sensitivity', '["Sensitivity"]');
 
@@ -78,3 +63,4 @@ AS
 -- VERIFY
 -- ═══════════════════════════════════════════════════════════════════════════
 SHOW TASKS LIKE 'TASK_PROCESS_%' IN SCHEMA ADJUSTMENT_APP;
+</content>

@@ -1,41 +1,22 @@
 -- =============================================================================
 -- 02_STREAMS.SQL
--- Queue views (one per scope) + standard streams on those views.
+-- Queue views (one per scope). The eligible set for each pipeline.
 --
--- WHY STREAMS ON VIEWS (NOT ON ADJ_HEADER DIRECTLY):
---   Each queue view filters ADJ_HEADER by PROCESS_TYPE, RUN_STATUS,
---   BLOCKED_BY_ADJ_ID, and IS_DELETED. A stream on the view only fires
---   when rows ENTER or LEAVE that view's result set for that specific scope.
---   If the streams were on ADJ_HEADER, every change to ANY scope would
---   trigger ALL 4 streams — defeating the purpose of per-scope isolation.
+-- The pipeline POLLS these (via SP_RUN_PIPELINE reading ADJ_HEADER every minute)
+-- — it no longer uses streams. The earlier stream-gated design stranded Pending
+-- rows that arrived while a run was in flight (the drain consumed their event),
+-- which got worse with concurrent users. Polling can't lose work.
 --
--- WHY STANDARD STREAMS (NOT APPEND_ONLY):
---   APPEND_ONLY streams only capture INSERTs. When a blocked adjustment is
---   unblocked (_unblock_resolved sets BLOCKED_BY_ADJ_ID = NULL), that is an
---   UPDATE which makes the row RE-ENTER the view. Standard streams capture
---   this as an INSERT event in the stream, so the task fires correctly.
+-- The old per-scope STREAM_QUEUE_* streams are DROPped below so they don't keep
+-- pinning change data on ADJ_HEADER. The views stay (eligible-set + monitoring).
 --
--- HOW VIEW-BASED STREAMS WORK:
---   • Row enters view (new Pending INSERT, or unblock UPDATE) → stream INSERT
---   • Row leaves view (promoted to Running, or blocked)        → stream DELETE
---   • SYSTEM$STREAM_HAS_DATA is TRUE only when NET changes exist for THIS scope
---   • The stream exposes all columns from the view (SELECT * FROM ADJ_HEADER)
---     plus METADATA$ACTION, METADATA$ISUPDATE, METADATA$ROW_ID
---
--- PREREQUISITE:
---   01_tables.sql must run first (ADJ_HEADER + BLOCKED_BY_ADJ_ID).
---   Change tracking must be enabled on ADJ_HEADER (required for streams on
---   views). The ALTER TABLE below is idempotent.
+-- PREREQUISITE: 01_tables.sql first (ADJ_HEADER + BLOCKED_BY_ADJ_ID).
 -- =============================================================================
 
 USE DATABASE DVLP_RAPTOR_NEWADJ;
 USE SCHEMA ADJUSTMENT_APP;
 
--- ═══════════════════════════════════════════════════════════════════════════
--- ENABLE CHANGE TRACKING ON ADJ_HEADER
--- Required for streams on views that reference this table.
--- ═══════════════════════════════════════════════════════════════════════════
-
+-- Change tracking stays on (cheap, and dynamic tables on ADJ_HEADER rely on it).
 ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER SET CHANGE_TRACKING = TRUE;
 
 
@@ -55,7 +36,7 @@ ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER SET CHANGE_TRACKING = TRUE;
 -- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_QUEUE_VAR
-    COMMENT = 'Eligible VaR adjustments: Pending/Approved + unblocked. Source for STREAM_QUEUE_VAR.'
+    COMMENT = 'Eligible VaR adjustments: Pending/Approved + unblocked.'
 AS
 SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER
 WHERE PROCESS_TYPE = 'VaR'
@@ -64,7 +45,7 @@ WHERE PROCESS_TYPE = 'VaR'
   AND IS_DELETED = FALSE;
 
 CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_QUEUE_STRESS
-    COMMENT = 'Eligible Stress adjustments: Pending/Approved + unblocked. Source for STREAM_QUEUE_STRESS.'
+    COMMENT = 'Eligible Stress adjustments: Pending/Approved + unblocked.'
 AS
 SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER
 WHERE PROCESS_TYPE = 'Stress'
@@ -73,7 +54,7 @@ WHERE PROCESS_TYPE = 'Stress'
   AND IS_DELETED = FALSE;
 
 CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_QUEUE_FRTB
-    COMMENT = 'Eligible FRTB-pipeline adjustments (FRTB + FRTBDRC + FRTBRRAO + FRTBALL): Pending/Approved + unblocked. Source for STREAM_QUEUE_FRTB.'
+    COMMENT = 'Eligible FRTB-pipeline adjustments (FRTB + FRTBDRC + FRTBRRAO + FRTBALL): Pending/Approved + unblocked.'
 AS
 SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER
 WHERE PROCESS_TYPE IN ('FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL')
@@ -82,7 +63,7 @@ WHERE PROCESS_TYPE IN ('FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL')
   AND IS_DELETED = FALSE;
 
 CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_QUEUE_SENSITIVITY
-    COMMENT = 'Eligible Sensitivity adjustments: Pending/Approved + unblocked. Source for STREAM_QUEUE_SENSITIVITY.'
+    COMMENT = 'Eligible Sensitivity adjustments: Pending/Approved + unblocked.'
 AS
 SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER
 WHERE PROCESS_TYPE = 'Sensitivity'
@@ -92,34 +73,16 @@ WHERE PROCESS_TYPE = 'Sensitivity'
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- STREAMS — standard (on views, NOT APPEND_ONLY)
---
--- Each stream tracks rows entering/leaving its queue view.
--- SYSTEM$STREAM_HAS_DATA fires the corresponding task only when this
--- specific scope has new eligible work.
---
--- IMPORTANT: Views must exist before these statements run.
+-- DROP the old per-scope streams — the pipeline polls now and nothing consumes
+-- them; left in place they would pin change data on ADJ_HEADER.
 -- ═══════════════════════════════════════════════════════════════════════════
-
-CREATE OR REPLACE STREAM ADJUSTMENT_APP.STREAM_QUEUE_VAR
-    ON VIEW ADJUSTMENT_APP.VW_QUEUE_VAR
-    COMMENT = 'Tracks rows entering/leaving VW_QUEUE_VAR. INSERT = new eligible VaR adjustment (submitted or unblocked). DELETE = claimed (Running) or blocked.';
-
-CREATE OR REPLACE STREAM ADJUSTMENT_APP.STREAM_QUEUE_STRESS
-    ON VIEW ADJUSTMENT_APP.VW_QUEUE_STRESS
-    COMMENT = 'Tracks rows entering/leaving VW_QUEUE_STRESS. INSERT = new eligible Stress adjustment. DELETE = claimed or blocked.';
-
-CREATE OR REPLACE STREAM ADJUSTMENT_APP.STREAM_QUEUE_FRTB
-    ON VIEW ADJUSTMENT_APP.VW_QUEUE_FRTB
-    COMMENT = 'Tracks rows entering/leaving VW_QUEUE_FRTB. INSERT = new eligible FRTB-pipeline adjustment. DELETE = claimed or blocked.';
-
-CREATE OR REPLACE STREAM ADJUSTMENT_APP.STREAM_QUEUE_SENSITIVITY
-    ON VIEW ADJUSTMENT_APP.VW_QUEUE_SENSITIVITY
-    COMMENT = 'Tracks rows entering/leaving VW_QUEUE_SENSITIVITY. INSERT = new eligible Sensitivity adjustment. DELETE = claimed or blocked.';
+DROP STREAM IF EXISTS ADJUSTMENT_APP.STREAM_QUEUE_VAR;
+DROP STREAM IF EXISTS ADJUSTMENT_APP.STREAM_QUEUE_STRESS;
+DROP STREAM IF EXISTS ADJUSTMENT_APP.STREAM_QUEUE_FRTB;
+DROP STREAM IF EXISTS ADJUSTMENT_APP.STREAM_QUEUE_SENSITIVITY;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- VERIFY
 -- ═══════════════════════════════════════════════════════════════════════════
-SHOW VIEWS   LIKE 'VW_QUEUE_%'     IN SCHEMA ADJUSTMENT_APP;
-SHOW STREAMS LIKE 'STREAM_QUEUE_%' IN SCHEMA ADJUSTMENT_APP;
+SHOW VIEWS LIKE 'VW_QUEUE_%' IN SCHEMA ADJUSTMENT_APP;
