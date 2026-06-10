@@ -9,6 +9,11 @@
 -- including under concurrent submissions. (A stream guard + drain raced with
 -- rows that arrived mid-run and silently dropped them.)
 --
+-- Compute: serverless (USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'MEDIUM').
+-- Snowflake provisions and right-sizes the compute and bills only for the time
+-- each run actually executes — so polling every minute costs only the sub-second
+-- of each empty run, not a warehouse kept warm.
+--
 -- FRTB pipeline covers: FRTB, FRTBDRC, FRTBRRAO, FRTBALL.
 -- FRTBALL is a fan-out tag applied within each real FRTB sub-type call.
 -- =============================================================================
@@ -19,7 +24,7 @@ USE SCHEMA ADJUSTMENT_APP;
 -- ─── VaR ───────────────────────────────────────────────────────────────────
 
 CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_VAR
-    WAREHOUSE = DVLP_RAVEN_WH_M
+    USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'MEDIUM'
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible VaR adjustments.'
 AS
@@ -29,7 +34,7 @@ AS
 -- ─── Stress ────────────────────────────────────────────────────────────────
 
 CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS
-    WAREHOUSE = DVLP_RAVEN_WH_M
+    USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'MEDIUM'
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible Stress adjustments.'
 AS
@@ -39,7 +44,7 @@ AS
 -- ─── FRTB (all sub-types) ───────────────────────────────────────────────────
 
 CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB
-    WAREHOUSE = DVLP_RAVEN_WH_M
+    USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'MEDIUM'
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible FRTB-pipeline adjustments (FRTB, FRTBDRC, FRTBRRAO, FRTBALL).'
 AS
@@ -49,7 +54,7 @@ AS
 -- ─── Sensitivity ───────────────────────────────────────────────────────────
 
 CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY
-    WAREHOUSE = DVLP_RAVEN_WH_M
+    USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'MEDIUM'
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible Sensitivity adjustments.'
 AS
