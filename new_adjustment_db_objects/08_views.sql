@@ -9,7 +9,6 @@
 --   • These are read primarily from Streamlit pages
 -- =============================================================================
 
-USE DATABASE DVLP_RAPTOR_NEWADJ;
 USE SCHEMA ADJUSTMENT_APP;
 
 -- ═══════════════════════════════════════════════════════════════════════════

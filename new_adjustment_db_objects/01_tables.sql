@@ -7,7 +7,6 @@
 -- All objects live in the ADJUSTMENT_APP schema.
 -- =============================================================================
 
-USE DATABASE DVLP_RAPTOR_NEWADJ;
 CREATE SCHEMA IF NOT EXISTS ADJUSTMENT_APP;
 USE SCHEMA ADJUSTMENT_APP;
 

@@ -8,7 +8,6 @@
 --   • Overlap detection is a complex join — better pre-computed than ad-hoc
 -- =============================================================================
 
-USE DATABASE DVLP_RAPTOR_NEWADJ;
 USE SCHEMA ADJUSTMENT_APP;
 
 -- ═══════════════════════════════════════════════════════════════════════════

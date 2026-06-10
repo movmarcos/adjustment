@@ -34,7 +34,6 @@
 -- target — SP_PROCESS_ADJUSTMENT picks it up when processing any real FRTB type.
 -- =============================================================================
 
-USE DATABASE DVLP_RAPTOR_NEWADJ;
 USE SCHEMA ADJUSTMENT_APP;
 
 CREATE OR ALTER PROCEDURE ADJUSTMENT_APP.SP_RUN_PIPELINE(
