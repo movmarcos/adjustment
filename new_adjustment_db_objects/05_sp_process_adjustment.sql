@@ -628,6 +628,8 @@ def main(session, process_type, adjustment_action, cobid):
                 'ENTITY_CODE', 'INSTRUMENT_CODE',
                 'SIMULATION_NAME', 'SIMULATION_SOURCE',
                 'VAR_COMPONENT_ID', 'VAR_SUB_COMPONENT_ID', 'DAY_TYPE',
+                'MEASURE_TYPE_CODE', 'TENOR_CODE', 'CURVE_CODE',
+                'UNDERLYING_TENOR_CODE', 'PRODUCT_CATEGORY_ATTRIBUTES',
             ]
             _check_fields = list(set(join_cols + _dim_fields))
             _check_in_adj = [f for f in _check_fields if f in adj_columns]
@@ -708,6 +710,58 @@ def main(session, process_type, adjustment_action, cobid):
                     "AND (vsc.VAR_COMPONENT_ID = adjust.VAR_COMPONENT_ID OR adjust.VAR_COMPONENT_ID IS NULL) "
                     "AND (vsc.VAR_SUB_COMPONENT_ID = adjust.VAR_SUB_COMPONENT_ID OR adjust.VAR_SUB_COMPONENT_ID IS NULL) "
                     "AND (vsc.VAR_SUB_COMPONENT_DAY_TYPE = adjust.DAY_TYPE OR adjust.DAY_TYPE IS NULL))"
+                )
+
+            # ── 1:1 code→key dimensions ─────────────────────────────────────
+            # The fact tables key these dimensions by surrogate key, but the app
+            # captures the code. Without resolving the code → key the filter is
+            # silently ignored (e.g. a Sensitivity adjustment on one MEASURE_TYPE
+            # would otherwise hit every measure type). Resolution rules mirror the
+            # dbt base model (context/codes/adjustment/adjustment__adjustments_base.sql).
+
+            # 7. MEASURE_TYPE_KEY → MEASURE_TYPE_CODE (SENSITIVITY_MEASURES, FRTB*)
+            if "MEASURE_TYPE_KEY" in fact_cols and _any_has('MEASURE_TYPE_CODE'):
+                from_where += (
+                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.MEASURE_TYPE mt "
+                    "WHERE mt.MEASURE_TYPE_KEY = COALESCE(fact.MEASURE_TYPE_KEY, -1) "
+                    "AND (mt.MEASURE_TYPE_CODE = adjust.MEASURE_TYPE_CODE OR adjust.MEASURE_TYPE_CODE IS NULL))"
+                )
+
+            # 8. TENOR_CURRENCY_KEY → TENOR_CODE + CURRENCY_CODE; the dim code is
+            #    CONCAT(tenor_code, '_', COALESCE(currency_code, 'USD')).
+            if "TENOR_CURRENCY_KEY" in fact_cols and _any_has('TENOR_CODE'):
+                from_where += (
+                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.TENOR_CURRENCY tc "
+                    "WHERE tc.TENOR_CURRENCY_KEY = COALESCE(fact.TENOR_CURRENCY_KEY, -1) "
+                    "AND (tc.TENOR_CURRENCY_CODE = CONCAT(adjust.TENOR_CODE, '_', COALESCE(adjust.CURRENCY_CODE, 'USD')) "
+                    "OR adjust.TENOR_CODE IS NULL))"
+                )
+
+            # 9. CURVE_CURRENCY_KEY → CURVE_CODE
+            if "CURVE_CURRENCY_KEY" in fact_cols and _any_has('CURVE_CODE'):
+                from_where += (
+                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.CURVE_CURRENCY cc "
+                    "WHERE cc.CURVE_CURRENCY_KEY = COALESCE(fact.CURVE_CURRENCY_KEY, -1) "
+                    "AND (cc.CURVE_CODE = adjust.CURVE_CODE OR adjust.CURVE_CODE IS NULL))"
+                )
+
+            # 10. UNDERLYING_TENOR_CURRENCY_KEY → UNDERLYING_TENOR_CODE
+            #     (dim column is UNDERYLING_TENOR_CODE — sic, as in the dbt model)
+            if "UNDERLYING_TENOR_CURRENCY_KEY" in fact_cols and _any_has('UNDERLYING_TENOR_CODE'):
+                from_where += (
+                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.UNDERLYING_TENOR_CURRENCY ut "
+                    "WHERE ut.UNDERLYING_TENOR_CURRENCY_KEY = COALESCE(fact.UNDERLYING_TENOR_CURRENCY_KEY, -1) "
+                    "AND (ut.UNDERYLING_TENOR_CODE = adjust.UNDERLYING_TENOR_CODE OR adjust.UNDERLYING_TENOR_CODE IS NULL))"
+                )
+
+            # 11. PRODUCT_CATEGORY_ATTRIBUTES_KEY → PRODUCT_CATEGORY_ATTRIBUTES
+            #     (space-insensitive match on PCA_CONCAT_KEY, as in the dbt model)
+            if "PRODUCT_CATEGORY_ATTRIBUTES_KEY" in fact_cols and _any_has('PRODUCT_CATEGORY_ATTRIBUTES'):
+                from_where += (
+                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.PRODUCT_CATEGORY_ATTRIBUTES pca "
+                    "WHERE pca.PRODUCT_CATEGORY_ATTRIBUTES_KEY = COALESCE(fact.PRODUCT_CATEGORY_ATTRIBUTES_KEY, -1) "
+                    "AND (REPLACE(pca.PCA_CONCAT_KEY, ' ', '') = REPLACE(adjust.PRODUCT_CATEGORY_ATTRIBUTES, ' ', '') "
+                    "OR adjust.PRODUCT_CATEGORY_ATTRIBUTES IS NULL))"
                 )
 
             # ── Direct join conditions (auto-detected column matches) ───────

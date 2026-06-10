@@ -156,17 +156,27 @@ def main(session, p_adjustment):
             )
 
     if has_book_key:
-        val = adj.get("book_code")
-        if val:
-            where_clauses.append(
-                f"EXISTS (SELECT 1 FROM DIMENSION.BOOK d "
-                f"WHERE d.BOOK_KEY = fact.BOOK_KEY AND d.BOOK_CODE = '{_esc(val)}')"
-            )
-        dept = adj.get("department_code")
-        if dept:
+        # BOOK attributes map to MANY books, so each is a semi-join on DIMENSION.BOOK
+        # (mirrors SP_PROCESS_ADJUSTMENT's BOOK EXISTS): book_code, department_code,
+        # trader_code, guaranteed_entity, region_key.
+        bk_conds = []
+        if adj.get("book_code"):
+            bk_conds.append(f"bk.BOOK_CODE = '{_esc(adj['book_code'])}'")
+        if adj.get("department_code"):
+            bk_conds.append(f"bk.DEPARTMENT_CODE = '{_esc(adj['department_code'])}'")
+        if adj.get("trader_code"):
+            bk_conds.append(f"bk.PRIMARY_TRADER_CODE = '{_esc(adj['trader_code'])}'")
+        if adj.get("guaranteed_entity"):
+            bk_conds.append(f"bk.GUARANTEED_ENTITY = '{_esc(adj['guaranteed_entity'])}'")
+        if adj.get("region_key") not in (None, ""):
+            try:
+                bk_conds.append(f"bk.REGION_KEY = {int(adj['region_key'])}")
+            except (TypeError, ValueError):
+                pass
+        if bk_conds:
             where_clauses.append(
                 f"EXISTS (SELECT 1 FROM DIMENSION.BOOK bk "
-                f"WHERE bk.BOOK_KEY = fact.BOOK_KEY AND bk.DEPARTMENT_CODE = '{_esc(dept)}')"
+                f"WHERE bk.BOOK_KEY = fact.BOOK_KEY AND {' AND '.join(bk_conds)})"
             )
 
     if has_currency:
@@ -180,18 +190,115 @@ def main(session, p_adjustment):
             where_clauses.append(f"fact.SOURCE_SYSTEM_CODE = '{_esc(val)}'")
 
     if has_trade_key:
-        strategy = adj.get("strategy")
-        typology = adj.get("trade_typology")
-        if strategy or typology:
-            trade_cond = "1=1"
-            if strategy:
-                trade_cond += f" AND td.STRATEGY = '{_esc(strategy)}'"
-            if typology:
-                trade_cond += f" AND td.TRADE_TYPOLOGY = '{_esc(typology)}'"
+        # TRADE attributes map to MANY trades (mirrors SP_PROCESS_ADJUSTMENT's
+        # TRADE EXISTS): trade_code, strategy, trade_typology.
+        td_conds = []
+        if adj.get("trade_code"):
+            td_conds.append(f"td.TRADE_CODE = '{_esc(adj['trade_code'])}'")
+        if adj.get("strategy"):
+            td_conds.append(f"td.STRATEGY = '{_esc(adj['strategy'])}'")
+        if adj.get("trade_typology"):
+            td_conds.append(f"td.TRADE_TYPOLOGY = '{_esc(adj['trade_typology'])}'")
+        if td_conds:
             where_clauses.append(
                 f"EXISTS (SELECT 1 FROM DIMENSION.TRADE td "
-                f"WHERE td.TRADE_KEY = fact.TRADE_KEY AND {trade_cond})"
+                f"WHERE td.TRADE_KEY = fact.TRADE_KEY AND {' AND '.join(td_conds)})"
             )
+
+    # ── 1:1 code→key dimensions ──────────────────────────────────────────
+    # Mirror the resolution SP_PROCESS_ADJUSTMENT applies (and the dbt base
+    # model) so the preview reflects the same affected rows. Each only applies
+    # when the fact keys that dimension by surrogate key.
+    if "MEASURE_TYPE_KEY" in fact_columns:
+        val = adj.get("measure_type_code")
+        if val:
+            where_clauses.append(
+                f"EXISTS (SELECT 1 FROM DIMENSION.MEASURE_TYPE mt "
+                f"WHERE mt.MEASURE_TYPE_KEY = fact.MEASURE_TYPE_KEY AND mt.MEASURE_TYPE_CODE = '{_esc(val)}')"
+            )
+
+    if "TENOR_CURRENCY_KEY" in fact_columns:
+        val = adj.get("tenor_code")
+        if val:
+            cur = adj.get("currency_code") or "USD"
+            where_clauses.append(
+                f"EXISTS (SELECT 1 FROM DIMENSION.TENOR_CURRENCY tc "
+                f"WHERE tc.TENOR_CURRENCY_KEY = fact.TENOR_CURRENCY_KEY "
+                f"AND tc.TENOR_CURRENCY_CODE = '{_esc(val)}_{_esc(cur)}')"
+            )
+
+    if "CURVE_CURRENCY_KEY" in fact_columns:
+        val = adj.get("curve_code")
+        if val:
+            where_clauses.append(
+                f"EXISTS (SELECT 1 FROM DIMENSION.CURVE_CURRENCY cc "
+                f"WHERE cc.CURVE_CURRENCY_KEY = fact.CURVE_CURRENCY_KEY AND cc.CURVE_CODE = '{_esc(val)}')"
+            )
+
+    if "UNDERLYING_TENOR_CURRENCY_KEY" in fact_columns:
+        val = adj.get("underlying_tenor_code")
+        if val:
+            where_clauses.append(
+                f"EXISTS (SELECT 1 FROM DIMENSION.UNDERLYING_TENOR_CURRENCY ut "
+                f"WHERE ut.UNDERLYING_TENOR_CURRENCY_KEY = fact.UNDERLYING_TENOR_CURRENCY_KEY "
+                f"AND ut.UNDERYLING_TENOR_CODE = '{_esc(val)}')"
+            )
+
+    if "PRODUCT_CATEGORY_ATTRIBUTES_KEY" in fact_columns:
+        val = adj.get("product_category_attributes")
+        if val:
+            where_clauses.append(
+                f"EXISTS (SELECT 1 FROM DIMENSION.PRODUCT_CATEGORY_ATTRIBUTES pca "
+                f"WHERE pca.PRODUCT_CATEGORY_ATTRIBUTES_KEY = fact.PRODUCT_CATEGORY_ATTRIBUTES_KEY "
+                f"AND REPLACE(pca.PCA_CONCAT_KEY, ' ', '') = REPLACE('{_esc(val)}', ' ', ''))"
+            )
+
+    # Instrument (COMMON_INSTRUMENT_KEY → INSTRUMENT_CODE)
+    if "COMMON_INSTRUMENT_KEY" in fact_columns:
+        val = adj.get("instrument_code")
+        if val:
+            where_clauses.append(
+                f"EXISTS (SELECT 1 FROM DIMENSION.COMMON_INSTRUMENT ci "
+                f"WHERE ci.COMMON_INSTRUMENT_KEY = fact.COMMON_INSTRUMENT_KEY "
+                f"AND ci.INSTRUMENT_CODE = '{_esc(val)}')"
+            )
+
+    # Stress simulation (STRESS_SIMULATION_KEY → SIMULATION_NAME + SOURCE)
+    if "STRESS_SIMULATION_KEY" in fact_columns:
+        ss_conds = []
+        if adj.get("simulation_name"):
+            ss_conds.append(f"s.STRESS_SIMULATION_NAME = '{_esc(adj['simulation_name'])}'")
+        if adj.get("simulation_source"):
+            ss_conds.append(f"s.SIMULATION_SOURCE = '{_esc(adj['simulation_source'])}'")
+        if ss_conds:
+            where_clauses.append(
+                f"EXISTS (SELECT 1 FROM DIMENSION.STRESS_SIMULATION s "
+                f"WHERE s.STRESS_SIMULATION_KEY = fact.STRESS_SIMULATION_KEY AND {' AND '.join(ss_conds)})"
+            )
+
+    # VaR sub-component (VAR_SUBCOMPONENT_ID → VAR_COMPONENT_ID + VAR_SUB_COMPONENT_ID + DAY_TYPE)
+    if "VAR_SUBCOMPONENT_ID" in fact_columns:
+        vsc_conds = []
+        for fld, dim_col in (("var_component_id", "VAR_COMPONENT_ID"),
+                             ("var_sub_component_id", "VAR_SUB_COMPONENT_ID"),
+                             ("day_type", "VAR_SUB_COMPONENT_DAY_TYPE")):
+            if adj.get(fld) not in (None, ""):
+                try:
+                    vsc_conds.append(f"v.{dim_col} = {int(adj[fld])}")
+                except (TypeError, ValueError):
+                    pass
+        if vsc_conds:
+            where_clauses.append(
+                f"EXISTS (SELECT 1 FROM DIMENSION.VAR_SUB_COMPONENT v "
+                f"WHERE v.VAR_SUB_COMPONENT_ID = fact.VAR_SUBCOMPONENT_ID AND {' AND '.join(vsc_conds)})"
+            )
+
+    # Scenario date (direct column match)
+    if "SCENARIO_DATE_ID" in fact_columns and adj.get("scenario_date_id") not in (None, ""):
+        try:
+            where_clauses.append(f"fact.SCENARIO_DATE_ID = {int(adj['scenario_date_id'])}")
+        except (TypeError, ValueError):
+            pass
 
     where_sql = "\n      AND ".join(where_clauses)
     base_where = f"WHERE {where_sql}\n      AND fact.{primary_metric} IS NOT NULL"
