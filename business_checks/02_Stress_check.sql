@@ -1,50 +1,36 @@
 -- =============================================================================
--- BUSINESS NUMBER CHECK — Stress
+-- BUSINESS CHECK — Stress    ·    run in each DB, export to Excel, compare
+-- Easier: use the app's Validation page — just enter the two adjustment IDs.
 -- =============================================================================
--- Tie out one adjustment's numbers between the new engine (DVLP_RAPTOR_NEWADJ)
--- and production (PROD_RAPTOR). Run in one DB, export to Excel; repeat in the
--- other DB and compare.
---
--- HOW TO USE
---   1. Connect a worksheet to the database you want to check.
---   2. Set the database context — uncomment ONE:
---        -- USE DATABASE DVLP_RAPTOR_NEWADJ;
---        -- USE DATABASE PROD_RAPTOR;
---   3. Set the numeric ADJUSTMENT_ID (from DIMENSION.ADJUSTMENT — NOT the long
---      hash/UUID). Each database has its OWN id for the same adjustment, so set
---      the right one for the DB you are connected to.
---   4. Run each query and export the grid to Excel.
+-- Set the database context first (one):
+--   USE DATABASE DVLP_RAPTOR_NEWADJ;   |   USE DATABASE PROD_RAPTOR;
+-- ADJ_ID = DIMENSION.ADJUSTMENT.ADJUSTMENT_ID (the number, NOT the hash) — differs per DB
+-- COB    = COB date (YYYYMMDD)        ·    USD amount column: SIMULATION_PL_IN_USD
+-- To narrow an ORIGINAL/FINAL query to one book, add:
+--   AND BOOK_KEY IN (SELECT BOOK_KEY FROM DIMENSION.BOOK WHERE BOOK_CODE = 'YOUR-BOOK')
 -- =============================================================================
+SET ADJ_ID = 100123;     -- <<< the adjustment id IN THIS database
+SET COB    = 20260608;   -- <<< the COB date
 
-SET ADJ_ID = 100123;   -- <<< CHANGE ME for each database
+-- DIMENSION.ADJUSTMENT — the adjustment record: who / what / when. Key: ADJUSTMENT_ID
+SELECT * FROM DIMENSION.ADJUSTMENT WHERE ADJUSTMENT_ID = $ADJ_ID;
 
+-- FACT.STRESS_MEASURES_ADJUSTMENT
+--   the DELTA this adjustment wrote (what it added/removed). Key: ADJUSTMENT_ID
+SELECT COUNT(*) AS ROWS, SUM(SIMULATION_PL_IN_USD) AS TOTAL_USD
+FROM FACT.STRESS_MEASURES_ADJUSTMENT WHERE ADJUSTMENT_ID = $ADJ_ID;                 -- total
+SELECT * FROM FACT.STRESS_MEASURES_ADJUSTMENT WHERE ADJUSTMENT_ID = $ADJ_ID ORDER BY COBID;   -- detail
 
--- 1) HEADER — one row describing the adjustment ---------------------------------
-SELECT
-    ADJUSTMENT_ID, COBID, SOURCE_COBID,
-    PROCESS_TYPE, ADJUSTMENT_TYPE, SCALE_FACTOR,
-    ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE, BOOK_CODE,
-    CURRENCY_CODE, TRADE_CODE, TRADE_TYPOLOGY, STRATEGY,
-    SIMULATION_NAME, SIMULATION_SOURCE,
-    ADJUSTMENT_VALUE_IN_USD, RECORD_COUNT, RUN_STATUS,
-    USERNAME, CREATED_DATE, PROCESS_DATE, REASON, GLOBAL_REFERENCE
-FROM DIMENSION.ADJUSTMENT
-WHERE ADJUSTMENT_ID = $ADJ_ID;
+-- FACT.STRESS_MEASURES
+--   ORIGINAL values, before any adjustment. Key: COBID
+SELECT COUNT(*) AS ROWS, SUM(SIMULATION_PL_IN_USD) AS TOTAL_USD
+FROM FACT.STRESS_MEASURES WHERE COBID = $COB;
 
+-- FACT.STRESS_MEASURES_COMBINED
+--   FINAL values = original + all adjustments (what the reports show). Key: COBID
+SELECT COUNT(*) AS ROWS, SUM(SIMULATION_PL_IN_USD) AS TOTAL_USD
+FROM FACT.STRESS_MEASURES_COMBINED WHERE COBID = $COB;
 
--- 2) IMPACT SUMMARY — row count + total USD impact ------------------------------
-SELECT
-    ADJUSTMENT_ID,
-    COUNT(*)                       AS ROW_COUNT,
-    SUM(SIMULATION_PL_IN_USD)      AS TOTAL_SIMULATION_PL_IN_USD
-FROM FACT.STRESS_MEASURES_ADJUSTMENT
-WHERE ADJUSTMENT_ID = $ADJ_ID
-GROUP BY ADJUSTMENT_ID;
-
-
--- 3) IMPACT DETAIL — every position-level row written by the adjustment ---------
-SELECT *
-FROM FACT.STRESS_MEASURES_ADJUSTMENT
-WHERE ADJUSTMENT_ID = $ADJ_ID
-ORDER BY COBID;
-</content>
+-- FACT.STRESS_MEASURES_ADJUSTMENT_SUMMARY
+--   per-COB summary of the adjustment delta. Key: COBID
+SELECT * FROM FACT.STRESS_MEASURES_ADJUSTMENT_SUMMARY WHERE COBID = $COB;
