@@ -651,9 +651,6 @@ def render_scaling_form() -> None:
     section_title("Business Context", "file-text")
     wiz["reason"] = st.text_area("Reason / Business Justification *",
                                  value=wiz.get("reason", ""), height=70, key=_k("reason"))
-    wiz["requires_approval"] = st.checkbox("Requires Approval",
-                                           value=wiz.get("requires_approval", False),
-                                           key=_k("approval"))
 
 
 def render_direct_form() -> None:
@@ -716,9 +713,6 @@ def render_direct_form() -> None:
     section_title("Business Context", "file-text")
     wiz["reason"] = st.text_area("Reason / Business Justification *",
                                  value=wiz.get("reason", ""), height=70, key=_k("var_reason"))
-    wiz["requires_approval"] = st.checkbox("Requires Approval",
-                                           value=wiz.get("requires_approval", False),
-                                           key=_k("var_approval"))
 
     # ── Duplicate reference check ────────────────────────────────────────
     if wiz.get("cobid") and wiz.get("global_reference"):
@@ -786,7 +780,6 @@ def render_entity_roll_form() -> None:
     wiz["reason"] = st.text_area("Reason / Business Justification *",
                                  value=wiz.get("reason", ""), height=70, key=_k("er_reason"),
                                  placeholder="e.g. Rolling MUSE VaR from previous business day")
-    st.checkbox("Requires Approval", value=True, disabled=True, key=_k("er_approval"))
     wiz["adjustment_type"]   = "Entity_Roll"
     wiz["requires_approval"] = True
 
@@ -1049,6 +1042,17 @@ with right:
         st.caption("Submit unlocks when the ticket is complete.")
     elif zero_rows:
         st.caption("Submit is blocked: the current filters match no data.")
+
+    # ── Approval flag (Entity Roll is always locked on) ───────────────────
+    if cat == "Entity Roll":
+        st.checkbox("Requires Approval", value=True, disabled=True,
+                    key=_k("er_approval"),
+                    help="Entity Roll always goes through the approval queue.")
+    elif cat:
+        wiz["requires_approval"] = st.checkbox(
+            "Requires Approval", value=wiz.get("requires_approval", False),
+            key=_k("approval"),
+            help="Send this adjustment to the Approval Queue before processing.")
 
 
 # ── Full-width preview detail (breakdown / sample) ───────────────────────────
