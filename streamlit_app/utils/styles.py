@@ -559,6 +559,7 @@ def inject_css():
         border: 1px solid var(--border) !important;
         border-radius: var(--r-lg) !important;
         box-shadow: var(--sh-sm);
+        margin-bottom: 0.4rem;
     }}
     [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] {{
         padding: 0.35rem 0.4rem;
@@ -567,7 +568,9 @@ def inject_css():
     /* Numbered section headers */
     .sec-head {{
         display: flex; align-items: flex-start; gap: 10px;
-        margin: 0.1rem 0 0.55rem 0;
+        margin: 0.1rem 0 0.75rem 0;
+        padding-bottom: 0.55rem;
+        border-bottom: 1px solid var(--border);
     }}
     .sec-num {{
         width: 21px; height: 21px; border-radius: 50%; flex-shrink: 0;
