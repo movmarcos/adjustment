@@ -20,7 +20,7 @@ st.set_page_config(
 
 from utils.styles import (
     inject_css, render_sidebar,
-    section_title, P, SCOPE_CONFIG, TYPE_CONFIG, CATEGORY_CONFIG,
+    P, SCOPE_CONFIG, TYPE_CONFIG, CATEGORY_CONFIG,
     fmt_adj_id, icon,
 )
 from utils.snowflake_conn import run_query, call_sp_df, current_user_name, safe_rerun
@@ -345,12 +345,13 @@ def _btn(label, *, icon_name=None, **kwargs):
     return st.button(label, **kwargs)
 
 
-def _pill_row(options, selected, key_prefix, fmt=None, icons=None):
+def _pill_row(options, selected, key_prefix, fmt=None, icons=None, descs=None):
     """One-click segmented selector built from small buttons.
 
     Buttons are used instead of st.radio/st.pills: the selection is driven
     purely by wiz state (selected → primary red), so there is no widget
     default-vs-state fight and a single click always takes effect.
+    `descs` adds a small caption under each option (two-line card look).
     Returns the clicked option, or None."""
     cols = st.columns(len(options))
     clicked = None
@@ -362,7 +363,26 @@ def _pill_row(options, selected, key_prefix, fmt=None, icons=None):
                     use_container_width=True,
                     type="primary" if opt == selected else "secondary"):
                 clicked = opt
+            if descs and descs.get(opt):
+                st.caption(descs[opt])
     return clicked
+
+
+def _sec(num: int, title: str, helper: str = "") -> None:
+    """Numbered section header inside a section card."""
+    help_html = f'<div class="sec-help">{helper}</div>' if helper else ""
+    st.markdown(
+        f'<div class="sec-head"><span class="sec-num">{num}</span>'
+        f'<div><div class="sec-title">{title}</div>{help_html}</div></div>',
+        unsafe_allow_html=True)
+
+
+def _card():
+    """Bordered container (section card); plain container on old Streamlit."""
+    try:
+        return st.container(border=True)
+    except TypeError:
+        return st.container()
 
 
 def _safe_int(v) -> int:
@@ -462,47 +482,55 @@ def _fmt_money(v):
 # VALIDATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _missing_fields() -> list:
+def _completion_checks() -> list:
+    """Ordered (label, done) pairs driving the ticket's completion checklist."""
     cat = wiz.get("category")
+    checks = [("Category", bool(cat))]
     if not cat:
-        return ["Category"]
-    missing = []
+        return checks
     if cat == "Direct Adjustment":
-        checks = [("Scope",       wiz.get("process_type")),
-                  ("CSV data",    wiz.get("uploaded_df") is not None or None),
-                  ("COB date",    wiz.get("cobid")),
-                  ("Entity code", (wiz.get("entity_code") or "").strip()),
-                  ("Reference",   (wiz.get("global_reference") or "").strip()),
-                  ("Reason",      (wiz.get("reason") or "").strip())]
-        missing = [f for f, v in checks if not v]
+        checks += [
+            ("Data scope",  bool(wiz.get("process_type"))),
+            ("CSV data",    wiz.get("uploaded_df") is not None),
+            ("COB date",    bool(wiz.get("cobid"))),
+            ("Entity code", bool((wiz.get("entity_code") or "").strip())),
+            ("Reference",   bool((wiz.get("global_reference") or "").strip())),
+            ("Reason",      bool((wiz.get("reason") or "").strip())),
+        ]
     elif cat == "Entity Roll":
-        checks = [("Scope",       wiz.get("process_type")),
-                  ("Target COB",  wiz.get("cobid")),
-                  ("Source COB",  wiz.get("source_cobid")),
-                  ("Entity code", (wiz.get("entity_code") or "").strip()),
-                  ("Reason",      (wiz.get("reason") or "").strip())]
-        missing = [f for f, v in checks if not v]
+        checks += [
+            ("Data scope",  bool(wiz.get("process_type"))),
+            ("Target COB",  bool(wiz.get("cobid"))),
+            ("Source COB",  bool(wiz.get("source_cobid"))),
+            ("Entity code", bool((wiz.get("entity_code") or "").strip())),
+            ("Reason",      bool((wiz.get("reason") or "").strip())),
+        ]
         if wiz.get("cobid") and wiz.get("source_cobid") \
                 and wiz["cobid"] == wiz["source_cobid"]:
-            missing.append("Source COB must differ from target")
+            checks.append(("Source COB differs from target", False))
     else:  # Scaling
-        checks = [("Scope",           wiz.get("process_type")),
-                  ("Adjustment type", wiz.get("adjustment_type")),
-                  ("COB date",        wiz.get("cobid")),
-                  ("Entity code",     (wiz.get("entity_code") or "").strip()),
-                  ("Reason",          (wiz.get("reason") or "").strip())]
-        missing = [f for f, v in checks if not v]
+        checks += [
+            ("Data scope",      bool(wiz.get("process_type"))),
+            ("Adjustment type", bool(wiz.get("adjustment_type"))),
+            ("COB date",        bool(wiz.get("cobid"))),
+        ]
+        if wiz.get("adjustment_type") == "Roll":
+            checks.append(("Source COB", bool(wiz.get("source_cobid"))))
         if wiz.get("occurrence") == "RECURRING":
-            if not wiz.get("recurring_start_cobid"):
-                missing.append("Start COBID")
-            if not wiz.get("recurring_end_cobid"):
-                missing.append("End COBID")
-        if wiz.get("adjustment_type") == "Roll" and not wiz.get("source_cobid"):
-            missing.append("Source COB")
-        if not (wiz.get("department_code") or "").strip() \
-                and not (wiz.get("book_code") or "").strip():
-            missing.append("Department or Book code")
-    return missing
+            checks += [("Start COBID", bool(wiz.get("recurring_start_cobid"))),
+                       ("End COBID",   bool(wiz.get("recurring_end_cobid")))]
+        checks += [
+            ("Entity code", bool((wiz.get("entity_code") or "").strip())),
+            ("Department or Book code",
+             bool((wiz.get("department_code") or "").strip())
+             or bool((wiz.get("book_code") or "").strip())),
+            ("Reason", bool((wiz.get("reason") or "").strip())),
+        ]
+    return checks
+
+
+def _missing_fields() -> list:
+    return [label for label, done in _completion_checks() if not done]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -511,7 +539,6 @@ def _missing_fields() -> list:
 
 def _render_scope_pills(include_frtball: bool = True) -> None:
     """Scope pill buttons + FRTB sub-type row. Sets wiz['process_type']."""
-    section_title("Data Scope", "search")
     current_group = "FRTB" if wiz.get("process_type") in FRTB_SUBTYPES \
                     else wiz.get("process_type")
     clicked = _pill_row(list(SCOPE_CONFIG.keys()), current_group,
@@ -583,32 +610,55 @@ def _render_extra_filters() -> None:
 
 
 def render_scaling_form() -> None:
-    _render_scope_pills()
+    with _card():
+        _sec(2, "Data Scope", "Select the data scope for this adjustment.")
+        _render_scope_pills()
     if not wiz.get("process_type"):
         st.info("Select a data scope to continue.")
         return
 
     # ── Type ─────────────────────────────────────────────────────────────
-    section_title("Adjustment Type", "zap")
-    tsel = _pill_row(list(TYPE_CONFIG.keys()), wiz.get("adjustment_type"),
-                     "type", icons=TYPE_BTN_ICONS)
-    if tsel and tsel != wiz.get("adjustment_type"):
-        wiz["adjustment_type"] = tsel
-        wiz["_preview_sum"] = None
-        safe_rerun()
-    if wiz.get("adjustment_type"):
-        tcfg = TYPE_CONFIG[wiz["adjustment_type"]]
-        st.caption(f"{tcfg['desc']} · Formula: {tcfg['formula']}")
+    with _card():
+        _sec(3, "Adjustment Type", "How should the figures change?")
+        tsel = _pill_row(list(TYPE_CONFIG.keys()), wiz.get("adjustment_type"),
+                         "type", icons=TYPE_BTN_ICONS,
+                         descs={k: v["desc"] for k, v in TYPE_CONFIG.items()})
+        if tsel and tsel != wiz.get("adjustment_type"):
+            wiz["adjustment_type"] = tsel
+            wiz["_preview_sum"] = None
+            safe_rerun()
+        if wiz.get("adjustment_type"):
+            st.caption(f"Formula: {TYPE_CONFIG[wiz['adjustment_type']]['formula']}")
 
     # ── Dates & factor ───────────────────────────────────────────────────
-    section_title("Date & Schedule", "calendar")
-    occ = _pill_row(["ADHOC", "RECURRING"], wiz.get("occurrence", "ADHOC"),
-                    "freq", icons=OCC_BTN_ICONS,
-                    fmt=lambda k: "Ad hoc" if k == "ADHOC" else "Recurring (daily)")
-    if occ and occ != wiz.get("occurrence"):
-        wiz["occurrence"] = occ
-        safe_rerun()
+    with _card():
+        _sec(4, "Date & Schedule", "When should this adjustment be applied?")
+        occ = _pill_row(["ADHOC", "RECURRING"], wiz.get("occurrence", "ADHOC"),
+                        "freq", icons=OCC_BTN_ICONS,
+                        fmt=lambda k: "Ad hoc" if k == "ADHOC" else "Recurring (daily)",
+                        descs={"ADHOC": "Apply once to a single COB",
+                               "RECURRING": "Apply daily between start and end COB"})
+        if occ and occ != wiz.get("occurrence"):
+            wiz["occurrence"] = occ
+            safe_rerun()
 
+        _render_schedule_fields()
+
+    # ── Filters ──────────────────────────────────────────────────────────
+    with _card():
+        _sec(5, "Dimension Filters", "Optional — blank means all values for that dimension.")
+        _render_main_filters()
+        _render_extra_filters()
+
+    # ── Reason ───────────────────────────────────────────────────────────
+    with _card():
+        _sec(6, "Business Context", "Why is this adjustment needed?")
+        wiz["reason"] = st.text_area("Reason / Business Justification *",
+                                     value=wiz.get("reason", ""), height=70,
+                                     key=_k("reason"))
+
+
+def _render_schedule_fields() -> None:
     d1, d2, d3 = st.columns(3)
     with d1:
         wiz["cobid"] = _int_input(
@@ -642,25 +692,19 @@ def render_scaling_form() -> None:
                 wiz["recurring_end_cobid"] = _int_input("End COBID *", "rec_end",
                                                         wiz.get("recurring_end_cobid"))
 
-    # ── Filters ──────────────────────────────────────────────────────────
-    section_title("Dimension Filters", "target")
-    _render_main_filters()
-    _render_extra_filters()
-
-    # ── Reason ───────────────────────────────────────────────────────────
-    section_title("Business Context", "file-text")
-    wiz["reason"] = st.text_area("Reason / Business Justification *",
-                                 value=wiz.get("reason", ""), height=70, key=_k("reason"))
-
 
 def render_direct_form() -> None:
-    _render_scope_pills(include_frtball=False)
+    with _card():
+        _sec(2, "Data Scope", "Select the data scope for this upload.")
+        _render_scope_pills(include_frtball=False)
     if not wiz.get("process_type"):
         st.info("Select a data scope to continue.")
         return
 
     expected_cols = _direct_expected_columns(wiz["process_type"])
-    section_title(f"CSV Upload — {wiz['process_type']}", "upload")
+    _csv_card = _card()
+    _csv_card.__enter__()
+    _sec(3, f"CSV Upload — {wiz['process_type']}", "Paste exact adjustment values.")
     if expected_cols:
         _info_banner('Paste a CSV of exact adjustment values. Expected columns: '
                      '<code>' + ', '.join(expected_cols) + '</code>.')
@@ -694,25 +738,31 @@ def render_direct_form() -> None:
         except Exception as exc:
             st.error(f"Failed to read CSV: {exc}")
 
-    g1, g2, g3 = st.columns(3)
-    with g1:
-        wiz["cobid"] = _int_input("COB Date (auto-detected) *", "var_cobid",
-                                  wiz.get("cobid"), placeholder="")
-    with g2:
-        ev = st.text_input("Entity Code (auto-detected) *", key=_k("var_entity"),
-                           value=wiz.get("entity_code") or "")
-        wiz["entity_code"] = ev.strip() or wiz.get("entity_code")
-    with g3:
-        rv = st.text_input("Reference *", key=_k("var_ref"),
-                           value=wiz.get("global_reference") or "",
-                           placeholder="e.g. CTN FX VaR",
-                           help="Unique reference for this upload. Re-submitting the same "
-                                "COB + Reference replaces the previous adjustment.")
-        wiz["global_reference"] = rv.strip() or None
+    _csv_card.__exit__(None, None, None)
 
-    section_title("Business Context", "file-text")
-    wiz["reason"] = st.text_area("Reason / Business Justification *",
-                                 value=wiz.get("reason", ""), height=70, key=_k("var_reason"))
+    with _card():
+        _sec(4, "Upload Details", "COB and entity are auto-detected from the CSV when present.")
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            wiz["cobid"] = _int_input("COB Date (auto-detected) *", "var_cobid",
+                                      wiz.get("cobid"), placeholder="")
+        with g2:
+            ev = st.text_input("Entity Code (auto-detected) *", key=_k("var_entity"),
+                               value=wiz.get("entity_code") or "")
+            wiz["entity_code"] = ev.strip() or wiz.get("entity_code")
+        with g3:
+            rv = st.text_input("Reference *", key=_k("var_ref"),
+                               value=wiz.get("global_reference") or "",
+                               placeholder="e.g. CTN FX VaR",
+                               help="Unique reference for this upload. Re-submitting the same "
+                                    "COB + Reference replaces the previous adjustment.")
+            wiz["global_reference"] = rv.strip() or None
+
+    with _card():
+        _sec(5, "Business Context", "Why is this adjustment needed?")
+        wiz["reason"] = st.text_area("Reason / Business Justification *",
+                                     value=wiz.get("reason", ""), height=70,
+                                     key=_k("var_reason"))
 
     # ── Duplicate reference check ────────────────────────────────────────
     if wiz.get("cobid") and wiz.get("global_reference"):
@@ -760,26 +810,31 @@ def render_entity_roll_form() -> None:
         f'Source adjustments are consolidated under one new Adjustment ID.</div></div>',
         unsafe_allow_html=True)
 
-    _render_scope_pills(include_frtball=False)
+    with _card():
+        _sec(2, "Data Scope", "Select the data scope to roll.")
+        _render_scope_pills(include_frtball=False)
     if not wiz.get("process_type"):
         st.info("Select a scope to continue.")
         return
 
-    g1, g2, g3 = st.columns(3)
-    with g1:
-        wiz["cobid"] = _int_input("Target COB (YYYYMMDD) *", "er_cobid", wiz.get("cobid"))
-    with g2:
-        wiz["source_cobid"] = _int_input("Source COB (YYYYMMDD) *", "er_src_cobid",
-                                         wiz.get("source_cobid"), placeholder="e.g. 20260327")
-    with g3:
-        wiz["entity_code"] = st.text_input("Entity Code *", key=_k("er_entity"),
-                                           value=wiz.get("entity_code") or "",
-                                           placeholder="e.g. MUSE")
+    with _card():
+        _sec(3, "Roll Details", "Copy the full entity from the source COB to the target COB.")
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            wiz["cobid"] = _int_input("Target COB (YYYYMMDD) *", "er_cobid", wiz.get("cobid"))
+        with g2:
+            wiz["source_cobid"] = _int_input("Source COB (YYYYMMDD) *", "er_src_cobid",
+                                             wiz.get("source_cobid"), placeholder="e.g. 20260327")
+        with g3:
+            wiz["entity_code"] = st.text_input("Entity Code *", key=_k("er_entity"),
+                                               value=wiz.get("entity_code") or "",
+                                               placeholder="e.g. MUSE")
 
-    section_title("Business Context", "file-text")
-    wiz["reason"] = st.text_area("Reason / Business Justification *",
-                                 value=wiz.get("reason", ""), height=70, key=_k("er_reason"),
-                                 placeholder="e.g. Rolling MUSE VaR from previous business day")
+    with _card():
+        _sec(4, "Business Context", "Why is this roll needed?")
+        wiz["reason"] = st.text_area("Reason / Business Justification *",
+                                     value=wiz.get("reason", ""), height=70, key=_k("er_reason"),
+                                     placeholder="e.g. Rolling MUSE VaR from previous business day")
     wiz["adjustment_type"]   = "Entity_Roll"
     wiz["requires_approval"] = True
 
@@ -788,42 +843,63 @@ def render_entity_roll_form() -> None:
 # RIGHT COLUMN — LIVE TICKET
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _ticket_row(label: str, value, is_set=None) -> str:
+    """One Ticket Summary row: set values bold red, unset show 'Not set'."""
+    setflag = bool(value) if is_set is None else is_set
+    cls  = "v-set" if setflag else "v-unset"
+    disp = value if setflag else "Not set"
+    return (f'<div class="kv"><span class="k">{label}</span>'
+            f'<span class="v {cls}">{disp}</span></div>')
+
+
 def _ticket_html(missing: list) -> str:
     cat = wiz.get("category")
-    rows = [("Category", cat or "—")]
+    kv = _ticket_row("Category", cat)
+    applied = []
 
     if cat == "Entity Roll":
-        rows += [("Scope",  wiz.get("process_type") or "—"),
-                 ("Entity", wiz.get("entity_code") or "—"),
-                 ("Roll",   f'{wiz.get("source_cobid") or "?"} → {wiz.get("cobid") or "?"}')]
+        roll_set = bool(wiz.get("source_cobid") and wiz.get("cobid"))
+        kv += _ticket_row("Scope",  wiz.get("process_type"))
+        kv += _ticket_row("Entity", wiz.get("entity_code"))
+        kv += _ticket_row("Roll",
+                          f'{wiz.get("source_cobid")} → {wiz.get("cobid")}'
+                          if roll_set else None, roll_set)
     elif cat == "Direct Adjustment":
         df_up = wiz.get("uploaded_df")
-        rows += [("Scope",     wiz.get("process_type") or "—"),
-                 ("COB",       wiz.get("cobid") or "—"),
-                 ("Reference", wiz.get("global_reference") or "—"),
-                 ("CSV rows",  f"{len(df_up):,}" if df_up is not None else "—")]
+        kv += _ticket_row("Scope",     wiz.get("process_type"))
+        kv += _ticket_row("COB",       wiz.get("cobid"))
+        kv += _ticket_row("Reference", wiz.get("global_reference"))
+        kv += _ticket_row("CSV rows",
+                          f"{len(df_up):,}" if df_up is not None else None,
+                          df_up is not None)
     elif cat == "Scaling Adjustment":
-        type_txt = wiz.get("adjustment_type") or "—"
-        if wiz.get("adjustment_type") in ("Scale", "Roll"):
+        type_txt = wiz.get("adjustment_type")
+        if type_txt and type_txt in ("Scale", "Roll"):
             type_txt += f' ×{wiz.get("scale_factor", 1.0):g}'
-        cob_txt = str(wiz.get("cobid") or "—")
-        if wiz.get("adjustment_type") == "Roll" and wiz.get("source_cobid"):
-            cob_txt = f'{wiz.get("source_cobid")} → {wiz.get("cobid") or "?"}'
-        rows += [("Scope", wiz.get("process_type") or "—"),
-                 ("Type",  type_txt),
-                 ("COB",   cob_txt)]
+        cob_txt = wiz.get("cobid")
+        if wiz.get("adjustment_type") == "Roll" and wiz.get("source_cobid") and cob_txt:
+            cob_txt = f'{wiz.get("source_cobid")} → {cob_txt}'
+        kv += _ticket_row("Scope", wiz.get("process_type"))
+        kv += _ticket_row("Type",  type_txt)
+        kv += _ticket_row("Schedule",
+                          "Ad hoc" if wiz.get("occurrence", "ADHOC") == "ADHOC"
+                          else "Recurring (daily)", True)
+        kv += _ticket_row("COB", cob_txt)
         if wiz.get("occurrence") == "RECURRING":
-            rows.append(("Recurring",
-                         f'{wiz.get("recurring_start_cobid") or "?"} → '
-                         f'{wiz.get("recurring_end_cobid") or "?"}'))
+            rec_set = bool(wiz.get("recurring_start_cobid") and wiz.get("recurring_end_cobid"))
+            kv += _ticket_row("Recurring",
+                              f'{wiz.get("recurring_start_cobid")} → '
+                              f'{wiz.get("recurring_end_cobid")}' if rec_set else None,
+                              rec_set)
         applied = [(k, str(wiz.get(k)).strip()) for k in FILTER_KEYS
                    if (wiz.get(k) or "") and str(wiz.get(k)).strip()]
-        rows.append(("Filters", f"{len(applied)} applied" if applied else "All records"))
+        kv += _ticket_row("Filters",
+                          f"{len(applied)} applied" if applied else "All records", True)
 
-    rows.append(("Approval", "Required" if wiz.get("requires_approval") else "Not required"))
-
-    kv = "".join(f'<div class="kv"><span class="k">{k}</span>'
-                 f'<span class="v">{v}</span></div>' for k, v in rows)
+    if cat:
+        kv += _ticket_row("Approval",
+                          "Required" if wiz.get("requires_approval") else "Not required",
+                          True)
 
     # Applied-filter chips (Scaling only) — mirrors the form selections
     if cat == "Scaling Adjustment":
@@ -865,16 +941,24 @@ def _ticket_html(missing: list) -> str:
                f'<span class="v">{_fmt_money(s.get("TOTAL_PROJECTED_VALUE"))}</span></div>'
                f'{note}</div>')
 
-    # ── Missing fields ───────────────────────────────────────────────────
-    miss = ""
-    if missing:
-        items = " · ".join(missing)
-        miss = (f'<div class="t-missing">{icon("info", size=12, color=P["grey_700"])} '
-                f'<strong>To complete:</strong> {items}</div>')
+    # ── Completion progress ──────────────────────────────────────────────
+    checks = _completion_checks()
+    done   = sum(1 for _, ok in checks if ok)
+    pct    = int(done / len(checks) * 100) if checks else 0
+    items  = "".join(
+        f'<div class="ck-item {"done" if ok else ""}">'
+        f'<span class="ck-dot {"done" if ok else ""}">'
+        f'{icon("check", size=9, color="white", valign="0") if ok else ""}</span>'
+        f'{label}</div>'
+        for label, ok in checks)
+    prog = (f'<div class="t-prog">'
+            f'<div class="prog-head">Completion progress<b>{pct}%</b></div>'
+            f'<div class="prog-bar"><i style="width:{pct}%"></i></div>'
+            f'{items}</div>')
 
     return (f'<div class="ticket">'
-            f'<div class="t-head">{icon("file-text", size=14, color=P["primary"])} Ticket</div>'
-            f'<div class="t-body">{kv}{imp}{miss}</div>'
+            f'<div class="t-head">{icon("file-text", size=14, color=P["primary"])} Ticket Summary</div>'
+            f'<div class="t-body">{kv}{imp}{prog}</div>'
             f'</div>')
 
 
@@ -958,22 +1042,22 @@ if wiz["step"] == 3:
 st.markdown("## New Adjustment")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
-    f"Pick a category, fill the ticket, submit — the panel on the right "
-    f"tracks what you've selected.</span>", unsafe_allow_html=True)
+    f"Create and submit an adjustment ticket.</span>", unsafe_allow_html=True)
+st.markdown("<div style='height:0.4rem'></div>", unsafe_allow_html=True)
 
 left, right = st.columns([1.85, 1], gap="large")
 
 with left:
-    section_title("Category", "layers")
-    cat = _pill_row(list(CATEGORY_CONFIG.keys()), wiz.get("category"),
-                    "cat", icons=CATEGORY_BTN_ICONS)
-    if cat and cat != wiz.get("category"):
-        wiz.update({"category": cat, "process_type": None, "adjustment_type": None,
-                    "uploaded_df": None, "uploaded_file_name": None,
-                    "_preview_sum": None, "_preview_err": None})
-        safe_rerun()
-    if wiz.get("category"):
-        st.caption(CATEGORY_CONFIG[wiz["category"]]["desc"])
+    with _card():
+        _sec(1, "Category", "Select the adjustment category.")
+        cat = _pill_row(list(CATEGORY_CONFIG.keys()), wiz.get("category"),
+                        "cat", icons=CATEGORY_BTN_ICONS,
+                        descs={k: v["desc"] for k, v in CATEGORY_CONFIG.items()})
+        if cat and cat != wiz.get("category"):
+            wiz.update({"category": cat, "process_type": None, "adjustment_type": None,
+                        "uploaded_df": None, "uploaded_file_name": None,
+                        "_preview_sum": None, "_preview_err": None})
+            safe_rerun()
 
     if not wiz.get("category"):
         st.info("Select an adjustment category to continue.")
@@ -987,7 +1071,6 @@ with left:
 missing = _missing_fields()
 
 with right:
-    section_title("Ticket", "file-text")
     st.markdown(_ticket_html(missing), unsafe_allow_html=True)
 
     cat = wiz.get("category")

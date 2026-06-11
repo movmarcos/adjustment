@@ -539,6 +539,68 @@ def inject_css():
     }}
     .stRadio [role="radiogroup"] label:has(input:checked) p {{ color: var(--brand) !important; font-weight: 700; }}
 
+    /* Bordered containers as section cards (New Adjustment) */
+    [data-testid="stVerticalBlockBorderWrapper"] {{
+        background: var(--card);
+        border: 1px solid var(--border) !important;
+        border-radius: var(--r-lg) !important;
+        box-shadow: var(--sh-sm);
+    }}
+    [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] {{
+        padding: 0.35rem 0.4rem;
+    }}
+
+    /* Numbered section headers */
+    .sec-head {{
+        display: flex; align-items: flex-start; gap: 10px;
+        margin: 0.1rem 0 0.55rem 0;
+    }}
+    .sec-num {{
+        width: 21px; height: 21px; border-radius: 50%; flex-shrink: 0;
+        background: #FFF0F3; border: 1px solid var(--brand);
+        color: var(--brand); font-size: 0.7rem; font-weight: 700;
+        display: flex; align-items: center; justify-content: center;
+        margin-top: 1px;
+    }}
+    .sec-title {{
+        font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+        letter-spacing: .08em; color: var(--ink); line-height: 1.6;
+    }}
+    .sec-help {{ font-size: 0.76rem; color: var(--ink-2); margin-top: -1px; }}
+
+    /* Ticket summary value states + completion progress */
+    .ticket .kv .v.v-set {{ color: var(--brand); font-weight: 700; }}
+    .ticket .kv .v.v-unset {{ color: var(--ink-3); font-weight: 500; font-style: italic; }}
+    .ticket .t-prog {{
+        margin-top: 0.85rem; border-top: 1px solid var(--border);
+        padding-top: 0.7rem;
+    }}
+    .prog-head {{
+        display: flex; justify-content: space-between; align-items: center;
+        font-size: 0.64rem; font-weight: 700; text-transform: uppercase;
+        letter-spacing: .07em; color: var(--ink-2); margin-bottom: 6px;
+    }}
+    .prog-head b {{ color: var(--ink); font-variant-numeric: tabular-nums; }}
+    .prog-bar {{
+        height: 5px; background: {P["grey_100"]}; border-radius: 3px;
+        overflow: hidden; margin-bottom: 0.6rem;
+    }}
+    .prog-bar i {{
+        display: block; height: 100%; background: var(--brand);
+        border-radius: 3px; transition: width .2s ease-out;
+    }}
+    .ck-item {{
+        display: flex; align-items: center; gap: 8px;
+        font-size: 0.76rem; color: var(--ink-2); padding: 2.5px 0;
+    }}
+    .ck-item.done {{ color: var(--ink); }}
+    .ck-dot {{
+        width: 15px; height: 15px; border-radius: 50%; flex-shrink: 0;
+        border: 1.5px solid var(--ink-3);
+        display: flex; align-items: center; justify-content: center;
+    }}
+    .ck-dot.done {{ background: {P["success"]}; border-color: {P["success"]}; }}
+
     /* Order-ticket summary panel (New Adjustment) */
     .ticket {{
         background: var(--card); border: 1px solid var(--border);
