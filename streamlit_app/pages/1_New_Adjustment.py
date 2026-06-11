@@ -1060,13 +1060,21 @@ elif wiz["step"] == 2:
                     if msg_col and not df_sum.empty:
                         st.warning(f"Preview not available: {df_sum.iloc[0][msg_col]}")
                     else:
-                        st.info("No matching rows found for this filter combination.")
+                        st.info(
+                            "Couldn't calculate a preview for these filters. "
+                            "Check the COB date and your filter values, then try again.")
                 else:
                     srow       = df_sum.iloc[0]
                     total_rows = int(srow["ROWS_AFFECTED"] or 0)
 
                     if total_rows == 0:
-                        st.info("No matching rows found for this filter combination.")
+                        st.warning(
+                            "⚠️ These filters match **0 rows**, so this adjustment would change "
+                            "nothing if submitted. This usually means one of your filter values "
+                            "doesn't exist for the selected COB — for example a mistyped or "
+                            "non-existent **entity, book, or measure-type code** — or the filter "
+                            "combination is too narrow. Please double-check your filter values "
+                            "before submitting.")
                     else:
                         nonzero = int(srow["NONZERO_ROWS"] or 0)
 
