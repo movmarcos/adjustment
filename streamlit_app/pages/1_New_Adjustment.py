@@ -573,7 +573,7 @@ def _render_scope_selector(include_frtball: bool = True) -> None:
                 f'<div style="background:{cfg["bg"] if is_sel else P["white"]};'
                 f'border:2px solid {P["primary"] if is_sel else P["border"]};'
                 f'border-radius:10px;padding:0.6rem 0.4rem;text-align:center">'
-                f'<div style="font-size:1.5rem">{cfg["icon"]}</div>'
+                f'<div>{icon(cfg["icon"], size=24, color=cfg["color"], valign="0")}</div>'
                 f'<div style="font-weight:700;font-size:0.8rem;margin-top:0.2rem">'
                 f'{cfg["label"]}</div></div>', unsafe_allow_html=True)
             if st.button(f'{"✓ " if is_sel else ""}{cfg["label"]}',
@@ -632,7 +632,7 @@ def render_scaling_form() -> None:
                     f'<div style="background:{"#FFF0F3" if is_sel else P["white"]};'
                     f'border:2px solid {P["primary"] if is_sel else P["border"]};'
                     f'border-radius:10px;padding:0.6rem 0.4rem;text-align:center">'
-                    f'<div style="font-size:1.3rem">{tcfg["icon"]}</div>'
+                    f'<div>{icon(tcfg["icon"], size=20, color=P["primary"] if is_sel else P["grey_700"], valign="0")}</div>'
                     f'<div style="font-weight:700;font-size:0.78rem;margin:0.2rem 0">{tk}</div>'
                     f'<div style="font-size:0.68rem;color:{P["grey_700"]}">{tcfg["desc"]}</div>'
                     f'</div>', unsafe_allow_html=True)
@@ -892,7 +892,7 @@ if wiz["step"] == 1:
                 f'border:2px solid {P["primary"] if is_sel else P["border"]};'
                 f'border-radius:10px;padding:0.8rem 0.5rem;'
                 f'text-align:center;min-height:130px">'
-                f'<div style="font-size:1.8rem">{ccfg["icon"]}</div>'
+                f'<div>{icon(ccfg["icon"], size=26, color=ccfg["color"], valign="0")}</div>'
                 f'<div style="font-weight:700;font-size:0.85rem;margin-top:0.3rem">{ck}</div>'
                 f'<div style="font-size:0.68rem;color:{P["grey_700"]};margin-top:0.2rem">'
                 f'{ccfg["desc"]}</div></div>', unsafe_allow_html=True)

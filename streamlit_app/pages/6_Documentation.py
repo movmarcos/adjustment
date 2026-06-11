@@ -80,7 +80,7 @@ with tab_overview:
         with scope_cols[i]:
             st.markdown(
                 f'<div class="mcard" style="text-align:center;border-top:3px solid {cfg["color"]};min-height:130px">'
-                f'<div style="font-size:2rem">{cfg["icon"]}</div>'
+                f'<div>{icon(cfg["icon"], size=28, color=cfg["color"], valign="0")}</div>'
                 f'<div style="font-weight:700;font-size:1rem;margin:0.3rem 0;color:{cfg["color"]}">{cfg["label"]}</div>'
                 f'<div style="font-size:0.75rem;color:{P["grey_700"]}">'
                 f'Config-driven via<br/><code>ADJUSTMENTS_SETTINGS</code></div>'
@@ -103,7 +103,7 @@ with tab_overview:
         type_rows += (
             f'<tr>'
             f'<td style="padding:10px 14px;font-weight:600;font-size:0.9rem;white-space:nowrap">'
-            f'{tcfg["icon"]} {tk}</td>'
+            f'{icon(tcfg["icon"], size=14)} {tk}</td>'
             f'<td style="padding:10px 14px;font-size:0.85rem;color:{P["grey_700"]}">{tcfg["desc"]}</td>'
             f'<td style="padding:10px 14px;font-family:monospace;font-size:0.82rem;'
             f'background:{P["grey_100"]};border-radius:4px">{tcfg["formula"]}</td>'

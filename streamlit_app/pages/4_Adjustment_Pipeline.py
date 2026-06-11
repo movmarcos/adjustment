@@ -177,7 +177,7 @@ for stg in BOARD_STAGES:
         detail = " · ".join(detail_parts) if detail_parts else "All"
         items_html += (
             f'<div class="board-item">'
-            f'<div class="bi-scope">{scope_cfg.get("icon", "")} {scope}</div>'
+            f'<div class="bi-scope">{icon(scope_cfg.get("icon", ""), size=11)} {scope}</div>'
             f'<div class="bi-detail">{detail}</div>'
             f'</div>')
     if count > 10:
@@ -187,7 +187,7 @@ for stg in BOARD_STAGES:
     board_html += (
         f'<div class="board-col" style="border-top-color:{cfg["color"]}">'
         f'<div class="board-col-header" style="color:{cfg["color"]}">'
-        f'{cfg["icon"]} {stg}'
+        f'{icon(cfg["icon"], size=13)} {stg}'
         f'<span class="board-col-count" style="color:{cfg["color"]}">{count}</span>'
         f'</div>{items_html}</div>')
 board_html += '</div>'
@@ -386,8 +386,8 @@ for _, row in df_track.iterrows():
     stage_cfg = STAGE_CONFIG.get(current_stage, {"icon": "", "color": "#9E9E9E"})
 
     with st.expander(
-        f'{scope_cfg.get("icon", "")} {scope} · {row.get("ADJUSTMENT_TYPE", "")} · '
-        f'{stage_cfg["icon"]} {current_stage} · ADJ {adj_label}',
+        f'{scope} · {row.get("ADJUSTMENT_TYPE", "")} · '
+        f'{current_stage} · ADJ {adj_label}',
         expanded=False,
     ):
         render_lifecycle_bar(row.to_dict())

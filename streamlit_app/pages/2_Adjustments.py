@@ -429,7 +429,7 @@ for tab, (label, statuses) in zip(tabs, tab_labels.items()):
             summary_html += (
                 f'<div style="background:{cfg.get("bg", P["grey_100"])};border-radius:6px;'
                 f'padding:4px 10px;font-size:0.78rem;font-weight:600;color:{cfg.get("color", P["grey_700"])}">'
-                f'{cfg.get("icon", "")} {cfg.get("label", scope_key)} · {cnt}</div>')
+                f'{icon(cfg.get("icon", ""), size=12)} {cfg.get("label", scope_key)} · {cnt}</div>')
         summary_html += '</div>'
         st.markdown(summary_html, unsafe_allow_html=True)
 
