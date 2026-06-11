@@ -139,9 +139,9 @@ with tab_overview:
     pages = [
         ("🏠", "Command Center",   "Dashboard with KPIs, status charts, overlap alerts, and activity feed"),
         ("✏️", "New Adjustment",    "2-step wizard: Category & Details → Preview & Submit"),
-        ("📋", "My Work",           "All your adjustments with full history, actions, and status timeline"),
+        ("📋", "Adjustments",       "All adjustments (tick 'Only my adjustments' for yours) with full history, actions, and status timeline"),
         ("✅", "Approval Queue",     "Review and approve adjustments. Only authorized approvers can act. Self-approval is blocked"),
-        ("⏳", "Processing Queue",  "Live view of the processing pipeline, queue position, and PowerBI report refresh status"),
+        ("⏳", "Adjustment Pipeline", "Lifecycle + live processing: stage board, running/waiting items with Force-process, and PowerBI report status"),
         ("⚙️", "Admin",             "Settings management, approvers, recurring templates, schema reference"),
         ("📖", "Documentation",     "This page — full process guide with diagrams"),
     ]
@@ -681,7 +681,7 @@ with tab_workflow:
         <div style="background:{P['success_lt']};border:1px solid {P['success']};border-radius:8px;padding:0.75rem 1rem;font-size:0.82rem;margin-top:0.8rem">
         <strong>Total time from Submit to Processed:</strong> typically <strong>1–3 minutes</strong>
         for Scaling adjustments. Upload adjustments may take longer depending on row count.
-        Monitor progress on the <strong>⏳ Processing Queue</strong> page.
+        Monitor progress on the <strong>⏳ Adjustment Pipeline</strong> page.
         </div>
         """)
 
@@ -1074,7 +1074,7 @@ with tab_processing:
     by calling `FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS`. This writes to `METADATA.POWERBI_ACTION`,
     which is monitored by a **ControlM job running every ~5 minutes**.
 
-    **Report Status indicators** (visible in My Work and Processing Queue):
+    **Report Status indicators** (visible in Adjustments and the Adjustment Pipeline):
 
     | Status | Meaning |
     |--------|---------|
@@ -1246,7 +1246,7 @@ with tab_ops:
 
     with st.expander("**How to: Retry a failed adjustment**", expanded=True):
         st.markdown("""
-        1. Go to **📋 My Work** → **❌ Errors / Rejected** tab
+        1. Go to **📋 Adjustments** → **❌ Errors / Rejected** tab
         2. Find the failed adjustment and expand it
         3. Review the error message in the red box
         4. Fix the underlying issue (e.g., missing data, dimension misconfig)
@@ -1347,7 +1347,7 @@ with tab_ops:
 
         4. The **most recent** adjustment (by `ADJUSTMENT_CREATED_TIMESTAMP`) always wins
            due to `DENSE_RANK` in the processing engine
-        5. If the older adjustment should win, delete the newer one from **📋 My Work**
+        5. If the older adjustment should win, delete the newer one from **📋 Adjustments**
         """)
 
     with st.expander("**How to: Understand the audit trail**"):
@@ -1362,7 +1362,7 @@ with tab_ops:
         ORDER BY h.CHANGED_AT;
         ```
 
-        You can also see the full timeline in the **📋 My Work** page by expanding
+        You can also see the full timeline in the **📋 Adjustments** page by expanding
         any adjustment card → **Status History** section.
         """)
 

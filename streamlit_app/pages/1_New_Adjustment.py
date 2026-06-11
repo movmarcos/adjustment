@@ -1199,8 +1199,8 @@ elif wiz["step"] == 3:
         f'<div style="font-size:0.9rem;color:#388E3C;margin-top:0.4rem">{msg}</div>'
         f'<div style="font-size:0.82rem;color:{P["info"]};margin-top:0.8rem">'
         f'⚡ Your adjustment is queued and will be processed automatically by the scope pipeline. '
-        f'Track it in the Processing Queue; once processed it is assigned a <strong>report ID</strong> '
-        f'(the number shown in My Work, the Adjustment Tracker, and your reports).</div>'
+        f'Track it on the Adjustment Pipeline page; once processed it is assigned a <strong>report ID</strong> '
+        f'(the number shown in Adjustments, the Adjustment Pipeline, and your reports).</div>'
         f'</div>', unsafe_allow_html=True)
 
     if blocked_msg:

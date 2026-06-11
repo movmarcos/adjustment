@@ -1,13 +1,14 @@
 """
-My Work — Personal Workspace
-==============================
-All adjustments created by the current user, with full history and actions.
+Adjustments — browse & manage
+=============================
+All adjustments, with full history and actions. Defaults to everyone's; tick
+"Only my adjustments" to narrow to the current user.
 Reads from: VW_MY_WORK, ADJ_STATUS_HISTORY.
 """
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="My Work · MUFG", page_icon="📋", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Adjustments · MUFG", page_icon="📋", layout="wide", initial_sidebar_state="expanded")
 
 from utils.styles import (
     inject_css, render_sidebar, render_filter_chips, render_status_timeline,
@@ -22,10 +23,11 @@ render_sidebar()
 
 user = current_user_name()
 
-st.markdown("## 📋 My Work")
+st.markdown("## 📋 Adjustments")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
-    f"All adjustments created by you, with full history and available actions.</span>",
+    f"All adjustments, with full history and available actions. "
+    f"Tick <em>Only my adjustments</em> to see just yours.</span>",
     unsafe_allow_html=True)
 st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -48,8 +50,8 @@ with f3:
         "Type", ["Flatten", "Scale", "Roll"],
         default=[], key="mw_type")
 with f4:
-    show_all = st.checkbox("Show all users' adjustments", value=False,
-                           help="When checked, shows all adjustments (not just yours).")
+    mine_only = st.checkbox("Only my adjustments", value=False,
+                            help="When checked, shows only adjustments you submitted.")
 with f5:
     show_deleted = st.checkbox("Show deleted", value=False,
                                help="Include adjustments that have been soft-deleted.")
@@ -64,7 +66,7 @@ try:
     where_clauses = ["1=1"]
     if not show_deleted:
         where_clauses.append("IS_DELETED = FALSE")
-    if not show_all:
+    if mine_only:
         where_clauses.append(f"SUBMITTED_BY = '{user}'")
     if filter_status:
         in_list = ",".join(f"'{s}'" for s in filter_status)

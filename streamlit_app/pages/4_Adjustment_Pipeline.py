@@ -1,35 +1,46 @@
 """
-Adjustment Tracker — Lifecycle Overview
-=========================================
-Pipeline board showing all adjustments by lifecycle stage,
-with deep-dive timeline per adjustment.
-Reads from: VW_ADJUSTMENT_TRACK.
+Adjustment Pipeline — lifecycle + live processing
+=================================================
+Merged view of the old Processing Queue and Adjustment Tracker:
+  • Live stats + Snowflake pipeline diagram
+  • Stage board (Submitted → Approved → Processing → Reports Ready)
+  • Running / waiting adjustments, with Force-process
+  • Per-adjustment lifecycle deep-dive (processing + PowerBI + status history)
+
+Reads from: VW_ADJUSTMENT_TRACK (everything) and calls
+SP_FORCE_PROCESS_ADJUSTMENT for the force action.
 """
 import streamlit as st
 import pandas as pd
 
 st.set_page_config(
-    page_title="Tracker · MUFG", page_icon="🔍",
+    page_title="Pipeline · MUFG", page_icon="⏳",
     layout="wide", initial_sidebar_state="expanded",
 )
 
 from utils.styles import (
-    inject_css, render_sidebar, render_lifecycle_bar, section_title,
-    render_status_timeline,
-    fmt_adj_id,
+    inject_css, render_sidebar, render_lifecycle_bar, render_pipeline_diagram,
+    section_title, render_status_timeline, fmt_adj_id,
     P, SCOPE_CONFIG, STAGE_CONFIG,
 )
-from utils.snowflake_conn import run_query, run_query_df, current_user_name
+from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
+
+# A Pending/Approved item older than this (minutes) is flagged as possibly stuck —
+# the scope tasks poll every minute, so anything beyond a couple of cycles is
+# suspicious and the "Force process" action is emphasised.
+STUCK_AFTER_MIN = 3
 
 inject_css()
 render_sidebar()
 
 user = current_user_name()
 
-st.markdown("## 🔍 Adjustment Tracker")
+st.markdown("## ⏳ Adjustment Pipeline")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
-    f"Full lifecycle tracking — from submission to report refresh.</span>",
+    "From submission to report refresh — live status, the processing pipeline, and "
+    "a deep-dive per adjustment. Adjustments are processed asynchronously by Snowflake "
+    "Tasks that poll every minute.</span>",
     unsafe_allow_html=True)
 st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -47,15 +58,15 @@ with f1:
         cob_options = [int(r["COBID"]) for r in cob_rows] if cob_rows else []
     except Exception:
         cob_options = []
-    filter_cob = st.selectbox("COB Date", options=["All"] + cob_options, index=0, key="tr_cob")
+    filter_cob = st.selectbox("COB Date", options=["All"] + cob_options, index=0, key="pl_cob")
 with f2:
     filter_scope = st.multiselect(
-        "Scope", list(SCOPE_CONFIG.keys()), default=[], key="tr_scope")
+        "Scope", list(SCOPE_CONFIG.keys()), default=[], key="pl_scope")
 with f3:
-    show_all = st.checkbox("All users", value=False,
-                           help="Show adjustments from all users", key="tr_all")
+    mine_only = st.checkbox("Only my adjustments", value=False,
+                            help="Show only adjustments you submitted", key="pl_mine")
 with f4:
-    show_deleted = st.checkbox("Include deleted", value=False, key="tr_del")
+    show_deleted = st.checkbox("Include deleted", value=False, key="pl_del")
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -67,7 +78,7 @@ try:
     where = ["1=1"]
     if not show_deleted:
         where.append("IS_DELETED = FALSE")
-    if not show_all:
+    if mine_only:
         where.append(f"SUBMITTED_BY = '{user}'")
     if filter_cob and filter_cob != "All":
         where.append(f"COBID = {filter_cob}")
@@ -77,7 +88,9 @@ try:
     where_sql = " AND ".join(where)
 
     df_track = run_query_df(f"""
-        SELECT *
+        SELECT *,
+               DATEDIFF('minute', SUBMITTED_AT,
+                        CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9)) AS WAIT_MIN
         FROM ADJUSTMENT_APP.VW_ADJUSTMENT_TRACK
         WHERE {where_sql}
         ORDER BY SUBMITTED_AT DESC
@@ -85,7 +98,7 @@ try:
     """)
 except Exception as e:
     df_track = pd.DataFrame()
-    st.warning(f"Could not load tracking data: {e}")
+    st.warning(f"Could not load pipeline data: {e}")
 
 if df_track.empty:
     st.markdown(
@@ -97,7 +110,51 @@ if df_track.empty:
     st.stop()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# PIPELINE BOARD — Overview by stage
+# LIVE STATS + PIPELINE DIAGRAM
+# ──────────────────────────────────────────────────────────────────────────────
+
+_status = df_track["RUN_STATUS"].fillna("")
+pending_count   = int(_status.isin(["Pending", "Approved"]).sum())
+running_count   = int((_status == "Running").sum())
+processed_count = int((_status == "Processed").sum())
+failed_count    = int((_status == "Failed").sum())
+
+c1, c2, c3, c4 = st.columns(4)
+stat_items = [
+    ("Pending / Approved", pending_count,   P["warning"], "⏸"),
+    ("Running",            running_count,   "#1565C0",    "⚡"),
+    ("Processed",          processed_count, P["success"], "✔"),
+    ("Failed",             failed_count,    P["danger"],  "✗"),
+]
+for col, (label, val, color, icon) in zip([c1, c2, c3, c4], stat_items):
+    col.markdown(
+        f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
+        f'border-top:3px solid {color};border-radius:8px;padding:0.8rem;text-align:center">'
+        f'<div style="font-size:1.6rem;font-weight:800;color:{color}">{icon} {val}</div>'
+        f'<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.06em;'
+        f'color:{P["grey_700"]};margin-top:3px">{label}</div>'
+        f'</div>',
+        unsafe_allow_html=True)
+
+st.markdown("<br/>", unsafe_allow_html=True)
+
+section_title("Snowflake Processing Pipeline", "🔧")
+stage = 3 if running_count > 0 else (2 if pending_count > 0 else 5)
+render_pipeline_diagram(current_stage=stage)
+st.markdown(
+    f'<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;'
+    f'font-size:0.78rem;color:{P["grey_700"]};text-align:center;margin-top:0.3rem">'
+    f'<div>Adjustment saved to<br/><strong>ADJ_HEADER</strong></div>'
+    f'<div><strong>Scope task</strong><br/>polls every 1 min<br/>exits fast when idle</div>'
+    f'<div><strong>SP_RUN_PIPELINE</strong><br/>claim → block → process → unblock</div>'
+    f'<div><strong>Dynamic Tables</strong><br/>auto-refresh (1 min lag)</div>'
+    f'<div><strong>PowerBI Refresh</strong><br/>ControlM every ~5 min</div>'
+    f'</div>',
+    unsafe_allow_html=True)
+st.markdown("<br/>", unsafe_allow_html=True)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PIPELINE BOARD — overview by stage
 # ──────────────────────────────────────────────────────────────────────────────
 
 section_title("Pipeline Board", "📊")
@@ -106,59 +163,137 @@ BOARD_STAGES = [
     "Submitted", "Pending Approval", "Approved",
     "Processing", "PBI Queued", "PBI Refreshing", "Reports Ready",
 ]
-
-stage_counts = {}
-for stage in BOARD_STAGES:
-    stage_counts[stage] = int(df_track[df_track["CURRENT_STAGE"] == stage].shape[0])
-
 board_html = '<div class="tracker-board">'
-for stage in BOARD_STAGES:
-    cfg = STAGE_CONFIG.get(stage, {"color": "#9E9E9E", "icon": "", "bg": "#F5F5F5"})
-    count = stage_counts[stage]
-    items_df = df_track[df_track["CURRENT_STAGE"] == stage].head(10)
-
+for stg in BOARD_STAGES:
+    cfg = STAGE_CONFIG.get(stg, {"color": "#9E9E9E", "icon": "", "bg": "#F5F5F5"})
+    items_df = df_track[df_track["CURRENT_STAGE"] == stg]
+    count = int(items_df.shape[0])
     items_html = ""
-    for _, row in items_df.iterrows():
+    for _, row in items_df.head(10).iterrows():
         scope = str(row.get("PROCESS_TYPE", ""))
         scope_cfg = SCOPE_CONFIG.get(scope, {})
-        entity = str(row.get("ENTITY_CODE", "")) or ""
-        book = str(row.get("BOOK_CODE", "")) or ""
-        detail_parts = [x for x in [entity, book] if x]
+        detail_parts = [x for x in [str(row.get("ENTITY_CODE", "")) or "",
+                                    str(row.get("BOOK_CODE", "")) or ""] if x]
         detail = " · ".join(detail_parts) if detail_parts else "All"
         items_html += (
             f'<div class="board-item">'
             f'<div class="bi-scope">{scope_cfg.get("icon", "")} {scope}</div>'
             f'<div class="bi-detail">{detail}</div>'
             f'</div>')
-
     if count > 10:
         items_html += (
             f'<div style="font-size:0.65rem;color:{P["grey_700"]};text-align:center;padding:4px">'
             f'+ {count - 10} more</div>')
-
     board_html += (
         f'<div class="board-col" style="border-top-color:{cfg["color"]}">'
         f'<div class="board-col-header" style="color:{cfg["color"]}">'
-        f'{cfg["icon"]} {stage}'
+        f'{cfg["icon"]} {stg}'
         f'<span class="board-col-count" style="color:{cfg["color"]}">{count}</span>'
-        f'</div>'
-        f'{items_html}'
-        f'</div>')
+        f'</div>{items_html}</div>')
 board_html += '</div>'
 st.markdown(board_html, unsafe_allow_html=True)
 
-# Show failed/rejected count if any
 failed_df = df_track[df_track["CURRENT_STAGE"].isin(["Failed", "Rejected"])]
 if not failed_df.empty:
     st.markdown(
         f'<div style="background:{P["danger_lt"]};border-left:4px solid {P["danger"]};'
-        f'border-radius:8px;padding:0.6rem 1rem;margin-bottom:1rem;font-size:0.82rem">'
-        f'❌ <strong>{len(failed_df)}</strong> adjustment(s) in Failed/Rejected status'
-        f'</div>',
+        f'border-radius:8px;padding:0.6rem 1rem;margin:0.6rem 0;font-size:0.82rem">'
+        f'❌ <strong>{len(failed_df)}</strong> adjustment(s) in Failed/Rejected status</div>',
         unsafe_allow_html=True)
 
+st.markdown("<br/>", unsafe_allow_html=True)
+
 # ──────────────────────────────────────────────────────────────────────────────
-# DETAIL TABLE + DEEP-DIVE
+# RUNNING / WAITING — live items with Force-process
+# ──────────────────────────────────────────────────────────────────────────────
+
+section_title("Running & Waiting", "⚡")
+
+live_df = df_track[df_track["RUN_STATUS"].isin(["Pending", "Approved", "Running"])]
+if live_df.empty:
+    st.markdown(
+        f'<div class="mcard" style="text-align:center;padding:1.5rem;color:{P["grey_700"]}">'
+        f'✅ Nothing in flight — all adjustments are processed.</div>',
+        unsafe_allow_html=True)
+else:
+    for _, qi in live_df.iterrows():
+        adj_id      = qi["ADJ_ID"]
+        scope       = str(qi.get("PROCESS_TYPE", ""))
+        adj_type    = str(qi.get("ADJUSTMENT_TYPE", ""))
+        run_status  = str(qi.get("RUN_STATUS", ""))
+        scope_cfg   = SCOPE_CONFIG.get(scope, {})
+        submitted_at = qi.get("SUBMITTED_AT", "")
+        entity      = str(qi.get("ENTITY_CODE", "")) or "—"
+
+        status_color = "#1565C0" if run_status == "Running" else ("#00897B" if run_status == "Approved" else P["warning"])
+        status_icon  = "⚡" if run_status == "Running" else ("✅" if run_status == "Approved" else "⏸")
+        # No report number yet (assigned at processing) — short id keeps rows distinct.
+        sub_txt = (submitted_at.strftime("%d %b %H:%M")
+                   if hasattr(submitted_at, "strftime") and str(submitted_at) != "NaT"
+                   else str(submitted_at))
+
+        st.markdown(
+            f'<div class="queue-item {run_status.lower()}">'
+            f'<div style="display:flex;justify-content:space-between;align-items:flex-start">'
+            f'  <div>'
+            f'    <span style="font-weight:700;font-size:0.92rem">ADJ #{str(adj_id)[:8]}…</span>'
+            f'    &nbsp;<span style="font-size:0.75rem;color:{P["grey_700"]}">'
+            f'    {scope_cfg.get("icon","")} {scope} · {adj_type} · Entity: {entity}</span>'
+            f'  </div>'
+            f'  <span style="font-size:0.75rem;font-weight:700;color:{status_color}">'
+            f'  {status_icon} {run_status}</span>'
+            f'</div>'
+            f'<div style="display:flex;justify-content:space-between;margin-top:4px;font-size:0.72rem;color:{P["grey_700"]}">'
+            f'  <span>COB: {qi.get("COBID","?")} · Submitted by: {qi.get("SUBMITTED_BY","?")}</span>'
+            f'  <span>Submitted: {sub_txt}</span>'
+            f'</div>'
+            f'</div>',
+            unsafe_allow_html=True)
+
+        # Force-process (Pending/Approved only) — the tasks poll every minute; if a
+        # row is stranded the user can push it through immediately.
+        if run_status in ("Pending", "Approved"):
+            try:
+                wait_min = int(qi.get("WAIT_MIN")) if pd.notna(qi.get("WAIT_MIN")) else None
+            except (TypeError, ValueError):
+                wait_min = None
+            stuck = wait_min is not None and wait_min >= STUCK_AFTER_MIN
+
+            wcol, bcol = st.columns([3, 1])
+            with wcol:
+                if wait_min is not None:
+                    if stuck:
+                        st.markdown(
+                            f"<span style='color:{P['danger']};font-size:0.76rem;font-weight:600'>"
+                            f"⚠ Waiting {wait_min} min — the task may have missed it; force it through.</span>",
+                            unsafe_allow_html=True)
+                    else:
+                        st.markdown(
+                            f"<span style='color:{P['grey_700']};font-size:0.76rem'>"
+                            f"Waiting {wait_min} min — the task polls every minute.</span>",
+                            unsafe_allow_html=True)
+            with bcol:
+                if st.button("⏵ Force process", key=f"force_{adj_id}",
+                             type="primary" if stuck else "secondary",
+                             use_container_width=True,
+                             help="Bypass the task and process this adjustment now."):
+                    with st.spinner("Forcing through the pipeline…"):
+                        try:
+                            res = run_query(
+                                f"CALL ADJUSTMENT_APP.SP_FORCE_PROCESS_ADJUSTMENT('{adj_id}')")
+                            st.success(f"ADJ #{str(adj_id)[:8]}… forced. {res[0][0] if res else ''}")
+                        except Exception as fe:
+                            st.error(f"Force failed: {fe}")
+                    safe_rerun()
+
+    st.markdown("<br/>", unsafe_allow_html=True)
+    if st.button("🔄 Refresh", type="primary"):
+        safe_rerun()
+
+st.markdown("<br/>", unsafe_allow_html=True)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DETAIL TABLE
 # ──────────────────────────────────────────────────────────────────────────────
 
 section_title("Adjustment Details", "📋")
@@ -179,9 +314,7 @@ if "SUBMITTED_AT" in df_display.columns:
           .dt.strftime("%d %b %Y %H:%M").fillna("—")
     )
 
-# Total duration = submitted → reports ready; falls back to submitted → processed
-# (VW_ADJUSTMENT_TRACK.TOTAL_DURATION_SEC is NULL until PowerBI reports complete,
-# which left this column blank for every still-in-flight adjustment).
+# Total duration = submitted → reports ready; falls back to submitted → processed.
 def _fmt_duration(sec):
     if sec is None or pd.isna(sec):
         return "—"
@@ -219,9 +352,28 @@ df_display = df_display.rename(columns={
 
 st.dataframe(df_display.style.hide(axis='index'), use_container_width=True, height=300)
 
-# ── Deep-dive expanders ──────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# DEEP DIVE
+# ──────────────────────────────────────────────────────────────────────────────
 
 section_title("Deep Dive", "🔎")
+
+def _fmt_ts(val):
+    if val is None or str(val) in ("NaT", "None", ""):
+        return "—"
+    if hasattr(val, "strftime"):
+        return val.strftime("%d %b %Y %H:%M:%S")
+    return str(val) if str(val) not in ("None", "") else "—"
+
+def _fmt_dur(sec):
+    if sec is None or (hasattr(sec, '__float__') and pd.isna(sec)):
+        return "—"
+    sec = int(sec)
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec // 60}m {sec % 60}s"
+    return f"{sec // 3600}h {(sec % 3600) // 60}m"
 
 for _, row in df_track.iterrows():
     adj_id = row.get("ADJ_ID", "?")
@@ -242,24 +394,6 @@ for _, row in df_track.iterrows():
 
         with col_detail:
             section_title("Adjustment Info", "📋")
-
-            def _fmt_ts(val):
-                if val is None or str(val) in ("NaT", "None", ""):
-                    return "—"
-                if hasattr(val, "strftime"):
-                    return val.strftime("%d %b %Y %H:%M:%S")
-                return str(val) if str(val) not in ("None", "") else "—"
-
-            def _fmt_dur(sec):
-                if sec is None or (hasattr(sec, '__float__') and pd.isna(sec)):
-                    return "—"
-                sec = int(sec)
-                if sec < 60:
-                    return f"{sec}s"
-                if sec < 3600:
-                    return f"{sec // 60}m {sec % 60}s"
-                return f"{sec // 3600}h {(sec % 3600) // 60}m"
-
             info_rows = [
                 ("COB",           str(row.get("COBID", "—"))),
                 ("Scope",         scope),
@@ -272,7 +406,6 @@ for _, row in df_track.iterrows():
             ]
             if row.get("GLOBAL_REFERENCE"):
                 info_rows.append(("Reference", str(row.get("GLOBAL_REFERENCE"))))
-
             rows_html = "".join(
                 f'<tr><td style="color:{P["grey_700"]};padding:3px 0;font-size:0.78rem;'
                 f'white-space:nowrap;padding-right:12px">{k}</td>'
@@ -287,7 +420,6 @@ for _, row in df_track.iterrows():
 
         with col_pbi:
             section_title("PowerBI Refresh", "📈")
-
             pbi_rows = [
                 ("PBI Action ID",     str(row.get("PBI_ACTION_ID", "")) or "—"),
                 ("Queued",            _fmt_ts(row.get("PBI_QUEUED_AT"))),
