@@ -378,12 +378,21 @@ def _sec(num: int, title: str, helper: str = "") -> None:
         unsafe_allow_html=True)
 
 
+from contextlib import contextmanager
+
+
+@contextmanager
 def _card():
-    """Bordered container (section card); plain container on old Streamlit."""
+    """Bordered container (section card) followed by a spacer, so cards never
+    hug each other (the gap is emitted in the page flow — version-proof,
+    unlike CSS on Streamlit's wrapper test-ids)."""
     try:
-        return st.container(border=True)
+        c = st.container(border=True)
     except TypeError:
-        return st.container()
+        c = st.container()
+    with c:
+        yield
+    st.markdown('<div style="height:0.7rem"></div>', unsafe_allow_html=True)
 
 
 def _safe_int(v) -> int:
