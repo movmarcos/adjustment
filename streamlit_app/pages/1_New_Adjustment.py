@@ -256,7 +256,10 @@ def _do_submit() -> dict:
 
         # Snowflake escapes a single quote by DOUBLING it (''), not with a
         # backslash. A backslash leaves the quote active → broken/injectable CALL.
-        json_str = json.dumps(payload).replace("'", "''")
+        # Backslashes must be doubled FIRST: Snowflake literals interpret \n, \t
+        # etc., so json.dumps's "\n" would arrive as a raw newline inside the
+        # JSON and json.loads in the SP fails with "Invalid control character".
+        json_str = json.dumps(payload).replace("\\", "\\\\").replace("'", "''")
         rows = run_query(f"CALL ADJUSTMENT_APP.SP_SUBMIT_ADJUSTMENT('{json_str}')")
         if not rows:
             result = {"status": "Error", "message": "No response from stored procedure"}

@@ -70,8 +70,15 @@ def call_sp_df(proc_name: str, *args):
     try:
         return get_session().call(proc_name, *args).to_pandas()
     except Exception:
-        # Fallback: SQL CALL with manual Row→dict conversion
-        args_str = ", ".join(f"'{a}'" if isinstance(a, str) else str(a) for a in args)
+        # Fallback: SQL CALL with manual Row→dict conversion.
+        # Double backslashes first (Snowflake literals interpret \n, \t, ...),
+        # then double single quotes — otherwise JSON args with newlines or
+        # quotes break the literal and the SP's json.loads.
+        def _lit(a):
+            if isinstance(a, str):
+                return "'" + a.replace("\\", "\\\\").replace("'", "''") + "'"
+            return str(a)
+        args_str = ", ".join(_lit(a) for a in args)
         rows = get_session().sql(f"CALL {proc_name}({args_str})").collect()
         if not rows:
             return pd.DataFrame()
