@@ -513,6 +513,69 @@ def inject_css():
     ::-webkit-scrollbar-thumb {{ background: var(--ink-3); border-radius: 4px; }}
     ::-webkit-scrollbar-track {{ background: transparent; }}
 
+    /* Segmented pill selectors — st.pills, and horizontal st.radio fallback */
+    [data-testid="stPills"] button {{
+        border-radius: 999px !important;
+        font-weight: 600 !important;
+        font-size: 0.82rem !important;
+    }}
+    [data-testid="stPills"] button[data-testid="stBaseButton-pillsActive"] {{
+        background: var(--brand) !important;
+        border-color: var(--brand) !important;
+        color: #fff !important;
+    }}
+    .stRadio [role="radiogroup"] {{ gap: 6px; flex-wrap: wrap; }}
+    .stRadio [role="radiogroup"] label {{
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 3px 14px 3px 10px;
+        background: var(--card);
+        transition: border-color .15s ease-out, background .15s ease-out;
+    }}
+    .stRadio [role="radiogroup"] label:hover {{ border-color: var(--ink-3); }}
+    .stRadio [role="radiogroup"] label:has(input:checked) {{
+        border-color: var(--brand);
+        background: #FFF0F3;
+    }}
+    .stRadio [role="radiogroup"] label:has(input:checked) p {{ color: var(--brand) !important; font-weight: 700; }}
+
+    /* Order-ticket summary panel (New Adjustment) */
+    .ticket {{
+        background: var(--card); border: 1px solid var(--border);
+        border-radius: var(--r-md); box-shadow: var(--sh-sm);
+        position: relative; overflow: hidden; margin-bottom: 0.75rem;
+    }}
+    .ticket::before {{
+        content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+        width: 3px; background: var(--brand);
+    }}
+    .ticket .t-head {{
+        padding: 0.7rem 1.1rem; border-bottom: 1px solid var(--border);
+        display: flex; align-items: center; gap: 8px;
+        font-weight: 700; font-size: 0.85rem;
+    }}
+    .ticket .t-body {{ padding: 0.8rem 1.1rem; }}
+    .ticket .kv {{ display: flex; justify-content: space-between; gap: 12px;
+                   font-size: 0.8rem; padding: 3px 0; }}
+    .ticket .kv .k {{ color: var(--ink-2); white-space: nowrap; }}
+    .ticket .kv .v {{ font-weight: 600; font-variant-numeric: tabular-nums;
+                      text-align: right; }}
+    .ticket .t-imp {{
+        margin-top: 0.8rem; background: #F8FAFC;
+        border: 1px solid var(--border); border-radius: var(--r-sm);
+        padding: 0.6rem 0.85rem;
+    }}
+    .ticket .t-warn {{
+        margin-top: 0.8rem; background: {P["warning_lt"]};
+        border: 1px solid #FDE68A; border-radius: var(--r-sm);
+        padding: 0.55rem 0.85rem; font-size: 0.76rem; color: {P["warning"]};
+    }}
+    .ticket .t-missing {{
+        margin-top: 0.8rem; background: #F8FAFC;
+        border: 1px dashed var(--border); border-radius: var(--r-sm);
+        padding: 0.55rem 0.85rem; font-size: 0.76rem; color: var(--ink-2);
+    }}
+
     /* Lifecycle progress bar */
     .lifecycle-bar {{
         display: flex;

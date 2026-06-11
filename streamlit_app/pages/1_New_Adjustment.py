@@ -1,16 +1,13 @@
 """
-New Adjustment — 2-Step Wizard
-================================
-Step 1 : Category & Details
-Step 2 : Preview & Submit
-Step 3 : Success  (inline — no fragile switch_page after submit)
+New Adjustment — Order Ticket
+==============================
+Single dense screen (no wizard steps): segmented pills select Category /
+Scope / Type in one click, a compact field grid holds dates and factors,
+and a live Ticket panel on the right mirrors the selections, runs the
+impact preview, and carries the Submit button.
 
-Root cause of "stuck after second submit":
-  Streamlit widget state persists by key across reruns.  After reset_wizard()
-  the text_input widgets (key="wiz_cobid", etc.) still hold their old values,
-  which then overwrite the freshly-reset wiz dict on the very next render.
-  Fix: _k() appends a version counter to every widget key; reset_wizard()
-  bumps the counter so all widgets are created fresh.
+Widget-state note: widget keys are versioned via _k(); reset_wizard()
+bumps the version so every control is recreated fresh after a submit.
 """
 import streamlit as st
 import json
@@ -22,7 +19,7 @@ st.set_page_config(
 )
 
 from utils.styles import (
-    inject_css, render_sidebar, render_step_bar, render_filter_chips,
+    inject_css, render_sidebar,
     section_title, P, SCOPE_CONFIG, TYPE_CONFIG, CATEGORY_CONFIG,
     fmt_adj_id, icon,
 )
@@ -65,7 +62,7 @@ _WIZ_DEFAULTS: dict = {
     "var_component_id":       None,
     "var_sub_component_id":   None,
     "guaranteed_entity":      None,
-    "region_key":             None,
+    "region_key":              None,
     "scenario_date_id":       None,
     "tenor_code":             None,
     "underlying_tenor_code":  None,
@@ -279,63 +276,349 @@ def _do_submit() -> dict:
     return result
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# UI HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+FRTB_SUBTYPES = ["FRTB", "FRTBDRC", "FRTBRRAO", "FRTBALL"]
+FRTB_SUBTYPE_CONFIG = {
+    "FRTB":     "Standard FRTB",
+    "FRTBDRC":  "Default Risk Charge",
+    "FRTBRRAO": "Residual Risk Add-On",
+    "FRTBALL":  "All FRTB (combined)",
+}
+
+# Scope-specific filter fields (tier 2)
+SCOPE_FIELDS = {
+    "VaR":         [],
+    "Stress":      [("simulation_name",   "Simulation Name",   "e.g. MRM_GLB_Std_EQ_M_PriceDnVolUp"),
+                    ("trade_typology",    "Trade Typology",    "e.g. EQTT"),
+                    ("instrument_code",   "Instrument Code",   "e.g. US4642872422 US")],
+    "Sensitivity": [("measure_type_code", "Measure Type Code", "e.g. FxDeltaExp"),
+                    ("strategy",          "Strategy",          "e.g. SSA00306"),
+                    ("trade_typology",    "Trade Typology",    "e.g. FEXF"),
+                    ("instrument_code",   "Instrument Code",   "e.g. US46090E1038 US")],
+    "FRTB":        [("measure_type_code", "Measure Type Code", "e.g. FRTBCSRDelta"),
+                    ("instrument_code",   "Instrument Code",   "e.g. US92826C8394 US"),
+                    ("strategy",          "Strategy",          "e.g. SSU00332")],
+}
+for _fst in FRTB_SUBTYPES:
+    SCOPE_FIELDS.setdefault(_fst, SCOPE_FIELDS["FRTB"])
+
+ALL_EXTRA_FIELDS = [
+    ("currency_code",                "Currency Code",                "e.g. USD"),
+    ("trade_typology",               "Trade Typology",               "e.g. FEXF"),
+    ("trade_code",                   "Trade Code",                   ""),
+    ("strategy",                     "Strategy",                     ""),
+    ("instrument_code",              "Instrument Code",              ""),
+    ("simulation_name",              "Simulation Name",              ""),
+    ("simulation_source",            "Simulation Source",            ""),
+    ("measure_type_code",            "Measure Type Code",            ""),
+    ("trader_code",                  "Trader Code",                  ""),
+    ("var_component_id",             "VaR Component ID",             ""),
+    ("var_sub_component_id",         "VaR Sub-Component ID",         ""),
+    ("guaranteed_entity",            "Guaranteed Entity",            ""),
+    ("region_key",                   "Region Key",                   ""),
+    ("scenario_date_id",             "Scenario Date ID",             ""),
+    ("tenor_code",                   "Tenor Code",                   ""),
+    ("underlying_tenor_code",        "Underlying Tenor Code",        ""),
+    ("curve_code",                   "Curve Code",                   ""),
+    ("day_type",                     "Day Type",                     ""),
+    ("product_category_attributes",  "Product Category Attributes",  ""),
+    ("batch_region_area",            "Batch Region Area",            ""),
+    ("murex_family",                 "Murex Family",                 ""),
+    ("murex_group",                  "Murex Group",                  ""),
+]
+
+# Every filter key (used for the ticket's applied-filter chips)
+FILTER_KEYS = ["entity_code", "source_system_code", "department_code", "book_code"] + \
+              [k for k, _, _ in ALL_EXTRA_FIELDS]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 1 FORM RENDERERS
-# ══════════════════════════════════════════════════════════════════════════════
+def _pills(options, key, default=None, format_func=None):
+    """Single-click segmented selector. st.pills when available; falls back to a
+    horizontal st.radio styled as pills by inject_css."""
+    fmt = format_func or str
+    if hasattr(st, "pills"):
+        return st.pills(" ", options, selection_mode="single",
+                        default=default if default in options else None,
+                        key=key, format_func=fmt, label_visibility="collapsed")
+    idx = options.index(default) if default in options else None
+    try:
+        return st.radio(" ", options, index=idx, horizontal=True,
+                        key=key, format_func=fmt, label_visibility="collapsed")
+    except Exception:
+        # Older Streamlit: index=None unsupported — preselect first option
+        return st.radio(" ", options, index=0, horizontal=True,
+                        key=key, format_func=fmt, label_visibility="collapsed")
+
+
+def _int_input(label, key, value, placeholder="e.g. 20260328"):
+    """Compact YYYYMMDD text input returning int or None."""
+    raw = st.text_input(label, key=_k(key), value=str(value or ""),
+                        placeholder=placeholder)
+    return int(raw.strip()) if raw.strip().isdigit() else None
+
 
 def _info_banner(text: str) -> None:
     st.markdown(
-        f'<div style="background:{P["info_lt"]};border:1px solid #90CAF9;'
+        f'<div style="background:{P["info_lt"]};border:1px solid #BFDBFE;'
         f'border-radius:8px;padding:0.7rem 1rem;margin-bottom:1rem;font-size:0.85rem">'
         f'{text}</div>', unsafe_allow_html=True)
 
 
-def _missing_info(fields: list) -> None:
-    if fields:
-        st.info(f"Complete required fields: **{', '.join(fields)}**")
+def _is_entity_only(wiz: dict) -> bool:
+    """True when a Scaling Adjustment is broad-scope (entity set, no book or department).
+
+    Entity+currency is treated as broad-scope because it still targets millions of
+    rows and the preview times out. The pipeline blocking logic already handles it
+    correctly — only book_code and department_code narrow the scope meaningfully.
+    """
+    if wiz.get("category") != "Scaling Adjustment":
+        return False
+    if not (wiz.get("entity_code") or "").strip():
+        return False
+    has_book = bool((wiz.get("book_code") or "").strip())
+    has_dept = bool((wiz.get("department_code") or "").strip())
+    return not (has_book or has_dept)
 
 
-def _render_approval_flag(key_suffix: str) -> bool:
-    """Render the 'Requires Approval' toggle, separated from the field above by a
-    gap + divider and slightly indented, so clicking just below the Reason box
-    lands on empty space rather than flipping the flag by accident."""
-    st.markdown("<br/>", unsafe_allow_html=True)
-    st.divider()
-    _, c = st.columns([0.04, 0.96])
-    with c:
-        return st.checkbox(
-            "Requires Approval",
-            value=wiz.get("requires_approval", False),
-            key=_k(key_suffix))
+def _preview_payload() -> dict:
+    pj = {
+        "cobid":           wiz["cobid"],
+        "process_type":    wiz["process_type"],
+        "adjustment_type": wiz["adjustment_type"],
+        "source_cobid":    wiz.get("source_cobid") or wiz["cobid"],
+        "scale_factor":    wiz.get("scale_factor", 1.0),
+    }
+    for key in FILTER_KEYS:
+        val = wiz.get(key)
+        if val and str(val).strip():
+            pj[key] = str(val).strip()
+    return pj
+
+
+def _fmt_money(v):
+    """Compact money formatting (K/M/B/T) so big totals fit the ticket rows."""
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    a = abs(n)
+    for div, suf in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if a >= div:
+            return f"{n / div:,.2f}{suf}"
+    return f"{n:,.0f}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VALIDATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _missing_fields() -> list:
+    cat = wiz.get("category")
+    if not cat:
+        return ["Category"]
+    missing = []
+    if cat == "Direct Adjustment":
+        checks = [("Scope",       wiz.get("process_type")),
+                  ("CSV data",    wiz.get("uploaded_df") is not None or None),
+                  ("COB date",    wiz.get("cobid")),
+                  ("Entity code", (wiz.get("entity_code") or "").strip()),
+                  ("Reference",   (wiz.get("global_reference") or "").strip()),
+                  ("Reason",      (wiz.get("reason") or "").strip())]
+        missing = [f for f, v in checks if not v]
+    elif cat == "Entity Roll":
+        checks = [("Scope",       wiz.get("process_type")),
+                  ("Target COB",  wiz.get("cobid")),
+                  ("Source COB",  wiz.get("source_cobid")),
+                  ("Entity code", (wiz.get("entity_code") or "").strip()),
+                  ("Reason",      (wiz.get("reason") or "").strip())]
+        missing = [f for f, v in checks if not v]
+        if wiz.get("cobid") and wiz.get("source_cobid") \
+                and wiz["cobid"] == wiz["source_cobid"]:
+            missing.append("Source COB must differ from target")
+    else:  # Scaling
+        checks = [("Scope",           wiz.get("process_type")),
+                  ("Adjustment type", wiz.get("adjustment_type")),
+                  ("COB date",        wiz.get("cobid")),
+                  ("Entity code",     (wiz.get("entity_code") or "").strip()),
+                  ("Reason",          (wiz.get("reason") or "").strip())]
+        missing = [f for f, v in checks if not v]
+        if wiz.get("occurrence") == "RECURRING":
+            if not wiz.get("recurring_start_cobid"):
+                missing.append("Start COBID")
+            if not wiz.get("recurring_end_cobid"):
+                missing.append("End COBID")
+        if wiz.get("adjustment_type") == "Roll" and not wiz.get("source_cobid"):
+            missing.append("Source COB")
+        if not (wiz.get("department_code") or "").strip() \
+                and not (wiz.get("book_code") or "").strip():
+            missing.append("Department or Book code")
+    return missing
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LEFT COLUMN — FORM SECTIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _render_scope_pills(include_frtball: bool = True) -> None:
+    """Scope pills + FRTB sub-type pills. Sets wiz['process_type']."""
+    section_title("Data Scope", "search")
+    groups = list(SCOPE_CONFIG.keys())
+    current_group = "FRTB" if wiz.get("process_type") in FRTB_SUBTYPES \
+                    else wiz.get("process_type")
+    sel = _pills(groups, key=_k(f"scope_{wiz.get('category')}"), default=current_group)
+    if sel and sel != current_group:
+        wiz["process_type"] = sel  # FRTB group defaults to plain FRTB sub-type
+    elif sel is None:
+        wiz["process_type"] = None
+
+    if wiz.get("process_type") in FRTB_SUBTYPES:
+        subtypes = [k for k in FRTB_SUBTYPE_CONFIG
+                    if include_frtball or k != "FRTBALL"]
+        sub = _pills(subtypes, key=_k(f"frtbsub_{wiz.get('category')}"),
+                     default=wiz["process_type"] if wiz["process_type"] in subtypes else "FRTB",
+                     format_func=lambda k: f"{k} — {FRTB_SUBTYPE_CONFIG[k]}")
+        wiz["process_type"] = sub or "FRTB"
+
+
+def _render_main_filters() -> None:
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        wiz["entity_code"] = st.text_input("Entity Code *", key=_k("entity"),
+                                           value=wiz.get("entity_code") or "",
+                                           placeholder="e.g. MUSI")
+    with c2:
+        wiz["source_system_code"] = st.text_input("Source System", key=_k("src_sys"),
+                                                  value=wiz.get("source_system_code") or "",
+                                                  placeholder="e.g. MS")
+    with c3:
+        wiz["department_code"] = st.text_input("Department Code †", key=_k("dept"),
+                                               value=wiz.get("department_code") or "")
+    with c4:
+        wiz["book_code"] = st.text_input("Book Code †", key=_k("book"),
+                                         value=wiz.get("book_code") or "")
+    st.caption("Blank = all values for that dimension · † at least one of Department or Book")
+
+
+def _render_extra_filters() -> None:
+    """Scope-specific (tier 2) + rarely-used (tier 3) filters, collapsed."""
+    pt = wiz.get("process_type", "")
+    custom_fields = SCOPE_FIELDS.get(pt, [])
+    applied = sum(1 for k in FILTER_KEYS
+                  if k not in ("entity_code", "source_system_code",
+                               "department_code", "book_code")
+                  and (wiz.get(k) or "").strip())
+    label = f"More filters ({applied} applied)" if applied else "More filters"
+    with st.expander(label, expanded=False):
+        if custom_fields:
+            st.markdown(
+                f'<div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;'
+                f'letter-spacing:0.05em;color:{P["info"]};margin-bottom:0.2rem">'
+                f'{pt} filters</div>', unsafe_allow_html=True)
+            ccols = st.columns(min(len(custom_fields), 4))
+            for i, (fk, fl, ph) in enumerate(custom_fields):
+                with ccols[i % len(ccols)]:
+                    wiz[fk] = st.text_input(fl, key=_k(fk),
+                                            value=wiz.get(fk) or "", placeholder=ph)
+        shown = {"entity_code", "source_system_code", "department_code", "book_code"}
+        shown.update(fk for fk, _, _ in custom_fields)
+        extra = [(k, l, p) for k, l, p in ALL_EXTRA_FIELDS if k not in shown]
+        ecols = st.columns(3)
+        for i, (fk, fl, ph) in enumerate(extra):
+            with ecols[i % 3]:
+                wiz[fk] = st.text_input(fl, key=_k(fk),
+                                        value=wiz.get(fk) or "", placeholder=ph)
+
+
+def render_scaling_form() -> None:
+    _render_scope_pills()
+    if not wiz.get("process_type"):
+        st.info("Select a data scope to continue.")
+        return
+
+    # ── Type ─────────────────────────────────────────────────────────────
+    section_title("Adjustment Type", "zap")
+    tsel = _pills(list(TYPE_CONFIG.keys()), key=_k("type_pills"),
+                  default=wiz.get("adjustment_type"),
+                  format_func=lambda k: f"{k} — {TYPE_CONFIG[k]['desc']}")
+    wiz["adjustment_type"] = tsel
+    if tsel:
+        st.caption(f"Formula: {TYPE_CONFIG[tsel]['formula']}")
+
+    # ── Dates & factor ───────────────────────────────────────────────────
+    section_title("Date & Schedule", "calendar")
+    occ = _pills(["ADHOC", "RECURRING"], key=_k("freq"),
+                 default=wiz.get("occurrence", "ADHOC"),
+                 format_func=lambda k: "Ad hoc" if k == "ADHOC" else "Recurring (daily)")
+    wiz["occurrence"] = occ or "ADHOC"
+
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        wiz["cobid"] = _int_input(
+            "First COB Date (YYYYMMDD) *" if wiz["occurrence"] == "RECURRING"
+            else "COB Date (YYYYMMDD) *", "cobid", wiz.get("cobid"))
+    with d2:
+        if wiz.get("adjustment_type") == "Roll":
+            wiz["source_cobid"] = _int_input("Source COB (roll from) *",
+                                             "src_cobid", wiz.get("source_cobid"))
+        elif wiz["occurrence"] == "RECURRING":
+            wiz["recurring_start_cobid"] = _int_input("Start COBID *", "rec_start",
+                                                      wiz.get("recurring_start_cobid"))
+    with d3:
+        if wiz.get("adjustment_type") in ("Scale", "Roll"):
+            wiz["scale_factor"] = st.number_input(
+                "Scale Factor", value=float(wiz.get("scale_factor", 1.0)),
+                min_value=-10.0, max_value=100.0, step=0.01, format="%.4f",
+                help="1.05 = +5%,  0.95 = −5%", key=_k("sf"))
+
+    if wiz["occurrence"] == "RECURRING":
+        r1, r2, _ = st.columns(3)
+        if wiz.get("adjustment_type") == "Roll":
+            with r1:
+                wiz["recurring_start_cobid"] = _int_input("Start COBID *", "rec_start",
+                                                          wiz.get("recurring_start_cobid"))
+            with r2:
+                wiz["recurring_end_cobid"] = _int_input("End COBID *", "rec_end",
+                                                        wiz.get("recurring_end_cobid"))
+        else:
+            with r1:
+                wiz["recurring_end_cobid"] = _int_input("End COBID *", "rec_end",
+                                                        wiz.get("recurring_end_cobid"))
+
+    # ── Filters ──────────────────────────────────────────────────────────
+    section_title("Dimension Filters", "target")
+    _render_main_filters()
+    _render_extra_filters()
+
+    # ── Reason ───────────────────────────────────────────────────────────
+    section_title("Business Context", "file-text")
+    wiz["reason"] = st.text_area("Reason / Business Justification *",
+                                 value=wiz.get("reason", ""), height=70, key=_k("reason"))
+    wiz["requires_approval"] = st.checkbox("Requires Approval",
+                                           value=wiz.get("requires_approval", False),
+                                           key=_k("approval"))
 
 
 def render_direct_form() -> None:
-    # ── Scope selection (FRTBALL excluded — no fan-out for direct values) ──
-    _render_scope_selector(include_frtball=False)
-
-    st.divider()
-    if not wiz["process_type"]:
+    _render_scope_pills(include_frtball=False)
+    if not wiz.get("process_type"):
         st.info("Select a data scope to continue.")
         return
 
     expected_cols = _direct_expected_columns(wiz["process_type"])
-
-    section_title(f"Direct Adjustment — {wiz['process_type']} CSV", "upload")
+    section_title(f"CSV Upload — {wiz['process_type']}", "upload")
     if expected_cols:
-        _info_banner(
-            'Paste a CSV of exact adjustment values. Expected columns: '
-            '<code>' + ', '.join(expected_cols) + '</code>.')
+        _info_banner('Paste a CSV of exact adjustment values. Expected columns: '
+                     '<code>' + ', '.join(expected_cols) + '</code>.')
     else:
-        _info_banner(
-            f'No upload schema is configured for the <b>{wiz["process_type"]}</b> scope yet. '
-            'Paste a CSV; columns will be stored as-is.')
+        _info_banner(f'No upload schema is configured for the <b>{wiz["process_type"]}</b> '
+                     'scope yet. Paste a CSV; columns will be stored as-is.')
 
-    csv_text = st.text_area(
-        "Paste CSV Data Here", value="", height=180, key=_k("direct_csv"),
-        help="Paste the full CSV content including the header row.")
-
+    csv_text = st.text_area("Paste CSV Data Here", value="", height=160,
+                            key=_k("direct_csv"),
+                            help="Paste the full CSV content including the header row.")
     if csv_text.strip():
         try:
             from io import StringIO
@@ -350,14 +633,6 @@ def render_direct_form() -> None:
             if extra_cols:
                 st.info(f"Extra columns (will be ignored): {', '.join(extra_cols)}")
 
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Rows",     f"{len(df):,}")
-            m2.metric("Columns",  len(df.columns))
-            if "EntityCode" in df.columns:
-                m3.metric("Entities", df["EntityCode"].nunique())
-            if "BookCode" in df.columns:
-                m4.metric("Books", df["BookCode"].nunique())
-
             st.dataframe(df.head(20), use_container_width=True, height=200)
 
             if "COBId" in df.columns and len(df):
@@ -367,32 +642,28 @@ def render_direct_form() -> None:
         except Exception as exc:
             st.error(f"Failed to read CSV: {exc}")
 
-    st.divider()
-    g1, g2 = st.columns(2)
+    g1, g2, g3 = st.columns(3)
     with g1:
-        cobid_val = st.text_input("COB Date (auto-detected) *", key=_k("var_cobid"),
-                                   value=str(wiz.get("cobid") or ""))
-        if cobid_val.strip().isdigit():
-            wiz["cobid"] = int(cobid_val.strip())
+        wiz["cobid"] = _int_input("COB Date (auto-detected) *", "var_cobid",
+                                  wiz.get("cobid"), placeholder="")
     with g2:
-        entity_val = st.text_input("Entity Code (auto-detected) *", key=_k("var_entity"),
-                                    value=wiz.get("entity_code") or "")
-        if entity_val.strip():
-            wiz["entity_code"] = entity_val.strip()
+        ev = st.text_input("Entity Code (auto-detected) *", key=_k("var_entity"),
+                           value=wiz.get("entity_code") or "")
+        wiz["entity_code"] = ev.strip() or wiz.get("entity_code")
+    with g3:
+        rv = st.text_input("Reference *", key=_k("var_ref"),
+                           value=wiz.get("global_reference") or "",
+                           placeholder="e.g. CTN FX VaR",
+                           help="Unique reference for this upload. Re-submitting the same "
+                                "COB + Reference replaces the previous adjustment.")
+        wiz["global_reference"] = rv.strip() or None
 
-    ref_val = st.text_input(
-        "Reference *", key=_k("var_ref"),
-        value=wiz.get("global_reference") or "",
-        placeholder="e.g. CTN FX VaR",
-        help="Unique reference for this upload. If you submit again with the same COB + Reference, "
-             "the previous adjustment will be replaced.")
-    if ref_val.strip():
-        wiz["global_reference"] = ref_val.strip()
-
-    wiz["reason"] = st.text_area(
-        "Reason / Business Justification *", value=wiz.get("reason", ""),
-        height=60, key=_k("var_reason"))
-    wiz["requires_approval"] = _render_approval_flag("var_approval")
+    section_title("Business Context", "file-text")
+    wiz["reason"] = st.text_area("Reason / Business Justification *",
+                                 value=wiz.get("reason", ""), height=70, key=_k("var_reason"))
+    wiz["requires_approval"] = st.checkbox("Requires Approval",
+                                           value=wiz.get("requires_approval", False),
+                                           key=_k("var_approval"))
 
     # ── Duplicate reference check ────────────────────────────────────────
     if wiz.get("cobid") and wiz.get("global_reference"):
@@ -407,20 +678,19 @@ def render_direct_form() -> None:
             """)
         except Exception:
             dup_rows = []
-
         if dup_rows:
             dup_info = dup_rows[0]
             st.markdown(
-                f'<div style="background:#FFF3E0;border:2px solid #FFB74D;border-radius:10px;'
+                f'<div style="background:{P["warning_lt"]};border:1px solid #FDE68A;border-radius:10px;'
                 f'padding:1rem;margin:0.8rem 0">'
-                f'<div style="font-weight:700;font-size:0.92rem;color:#E65100;margin-bottom:0.4rem">'
+                f'<div style="font-weight:700;font-size:0.92rem;color:{P["warning"]};margin-bottom:0.4rem">'
                 f'{icon("alert-triangle", size=14, color="#B45309")} Existing adjustment found with the same Reference</div>'
-                f'<div style="font-size:0.83rem;color:#BF360C">'
+                f'<div style="font-size:0.83rem;color:{P["warning"]}">'
                 f'<strong>Adj ID:</strong> {fmt_adj_id(dup_info[5])} &nbsp;·&nbsp; '
                 f'<strong>Entity:</strong> {dup_info[1]} &nbsp;·&nbsp; '
                 f'<strong>Status:</strong> {dup_info[2]} &nbsp;·&nbsp; '
                 f'<strong>User:</strong> {dup_info[3]}<br/>'
-                f'If you continue, the previous adjustment will be <strong>soft-deleted</strong> '
+                f'If you submit, the previous adjustment will be <strong>soft-deleted</strong> '
                 f'and its data removed from the adjustment tables.</div></div>',
                 unsafe_allow_html=True)
             wiz["_dup_adj_ids"] = [r[0] for r in dup_rows]
@@ -429,757 +699,163 @@ def render_direct_form() -> None:
     else:
         wiz["_dup_adj_ids"] = []
 
-    st.markdown("<br/>", unsafe_allow_html=True)
-    _checks = [
-        ("Scope",        bool(wiz.get("process_type"))),
-        ("CSV Data",     wiz.get("uploaded_df") is not None),
-        ("COB Date",     bool(wiz.get("cobid"))),
-        ("Entity Code",  bool(wiz.get("entity_code"))),
-        ("Reference",    bool(wiz.get("global_reference"))),
-        ("Reason",       bool((wiz.get("reason") or "").strip())),
-    ]
-    missing = [f for f, present in _checks if not present]
-    if missing:
-        _missing_info(missing)
-    else:
-        if wiz.get("_dup_adj_ids"):
-            confirmed = st.checkbox(
-                "I confirm I want to replace the existing adjustment(s) with this upload",
-                key=_k("var_dup_confirm"), value=False)
-        else:
-            confirmed = True
-
-        if confirmed:
-            if st.button("Continue → Preview", type="primary",
-                         use_container_width=True, key=_k("direct_continue")):
-                wiz["step"] = 2
-                safe_rerun()
-
-
-# ── Entity Roll ──────────────────────────────────────────────────────────────
 
 def render_entity_roll_form() -> None:
-    section_title("Entity Roll — Full Entity Copy", "refresh-cw")
-
     st.markdown(
-        f'<div style="background:#FFF3E0;border:2px solid #FFB74D;border-radius:10px;'
-        f'padding:1rem;margin-bottom:1rem">'
-        f'<div style="font-weight:700;font-size:0.95rem;color:#E65100;margin-bottom:0.4rem">'
-        f'{icon("alert-triangle", size=14, color="#B45309")} Destructive Operation — Approval Required</div>'
-        f'<div style="font-size:0.84rem;color:#BF360C">'
-        f'This operation will <strong>delete all existing data</strong> for the target COB + Entity '
-        f'in both the FACT table and FACT ADJUSTED table, then <strong>copy all data</strong> from '
-        f'the source COB + Entity. No delta calculation is performed.<br/><br/>'
-        f'All source adjustment records will be consolidated under a single new Adjustment ID.<br/><br/>'
-        f'<strong>This adjustment always requires approval before processing.</strong>'
-        f'</div></div>',
+        f'<div style="background:{P["warning_lt"]};border:1px solid #FDE68A;border-radius:10px;'
+        f'padding:0.8rem 1rem;margin-bottom:0.6rem">'
+        f'<div style="font-weight:700;font-size:0.9rem;color:{P["warning"]};margin-bottom:0.3rem">'
+        f'{icon("alert-triangle", size=14, color="#B45309")} Entity Roll replaces the whole entity — approval required</div>'
+        f'<div style="font-size:0.82rem;color:{P["warning"]}">'
+        f'All data for the target COB + Entity is replaced by the source COB\'s data. '
+        f'Source adjustments are consolidated under one new Adjustment ID.</div></div>',
         unsafe_allow_html=True)
 
-    # Scope selection
-    section_title("Data Scope", "search")
-    scope_cols = st.columns(len(SCOPE_CONFIG))
-    for i, (sk, cfg) in enumerate(SCOPE_CONFIG.items()):
-        with scope_cols[i]:
-            is_sel = wiz.get("process_type") == sk
-            st.markdown(
-                f'<div style="background:{"#E3F2FD" if is_sel else P["white"]};'
-                f'border:2px solid {P["primary"] if is_sel else P["border"]};'
-                f'border-radius:10px;padding:0.6rem;text-align:center">'
-                f'<div>{icon(cfg.get("icon","bar-chart"), size=20, color=cfg.get("color", P["grey_700"]), valign="0")}</div>'
-                f'<div style="font-weight:600;font-size:0.82rem">{sk}</div></div>',
-                unsafe_allow_html=True)
-            if st.button(sk, key=_k(f"er_scope_{sk}"), use_container_width=True,
-                         type="primary" if is_sel else "secondary"):
-                wiz["process_type"] = sk
-                safe_rerun()
-
+    _render_scope_pills(include_frtball=False)
     if not wiz.get("process_type"):
         st.info("Select a scope to continue.")
         return
 
-    st.divider()
     g1, g2, g3 = st.columns(3)
     with g1:
-        cobid_val = st.text_input("Target COB Date (YYYYMMDD) *", key=_k("er_cobid"),
-                                   value=str(wiz.get("cobid") or ""),
-                                   placeholder="e.g. 20260328")
-        if cobid_val.strip().isdigit():
-            wiz["cobid"] = int(cobid_val.strip())
+        wiz["cobid"] = _int_input("Target COB (YYYYMMDD) *", "er_cobid", wiz.get("cobid"))
     with g2:
-        src_val = st.text_input("Source COB Date (YYYYMMDD) *", key=_k("er_src_cobid"),
-                                 value=str(wiz.get("source_cobid") or ""),
-                                 placeholder="e.g. 20260327")
-        if src_val.strip().isdigit():
-            wiz["source_cobid"] = int(src_val.strip())
+        wiz["source_cobid"] = _int_input("Source COB (YYYYMMDD) *", "er_src_cobid",
+                                         wiz.get("source_cobid"), placeholder="e.g. 20260327")
     with g3:
-        wiz["entity_code"] = st.text_input(
-            "Entity Code *", key=_k("er_entity"),
-            value=wiz.get("entity_code") or "", placeholder="e.g. MUSE")
+        wiz["entity_code"] = st.text_input("Entity Code *", key=_k("er_entity"),
+                                           value=wiz.get("entity_code") or "",
+                                           placeholder="e.g. MUSE")
 
-    st.divider()
-    wiz["reason"] = st.text_area(
-        "Reason / Business Justification *", value=wiz.get("reason", ""),
-        height=60, key=_k("er_reason"), placeholder="e.g. Rolling MUSE VaR from previous business day")
-
-    # Approval is always required — show locked checkbox
+    section_title("Business Context", "file-text")
+    wiz["reason"] = st.text_area("Reason / Business Justification *",
+                                 value=wiz.get("reason", ""), height=70, key=_k("er_reason"),
+                                 placeholder="e.g. Rolling MUSE VaR from previous business day")
     st.checkbox("Requires Approval", value=True, disabled=True, key=_k("er_approval"))
-
-    st.markdown("<br/>", unsafe_allow_html=True)
-    missing = [f for f, v in [("Scope", wiz.get("process_type")),
-                               ("Target COB", wiz.get("cobid")),
-                               ("Source COB", wiz.get("source_cobid")),
-                               ("Entity Code", (wiz.get("entity_code") or "").strip()),
-                               ("Reason / Business Justification",
-                                                  (wiz.get("reason") or "").strip())] if not v]
-    if wiz.get("cobid") and wiz.get("source_cobid") and wiz["cobid"] == wiz["source_cobid"]:
-        st.error("Source COB and Target COB must be different for an Entity Roll.")
-    elif missing:
-        _missing_info(missing)
-    else:
-        if st.button("Continue → Preview", type="primary",
-                     use_container_width=True, key=_k("er_continue")):
-            wiz["adjustment_type"] = "Entity_Roll"
-            wiz["requires_approval"] = True
-            wiz["step"] = 2
-            safe_rerun()
+    wiz["adjustment_type"]   = "Entity_Roll"
+    wiz["requires_approval"] = True
 
 
-# ── Scaling Adjustment ────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# RIGHT COLUMN — LIVE TICKET
+# ══════════════════════════════════════════════════════════════════════════════
 
-FRTB_SUBTYPES = ["FRTB", "FRTBDRC", "FRTBRRAO", "FRTBALL"]
-FRTB_SUBTYPE_CONFIG = {
-    "FRTB":     "Standard FRTB",
-    "FRTBDRC":  "Default Risk Charge",
-    "FRTBRRAO": "Residual Risk Add-On",
-    "FRTBALL":  "All FRTB (combined)",
-}
+def _ticket_html(missing: list) -> str:
+    cat = wiz.get("category")
+    rows = [("Category", cat or "—")]
 
+    if cat == "Entity Roll":
+        rows += [("Scope",  wiz.get("process_type") or "—"),
+                 ("Entity", wiz.get("entity_code") or "—"),
+                 ("Roll",   f'{wiz.get("source_cobid") or "?"} → {wiz.get("cobid") or "?"}')]
+    elif cat == "Direct Adjustment":
+        df_up = wiz.get("uploaded_df")
+        rows += [("Scope",     wiz.get("process_type") or "—"),
+                 ("COB",       wiz.get("cobid") or "—"),
+                 ("Reference", wiz.get("global_reference") or "—"),
+                 ("CSV rows",  f"{len(df_up):,}" if df_up is not None else "—")]
+    elif cat == "Scaling Adjustment":
+        type_txt = wiz.get("adjustment_type") or "—"
+        if wiz.get("adjustment_type") in ("Scale", "Roll"):
+            type_txt += f' ×{wiz.get("scale_factor", 1.0):g}'
+        cob_txt = str(wiz.get("cobid") or "—")
+        if wiz.get("adjustment_type") == "Roll" and wiz.get("source_cobid"):
+            cob_txt = f'{wiz.get("source_cobid")} → {wiz.get("cobid") or "?"}'
+        rows += [("Scope", wiz.get("process_type") or "—"),
+                 ("Type",  type_txt),
+                 ("COB",   cob_txt)]
+        if wiz.get("occurrence") == "RECURRING":
+            rows.append(("Recurring",
+                         f'{wiz.get("recurring_start_cobid") or "?"} → '
+                         f'{wiz.get("recurring_end_cobid") or "?"}'))
+        applied = [(k, str(wiz.get(k)).strip()) for k in FILTER_KEYS
+                   if (wiz.get(k) or "") and str(wiz.get(k)).strip()]
+        rows.append(("Filters", f"{len(applied)} applied" if applied else "All records"))
 
-def _render_scope_selector(include_frtball: bool = True) -> None:
-    """Scope cards (VaR/Stress/FRTB/Sensitivity) + FRTB sub-type selector.
+    rows.append(("Approval", "Required" if wiz.get("requires_approval") else "Not required"))
 
-    Sets wiz['process_type']. Shared by the Scaling and Direct Adjustment forms.
-    include_frtball=False hides the FRTBALL sub-type (Direct Adjustment uploads
-    explicit values, so the fan-out tag does not apply).
-    """
-    # ── Scope cards ───────────────────────────────────────────────────────
-    section_title("Data Scope", "search")
-    scope_cols = st.columns(len(SCOPE_CONFIG))
-    for i, (sk, cfg) in enumerate(SCOPE_CONFIG.items()):
-        with scope_cols[i]:
-            is_sel = (wiz["process_type"] in FRTB_SUBTYPES) if sk == "FRTB" \
-                     else (wiz["process_type"] == sk)
-            st.markdown(
-                f'<div style="background:{cfg["bg"] if is_sel else P["white"]};'
-                f'border:2px solid {P["primary"] if is_sel else P["border"]};'
-                f'border-radius:10px;padding:0.6rem 0.4rem;text-align:center">'
-                f'<div>{icon(cfg["icon"], size=24, color=cfg["color"], valign="0")}</div>'
-                f'<div style="font-weight:700;font-size:0.8rem;margin-top:0.2rem">'
-                f'{cfg["label"]}</div></div>', unsafe_allow_html=True)
-            if st.button(f'{"✓ " if is_sel else ""}{cfg["label"]}',
-                         key=_k(f"scope_{sk}"), use_container_width=True,
-                         type="primary" if is_sel else "secondary"):
-                wiz["process_type"] = sk
-                safe_rerun()
+    kv = "".join(f'<div class="kv"><span class="k">{k}</span>'
+                 f'<span class="v">{v}</span></div>' for k, v in rows)
 
-    # FRTB sub-type selector
-    if wiz["process_type"] in FRTB_SUBTYPES:
-        st.markdown(
-            f'<div style="background:{P["success_lt"]};border:1px solid #A5D6A7;'
-            f'border-radius:8px;padding:0.5rem 1rem;margin:0.5rem 0 0.3rem;'
-            f'font-size:0.82rem;color:{P["success"]}">'
-            f'{icon("landmark", size=14, color=P["success"])} <strong>FRTB selected</strong> — choose a sub-type</div>',
-            unsafe_allow_html=True)
-        subtypes = {k: v for k, v in FRTB_SUBTYPE_CONFIG.items()
-                    if include_frtball or k != "FRTBALL"}
-        sub_cols = st.columns(len(subtypes))
-        for i, (stk, stdesc) in enumerate(subtypes.items()):
-            with sub_cols[i]:
-                is_sub = wiz["process_type"] == stk
-                st.markdown(
-                    f'<div style="background:{P["success_lt"] if is_sub else P["white"]};'
-                    f'border:2px solid {P["success"] if is_sub else P["border"]};'
-                    f'border-radius:8px;padding:0.5rem 0.3rem;text-align:center">'
-                    f'<div style="font-weight:700;font-size:0.82rem">{stk}</div>'
-                    f'<div style="font-size:0.68rem;color:{P["grey_700"]};margin-top:2px">'
-                    f'{stdesc}</div></div>', unsafe_allow_html=True)
-                if st.button(f'{"✓ " if is_sub else ""}{stk}',
-                             key=_k(f"frtb_{stk}"), use_container_width=True,
-                             type="primary" if is_sub else "secondary"):
-                    wiz["process_type"] = stk
-                    safe_rerun()
+    # Applied-filter chips (Scaling only) — mirrors the form selections
+    if cat == "Scaling Adjustment":
+        label_map = {"entity_code": "Entity", "source_system_code": "Source",
+                     "department_code": "Dept", "book_code": "Book"}
+        label_map.update({k: l for k, l, _ in ALL_EXTRA_FIELDS})
+        chips = "".join(
+            f'<span class="filter-chip">{label_map.get(k, k)}: {v}</span>'
+            for k, v in applied)
+        if chips:
+            kv += f'<div class="adj-filters" style="margin-top:6px">{chips}</div>'
 
+    # ── Impact block ─────────────────────────────────────────────────────
+    imp = ""
+    if cat == "Scaling Adjustment" and _is_entity_only(wiz) and not missing:
+        imp = (f'<div class="t-warn">{icon("alert-triangle", size=12, color="#B45309")} '
+               f'<strong>Entity-wide adjustment</strong> — applies to every book and '
+               f'department of {wiz.get("entity_code")}. Preview is skipped for '
+               f'broad-scope adjustments; processing waits until the scope is idle.</div>')
+    elif wiz.get("_preview_sum") is not None:
+        s = wiz["_preview_sum"]
+        stale = (wiz.get("_preview_for") != json.dumps(_preview_payload(), sort_keys=True,
+                                                       default=str)) \
+                if cat == "Scaling Adjustment" else False
+        note = ('<div style="font-size:0.68rem;color:#B45309;margin-top:3px">'
+                'Filters changed — re-run the preview.</div>') if stale else ""
+        imp = (f'<div class="t-imp">'
+               f'<div style="font-size:0.66rem;font-weight:700;text-transform:uppercase;'
+               f'letter-spacing:.07em;color:{P["grey_700"]};margin-bottom:3px">Impact preview</div>'
+               f'<div class="kv"><span class="k">Rows affected</span>'
+               f'<span class="v">{int(s.get("ROWS_AFFECTED") or 0):,}</span></div>'
+               f'<div class="kv"><span class="k">Non-zero rows</span>'
+               f'<span class="v">{int(s.get("NONZERO_ROWS") or 0):,}</span></div>'
+               f'<div class="kv"><span class="k">Original</span>'
+               f'<span class="v">{_fmt_money(s.get("TOTAL_CURRENT_VALUE"))}</span></div>'
+               f'<div class="kv"><span class="k">Adjustment</span>'
+               f'<span class="v">{_fmt_money(s.get("TOTAL_ADJUSTMENT_DELTA"))}</span></div>'
+               f'<div class="kv"><span class="k">Projected</span>'
+               f'<span class="v">{_fmt_money(s.get("TOTAL_PROJECTED_VALUE"))}</span></div>'
+               f'{note}</div>')
 
-def render_scaling_form() -> None:
-    # ── Scope selection (shared with Direct Adjustment) ───────────────────
-    _render_scope_selector()
-
-    st.divider()
-    if not wiz["process_type"]:
-        st.info("Select a data scope to continue.")
-        return
-
-    # ── Adjustment Type  +  Date & Schedule ──────────────────────────────
-    left_col, right_col = st.columns([3, 2], gap="large")
-
-    with left_col:
-        section_title("Adjustment Type", "zap")
-        type_cols = st.columns(len(TYPE_CONFIG))
-        for i, (tk, tcfg) in enumerate(TYPE_CONFIG.items()):
-            with type_cols[i]:
-                is_sel = wiz["adjustment_type"] == tk
-                st.markdown(
-                    f'<div style="background:{"#FFF0F3" if is_sel else P["white"]};'
-                    f'border:2px solid {P["primary"] if is_sel else P["border"]};'
-                    f'border-radius:10px;padding:0.6rem 0.4rem;text-align:center">'
-                    f'<div>{icon(tcfg["icon"], size=20, color=P["primary"] if is_sel else P["grey_700"], valign="0")}</div>'
-                    f'<div style="font-weight:700;font-size:0.78rem;margin:0.2rem 0">{tk}</div>'
-                    f'<div style="font-size:0.68rem;color:{P["grey_700"]}">{tcfg["desc"]}</div>'
-                    f'</div>', unsafe_allow_html=True)
-                if st.button(f'{"✓ " if is_sel else ""}{tk}',
-                             key=_k(f"type_{tk}"), use_container_width=True,
-                             type="primary" if is_sel else "secondary"):
-                    wiz["adjustment_type"] = tk
-                    safe_rerun()
-
-        if wiz["adjustment_type"]:
-            st.markdown(
-                f'<div style="background:{P["grey_100"]};border-radius:6px;'
-                f'padding:0.5rem 0.8rem;font-size:0.78rem;color:{P["grey_700"]};'
-                f'margin-top:0.5rem;font-family:monospace">'
-                f'Formula: {TYPE_CONFIG[wiz["adjustment_type"]]["formula"]}</div>',
-                unsafe_allow_html=True)
-
-    with right_col:
-        section_title("Date & Schedule", "calendar")
-        wiz["occurrence"] = st.radio(
-            "Frequency", ["ADHOC", "RECURRING"],
-            index=0 if wiz.get("occurrence", "ADHOC") == "ADHOC" else 1,
-            horizontal=True, key=_k("freq"))
-
-        if wiz["occurrence"] == "ADHOC":
-            cobid_val = st.text_input(
-                "COB Date (YYYYMMDD) *", key=_k("cobid"),
-                value=str(wiz.get("cobid") or ""), placeholder="e.g. 20260328")
-            if cobid_val.strip().isdigit():
-                wiz["cobid"] = int(cobid_val.strip())
-        else:
-            st.info("Recurring adjustments repeat daily between start and end COB.")
-            cobid_val = st.text_input(
-                "First COB Date (YYYYMMDD) *", key=_k("cobid_r"),
-                value=str(wiz.get("cobid") or ""), placeholder="e.g. 20260328")
-            if cobid_val.strip().isdigit():
-                wiz["cobid"] = int(cobid_val.strip())
-            rc1, rc2 = st.columns(2)
-            with rc1:
-                rs = st.text_input("Start COBID *", key=_k("rec_start"),
-                                    value=str(wiz.get("recurring_start_cobid") or ""))
-                if rs.strip().isdigit():
-                    wiz["recurring_start_cobid"] = int(rs.strip())
-            with rc2:
-                re_ = st.text_input("End COBID *", key=_k("rec_end"),
-                                     value=str(wiz.get("recurring_end_cobid") or ""))
-                if re_.strip().isdigit():
-                    wiz["recurring_end_cobid"] = int(re_.strip())
-
-        if wiz["adjustment_type"] == "Roll":
-            src_val = st.text_input(
-                "Source COB (roll from) *", key=_k("src_cobid"),
-                value=str(wiz.get("source_cobid") or ""))
-            if src_val.strip().isdigit():
-                wiz["source_cobid"] = int(src_val.strip())
-
-        if wiz["adjustment_type"] in ("Scale", "Roll"):
-            section_title("Scale Factor", "sliders")
-            wiz["scale_factor"] = st.number_input(
-                "Scale Factor", value=float(wiz.get("scale_factor", 1.0)),
-                min_value=-10.0, max_value=100.0, step=0.01, format="%.4f",
-                help="1.05 = +5%,  0.95 = −5%", key=_k("sf"))
-
-    st.divider()
-
-    # ── Dimension Filters ────────────────────────────────────────────────
-    # Fields are organized into 3 tiers:
-    #   1. Main (always visible): common across all process types
-    #   2. Scope-specific (visible when process type selected): varies by scope
-    #   3. Additional (collapsed): rarely used, available if needed
-
-    SCOPE_FIELDS = {
-        "VaR": {
-            "custom": [],
-        },
-        "Stress": {
-            "custom": [
-                ("simulation_name",   "Simulation Name",   "e.g. MRM_GLB_Std_EQ_M_PriceDnVolUp"),
-                ("trade_typology",    "Trade Typology",    "e.g. EQTT"),
-                ("instrument_code",   "Instrument Code",   "e.g. US4642872422 US"),
-            ],
-        },
-        "Sensitivity": {
-            "custom": [
-                ("measure_type_code", "Measure Type Code", "e.g. FxDeltaExp"),
-                ("strategy",          "Strategy",          "e.g. SSA00306"),
-                ("trade_typology",    "Trade Typology",    "e.g. FEXF"),
-                ("instrument_code",   "Instrument Code",   "e.g. US46090E1038 US"),
-            ],
-        },
-        "FRTB": {
-            "custom": [
-                ("measure_type_code", "Measure Type Code", "e.g. FRTBCSRDelta"),
-                ("instrument_code",   "Instrument Code",   "e.g. US92826C8394 US"),
-                ("strategy",          "Strategy",          "e.g. SSU00332"),
-            ],
-        },
-    }
-    # FRTB sub-types share the same fields
-    for fst in FRTB_SUBTYPES:
-        if fst not in SCOPE_FIELDS:
-            SCOPE_FIELDS[fst] = SCOPE_FIELDS["FRTB"]
-
-    pt = wiz.get("process_type", "")
-
-    section_title("Dimension Filters", "target")
-    st.caption("Leave blank to include all values for that dimension.")
-
-    # ── Tier 1: Main fields (always visible) ─────────────────────────────
-    st.markdown(
-        f'<div style="font-size:0.78rem;font-weight:700;text-transform:uppercase;'
-        f'letter-spacing:0.05em;color:{P["primary"]};margin-bottom:0.3rem">'
-        f'Main Filters</div>', unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        wiz["entity_code"]     = st.text_input("Entity Code *",    key=_k("entity"),
-                                                value=wiz.get("entity_code") or "",
-                                                placeholder="e.g. MUSI")
-    with c2:
-        wiz["source_system_code"] = st.text_input("Source System",  key=_k("src_sys"),
-                                                    value=wiz.get("source_system_code") or "",
-                                                    placeholder="e.g. MS")
-    with c3:
-        wiz["department_code"] = st.text_input("Department Code †", key=_k("dept"),
-                                                value=wiz.get("department_code") or "")
-    with c4:
-        wiz["book_code"]       = st.text_input("Book Code †",       key=_k("book"),
-                                                value=wiz.get("book_code") or "")
-    st.caption("† Provide at least one of Department Code or Book Code.")
-
-    # ── Tier 2: Scope-specific fields ────────────────────────────────────
-    custom_fields = SCOPE_FIELDS.get(pt, {}).get("custom", [])
-    if custom_fields:
-        st.markdown(
-            f'<div style="font-size:0.78rem;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:0.05em;color:{P["info"]};margin:0.6rem 0 0.3rem">'
-            f'{pt} Filters</div>', unsafe_allow_html=True)
-        custom_cols = st.columns(min(len(custom_fields), 4))
-        for i, (field_key, field_label, placeholder) in enumerate(custom_fields):
-            with custom_cols[i % len(custom_cols)]:
-                wiz[field_key] = st.text_input(field_label, key=_k(field_key),
-                                                value=wiz.get(field_key) or "",
-                                                placeholder=placeholder)
-
-    # ── Tier 3: Additional fields (collapsed) ────────────────────────────
-    # Collect keys already shown in tier 1 + tier 2
-    shown_keys = {"entity_code", "source_system_code", "department_code", "book_code"}
-    shown_keys.update(fk for fk, _, _ in custom_fields)
-
-    ALL_EXTRA_FIELDS = [
-        ("currency_code",                "Currency Code",                "e.g. USD"),
-        ("trade_typology",               "Trade Typology",               "e.g. FEXF"),
-        ("trade_code",                   "Trade Code",                   ""),
-        ("strategy",                     "Strategy",                     ""),
-        ("instrument_code",              "Instrument Code",              ""),
-        ("simulation_name",              "Simulation Name",              ""),
-        ("simulation_source",            "Simulation Source",            ""),
-        ("measure_type_code",            "Measure Type Code",            ""),
-        ("trader_code",                  "Trader Code",                  ""),
-        ("var_component_id",             "VaR Component ID",             ""),
-        ("var_sub_component_id",         "VaR Sub-Component ID",         ""),
-        ("guaranteed_entity",            "Guaranteed Entity",            ""),
-        ("region_key",                   "Region Key",                   ""),
-        ("scenario_date_id",             "Scenario Date ID",             ""),
-        ("tenor_code",                   "Tenor Code",                   ""),
-        ("underlying_tenor_code",        "Underlying Tenor Code",        ""),
-        ("curve_code",                   "Curve Code",                   ""),
-        ("day_type",                     "Day Type",                     ""),
-        ("product_category_attributes",  "Product Category Attributes",  ""),
-        ("batch_region_area",            "Batch Region Area",            ""),
-        ("murex_family",                 "Murex Family",                 ""),
-        ("murex_group",                  "Murex Group",                  ""),
-    ]
-    extra_fields = [(k, l, p) for k, l, p in ALL_EXTRA_FIELDS if k not in shown_keys]
-
-    if extra_fields:
-        with st.expander("Additional Filters", expanded=False):
-            extra_cols = st.columns(3)
-            for i, (field_key, field_label, placeholder) in enumerate(extra_fields):
-                with extra_cols[i % 3]:
-                    wiz[field_key] = st.text_input(field_label, key=_k(field_key),
-                                                    value=wiz.get(field_key) or "",
-                                                    placeholder=placeholder)
-
-    st.divider()
-
-    # ── Business Context ─────────────────────────────────────────────────
-    wiz["reason"] = st.text_area(
-        "Reason / Business Justification *", value=wiz.get("reason", ""),
-        height=80, key=_k("reason"))
-    wiz["requires_approval"] = _render_approval_flag("approval")
-
-    st.markdown("<br/>", unsafe_allow_html=True)
-    missing = [f for f, v in [("Adjustment Type", wiz.get("adjustment_type")),
-                               ("Entity Code",     (wiz.get("entity_code") or "").strip()),
-                               ("COB Date",        wiz.get("cobid")),
-                               ("Reason / Business Justification",
-                                                   (wiz.get("reason") or "").strip())] if not v]
-    if wiz.get("occurrence") == "RECURRING":
-        for f, v in [("Start COBID", wiz.get("recurring_start_cobid")),
-                     ("End COBID",   wiz.get("recurring_end_cobid"))]:
-            if not v:
-                missing.append(f)
-
-    # At least one of Department Code or Book Code is required.
-    if not (wiz.get("department_code") or "").strip() \
-            and not (wiz.get("book_code") or "").strip():
-        missing.append("Department Code or Book Code")
-
+    # ── Missing fields ───────────────────────────────────────────────────
+    miss = ""
     if missing:
-        _missing_info(missing)
-    else:
-        if st.button("Continue → Preview", type="primary",
-                     use_container_width=True, key=_k("scale_continue")):
-            wiz["step"] = 2
-            safe_rerun()
+        items = " · ".join(missing)
+        miss = (f'<div class="t-missing">{icon("info", size=12, color=P["grey_700"])} '
+                f'<strong>To complete:</strong> {items}</div>')
+
+    return (f'<div class="ticket">'
+            f'<div class="t-head">{icon("file-text", size=14, color=P["primary"])} Ticket</div>'
+            f'<div class="t-body">{kv}{imp}{miss}</div>'
+            f'</div>')
+
+
+def _run_preview() -> None:
+    """Run the summary-mode preview SP and stash the single aggregate row."""
+    payload = _preview_payload()
+    try:
+        df_sum = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                            json.dumps({**payload, "mode": "summary"}))
+        if df_sum.empty or "ROWS_AFFECTED" not in df_sum.columns:
+            msg_col = next((c for c in df_sum.columns if "MESSAGE" in c.upper()), None)
+            wiz["_preview_err"] = (str(df_sum.iloc[0][msg_col]) if msg_col and not df_sum.empty
+                                   else "Couldn't calculate a preview for these filters.")
+            wiz["_preview_sum"] = None
+        else:
+            wiz["_preview_sum"] = df_sum.iloc[0].to_dict()
+            wiz["_preview_err"] = None
+            wiz["_preview_for"] = json.dumps(payload, sort_keys=True, default=str)
+    except Exception as exc:
+        wiz["_preview_err"] = str(exc)
+        wiz["_preview_sum"] = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE LAYOUT — STEP BAR + ROUTER
+# PAGE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _is_entity_only(wiz: dict) -> bool:
-    """True when a Scaling Adjustment is broad-scope (entity set, no book or department).
-
-    Entity+currency is treated as broad-scope because it still targets millions of
-    rows and the preview times out. The pipeline blocking logic already handles it
-    correctly — only book_code and department_code narrow the scope meaningfully.
-    """
-    if wiz.get("category") != "Scaling Adjustment":
-        return False
-    if not (wiz.get("entity_code") or "").strip():
-        return False
-    # Broad-scope: no book_code and no department_code (currency alone doesn't narrow enough)
-    has_book = bool((wiz.get("book_code") or "").strip())
-    has_dept = bool((wiz.get("department_code") or "").strip())
-    return not has_book and not has_dept
-
-
-STEPS = ["Category & Details", "Preview & Submit"]
-
-if wiz["step"] in (1, 2):
-    render_step_bar(wiz["step"], STEPS)
-    st.markdown("<br/>", unsafe_allow_html=True)
-
-
-# ── STEP 1 : Category & Details ───────────────────────────────────────────────
-
-if wiz["step"] == 1:
-    section_title("Adjustment Category", "layers")
-    cat_cols = st.columns(len(CATEGORY_CONFIG))
-    for i, (ck, ccfg) in enumerate(CATEGORY_CONFIG.items()):
-        with cat_cols[i]:
-            is_sel = wiz["category"] == ck
-            st.markdown(
-                f'<div style="background:{ccfg["bg"] if is_sel else P["white"]};'
-                f'border:2px solid {P["primary"] if is_sel else P["border"]};'
-                f'border-radius:10px;padding:0.8rem 0.5rem;'
-                f'text-align:center;min-height:130px">'
-                f'<div>{icon(ccfg["icon"], size=26, color=ccfg["color"], valign="0")}</div>'
-                f'<div style="font-weight:700;font-size:0.85rem;margin-top:0.3rem">{ck}</div>'
-                f'<div style="font-size:0.68rem;color:{P["grey_700"]};margin-top:0.2rem">'
-                f'{ccfg["desc"]}</div></div>', unsafe_allow_html=True)
-            if st.button(f'{"✓ " if is_sel else ""}{ck}',
-                         key=_k(f"cat_{ck}"), use_container_width=True,
-                         type="primary" if is_sel else "secondary"):
-                wiz.update({"category": ck, "process_type": None,
-                             "adjustment_type": None,
-                             "uploaded_df": None, "uploaded_file_name": None})
-                safe_rerun()
-
-    st.divider()
-
-    if not wiz["category"]:
-        st.info("Select an adjustment category to continue.")
-    elif wiz["category"] == "Direct Adjustment":
-        render_direct_form()
-    elif wiz["category"] == "Entity Roll":
-        render_entity_roll_form()
-    else:
-        render_scaling_form()
-
-
-# ── STEP 2 : Preview & Submit ─────────────────────────────────────────────────
-
-elif wiz["step"] == 2:
-    cat       = wiz.get("category") or "Scaling Adjustment"
-    scope_cfg = SCOPE_CONFIG.get(wiz.get("process_type", ""), {})
-
-    section_title("Adjustment Summary", "file-text")
-
-    # ── Summary banner ────────────────────────────────────────────────────
-    if cat == "Direct Adjustment":
-        df_up     = wiz.get("uploaded_df")
-        row_count = len(df_up) if df_up is not None else 0
-        st.markdown(
-            f'<div class="mcard">'
-            f'<div style="display:flex;gap:16px;align-items:center">'
-            f'<span>{icon("upload", size=30, color=P["purple"], valign="0")}</span>'
-            f'<div><div style="font-weight:700;font-size:1.1rem">'
-            f'{wiz.get("process_type","")} — Direct</div>'
-            f'<div style="font-size:0.85rem;color:{P["grey_700"]}">'
-            f'Ref: {wiz.get("global_reference","?")} · '
-            f'File: {wiz.get("uploaded_file_name","?")} · '
-            f'{row_count:,} rows · COB: {wiz["cobid"]}'
-            f'</div></div></div></div>', unsafe_allow_html=True)
-        if df_up is not None:
-            section_title(f"Data Preview ({row_count:,} rows)", "table")
-            st.dataframe(df_up.head(50), use_container_width=True, height=300)
-
-        if wiz.get("_dup_adj_ids"):
-            dup_count = len(wiz["_dup_adj_ids"])
-            st.markdown(
-                f'<div style="background:#FFF3E0;border:2px solid #FFB74D;border-radius:10px;'
-                f'padding:1rem;margin:0.8rem 0">'
-                f'<div style="font-weight:700;font-size:0.92rem;color:#E65100">'
-                f'{icon("alert-triangle", size=14, color="#B45309")} Replacing {dup_count} existing adjustment(s) with reference '
-                f'"{wiz.get("global_reference","")}" on COB {wiz.get("cobid","")}</div>'
-                f'<div style="font-size:0.83rem;color:#BF360C;margin-top:0.3rem">'
-                f'Previous adjustment data will be soft-deleted from ADJ_HEADER and '
-                f'DIMENSION.ADJUSTMENT, and removed from FACT adjustment tables on submission.</div>'
-                f'</div>', unsafe_allow_html=True)
-
-    elif cat == "Entity Roll":
-        st.markdown(
-            f'<div class="mcard" style="border-left:4px solid #E65100">'
-            f'<div style="display:flex;gap:16px;align-items:center">'
-            f'<span>{icon("refresh-cw", size=30, color="#B45309", valign="0")}</span>'
-            f'<div><div style="font-weight:700;font-size:1.1rem">'
-            f'{wiz.get("process_type","")} — Entity Roll</div>'
-            f'<div style="font-size:0.85rem;color:{P["grey_700"]}">'
-            f'Entity: {wiz.get("entity_code","")} · '
-            f'Source COB: {wiz.get("source_cobid","")} → Target COB: {wiz.get("cobid","")}'
-            f'</div></div></div></div>', unsafe_allow_html=True)
-
-        st.markdown(
-            f'<div style="background:#FFF3E0;border:1px solid #FFB74D;border-radius:8px;'
-            f'padding:0.75rem 1rem;margin-top:0.8rem;font-size:0.83rem;color:#E65100">'
-            f'{icon("alert-triangle", size=14, color="#B45309")} <strong>This will delete all {wiz.get("process_type","")} data for '
-            f'COB {wiz.get("cobid","")} / Entity {wiz.get("entity_code","")}</strong> '
-            f'in both FACT and FACT ADJUSTED tables, then copy from '
-            f'COB {wiz.get("source_cobid","")}. '
-            f'This operation requires approval before it is processed.</div>',
-            unsafe_allow_html=True)
-
-        if wiz.get("reason"):
-            st.markdown(
-                f'<div class="mcard" style="margin-top:0.8rem">'
-                f'<strong>Reason:</strong> {wiz.get("reason","")}</div>',
-                unsafe_allow_html=True)
-
-    else:  # Scaling Adjustment
-        scale_info = (f' · Scale: {wiz.get("scale_factor", 1.0)}×'
-                      if wiz.get("adjustment_type") in ("Scale", "Roll") else "")
-        rec_info   = (f' · Recurring: {wiz.get("recurring_start_cobid")} → '
-                      f'{wiz.get("recurring_end_cobid")}'
-                      if wiz.get("occurrence") == "RECURRING" else "")
-        st.markdown(
-            f'<div class="mcard">'
-            f'<div style="display:flex;gap:16px;align-items:center">'
-            f'<span>{icon(scope_cfg.get("icon","bar-chart"), size=30, color=scope_cfg.get("color", P["grey_700"]), valign="0")}</span>'
-            f'<div><div style="font-weight:700;font-size:1.1rem">'
-            f'{wiz.get("process_type","")} — {wiz.get("adjustment_type","")}</div>'
-            f'<div style="font-size:0.85rem;color:{P["grey_700"]}">'
-            f'COB: {wiz["cobid"]} · {wiz.get("occurrence","ADHOC")}'
-            f'{scale_info}{rec_info}</div></div></div></div>',
-            unsafe_allow_html=True)
-
-        render_filter_chips(wiz)
-
-        # ── Impact Preview ─────────────────────────────────────────────────
-        section_title("Impact Preview", "eye")
-
-        if _is_entity_only(wiz):
-            st.info(
-                f"**Entity-wide adjustment** — this applies to all books and departments "
-                f"for entity **{wiz.get('entity_code')}** on COB **{wiz['cobid']}**. "
-                f"Data preview is skipped for broad-scope adjustments to avoid timeouts. "
-                f"The adjustment will be queued and will only be processed once no other "
-                f"adjustments are active in the **{wiz.get('process_type','')}** scope."
-            )
-        else:
-            preview_json = {
-                "cobid":           wiz["cobid"],
-                "process_type":    wiz["process_type"],
-                "adjustment_type": wiz["adjustment_type"],
-                "source_cobid":    wiz.get("source_cobid") or wiz["cobid"],
-                "scale_factor":    wiz.get("scale_factor", 1.0),
-            }
-            for key in ["entity_code", "source_system_code", "department_code",
-                        "book_code", "currency_code", "trade_typology",
-                        "strategy", "instrument_code", "simulation_name",
-                        "simulation_source", "measure_type_code", "trade_code",
-                        "trader_code", "var_component_id", "var_sub_component_id",
-                        "guaranteed_entity", "region_key", "scenario_date_id",
-                        "tenor_code", "underlying_tenor_code", "curve_code",
-                        "day_type", "product_category_attributes",
-                        "batch_region_area", "murex_family", "murex_group"]:
-                val = wiz.get(key)
-                if val and str(val).strip():
-                    preview_json[key] = str(val).strip()
-
-            def _fmt(v):
-                """Compact money formatting (K/M/B/T) so big totals fit the metric cards."""
-                try:
-                    n = float(v)
-                except (TypeError, ValueError):
-                    return "—"
-                a = abs(n)
-                for div, suf in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
-                    if a >= div:
-                        return f"{n / div:,.2f}{suf}"
-                return f"{n:,.0f}"
-
-            def _fmt_full(v):
-                """Exact value with thousands separators — shown on hover."""
-                try:    return f"{float(v):,.2f}"
-                except (TypeError, ValueError): return "—"
-
-            try:
-                # Summary is a single server-side aggregated row — safe at any
-                # scale. Row-level data is only fetched (capped) on demand below.
-                df_sum = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
-                                    json.dumps({**preview_json, "mode": "summary"}))
-
-                if df_sum.empty or "ROWS_AFFECTED" not in df_sum.columns:
-                    msg_col = next((c for c in df_sum.columns if "MESSAGE" in c.upper()), None)
-                    if msg_col and not df_sum.empty:
-                        st.warning(f"Preview not available: {df_sum.iloc[0][msg_col]}")
-                    else:
-                        st.info(
-                            "Couldn't calculate a preview for these filters. "
-                            "Check the COB date and your filter values, then try again.")
-                else:
-                    srow       = df_sum.iloc[0]
-                    total_rows = int(srow["ROWS_AFFECTED"] or 0)
-
-                    if total_rows == 0:
-                        st.warning(
-                            "These filters match **0 rows**, so this adjustment would change "
-                            "nothing if submitted. This usually means one of your filter values "
-                            "doesn't exist for the selected COB — for example a mistyped or "
-                            "non-existent **entity, book, or measure-type code** — or the filter "
-                            "combination is too narrow. Please double-check your filter values "
-                            "before submitting.")
-                    else:
-                        nonzero = int(srow["NONZERO_ROWS"] or 0)
-
-                        m1, m2, m3, m4, m5 = st.columns(5)
-                        m1.metric("Rows Affected",    f"{total_rows:,}")
-                        m2.metric("Non-zero Rows",    f"{nonzero:,}")
-                        m3.metric("Total Original",   _fmt(srow["TOTAL_CURRENT_VALUE"]),
-                                  help=_fmt_full(srow["TOTAL_CURRENT_VALUE"]))
-                        m4.metric("Total Adjustment", _fmt(srow["TOTAL_ADJUSTMENT_DELTA"]),
-                                  help=_fmt_full(srow["TOTAL_ADJUSTMENT_DELTA"]))
-                        m5.metric("Total Projected",  _fmt(srow["TOTAL_PROJECTED_VALUE"]),
-                                  help=_fmt_full(srow["TOTAL_PROJECTED_VALUE"]))
-
-                        st.markdown("<br/>", unsafe_allow_html=True)
-
-                        # A cross-COB Roll replaces the target value with the
-                        # source cob's adjusted state — the metric cards above
-                        # reflect that. A per-position breakdown/sample would
-                        # need the netting engine to be meaningful, so they are
-                        # not offered here.
-                        _is_roll = (wiz.get("adjustment_type") == "Roll"
-                                    and wiz.get("source_cobid")
-                                    and int(wiz.get("source_cobid")) != int(wiz["cobid"]))
-
-                        if _is_roll:
-                            st.caption(
-                                "Roll preview shows the net impact: **current** = the target "
-                                "COB's original total (flattened), **projected** = the source "
-                                "COB's adjusted total rolled forward. Per-row breakdown is not "
-                                "shown for cross-COB rolls.")
-                        else:
-                            btn1, btn2, _ = st.columns([1, 1, 3])
-                            with btn1:
-                                if st.button("Show Breakdown", key=_k("show_breakdown"), type="secondary", use_container_width=True):
-                                    wiz["show_breakdown"] = True
-                            with btn2:
-                                if st.button("Show Sample Rows", key=_k("show_sample"), type="secondary", use_container_width=True):
-                                    wiz["show_sample"] = True
-
-                        if not _is_roll and wiz.get("show_breakdown"):
-                            df_grp = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
-                                                json.dumps({**preview_json, "mode": "breakdown"}))
-                            grp_cols = [c for c in ["BOOK_CODE", "DEPARTMENT_CODE", "ENTITY_CODE"]
-                                        if c in df_grp.columns]
-                            if not df_grp.empty:
-                                df_grp = df_grp.rename(columns={"CURRENT_VALUE": "Original",
-                                                                "ADJUSTMENT_DELTA": "Adjustment",
-                                                                "PROJECTED_VALUE": "Projected"})
-                                label = (f"by {' / '.join(grp_cols)}" if grp_cols else "")
-                                st.markdown(f"**Breakdown {label}**")
-                                st.dataframe(df_grp, use_container_width=True,
-                                             height=min(300, 38 + 35 * len(df_grp)))
-
-                        if not _is_roll and wiz.get("show_sample"):
-                            df_sample = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
-                                                   json.dumps({**preview_json, "mode": "sample"}))
-                            st.markdown(f"**Sample rows (up to 1,000 of {total_rows:,})**")
-                            st.dataframe(df_sample, use_container_width=True, height=300)
-
-                with st.expander("Debug — request params",
-                                 expanded=("ROWS_AFFECTED" not in df_sum.columns)):
-                    st.code(json.dumps(preview_json, indent=2), language="json")
-
-            except Exception as exc:
-                st.warning(f"Preview not available: {exc}")
-
-    # ── Error / rejection from previous attempt ─────────────────────────────
-    # Any non-success result (Error OR a workflow rejection like
-    # "Rejected - SignedOff") must surface here — never on the success screen.
-    _res = wiz.get("result") or {}
-    if _res and not _is_submit_success(_res):
-        _status = _res.get("status", "")
-        _msg = _res.get("message", "Submission was not accepted.")
-        if _status and _status != "Error":
-            st.error(f"Not submitted — {_status}: {_msg}")
-        else:
-            st.error(f"{_msg}")
-
-    # ── Navigation ─────────────────────────────────────────────────────────
-    st.divider()
-    nav1, nav2 = st.columns(2)
-    with nav1:
-        if st.button("← Back", use_container_width=True, key=_k("back")):
-            wiz["result"]         = None
-            wiz["step"]           = 1
-            wiz["show_breakdown"] = False
-            wiz["show_sample"]    = False
-            safe_rerun()
-    with nav2:
-        if st.button("Submit Adjustment", type="primary",
-                     use_container_width=True, key=_k("submit")):
-            wiz["result"] = None
-            with st.spinner("Submitting adjustment…"):
-                result = _do_submit()
-            wiz["result"] = result
-            wiz["step"]   = 3 if _is_submit_success(result) else 2
-            safe_rerun()
-
-
-# ── STEP 3 : Success ──────────────────────────────────────────────────────────
-
-elif wiz["step"] == 3:
+# ── Success screen ────────────────────────────────────────────────────────────
+if wiz["step"] == 3:
     result = wiz.get("result") or {}
     msg    = result.get("message", "Adjustment created successfully")
 
@@ -1202,12 +878,12 @@ elif wiz["step"] == 3:
     blocked_msg = msg if "Blocked by ADJ #" in msg else ""
 
     st.markdown(
-        f'<div style="background:#E8F5E9;border:2px solid #A5D6A7;'
+        f'<div style="background:{P["success_lt"]};border:2px solid #BBF7D0;'
         f'border-radius:12px;padding:2.5rem;text-align:center;margin:1rem 0">'
         f'<div>{icon("check-circle", size=44, color=P["success"], valign="0")}</div>'
-        f'<div style="font-size:1.4rem;font-weight:700;color:#2E7D32;margin-top:0.5rem">'
+        f'<div style="font-size:1.4rem;font-weight:700;color:{P["success"]};margin-top:0.5rem">'
         f'Adjustment Submitted Successfully</div>'
-        f'<div style="font-size:0.9rem;color:#388E3C;margin-top:0.4rem">{msg}</div>'
+        f'<div style="font-size:0.9rem;color:{P["success"]};margin-top:0.4rem">{msg}</div>'
         f'<div style="font-size:0.82rem;color:{P["info"]};margin-top:0.8rem">'
         f'Your adjustment is queued and will be processed automatically by the scope pipeline. '
         f'Track it on the Adjustment Pipeline page; once processed it is assigned a <strong>report ID</strong> '
@@ -1216,9 +892,9 @@ elif wiz["step"] == 3:
 
     if blocked_msg:
         st.markdown(
-            f'<div style="background:#FFF3E0;border:1px solid #FFB74D;border-radius:8px;'
-            f'padding:0.75rem 1rem;margin-top:0.5rem;font-size:0.83rem;color:#E65100">'
-            f'⏸ <strong>Processing is queued behind another adjustment.</strong> '
+            f'<div style="background:{P["warning_lt"]};border:1px solid #FDE68A;border-radius:8px;'
+            f'padding:0.75rem 1rem;margin-top:0.5rem;font-size:0.83rem;color:{P["warning"]}">'
+            f'{icon("clock", size=13, color="#B45309")} <strong>Processing is queued behind another adjustment.</strong> '
             f'{blocked_msg} It will be picked up automatically once that run completes.</div>',
             unsafe_allow_html=True)
 
@@ -1227,3 +903,121 @@ elif wiz["step"] == 3:
                  type="secondary", key="new_adj"):
         reset_wizard()
         safe_rerun()
+    st.stop()
+
+
+# ── Order ticket layout ───────────────────────────────────────────────────────
+st.markdown("## New Adjustment")
+st.markdown(
+    f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
+    f"Pick a category, fill the ticket, submit — the panel on the right "
+    f"tracks what you've selected.</span>", unsafe_allow_html=True)
+
+left, right = st.columns([1.85, 1], gap="large")
+
+with left:
+    section_title("Category", "layers")
+    cat = _pills(list(CATEGORY_CONFIG.keys()), key=_k("cat_pills"),
+                 default=wiz.get("category"),
+                 format_func=lambda k: k)
+    if cat != wiz.get("category"):
+        wiz.update({"category": cat, "process_type": None, "adjustment_type": None,
+                    "uploaded_df": None, "uploaded_file_name": None,
+                    "_preview_sum": None, "_preview_err": None})
+    if wiz.get("category"):
+        st.caption(CATEGORY_CONFIG[wiz["category"]]["desc"])
+
+    if not wiz.get("category"):
+        st.info("Select an adjustment category to continue.")
+    elif wiz["category"] == "Direct Adjustment":
+        render_direct_form()
+    elif wiz["category"] == "Entity Roll":
+        render_entity_roll_form()
+    else:
+        render_scaling_form()
+
+missing = _missing_fields()
+
+with right:
+    section_title("Ticket", "file-text")
+    st.markdown(_ticket_html(missing), unsafe_allow_html=True)
+
+    cat = wiz.get("category")
+
+    # ── Impact preview trigger (Scaling, narrow scope only) ─────────────
+    if cat == "Scaling Adjustment" and not missing and not _is_entity_only(wiz):
+        if st.button("Run impact preview", use_container_width=True,
+                     key=_k("run_preview")):
+            with st.spinner("Calculating impact…"):
+                _run_preview()
+            safe_rerun()
+        if wiz.get("_preview_err"):
+            st.warning(f"Preview not available: {wiz['_preview_err']}")
+        s = wiz.get("_preview_sum")
+        if s is not None and int(s.get("ROWS_AFFECTED") or 0) == 0:
+            st.warning(
+                "These filters match **0 rows**, so this adjustment would change "
+                "nothing if submitted. Double-check entity, book, and measure-type "
+                "codes for the selected COB before submitting.")
+
+    # ── Direct: replacement confirmation ─────────────────────────────────
+    dup_ok = True
+    if cat == "Direct Adjustment" and wiz.get("_dup_adj_ids"):
+        dup_ok = st.checkbox(
+            f"Replace {len(wiz['_dup_adj_ids'])} existing adjustment(s) with this upload",
+            key=_k("dup_confirm"), value=False)
+
+    # ── Previous submit error ─────────────────────────────────────────────
+    _res = wiz.get("result") or {}
+    if _res and not _is_submit_success(_res):
+        _status = _res.get("status", "")
+        _msg = _res.get("message", "Submission was not accepted.")
+        st.error(f"Not submitted — {_status}: {_msg}" if _status and _status != "Error"
+                 else _msg)
+
+    # ── Submit ────────────────────────────────────────────────────────────
+    if st.button("Submit Adjustment", type="primary", use_container_width=True,
+                 key=_k("submit"), disabled=bool(missing) or not dup_ok):
+        wiz["result"] = None
+        with st.spinner("Submitting adjustment…"):
+            result = _do_submit()
+        wiz["result"] = result
+        wiz["step"]   = 3 if _is_submit_success(result) else 1
+        safe_rerun()
+    if missing:
+        st.caption("Submit unlocks when the ticket is complete.")
+
+
+# ── Full-width preview detail (breakdown / sample) ───────────────────────────
+if wiz.get("category") == "Scaling Adjustment" and wiz.get("_preview_sum") \
+        and not missing and not _is_entity_only(wiz):
+    s = wiz["_preview_sum"]
+    total_rows = int(s.get("ROWS_AFFECTED") or 0)
+    _is_roll = (wiz.get("adjustment_type") == "Roll"
+                and wiz.get("source_cobid")
+                and int(wiz.get("source_cobid")) != int(wiz["cobid"]))
+    if _is_roll:
+        st.caption(
+            "Roll preview shows the net impact: **current** = the target COB's "
+            "original total (flattened), **projected** = the source COB's adjusted "
+            "total rolled forward. Per-row breakdown is not shown for cross-COB rolls.")
+    elif total_rows > 0:
+        with st.expander("Breakdown by book / department / entity", expanded=False):
+            try:
+                df_grp = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                                    json.dumps({**_preview_payload(), "mode": "breakdown"}))
+                if not df_grp.empty:
+                    df_grp = df_grp.rename(columns={"CURRENT_VALUE": "Original",
+                                                    "ADJUSTMENT_DELTA": "Adjustment",
+                                                    "PROJECTED_VALUE": "Projected"})
+                    st.dataframe(df_grp, use_container_width=True,
+                                 height=min(300, 38 + 35 * len(df_grp)))
+            except Exception as exc:
+                st.warning(f"Breakdown not available: {exc}")
+        with st.expander(f"Sample rows (up to 1,000 of {total_rows:,})", expanded=False):
+            try:
+                df_sample = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                                       json.dumps({**_preview_payload(), "mode": "sample"}))
+                st.dataframe(df_sample, use_container_width=True, height=300)
+            except Exception as exc:
+                st.warning(f"Sample not available: {exc}")
