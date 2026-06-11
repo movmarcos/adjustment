@@ -1,8 +1,12 @@
 """
 Design System — MUFG Brand
 ============================
-Professional banking UI. Colours, CSS, and reusable components.
-Adapted from prototype_v2 design system for production use.
+Professional banking UI. Colours, CSS, SVG icons, and reusable components.
+
+Tokens: slate-tinted neutrals, MUFG red brand, one radius scale (6/10/14),
+one elevation scale (sm/md/lg). Icons are inline Lucide-style SVGs — no
+external requests, so they render inside the Streamlit-in-Snowflake sandbox
+(external origins like Google Fonts are blocked there).
 """
 import streamlit as st
 
@@ -14,95 +18,157 @@ P = {
     "primary":    "#D50032",
     "primary_dk": "#A80028",
     "primary_lt": "#FF3D5A",
-    "accent":     "#1A1A2E",
-    "grey_900":   "#212121",
-    "grey_700":   "#616161",
-    "grey_400":   "#BDBDBD",
-    "grey_100":   "#F5F5F5",
+    "accent":     "#0F172A",
+    "grey_900":   "#0F172A",
+    "grey_700":   "#475569",
+    "grey_400":   "#94A3B8",
+    "grey_100":   "#F1F5F9",
     "white":      "#FFFFFF",
-    "bg":         "#F7F8FA",
+    "bg":         "#F6F7F9",
     "card":       "#FFFFFF",
-    "border":     "#E8E8EC",
-    "success":    "#2E7D32",
-    "success_lt": "#E8F5E9",
-    "warning":    "#E65100",
-    "warning_lt": "#FFF3E0",
-    "danger":     "#C62828",
-    "danger_lt":  "#FFEBEE",
-    "info":       "#1565C0",
-    "info_lt":    "#E3F2FD",
-    "purple":     "#6A1B9A",
-    "purple_lt":  "#F3E5F5",
+    "border":     "#E2E5EA",
+    "success":    "#15803D",
+    "success_lt": "#F0FDF4",
+    "warning":    "#B45309",
+    "warning_lt": "#FFFBEB",
+    "danger":     "#B91C1C",
+    "danger_lt":  "#FEF2F2",
+    "info":       "#1D4ED8",
+    "info_lt":    "#EFF6FF",
+    "purple":     "#7E22CE",
+    "purple_lt":  "#FAF5FF",
 }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SVG ICON SYSTEM (Lucide outline, 24px viewBox, stroke-based)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_ICON_PATHS = {
+    "clock":          '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+    "check":          '<path d="M20 6 9 17l-5-5"/>',
+    "check-circle":   '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/>',
+    "x":              '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+    "x-circle":       '<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>',
+    "zap":            '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+    "lock":           '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+    "trash":          '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+    "bar-chart":      '<line x1="12" x2="12" y1="20" y2="10"/><line x1="18" x2="18" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="16"/>',
+    "activity":       '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+    "landmark":       '<line x1="3" x2="21" y1="22" y2="22"/><line x1="6" x2="6" y1="18" y2="11"/><line x1="10" x2="10" y1="18" y2="11"/><line x1="14" x2="14" y1="18" y2="11"/><line x1="18" x2="18" y1="18" y2="11"/><polygon points="12 2 20 7 4 7"/>',
+    "target":         '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
+    "refresh-cw":     '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+    "minus-circle":   '<circle cx="12" cy="12" r="10"/><path d="M8 12h8"/>',
+    "upload":         '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/>',
+    "send":           '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
+    "shield-check":   '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
+    "ban":            '<circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/>',
+    "scale":          '<path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="M7 21h10"/><path d="M12 3v18"/><path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"/>',
+    "database":       '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/>',
+    "play":           '<polygon points="6 3 20 12 6 21 6 3"/>',
+    "table":          '<path d="M12 3v18"/><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/>',
+    "line-chart":     '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/>',
+    "user":           '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+    "alert-triangle": '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+    "info":           '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+    "clipboard":      '<rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/>',
+    "home":           '<path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>',
+    "file-text":      '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>',
+    "eye":            '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
+    "inbox":          '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+    "chevron-right":  '<path d="m9 18 6-6-6-6"/>',
+    "arrow-right":    '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
+    "sliders":        '<line x1="4" x2="4" y1="21" y2="14"/><line x1="4" x2="4" y1="10" y2="3"/><line x1="12" x2="12" y1="21" y2="12"/><line x1="12" x2="12" y1="8" y2="3"/><line x1="20" x2="20" y1="21" y2="16"/><line x1="20" x2="20" y1="12" y2="3"/><line x1="2" x2="6" y1="14" y2="14"/><line x1="10" x2="14" y1="8" y2="8"/><line x1="18" x2="22" y1="16" y2="16"/>',
+    "settings":       '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+    "search":         '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+    "calendar":       '<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/>',
+    "layers":         '<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 12.18-9.17 4.16a2 2 0 0 1-1.66 0L2 12.18"/><path d="m22 17.18-9.17 4.16a2 2 0 0 1-1.66 0L2 17.18"/>',
+    "timer":          '<line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/><circle cx="12" cy="14" r="8"/>',
+    "undo":           '<path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/>',
+    "list":           '<line x1="8" x2="21" y1="6" y2="6"/><line x1="8" x2="21" y1="12" y2="12"/><line x1="8" x2="21" y1="18" y2="18"/><line x1="3" x2="3.01" y1="6" y2="6"/><line x1="3" x2="3.01" y1="12" y2="12"/><line x1="3" x2="3.01" y1="18" y2="18"/>',
+}
+
+
+def icon(name: str, size: int = 14, color: str = "currentColor",
+         stroke: float = 2, valign: str = "-2px") -> str:
+    """Inline Lucide-style SVG icon. Returns '' for unknown names."""
+    path = _ICON_PATHS.get(name)
+    if not path:
+        return ""
+    return (f'<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" '
+            f'stroke="{color}" stroke-width="{stroke}" stroke-linecap="round" '
+            f'stroke-linejoin="round" style="vertical-align:{valign};flex-shrink:0">'
+            f'{path}</svg>')
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # STATUS MAPPING
 # ──────────────────────────────────────────────────────────────────────────────
 
 STATUS_COLORS = {
-    "Pending":              "#FB8C00",
-    "Pending Approval":     "#1565C0",
-    "Approved":             "#00897B",
-    "Running":              "#1565C0",
-    "Processed":            "#388E3C",
-    "Failed":               "#D32F2F",
-    "Rejected":             "#C62828",
-    "Rejected - SignedOff": "#7B1FA2",
-    "Deleted":              "#757575",
+    "Pending":              "#B45309",
+    "Pending Approval":     "#1D4ED8",
+    "Approved":             "#0F766E",
+    "Running":              "#1D4ED8",
+    "Processed":            "#15803D",
+    "Failed":               "#DC2626",
+    "Rejected":             "#B91C1C",
+    "Rejected - SignedOff": "#7E22CE",
+    "Deleted":              "#64748B",
 }
 
+# Values are icon() names (previously emoji)
 STATUS_ICONS = {
-    "Pending":              "⏳",
-    "Pending Approval":     "📝",
-    "Approved":             "✅",
-    "Running":              "⚡",
-    "Processed":            "✔️",
-    "Failed":               "❌",
-    "Rejected":             "❌",
-    "Rejected - SignedOff": "🔒",
-    "Deleted":              "🗑️",
+    "Pending":              "clock",
+    "Pending Approval":     "clipboard",
+    "Approved":             "shield-check",
+    "Running":              "zap",
+    "Processed":            "check-circle",
+    "Failed":               "x-circle",
+    "Rejected":             "ban",
+    "Rejected - SignedOff": "lock",
+    "Deleted":              "trash",
 }
 
 SCOPE_CONFIG = {
-    "VaR":         {"icon": "📊", "color": "#D50032", "bg": "#FFF0F3", "label": "VaR"},
-    "Stress":      {"icon": "⚡", "color": "#1565C0", "bg": "#E3F2FD", "label": "Stress"},
-    "FRTB":        {"icon": "🏛️", "color": "#2E7D32", "bg": "#E8F5E9", "label": "FRTB"},
-    "Sensitivity": {"icon": "🎯", "color": "#E65100", "bg": "#FFF3E0", "label": "Sensitivity"},
+    "VaR":         {"icon": "bar-chart",  "color": "#D50032", "bg": "#FFF0F3", "label": "VaR"},
+    "Stress":      {"icon": "activity",   "color": "#1D4ED8", "bg": "#EFF6FF", "label": "Stress"},
+    "FRTB":        {"icon": "landmark",   "color": "#15803D", "bg": "#F0FDF4", "label": "FRTB"},
+    "Sensitivity": {"icon": "target",     "color": "#B45309", "bg": "#FFFBEB", "label": "Sensitivity"},
 }
 
 TYPE_CONFIG = {
-    "Flatten": {"icon": "🔴", "desc": "Zero out matching positions", "formula": "new = original × 0"},
-    "Scale":   {"icon": "📊", "desc": "Multiply by a scale factor", "formula": "new = original × sf"},
-    "Roll":    {"icon": "🔄", "desc": "Roll prior COB's adjusted state forward", "formula": "new = (prior + prior_adj) × sf"},
+    "Flatten": {"icon": "minus-circle", "desc": "Zero out matching positions", "formula": "new = original × 0"},
+    "Scale":   {"icon": "bar-chart",    "desc": "Multiply by a scale factor", "formula": "new = original × sf"},
+    "Roll":    {"icon": "refresh-cw",   "desc": "Roll prior COB's adjusted state forward", "formula": "new = (prior + prior_adj) × sf"},
 }
 
 # ── Lifecycle stage colours (used by tracker board and lifecycle bar) ───────
 
 STAGE_CONFIG = {
-    "Submitted":        {"color": "#FB8C00", "icon": "📝", "bg": "#FFF3E0"},
-    "Pending Approval": {"color": "#1565C0", "icon": "🔐", "bg": "#E3F2FD"},
-    "Approved":         {"color": "#00897B", "icon": "✅", "bg": "#E0F2F1"},
-    "Processing":       {"color": "#1565C0", "icon": "⚡", "bg": "#E3F2FD"},
-    "PBI Queued":       {"color": "#6A1B9A", "icon": "⏳", "bg": "#F3E5F5"},
-    "PBI Refreshing":   {"color": "#6A1B9A", "icon": "🔄", "bg": "#F3E5F5"},
-    "Reports Ready":    {"color": "#2E7D32", "icon": "✔️", "bg": "#E8F5E9"},
-    "Failed":           {"color": "#D32F2F", "icon": "❌", "bg": "#FFEBEE"},
-    "Rejected":         {"color": "#C62828", "icon": "🚫", "bg": "#FFEBEE"},
+    "Submitted":        {"color": "#B45309", "icon": "send",         "bg": "#FFFBEB"},
+    "Pending Approval": {"color": "#1D4ED8", "icon": "clipboard",    "bg": "#EFF6FF"},
+    "Approved":         {"color": "#0F766E", "icon": "shield-check", "bg": "#F0FDFA"},
+    "Processing":       {"color": "#1D4ED8", "icon": "zap",          "bg": "#EFF6FF"},
+    "PBI Queued":       {"color": "#7E22CE", "icon": "clock",        "bg": "#FAF5FF"},
+    "PBI Refreshing":   {"color": "#7E22CE", "icon": "refresh-cw",   "bg": "#FAF5FF"},
+    "Reports Ready":    {"color": "#15803D", "icon": "check-circle", "bg": "#F0FDF4"},
+    "Failed":           {"color": "#DC2626", "icon": "x-circle",     "bg": "#FEF2F2"},
+    "Rejected":         {"color": "#B91C1C", "icon": "ban",          "bg": "#FEF2F2"},
 }
 
 # ── Adjustment Category — the first selection in the wizard ──────────────────
 
 CATEGORY_CONFIG = {
     "Scaling Adjustment": {
-        "icon": "⚖️", "color": "#D50032", "bg": "#FFF0F3",
+        "icon": "scale", "color": "#D50032", "bg": "#FFF0F3",
         "desc": "Scale, flatten or roll fact table data (config-driven)",
     },
     "Direct Adjustment": {
-        "icon": "📥", "color": "#6A1B9A", "bg": "#F3E5F5",
+        "icon": "upload", "color": "#7E22CE", "bg": "#FAF5FF",
         "desc": "Upload exact adjustment values for a chosen scope (CSV)",
     },
     "Entity Roll": {
-        "icon": "🔄", "color": "#E65100", "bg": "#FFF3E0",
+        "icon": "refresh-cw", "color": "#B45309", "bg": "#FFFBEB",
         "desc": "Full entity roll — copies all data from a source COB (approval required)",
     },
 }
@@ -115,44 +181,65 @@ CATEGORY_CONFIG = {
 def inject_css():
     st.markdown(f"""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-
-    html, body, [class*="css"] {{
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+    :root {{
+        --brand:      {P["primary"]};
+        --brand-dk:   {P["primary_dk"]};
+        --ink:        {P["grey_900"]};
+        --ink-2:      {P["grey_700"]};
+        --ink-3:      {P["grey_400"]};
+        --bg:         {P["bg"]};
+        --card:       {P["card"]};
+        --border:     {P["border"]};
+        --r-sm: 6px;  --r-md: 10px;  --r-lg: 14px;
+        --sh-sm: 0 1px 2px rgba(15,23,42,.05);
+        --sh-md: 0 2px 8px rgba(15,23,42,.06);
+        --sh-lg: 0 8px 24px rgba(15,23,42,.10);
     }}
-    [data-testid="stAppViewContainer"] {{ background: {P["bg"]} !important; }}
+
+    /* System font stack — external fonts don't load inside the SiS sandbox */
+    html, body, [class*="css"] {{
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                     'Helvetica Neue', Arial, sans-serif !important;
+        -webkit-font-smoothing: antialiased;
+    }}
+    h1, h2, h3 {{ letter-spacing: -0.01em; }}
+    [data-testid="stAppViewContainer"] {{ background: var(--bg) !important; }}
     [data-testid="stMainBlockContainer"] {{ padding-top: 1.5rem; padding-bottom: 3rem; }}
     [data-testid="stVerticalBlock"] {{ gap: 0.75rem; }}
 
-    /* ── Sidebar — MUFG brand dark grey ────────────────────────────────── */
+    @media (prefers-reduced-motion: reduce) {{
+        * {{ transition: none !important; animation: none !important; }}
+    }}
+
+    /* ── Sidebar — MUFG brand dark ─────────────────────────────────────── */
     [data-testid="stSidebar"] {{
-        background: #3C3D3E !important;
+        background: #26272B !important;
         border-right: none !important;
     }}
     [data-testid="stSidebar"] > div:first-child {{
-        background: #3C3D3E !important;
-        overflow-y: auto !important;   /* scroll if the nav is taller than the viewport */
+        background: #26272B !important;
+        overflow-y: auto !important;
         height: 100vh !important;
         display: flex !important;
         flex-direction: column !important;
     }}
-    [data-testid="stSidebar"] * {{ color: #E8E8EC !important; }}
-    [data-testid="stSidebar"] hr {{ border-color: rgba(255,255,255,0.12) !important; }}
+    [data-testid="stSidebar"] * {{ color: #E2E5EA !important; }}
+    [data-testid="stSidebar"] hr {{ border-color: rgba(255,255,255,0.10) !important; }}
 
     /* Logo area red top-stripe */
     [data-testid="stSidebar"] > div:first-child::before {{
         content: "";
         display: block;
         height: 3px;
-        background: #D50032;
+        background: var(--brand);
         flex-shrink: 0;
     }}
 
     /* Compact sidebar navigation — all pages visible with no scroll */
     [data-testid="stSidebar"] [data-testid="stSidebarNav"] {{
-        padding-top: 0.2rem !important;
+        padding-top: 0.3rem !important;
         flex-shrink: 0 !important;
-        max-height: none !important;   /* override Streamlit's built-in scroll cap */
+        max-height: none !important;
         overflow: visible !important;
         height: auto !important;
     }}
@@ -162,23 +249,23 @@ def inject_css():
         overflow: visible !important;
     }}
     [data-testid="stSidebar"] [data-testid="stSidebarNav"] li {{
-        margin: 0 !important;
+        margin: 1px 8px !important;
         padding: 0 !important;
     }}
     [data-testid="stSidebar"] [data-testid="stSidebarNav"] a {{
-        padding: 0.3rem 0.9rem !important;
+        padding: 0.32rem 0.7rem !important;
         font-size: 0.83rem !important;
         line-height: 1.25 !important;
         min-height: unset !important;
-        border-radius: 0 !important;
-        transition: background .12s !important;
+        border-radius: var(--r-sm) !important;
+        transition: background .15s ease-out !important;
     }}
     [data-testid="stSidebar"] [data-testid="stSidebarNav"] a:hover {{
-        background: rgba(213,0,50,.15) !important;
+        background: rgba(255,255,255,.06) !important;
     }}
     [data-testid="stSidebar"] [data-testid="stSidebarNav"] a[aria-selected="true"] {{
-        background: rgba(213,0,50,.22) !important;
-        border-left: 3px solid #D50032 !important;
+        background: rgba(213,0,50,.28) !important;
+        box-shadow: inset 3px 0 0 var(--brand) !important;
     }}
     [data-testid="stSidebar"] [data-testid="stSidebarNav"] a span {{
         font-size: 0.83rem !important;
@@ -192,34 +279,31 @@ def inject_css():
         content: "Home";
         font-size: 0.83rem !important;
     }}
-
-    /* Sidebar content flows top-to-bottom (logo → nav → footer) and scrolls if
-       it's taller than the viewport. Nothing is force-stretched — that stretch
-       previously let the logo block expand over the top nav links. */
     [data-testid="stSidebarNav"] {{
         flex: 0 0 auto !important;
     }}
 
     /* Sidebar user footer */
     .sidebar-user-footer {{
-        border-top: 1px solid rgba(255,255,255,0.1);
+        border-top: 1px solid rgba(255,255,255,0.10);
         padding: 0.65rem 1rem;
         margin-top: 0.75rem;
-        background: #343536;
+        background: #1F2023;
         flex-shrink: 0 !important;
+        display: flex; align-items: center; gap: 9px;
     }}
 
     /* Cards */
     .mcard {{
-        background: {P["white"]};
-        border: 1px solid {P["border"]};
-        border-radius: 10px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--r-md);
         padding: 1.2rem 1.4rem;
         margin-bottom: 0.75rem;
-        box-shadow: 0 1px 4px rgba(0,0,0,.04);
-        transition: box-shadow .15s;
+        box-shadow: var(--sh-sm);
+        transition: box-shadow .15s ease-out, transform .15s ease-out;
     }}
-    .mcard:hover {{ box-shadow: 0 3px 12px rgba(0,0,0,.08); }}
+    .mcard:hover {{ box-shadow: var(--sh-lg); }}
 
     /* KPI cards */
     .kpi-grid {{
@@ -229,53 +313,70 @@ def inject_css():
         margin-bottom: 1.25rem;
     }}
     .kpi-card {{
-        background: {P["white"]};
-        border: 1px solid {P["border"]};
-        border-radius: 10px;
-        padding: 1rem 1.1rem;
-        box-shadow: 0 1px 3px rgba(0,0,0,.04);
+        position: relative;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--r-md);
+        padding: 1rem 1.1rem 1rem 1.25rem;
+        box-shadow: var(--sh-sm);
+        overflow: hidden;
+        transition: box-shadow .15s ease-out;
+    }}
+    .kpi-card:hover {{ box-shadow: var(--sh-md); }}
+    .kpi-card::before {{
+        content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+        width: 3px; background: var(--border);
     }}
     .kpi-card .kpi-label {{
-        font-size: 0.72rem; font-weight: 600; text-transform: uppercase;
-        letter-spacing: .06em; color: {P["grey_700"]}; margin-bottom: 0.35rem;
+        font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+        letter-spacing: .07em; color: var(--ink-2); margin-bottom: 0.35rem;
     }}
-    .kpi-card .kpi-value {{ font-size: 1.8rem; font-weight: 700; color: {P["accent"]}; line-height: 1; }}
-    .kpi-card .kpi-sub {{ font-size: 0.72rem; color: {P["grey_700"]}; margin-top: 0.25rem; }}
-    .kpi-card.kpi-primary {{ border-top: 3px solid {P["primary"]}; }}
-    .kpi-card.kpi-warning {{ border-top: 3px solid {P["warning"]}; }}
-    .kpi-card.kpi-success {{ border-top: 3px solid {P["success"]}; }}
-    .kpi-card.kpi-info    {{ border-top: 3px solid {P["info"]}; }}
-    .kpi-card.kpi-purple  {{ border-top: 3px solid {P["purple"]}; }}
-    .kpi-card.kpi-danger  {{ border-top: 3px solid {P["danger"]}; }}
+    .kpi-card .kpi-value {{
+        font-size: 1.8rem; font-weight: 700; color: var(--ink); line-height: 1.05;
+        font-variant-numeric: tabular-nums;
+    }}
+    .kpi-card .kpi-sub {{ font-size: 0.72rem; color: var(--ink-2); margin-top: 0.3rem; }}
+    .kpi-card.kpi-primary::before {{ background: {P["primary"]}; }}
+    .kpi-card.kpi-warning::before {{ background: {P["warning"]}; }}
+    .kpi-card.kpi-success::before {{ background: {P["success"]}; }}
+    .kpi-card.kpi-info::before    {{ background: {P["info"]}; }}
+    .kpi-card.kpi-purple::before  {{ background: {P["purple"]}; }}
+    .kpi-card.kpi-danger::before  {{ background: {P["danger"]}; }}
 
     /* Status badges */
     .status-badge {{
-        display: inline-block; padding: 2px 10px; border-radius: 20px;
-        font-size: 0.72rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+        display: inline-flex; align-items: center; gap: 5px;
+        padding: 2px 10px; border-radius: 999px;
+        font-size: 0.72rem; font-weight: 600; letter-spacing: .03em;
+        white-space: nowrap; border: 1px solid transparent;
     }}
 
     /* Adjustment cards */
     .adj-card {{
-        background: {P["white"]}; border: 1px solid {P["border"]};
-        border-radius: 10px; padding: 1rem 1.2rem; margin-bottom: 0.6rem;
-        box-shadow: 0 1px 3px rgba(0,0,0,.03);
+        background: var(--card); border: 1px solid var(--border);
+        border-radius: var(--r-md); padding: 1rem 1.2rem; margin-bottom: 0.6rem;
+        box-shadow: var(--sh-sm);
+        transition: box-shadow .15s ease-out;
     }}
+    .adj-card:hover {{ box-shadow: var(--sh-md); }}
     .adj-card-header {{
         display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;
     }}
-    .adj-id {{ font-size: 0.8rem; font-weight: 700; color: {P["grey_700"]}; letter-spacing: .04em; }}
-    .adj-title {{ font-size: 0.95rem; font-weight: 600; color: {P["accent"]}; }}
-    .adj-meta {{ font-size: 0.78rem; color: {P["grey_700"]}; }}
+    .adj-id {{ font-size: 0.8rem; font-weight: 700; color: var(--ink-2); letter-spacing: .04em;
+               font-variant-numeric: tabular-nums; }}
+    .adj-title {{ font-size: 0.95rem; font-weight: 600; color: var(--ink); }}
+    .adj-meta {{ font-size: 0.78rem; color: var(--ink-2); }}
     .adj-filters {{ display: flex; flex-wrap: wrap; gap: 5px; margin-top: 0.5rem; }}
     .filter-chip {{
-        background: {P["grey_100"]}; border-radius: 4px; padding: 2px 8px;
-        font-size: 0.71rem; color: {P["grey_700"]}; font-weight: 500;
+        background: {P["grey_100"]}; border: 1px solid var(--border);
+        border-radius: 999px; padding: 1px 9px;
+        font-size: 0.71rem; color: var(--ink-2); font-weight: 500;
     }}
 
     /* Overlap warning */
     .overlap-box {{
-        background: {P["warning_lt"]}; border: 1px solid #FFCC80;
-        border-left: 4px solid {P["warning"]}; border-radius: 8px;
+        background: {P["warning_lt"]}; border: 1px solid #FDE68A;
+        border-left: 4px solid {P["warning"]}; border-radius: var(--r-sm);
         padding: 1rem 1.2rem; margin: 0.75rem 0;
     }}
     .overlap-box h4 {{ color: {P["warning"]}; margin: 0 0 0.5rem 0; font-size: 0.9rem; }}
@@ -284,26 +385,27 @@ def inject_css():
     .timeline {{ position: relative; padding-left: 24px; }}
     .timeline::before {{
         content: ""; position: absolute; left: 8px; top: 0; bottom: 0;
-        width: 2px; background: {P["border"]};
+        width: 2px; background: var(--border);
     }}
     .tl-item {{
         position: relative; margin-bottom: 1rem; padding: 0.6rem 0.8rem;
-        background: {P["white"]}; border: 1px solid {P["border"]}; border-radius: 8px;
+        background: var(--card); border: 1px solid var(--border); border-radius: var(--r-sm);
     }}
     .tl-item::before {{
         content: ""; position: absolute; left: -20px; top: 14px;
         width: 10px; height: 10px; border-radius: 50%;
-        background: {P["grey_400"]}; border: 2px solid {P["white"]};
-        box-shadow: 0 0 0 2px {P["border"]};
+        background: var(--ink-3); border: 2px solid var(--card);
+        box-shadow: 0 0 0 2px var(--border);
     }}
-    .tl-status {{ font-size: 0.78rem; font-weight: 700; text-transform: uppercase; }}
-    .tl-meta {{ font-size: 0.73rem; color: {P["grey_700"]}; margin-top: 2px; }}
-    .tl-comment {{ font-size: 0.8rem; color: {P["grey_900"]}; margin-top: 4px; font-style: italic; }}
+    .tl-status {{ font-size: 0.78rem; font-weight: 700; text-transform: uppercase;
+                  display: inline-flex; align-items: center; gap: 5px; }}
+    .tl-meta {{ font-size: 0.73rem; color: var(--ink-2); margin-top: 2px; }}
+    .tl-comment {{ font-size: 0.8rem; color: var(--ink); margin-top: 4px; font-style: italic; }}
 
     /* Queue items */
     .queue-item {{
-        background: {P["white"]}; border: 1px solid {P["border"]};
-        border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 0.5rem;
+        background: var(--card); border: 1px solid var(--border);
+        border-radius: var(--r-sm); padding: 0.75rem 1rem; margin-bottom: 0.5rem;
     }}
     .queue-item.running {{ border-left: 3px solid {P["info"]}; }}
     .queue-item.pending {{ border-left: 3px solid {P["warning"]}; }}
@@ -313,18 +415,20 @@ def inject_css():
     /* Pipeline diagram */
     .pipeline {{
         display: flex; align-items: center; gap: 0; overflow-x: auto;
-        padding: 1rem; background: {P["grey_100"]}; border-radius: 10px; margin: 1rem 0;
+        padding: 1rem; background: {P["grey_100"]}; border-radius: var(--r-md); margin: 1rem 0;
     }}
     .pipe-node {{
-        background: {P["white"]}; border: 2px solid {P["border"]};
-        border-radius: 8px; padding: 0.6rem 0.9rem; text-align: center;
+        background: var(--card); border: 1.5px solid var(--border);
+        border-radius: var(--r-sm); padding: 0.6rem 0.9rem; text-align: center;
         min-width: 100px; flex-shrink: 0;
     }}
     .pipe-node.active {{ border-color: {P["info"]}; background: {P["info_lt"]}; }}
     .pipe-node.done {{ border-color: {P["success"]}; background: {P["success_lt"]}; }}
-    .pipe-node .pn-icon {{ font-size: 1.3rem; }}
-    .pipe-node .pn-label {{ font-size: 0.7rem; font-weight: 600; margin-top: 3px; color: {P["grey_700"]}; }}
-    .pipe-arrow {{ color: {P["grey_400"]}; font-size: 1.2rem; padding: 0 4px; flex-shrink: 0; }}
+    .pipe-node .pn-icon {{ display: flex; justify-content: center; color: var(--ink-2); }}
+    .pipe-node.active .pn-icon {{ color: {P["info"]}; }}
+    .pipe-node.done .pn-icon {{ color: {P["success"]}; }}
+    .pipe-node .pn-label {{ font-size: 0.7rem; font-weight: 600; margin-top: 5px; color: var(--ink-2); }}
+    .pipe-arrow {{ color: var(--ink-3); display: flex; align-items: center; padding: 0 4px; flex-shrink: 0; }}
 
     /* Step indicator */
     .step-bar {{ display: flex; align-items: center; gap: 0; margin-bottom: 1.5rem; }}
@@ -333,36 +437,81 @@ def inject_css():
         width: 26px; height: 26px; border-radius: 50%;
         display: flex; align-items: center; justify-content: center;
         font-size: 0.75rem; font-weight: 700; flex-shrink: 0;
+        transition: background .15s ease-out;
     }}
     .step-dot.done    {{ background: {P["success"]}; color: white; }}
-    .step-dot.active  {{ background: {P["primary"]}; color: white; }}
-    .step-dot.pending {{ background: {P["grey_100"]}; color: {P["grey_700"]}; border: 2px solid {P["grey_400"]}; }}
+    .step-dot.active  {{ background: {P["primary"]}; color: white;
+                         box-shadow: 0 0 0 3px rgba(213,0,50,.18); }}
+    .step-dot.pending {{ background: {P["grey_100"]}; color: var(--ink-2); border: 2px solid var(--ink-3); }}
     .step-label {{ font-size: 0.78rem; font-weight: 600; white-space: nowrap; }}
     .step-label.done    {{ color: {P["success"]}; }}
     .step-label.active  {{ color: {P["primary"]}; }}
-    .step-label.pending {{ color: {P["grey_700"]}; }}
-    .step-line {{ flex: 1; height: 2px; background: {P["border"]}; margin: 0 6px; }}
+    .step-label.pending {{ color: var(--ink-2); }}
+    .step-line {{ flex: 1; height: 2px; background: var(--border); margin: 0 6px; }}
     .step-line.done {{ background: {P["success"]}; }}
 
     /* Section headers */
     .section-title {{
         font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
-        letter-spacing: .08em; color: {P["grey_700"]}; margin: 1rem 0 0.6rem 0;
-        display: flex; align-items: center; gap: 6px;
+        letter-spacing: .08em; color: var(--ink-2); margin: 1rem 0 0.6rem 0;
+        display: flex; align-items: center; gap: 7px;
     }}
-    .section-title::after {{ content: ""; flex: 1; height: 1px; background: {P["border"]}; }}
+    .section-title::after {{ content: ""; flex: 1; height: 1px; background: var(--border); }}
 
     /* Tags */
     .tag {{
         display: inline-block; background: {P["info_lt"]}; color: {P["info"]};
-        border-radius: 4px; padding: 1px 7px; font-size: 0.7rem; font-weight: 600;
+        border-radius: 999px; padding: 1px 8px; font-size: 0.7rem; font-weight: 600;
     }}
     .tag.recurring {{ background: {P["purple_lt"]}; color: {P["purple"]}; }}
 
-    /* Misc */
-    .stButton>button {{ border-radius: 7px !important; font-weight: 600 !important; font-size: 0.85rem !important; }}
-    [data-testid="stDataFrame"] {{ border-radius: 8px; overflow: hidden; }}
-    div[data-testid="stExpander"] {{ border: 1px solid {P["border"]}; border-radius: 8px; overflow: hidden; }}
+    /* Native widget polish */
+    .stButton>button {{
+        border-radius: var(--r-sm) !important; font-weight: 600 !important;
+        font-size: 0.85rem !important;
+        border: 1px solid var(--border) !important;
+        box-shadow: var(--sh-sm) !important;
+        transition: background .15s ease-out, box-shadow .15s ease-out,
+                    border-color .15s ease-out !important;
+    }}
+    .stButton>button:hover {{
+        border-color: var(--ink-3) !important;
+        box-shadow: var(--sh-md) !important;
+    }}
+    .stButton>button:focus-visible {{
+        outline: 2px solid {P["info"]} !important; outline-offset: 2px !important;
+    }}
+    .stButton>button[kind="primary"], .stButton>button[data-testid="stBaseButton-primary"] {{
+        background: var(--brand) !important; border-color: var(--brand) !important;
+        color: white !important;
+    }}
+    .stButton>button[kind="primary"]:hover, .stButton>button[data-testid="stBaseButton-primary"]:hover {{
+        background: var(--brand-dk) !important; border-color: var(--brand-dk) !important;
+    }}
+    [data-testid="stDataFrame"] {{
+        border-radius: var(--r-sm); overflow: hidden;
+        border: 1px solid var(--border);
+    }}
+    div[data-testid="stExpander"] {{
+        border: 1px solid var(--border); border-radius: var(--r-md);
+        overflow: hidden; background: var(--card); box-shadow: var(--sh-sm);
+    }}
+    div[data-testid="stExpander"] summary {{ font-weight: 600; }}
+    .stTabs [data-baseweb="tab"] {{
+        font-weight: 600; font-size: 0.86rem; color: var(--ink-2);
+    }}
+    .stTabs [data-baseweb="tab"][aria-selected="true"] {{ color: var(--brand); }}
+    .stTabs [data-baseweb="tab-highlight"] {{ background-color: var(--brand); }}
+    [data-testid="stTextInput"] input, [data-testid="stNumberInput"] input,
+    [data-testid="stTextArea"] textarea {{
+        border-radius: var(--r-sm) !important;
+    }}
+    [data-baseweb="select"] > div {{ border-radius: var(--r-sm) !important; }}
+
+    /* Thin scrollbars */
+    ::-webkit-scrollbar {{ height: 8px; width: 8px; }}
+    ::-webkit-scrollbar-thumb {{ background: var(--ink-3); border-radius: 4px; }}
+    ::-webkit-scrollbar-track {{ background: transparent; }}
 
     /* Lifecycle progress bar */
     .lifecycle-bar {{
@@ -371,8 +520,8 @@ def inject_css():
         gap: 0;
         margin: 0.6rem 0 0.8rem 0;
         padding: 0.5rem 0.8rem;
-        background: #FAFAFA;
-        border-radius: 8px;
+        background: {P["grey_100"]};
+        border-radius: var(--r-sm);
         overflow-x: auto;
     }}
     .lc-stage {{
@@ -389,27 +538,25 @@ def inject_css():
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 0.65rem;
-        font-weight: 700;
         flex-shrink: 0;
     }}
     .lc-dot.completed {{
-        background: #2E7D32;
+        background: {P["success"]};
         color: white;
     }}
     .lc-dot.current {{
-        background: #1565C0;
+        background: {P["info"]};
         color: white;
-        box-shadow: 0 0 0 3px rgba(21,101,192,0.25);
+        box-shadow: 0 0 0 3px rgba(29,78,216,0.22);
     }}
     .lc-dot.failed {{
-        background: #D32F2F;
+        background: #DC2626;
         color: white;
     }}
     .lc-dot.upcoming {{
-        background: #F5F5F5;
-        color: #BDBDBD;
-        border: 2px solid #E0E0E0;
+        background: {P["grey_100"]};
+        color: var(--ink-3);
+        border: 2px solid var(--border);
     }}
     .lc-label {{
         font-size: 0.62rem;
@@ -420,9 +567,10 @@ def inject_css():
     }}
     .lc-time {{
         font-size: 0.58rem;
-        color: #9E9E9E;
+        color: var(--ink-3);
         margin-top: 1px;
         text-align: center;
+        font-variant-numeric: tabular-nums;
     }}
     .lc-connector {{
         width: 28px;
@@ -430,9 +578,9 @@ def inject_css():
         margin-top: 10px;
         flex-shrink: 0;
     }}
-    .lc-connector.completed {{ background: #2E7D32; }}
-    .lc-connector.upcoming  {{ background: #E0E0E0; }}
-    .lc-connector.failed    {{ background: #D32F2F; }}
+    .lc-connector.completed {{ background: {P["success"]}; }}
+    .lc-connector.upcoming  {{ background: var(--border); }}
+    .lc-connector.failed    {{ background: #DC2626; }}
 
     /* Tracker board */
     .tracker-board {{
@@ -446,10 +594,10 @@ def inject_css():
         flex: 1;
         min-width: 140px;
         max-width: 220px;
-        background: #FAFAFA;
-        border-radius: 10px;
+        background: {P["grey_100"]};
+        border-radius: var(--r-md);
         padding: 0.6rem;
-        border-top: 3px solid #E0E0E0;
+        border-top: 3px solid var(--border);
     }}
     .board-col-header {{
         font-size: 0.7rem;
@@ -463,25 +611,27 @@ def inject_css():
     }}
     .board-col-count {{
         background: white;
-        border-radius: 10px;
+        border-radius: 999px;
         padding: 1px 7px;
         font-size: 0.68rem;
         font-weight: 700;
+        font-variant-numeric: tabular-nums;
     }}
     .board-item {{
         background: white;
-        border: 1px solid #E8E8EC;
-        border-radius: 6px;
+        border: 1px solid var(--border);
+        border-radius: var(--r-sm);
         padding: 0.4rem 0.6rem;
         margin-bottom: 0.4rem;
         font-size: 0.72rem;
+        box-shadow: var(--sh-sm);
     }}
     .board-item .bi-scope {{
         font-weight: 600;
         font-size: 0.68rem;
     }}
     .board-item .bi-detail {{
-        color: #616161;
+        color: var(--ink-2);
         font-size: 0.65rem;
         margin-top: 2px;
     }}
@@ -494,11 +644,12 @@ def inject_css():
 # ──────────────────────────────────────────────────────────────────────────────
 
 def status_badge(status: str) -> str:
-    color = STATUS_COLORS.get(status, "#9E9E9E")
-    icon  = STATUS_ICONS.get(status, "•")
-    bg    = color + "22"
-    return (f'<span class="status-badge" style="background:{bg};color:{color}">'
-            f'{icon} {status}</span>')
+    color = STATUS_COLORS.get(status, "#64748B")
+    icon_name = STATUS_ICONS.get(status, "")
+    bg = color + "14"
+    svg = icon(icon_name, size=12, color=color) if icon_name else ""
+    return (f'<span class="status-badge" style="background:{bg};color:{color};'
+            f'border-color:{color}33">{svg}{status}</span>')
 
 
 def kpi_card(label: str, value, sub: str = "", variant: str = "primary") -> str:
@@ -509,8 +660,13 @@ def kpi_card(label: str, value, sub: str = "", variant: str = "primary") -> str:
             f'</div>')
 
 
-def section_title(text: str, icon: str = ""):
-    prefix = f"{icon} " if icon else ""
+def section_title(text: str, icon_name: str = ""):
+    """Section header. `icon_name` accepts an icon() name; anything else
+    (legacy emoji) is rendered as-is."""
+    prefix = ""
+    if icon_name:
+        svg = icon(icon_name, size=13)
+        prefix = f"{svg} " if svg else f"{icon_name} "
     st.markdown(f'<div class="section-title">{prefix}{text}</div>', unsafe_allow_html=True)
 
 
@@ -549,10 +705,10 @@ def render_step_bar(current_step: int, steps: list):
     dots = []
     for i, label in enumerate(steps, 1):
         state = "done" if i < current_step else ("active" if i == current_step else "pending")
-        icon  = "✓" if state == "done" else str(i)
+        glyph = icon("check", size=13, color="white", valign="0") if state == "done" else str(i)
         dots.append(
             f'<div class="step">'
-            f'<div class="step-dot {state}">{icon}</div>'
+            f'<div class="step-dot {state}">{glyph}</div>'
             f'<span class="step-label {state}">{label}</span>'
             f'</div>')
         if i < len(steps):
@@ -601,7 +757,7 @@ def render_filter_chips(row: dict):
     if chips:
         st.markdown(f'<div class="adj-filters">{"".join(chips)}</div>', unsafe_allow_html=True)
     else:
-        st.markdown('<span style="font-size:0.78rem;color:#9E9E9E">All records (no filters)</span>',
+        st.markdown('<span style="font-size:0.78rem;color:#94A3B8">All records (no filters)</span>',
                     unsafe_allow_html=True)
 
 
@@ -616,8 +772,8 @@ def render_status_timeline(history_rows):
     html = '<div class="timeline">'
     for h in history_rows:
         status = h.get("NEW_STATUS", "?")
-        color  = STATUS_COLORS.get(status, "#9E9E9E")
-        icon   = STATUS_ICONS.get(status, "•")
+        color  = STATUS_COLORS.get(status, "#64748B")
+        svg    = icon(STATUS_ICONS.get(status, ""), size=13, color=color)
         by     = h.get("CHANGED_BY", "system")
         at     = h.get("CHANGED_AT", "")
         if hasattr(at, "strftime"):
@@ -625,7 +781,7 @@ def render_status_timeline(history_rows):
         comment = h.get("COMMENT", "")
         html += (
             f'<div class="tl-item">'
-            f'<div class="tl-status" style="color:{color}">{icon} {status}</div>'
+            f'<div class="tl-status" style="color:{color}">{svg} {status}</div>'
             f'<div class="tl-meta">by {by} · {at}</div>'
             + (f'<div class="tl-comment">"{comment}"</div>' if comment else "")
             + '</div>')
@@ -635,21 +791,21 @@ def render_status_timeline(history_rows):
 
 def render_pipeline_diagram(current_stage: int = 0):
     stages = [
-        ("💾", "ADJ Header\nInsert"),
-        ("⏰", "Task Polls\n(≤1 min)"),
-        ("🔄", "SP_RUN_PIPELINE\nExecutes"),
-        ("📊", "Dynamic Table\nRefresh"),
-        ("📈", "Report\nRefresh"),
+        ("database",   "ADJ Header\nInsert"),
+        ("timer",      "Task Polls\n(≤1 min)"),
+        ("play",       "SP_RUN_PIPELINE\nExecutes"),
+        ("table",      "Dynamic Table\nRefresh"),
+        ("line-chart", "Report\nRefresh"),
     ]
     nodes = []
-    for i, (icon, label) in enumerate(stages, 1):
+    for i, (icon_name, label) in enumerate(stages, 1):
         state_class = "done" if i < current_stage else ("active" if i == current_stage else "")
         nodes.append(
             f'<div class="pipe-node {state_class}">'
-            f'<div class="pn-icon">{icon}</div>'
+            f'<div class="pn-icon">{icon(icon_name, size=18, valign="0")}</div>'
             f'<div class="pn-label">{label}</div></div>')
         if i < len(stages):
-            nodes.append('<div class="pipe-arrow">→</div>')
+            nodes.append(f'<div class="pipe-arrow">{icon("chevron-right", size=16, valign="0")}</div>')
     st.markdown(f'<div class="pipeline">{"".join(nodes)}</div>', unsafe_allow_html=True)
 
 
@@ -733,29 +889,34 @@ def render_lifecycle_bar(track_row: dict):
         if is_failed and i >= current_idx:
             if i == current_idx:
                 dot_class = "failed"
-                label_color = "#D32F2F"
+                label_color = "#DC2626"
                 conn_class = "failed"
             else:
                 dot_class = "upcoming"
-                label_color = "#BDBDBD"
+                label_color = "#94A3B8"
                 conn_class = "upcoming"
         elif i < current_idx:
             dot_class = "completed"
-            label_color = "#2E7D32"
+            label_color = P["success"]
             conn_class = "completed"
         elif i == current_idx:
             dot_class = "current"
-            label_color = "#1565C0"
+            label_color = P["info"]
             conn_class = "upcoming"
         else:
             dot_class = "upcoming"
-            label_color = "#BDBDBD"
+            label_color = "#94A3B8"
             conn_class = "upcoming"
 
-        icon = "✓" if dot_class == "completed" else ("✕" if dot_class == "failed" else "")
+        if dot_class == "completed":
+            glyph = icon("check", size=12, color="white", valign="0")
+        elif dot_class == "failed":
+            glyph = icon("x", size=12, color="white", valign="0")
+        else:
+            glyph = ""
         html_parts.append(
             f'<div class="lc-stage">'
-            f'<div class="lc-dot {dot_class}">{icon}</div>'
+            f'<div class="lc-dot {dot_class}">{glyph}</div>'
             f'<div class="lc-label" style="color:{label_color}">{label}</div>'
             f'<div class="lc-time">{ts_str}</div>'
             f'</div>')
@@ -802,10 +963,13 @@ def render_sidebar():
         # ── User footer ───────────────────────────────────────────────────────
         st.markdown(
             f'<div class="sidebar-user-footer">'
+            f'{icon("user", size=16, color="rgba(255,255,255,0.5)", valign="0")}'
+            f'<div>'
             f'<div style="font-size:0.6rem;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:.1em;color:rgba(255,255,255,0.38);margin-bottom:3px">'
+            f'letter-spacing:.1em;color:rgba(255,255,255,0.38);margin-bottom:2px">'
             f'Logged in as</div>'
             f'<div style="font-size:0.82rem;font-weight:600;color:rgba(255,255,255,0.88)">'
             f'{user}</div>'
+            f'</div>'
             f'</div>',
             unsafe_allow_html=True)

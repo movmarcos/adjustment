@@ -12,7 +12,7 @@ st.set_page_config(page_title="Approval Queue · MUFG", page_icon="✅", layout=
 
 from utils.styles import (
     inject_css, render_sidebar, render_filter_chips,
-    section_title, status_badge, P, SCOPE_CONFIG, STATUS_COLORS,
+    section_title, status_badge, P, SCOPE_CONFIG, STATUS_COLORS, icon,
 )
 from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
 
@@ -25,7 +25,7 @@ render_sidebar()
 
 user = current_user_name()
 
-st.markdown("## ✅ Approval Queue")
+st.markdown("## Approval Queue")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
     "Review adjustments that require approval before processing. "
@@ -78,15 +78,15 @@ except Exception:
 
 c1, c2, c3 = st.columns(3)
 stat_items = [
-    ("Awaiting Approval", qs.get("TOTAL_PENDING", 0), P["info"],    "📝"),
-    ("Scopes",            qs.get("SCOPES", 0),         P["primary"], "📊"),
-    ("Submitters",        qs.get("SUBMITTERS", 0),      P["grey_700"],"👤"),
+    ("Awaiting Approval", qs.get("TOTAL_PENDING", 0), P["info"],    "clipboard"),
+    ("Scopes",            qs.get("SCOPES", 0),         P["primary"], "bar-chart"),
+    ("Submitters",        qs.get("SUBMITTERS", 0),      P["grey_700"],"user"),
 ]
-for col, (label, val, color, icon) in zip([c1, c2, c3], stat_items):
+for col, (label, val, color, icon_name) in zip([c1, c2, c3], stat_items):
     col.markdown(
         f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
         f'border-top:3px solid {color};border-radius:8px;padding:0.8rem;text-align:center">'
-        f'<div style="font-size:1.6rem;font-weight:800;color:{color}">{icon} {int(val)}</div>'
+        f'<div style="font-size:1.6rem;font-weight:800;color:{color};font-variant-numeric:tabular-nums">{icon(icon_name, size=15, color=color)} {int(val)}</div>'
         f'<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.06em;'
         f'color:{P["grey_700"]};margin-top:3px">{label}</div>'
         f'</div>',
@@ -153,12 +153,12 @@ if not df_queue.empty:
     except Exception:
         df_overlaps = pd.DataFrame()
 
-section_title(f"Adjustments Awaiting Approval ({len(df_queue)})", "📝")
+section_title(f"Adjustments Awaiting Approval ({len(df_queue)})", "clipboard")
 
 if df_queue.empty:
     st.markdown(
         f'<div class="mcard" style="text-align:center;padding:2.5rem;color:{P["grey_700"]}">'
-        f'<div style="font-size:1.8rem">✅</div>'
+        f'<div>{icon("check-circle", size=28, color=P["success"], valign="0")}</div>'
         f'<div style="font-size:0.9rem;margin-top:0.5rem">No adjustments awaiting approval</div>'
         f'</div>',
         unsafe_allow_html=True)
@@ -183,10 +183,10 @@ else:
             (df_overlaps["ADJ_ID_B"] == adj_id).any()
         ))
         expander_label = (
-            f'⚠️ ADJ {adj_short} · {scope_cfg.get("icon","📊")} {scope} · '
+            f'ADJ {adj_short} · {scope} · '
             f'{adj_type} · by {submitted_by}  — OVERLAP'
             if has_overlap else
-            f'ADJ {adj_short} · {scope_cfg.get("icon","📊")} {scope} · '
+            f'ADJ {adj_short} · {scope} · '
             f'{adj_type} · by {submitted_by}'
         )
         with st.expander(expander_label, expanded=has_overlap):
@@ -215,7 +215,7 @@ else:
                 )
                 st.markdown(meta_html, unsafe_allow_html=True)
 
-                section_title("Filters Applied", "🔍")
+                section_title("Filters Applied", "search")
                 render_filter_chips(row.to_dict())
 
                 # ── Overlap warnings ──────────────────────────────────────
@@ -246,7 +246,7 @@ else:
                             f'border-left:4px solid #F9A825;border-radius:8px;'
                             f'padding:0.7rem 1rem;margin:0.8rem 0">'
                             f'<div style="font-weight:700;font-size:0.82rem;color:#E65100;'
-                            f'margin-bottom:0.4rem">⚠️ Overlap Detected with '
+                            f'margin-bottom:0.4rem">{icon("alert-triangle", size=13, color="#B45309")} Overlap Detected with '
                             f'{len(other_ids)} adjustment(s)</div>'
                             f'<table style="width:100%;border-collapse:collapse">'
                             f'{rows_html}</table>'
@@ -291,20 +291,20 @@ else:
                         f'<div style="background:#FFF3CD;border:1px solid #FFECB5;'
                         f'border-radius:6px;padding:0.6rem;font-size:0.8rem;text-align:center;'
                         f'color:#664D03;margin-bottom:0.5rem">'
-                        f'⚠️ You cannot approve your own adjustment</div>',
+                        f'{icon("alert-triangle", size=13, color="#B45309")} You cannot approve your own adjustment</div>',
                         unsafe_allow_html=True)
                 elif not can_approve_scope:
                     st.markdown(
                         f'<div style="background:#F8D7DA;border:1px solid #F5C2C7;'
                         f'border-radius:6px;padding:0.6rem;font-size:0.8rem;text-align:center;'
                         f'color:#842029;margin-bottom:0.5rem">'
-                        f'🔒 Not authorized for {scope}</div>',
+                        f'{icon("lock", size=13, color=P["grey_700"])} Not authorized for {scope}</div>',
                         unsafe_allow_html=True)
 
                 actions_enabled = is_approver and can_approve_scope and not is_own_adjustment
 
                 # Approve
-                if st.button("✅ Approve", key=f"approve_{adj_id}",
+                if st.button("Approve", key=f"approve_{adj_id}",
                              use_container_width=True, type="primary",
                              disabled=not actions_enabled):
                     try:
@@ -331,7 +331,7 @@ else:
                 reject_reason = st.text_input(
                     "Rejection reason", key=f"reject_reason_{adj_id}",
                     label_visibility="collapsed")
-                if st.button("❌ Reject", key=f"reject_{adj_id}",
+                if st.button("Reject", key=f"reject_{adj_id}",
                              use_container_width=True,
                              disabled=not actions_enabled):
                     try:
@@ -358,7 +358,7 @@ else:
 # ──────────────────────────────────────────────────────────────────────────────
 
 st.markdown("<br/>", unsafe_allow_html=True)
-section_title("Recently Approved / Rejected", "📜")
+section_title("Recently Approved / Rejected", "file-text")
 
 try:
     df_recent = run_query_df("""

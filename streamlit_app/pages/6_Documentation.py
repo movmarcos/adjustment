@@ -25,12 +25,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from utils.styles import inject_css, render_sidebar, section_title, P, SCOPE_CONFIG, TYPE_CONFIG, STATUS_COLORS, STATUS_ICONS
+from utils.styles import inject_css, render_sidebar, section_title, P, SCOPE_CONFIG, TYPE_CONFIG, STATUS_COLORS, STATUS_ICONS, icon
 
 inject_css()
 render_sidebar()
 
-st.markdown("## 📖 Documentation")
+st.markdown("## Documentation")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
     "Comprehensive guide to the Adjustment Engine — architecture, workflows, "
@@ -44,12 +44,12 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # ══════════════════════════════════════════════════════════════════════════════
 
 tab_overview, tab_architecture, tab_workflow, tab_processing, tab_objects, tab_ops = st.tabs([
-    "📋 Overview",
-    "🏗️ Architecture",
-    "🔄 Workflow & Status",
-    "⚙️ Processing Engine",
-    "🗄️ Database Objects",
-    "🛠️ Operations Guide",
+    "Overview",
+    "Architecture",
+    "Workflow & Status",
+    "Processing Engine",
+    "Database Objects",
+    "Operations Guide",
 ])
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -58,7 +58,7 @@ tab_overview, tab_architecture, tab_workflow, tab_processing, tab_objects, tab_o
 
 with tab_overview:
 
-    section_title("What is the Adjustment Engine?", "🎯")
+    section_title("What is the Adjustment Engine?", "target")
     st.markdown(
         "The Adjustment Engine is a **Streamlit-on-Snowflake application** that provides a unified, "
         "self-service interface for creating, approving, reviewing, and processing risk-related "
@@ -74,7 +74,7 @@ with tab_overview:
     st.markdown("<br/>", unsafe_allow_html=True)
 
     # ── Scopes ────────────────────────────────────────────────────────────
-    section_title("Supported Scopes", "📊")
+    section_title("Supported Scopes", "bar-chart")
     scope_cols = st.columns(len(SCOPE_CONFIG))
     for i, (key, cfg) in enumerate(SCOPE_CONFIG.items()):
         with scope_cols[i]:
@@ -96,7 +96,7 @@ with tab_overview:
 
     # ── Adjustment Types ─────────────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Adjustment Types", "⚡")
+    section_title("Adjustment Types", "zap")
 
     type_rows = ""
     for tk, tcfg in TYPE_CONFIG.items():
@@ -111,13 +111,13 @@ with tab_overview:
     # Add Entity Roll, Upload, Direct manually (not in TYPE_CONFIG)
     type_rows += (
         f'<tr>'
-        f'<td style="padding:10px 14px;font-weight:600;font-size:0.9rem;white-space:nowrap">🔄 Entity Roll</td>'
+        f'<td style="padding:10px 14px;font-weight:600;font-size:0.9rem;white-space:nowrap">{icon("refresh-cw", size=13)} Entity Roll</td>'
         f'<td style="padding:10px 14px;font-size:0.85rem;color:{P["grey_700"]}">Full entity copy from source COB — deletes target, copies source (approval required)</td>'
         f'<td style="padding:10px 14px;font-family:monospace;font-size:0.82rem;'
         f'background:{P["grey_100"]};border-radius:4px">DELETE target + INSERT FROM source</td>'
         f'</tr>'
         f'<tr>'
-        f'<td style="padding:10px 14px;font-weight:600;font-size:0.9rem;white-space:nowrap">📤 Upload</td>'
+        f'<td style="padding:10px 14px;font-weight:600;font-size:0.9rem;white-space:nowrap">{icon("upload", size=13)} Upload</td>'
         f'<td style="padding:10px 14px;font-size:0.85rem;color:{P["grey_700"]}">Direct CSV upload of VaR measure values</td>'
         f'<td style="padding:10px 14px;font-family:monospace;font-size:0.82rem;'
         f'background:{P["grey_100"]};border-radius:4px">INSERT line items directly</td>'
@@ -134,22 +134,22 @@ with tab_overview:
 
     # ── Pages Summary ────────────────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Application Pages", "📄")
+    section_title("Application Pages", "file-text")
 
     pages = [
-        ("🏠", "Command Center",   "Dashboard with KPIs, status charts, overlap alerts, and activity feed"),
-        ("✏️", "New Adjustment",    "2-step wizard: Category & Details → Preview & Submit"),
-        ("📋", "Adjustments",       "All adjustments (tick 'Only my adjustments' for yours) with full history, actions, and status timeline"),
-        ("✅", "Approval Queue",     "Review and approve adjustments. Only authorized approvers can act. Self-approval is blocked"),
-        ("⏳", "Adjustment Pipeline", "Lifecycle + live processing: stage board, running/waiting items with Force-process, and PowerBI report status"),
-        ("⚙️", "Admin",             "Settings management, approvers, recurring templates, schema reference"),
-        ("📖", "Documentation",     "This page — full process guide with diagrams"),
+        ("home",       "Command Center",   "Dashboard with KPIs, status charts, overlap alerts, and activity feed"),
+        ("file-text",  "New Adjustment",    "2-step wizard: Category & Details → Preview & Submit"),
+        ("clipboard",  "Adjustments",       "All adjustments (tick 'Only my adjustments' for yours) with full history, actions, and status timeline"),
+        ("check-circle", "Approval Queue",  "Review and approve adjustments. Only authorized approvers can act. Self-approval is blocked"),
+        ("clock",      "Adjustment Pipeline", "Lifecycle + live processing: stage board, running/waiting items with Force-process, and PowerBI report status"),
+        ("settings",   "Admin",             "Settings management, approvers, recurring templates, schema reference"),
+        ("info",       "Documentation",     "This page — full process guide with diagrams"),
     ]
-    for icon, name, desc in pages:
+    for icon_name, name, desc in pages:
         st.markdown(
             f'<div style="display:flex;align-items:center;gap:12px;padding:0.5rem 0;'
             f'border-bottom:1px solid {P["border"]}">'
-            f'<span style="font-size:1.3rem;width:32px;text-align:center">{icon}</span>'
+            f'<span style="width:32px;text-align:center">{icon(icon_name, size=18, color=P["grey_700"], valign="0")}</span>'
             f'<div><div style="font-weight:600;font-size:0.9rem">{name}</div>'
             f'<div style="font-size:0.8rem;color:{P["grey_700"]}">{desc}</div></div></div>',
             unsafe_allow_html=True)
@@ -162,7 +162,7 @@ with tab_overview:
 with tab_architecture:
 
     # ── End-to-End Architecture Diagram ──────────────────────────────────
-    section_title("End-to-End Architecture", "🏗️")
+    section_title("End-to-End Architecture", "landmark")
 
     _html(f"""
     <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:1rem 0;overflow-x:auto">
@@ -170,7 +170,7 @@ with tab_architecture:
 
         <div style="display:flex;flex-direction:column;align-items:center;min-width:140px">
             <div style="background:#E3F2FD;border:2px solid {P['info']};border-radius:10px;padding:1rem;text-align:center;width:140px">
-                <div style="font-size:2rem">👤</div>
+                <div>{icon("user", size=28, color=P['grey_700'], valign="0")}</div>
                 <div style="font-weight:700;font-size:0.82rem;color:{P['info']}">User</div>
                 <div style="font-size:0.7rem;color:{P['grey_700']}">Streamlit UI</div>
             </div>
@@ -183,7 +183,7 @@ with tab_architecture:
 
         <div style="display:flex;flex-direction:column;align-items:center;min-width:155px">
             <div style="background:#FFF3E0;border:2px solid {P['warning']};border-radius:10px;padding:1rem;text-align:center;width:155px">
-                <div style="font-size:2rem">⚡</div>
+                <div>{icon("zap", size=28, color=P['grey_700'], valign="0")}</div>
                 <div style="font-weight:700;font-size:0.82rem;color:{P['warning']}">SP_SUBMIT</div>
                 <div style="font-size:0.7rem;color:{P['grey_700']}">Validate &amp; Insert</div>
             </div>
@@ -196,7 +196,7 @@ with tab_architecture:
 
         <div style="display:flex;flex-direction:column;align-items:center;min-width:140px">
             <div style="background:#E8F5E9;border:2px solid {P['success']};border-radius:10px;padding:1rem;text-align:center;width:140px">
-                <div style="font-size:2rem">💾</div>
+                <div>{icon("database", size=28, color=P['grey_700'], valign="0")}</div>
                 <div style="font-weight:700;font-size:0.82rem;color:{P['success']}">ADJ_HEADER</div>
                 <div style="font-size:0.7rem;color:{P['grey_700']}">Source of Truth</div>
             </div>
@@ -209,7 +209,7 @@ with tab_architecture:
 
         <div style="display:flex;flex-direction:column;align-items:center;min-width:130px">
             <div style="background:#E3F2FD;border:2px solid #42A5F5;border-radius:10px;padding:1rem;text-align:center;width:130px">
-                <div style="font-size:2rem">🗂️</div>
+                <div>{icon("table", size=28, color=P['grey_700'], valign="0")}</div>
                 <div style="font-weight:700;font-size:0.82rem;color:#1976D2">4 QUEUE VIEWS</div>
                 <div style="font-size:0.7rem;color:{P['grey_700']}">One per scope</div>
             </div>
@@ -235,7 +235,7 @@ with tab_architecture:
 
         <div style="display:flex;flex-direction:column;align-items:center;min-width:155px">
             <div style="background:#FFEBEE;border:2px solid {P['primary']};border-radius:10px;padding:1rem;text-align:center;width:155px">
-                <div style="font-size:2rem">🔄</div>
+                <div>{icon("refresh-cw", size=28, color=P['grey_700'], valign="0")}</div>
                 <div style="font-weight:700;font-size:0.82rem;color:{P['primary']}">SP_PROCESS</div>
                 <div style="font-size:0.7rem;color:{P['grey_700']}">Python / Snowpark</div>
             </div>
@@ -248,7 +248,7 @@ with tab_architecture:
 
         <div style="display:flex;flex-direction:column;align-items:center;min-width:150px">
             <div style="background:#E8F5E9;border:2px solid {P['success']};border-radius:10px;padding:1rem;text-align:center;width:150px">
-                <div style="font-size:2rem">📊</div>
+                <div>{icon("bar-chart", size=28, color=P['grey_700'], valign="0")}</div>
                 <div style="font-weight:700;font-size:0.82rem;color:{P['success']}">FACT.*_ADJ</div>
                 <div style="font-size:0.7rem;color:{P['grey_700']}">Delta Rows</div>
             </div>
@@ -271,7 +271,7 @@ with tab_architecture:
 
     # ── Layer Diagram ────────────────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Snowflake Object Layers", "🗄️")
+    section_title("Snowflake Object Layers", "database")
 
     _html(f"""
     <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0">
@@ -281,11 +281,11 @@ with tab_architecture:
         ① Entry Layer — Streamlit writes here</div>
         <div style="display:flex;gap:10px;flex-wrap:wrap">
             <div style="background:#FFEBEE;border:1px solid {P['primary']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            💾 ADJ_HEADER</div>
+            {icon("database", size=13)} ADJ_HEADER</div>
             <div style="background:#FFEBEE;border:1px solid {P['primary']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            📝 ADJ_LINE_ITEM</div>
+            {icon("file-text", size=13)} ADJ_LINE_ITEM</div>
             <div style="background:#FFEBEE;border:1px solid {P['primary']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            📜 ADJ_STATUS_HISTORY</div>
+            {icon("file-text", size=13)} ADJ_STATUS_HISTORY</div>
         </div>
     </div>
 
@@ -294,9 +294,9 @@ with tab_architecture:
         ② Config Layer — Drives behaviour</div>
         <div style="display:flex;gap:10px;flex-wrap:wrap">
             <div style="background:{P['purple_lt']};border:1px solid {P['purple']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            ⚙️ ADJUSTMENTS_SETTINGS</div>
+            {icon("settings", size=13)} ADJUSTMENTS_SETTINGS</div>
             <div style="background:{P['purple_lt']};border:1px solid {P['purple']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            🔁 ADJ_RECURRING_TEMPLATE</div>
+            {icon("refresh-cw", size=13)} ADJ_RECURRING_TEMPLATE</div>
         </div>
     </div>
 
@@ -305,13 +305,13 @@ with tab_architecture:
         ③ Queue Views — Eligible adjustment queues (one per scope)</div>
         <div style="display:flex;gap:10px;flex-wrap:wrap">
             <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            🗂️ VW_QUEUE_VAR</div>
+            {icon("table", size=13)} VW_QUEUE_VAR</div>
             <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            🗂️ VW_QUEUE_STRESS</div>
+            {icon("table", size=13)} VW_QUEUE_STRESS</div>
             <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            🗂️ VW_QUEUE_FRTB</div>
+            {icon("table", size=13)} VW_QUEUE_FRTB</div>
             <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            🗂️ VW_QUEUE_SENSITIVITY</div>
+            {icon("table", size=13)} VW_QUEUE_SENSITIVITY</div>
         </div>
     </div>
 
@@ -328,13 +328,13 @@ with tab_architecture:
             <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
             ⏰ TASK_PROCESS_SENSITIVITY</div>
             <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            ⚡ SP_RUN_PIPELINE</div>
+            {icon("zap", size=13)} SP_RUN_PIPELINE</div>
             <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            ⚡ SP_SUBMIT_ADJUSTMENT</div>
+            {icon("zap", size=13)} SP_SUBMIT_ADJUSTMENT</div>
             <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            ⚡ SP_PREVIEW_ADJUSTMENT</div>
+            {icon("zap", size=13)} SP_PREVIEW_ADJUSTMENT</div>
             <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            ⚡ SP_PROCESS_ADJUSTMENT</div>
+            {icon("zap", size=13)} SP_PROCESS_ADJUSTMENT</div>
         </div>
     </div>
 
@@ -343,9 +343,9 @@ with tab_architecture:
         ⑤ Materialised Layer — Auto-refresh (1 min lag)</div>
         <div style="display:flex;gap:10px;flex-wrap:wrap">
             <div style="background:#E8F5E9;border:1px solid {P['success']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            📊 DT_DASHBOARD</div>
+            {icon("bar-chart", size=13)} DT_DASHBOARD</div>
             <div style="background:#E8F5E9;border:1px solid {P['success']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            ⚠️ DT_OVERLAP_ALERTS</div>
+            {icon("alert-triangle", size=13)} DT_OVERLAP_ALERTS</div>
         </div>
     </div>
 
@@ -354,19 +354,19 @@ with tab_architecture:
         ⑥ Read Layer — Real-time views for Streamlit</div>
         <div style="display:flex;gap:10px;flex-wrap:wrap">
             <div style="background:{P['white']};border:1px solid {P['border']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            👁️ VW_DASHBOARD_KPI</div>
+            {icon("eye", size=13)} VW_DASHBOARD_KPI</div>
             <div style="background:{P['white']};border:1px solid {P['border']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            👁️ VW_SIGNOFF_STATUS</div>
+            {icon("eye", size=13)} VW_SIGNOFF_STATUS</div>
             <div style="background:{P['white']};border:1px solid {P['border']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            👁️ VW_RECENT_ACTIVITY</div>
+            {icon("eye", size=13)} VW_RECENT_ACTIVITY</div>
             <div style="background:{P['white']};border:1px solid {P['border']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            👁️ VW_ERRORS</div>
+            {icon("eye", size=13)} VW_ERRORS</div>
             <div style="background:{P['white']};border:1px solid {P['border']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            👁️ VW_MY_WORK</div>
+            {icon("eye", size=13)} VW_MY_WORK</div>
             <div style="background:{P['white']};border:1px solid {P['border']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            👁️ VW_ADJUSTMENT_TRACK</div>
+            {icon("eye", size=13)} VW_ADJUSTMENT_TRACK</div>
             <div style="background:{P['white']};border:1px solid {P['border']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            👁️ VW_APPROVAL_QUEUE</div>
+            {icon("eye", size=13)} VW_APPROVAL_QUEUE</div>
         </div>
     </div>
 
@@ -381,7 +381,7 @@ with tab_architecture:
 with tab_workflow:
 
     # ── User Guide ───────────────────────────────────────────────────────
-    section_title("How to Submit an Adjustment — Step-by-Step Guide", "📘")
+    section_title("How to Submit an Adjustment — Step-by-Step Guide", "info")
 
     _html(f"""
     <div class="mcard" style="border-left:4px solid {P['primary']};margin-bottom:1rem">
@@ -394,25 +394,25 @@ with tab_workflow:
     with st.expander("**Step 1 — Open New Adjustment**", expanded=True):
         _html(f"""
         <div style="font-size:0.88rem;color:{P['grey_700']};margin-bottom:0.6rem">
-        Navigate to <strong>✏️ New Adjustment</strong> in the sidebar. You will see three adjustment categories.
+        Navigate to <strong>New Adjustment</strong> in the sidebar. You will see three adjustment categories.
         </div>
         <div style="display:flex;gap:12px;flex-wrap:wrap">
             <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.75rem 1rem;min-width:200px;flex:1">
-                <div style="font-weight:700;font-size:0.88rem">📊 Scaling Adjustment</div>
+                <div style="font-weight:700;font-size:0.88rem">{icon("bar-chart", size=13)} Scaling Adjustment</div>
                 <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:4px">
                 Multiply, flatten, or roll existing fact data. The system reads the
                 source data and writes a delta row. Most common type.
                 </div>
             </div>
             <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.75rem 1rem;min-width:200px;flex:1">
-                <div style="font-weight:700;font-size:0.88rem">📤 Upload Adjustment</div>
+                <div style="font-weight:700;font-size:0.88rem">{icon("upload", size=13)} Upload Adjustment</div>
                 <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:4px">
                 Provide exact adjustment values via CSV upload. The system writes your
                 values directly without reading the source data.
                 </div>
             </div>
             <div style="background:#E8F5E9;border:1px solid {P['success']};border-radius:8px;padding:0.75rem 1rem;min-width:200px;flex:1">
-                <div style="font-weight:700;font-size:0.88rem">🔄 Entity Roll</div>
+                <div style="font-weight:700;font-size:0.88rem">{icon("refresh-cw", size=13)} Entity Roll</div>
                 <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:4px">
                 Copy all data from a source COB/entity to a target. Destructive operation
                 that requires approval before processing.
@@ -428,21 +428,21 @@ with tab_workflow:
         </div>
         <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:0.8rem">
             <div style="background:#FFF0F3;border:1px solid {P['primary']};border-radius:8px;padding:0.7rem 0.9rem">
-                <div style="font-weight:700;font-size:0.85rem;color:{P['primary']}">📊 VaR</div>
+                <div style="font-weight:700;font-size:0.85rem;color:{P['primary']}">{icon("bar-chart", size=13)} VaR</div>
                 <div style="font-size:0.78rem;color:{P['grey_700']}">Value at Risk adjustments on the VaR fact table</div>
             </div>
             <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.7rem 0.9rem">
-                <div style="font-weight:700;font-size:0.85rem;color:{P['info']}">⚡ Stress</div>
+                <div style="font-weight:700;font-size:0.85rem;color:{P['info']}">{icon("zap", size=13)} Stress</div>
                 <div style="font-size:0.78rem;color:{P['grey_700']}">Stress testing adjustments</div>
             </div>
             <div style="background:#E8F5E9;border:1px solid {P['success']};border-radius:8px;padding:0.7rem 0.9rem">
-                <div style="font-weight:700;font-size:0.85rem;color:{P['success']}">🏛️ FRTB</div>
+                <div style="font-weight:700;font-size:0.85rem;color:{P['success']}">{icon("landmark", size=13)} FRTB</div>
                 <div style="font-size:0.78rem;color:{P['grey_700']}">
                 Fundamental Review of the Trading Book. Has <strong>sub-types</strong> — see Step 3.
                 </div>
             </div>
             <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.7rem 0.9rem">
-                <div style="font-weight:700;font-size:0.85rem;color:{P['warning']}">🎯 Sensitivity</div>
+                <div style="font-weight:700;font-size:0.85rem;color:{P['warning']}">{icon("target", size=13)} Sensitivity</div>
                 <div style="font-size:0.78rem;color:{P['grey_700']}">Sensitivity / Greeks adjustments</div>
             </div>
         </div>
@@ -490,7 +490,7 @@ with tab_workflow:
         </div>
         <div style="display:flex;flex-direction:column;gap:10px">
             <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.75rem 1rem">
-                <div style="font-weight:700;font-size:0.88rem">📊 Scale</div>
+                <div style="font-weight:700;font-size:0.88rem">{icon("bar-chart", size=13)} Scale</div>
                 <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:4px">
                 Multiply the matching rows by a scale factor. <strong>Same COB:</strong> only the incremental
                 delta is written (sf - 1). For example, a scale of 1.10× adds +10% as a delta row.
@@ -498,14 +498,14 @@ with tab_workflow:
                 </div>
             </div>
             <div style="background:#FFEBEE;border:1px solid {P['primary']};border-radius:8px;padding:0.75rem 1rem">
-                <div style="font-weight:700;font-size:0.88rem;color:{P['primary']}">🔴 Flatten</div>
+                <div style="font-weight:700;font-size:0.88rem;color:{P['primary']}">{icon("minus-circle", size=13)} Flatten</div>
                 <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:4px">
                 Zero out the matching rows by writing a delta of −1×. The net result
                 (original + delta) becomes zero. Use this to remove positions from the risk figures.
                 </div>
             </div>
             <div style="background:#E8F5E9;border:1px solid {P['success']};border-radius:8px;padding:0.75rem 1rem">
-                <div style="font-weight:700;font-size:0.88rem;color:{P['success']}">🔄 Roll</div>
+                <div style="font-weight:700;font-size:0.88rem;color:{P['success']}">{icon("refresh-cw", size=13)} Roll</div>
                 <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:4px">
                 Roll a prior COB (Source COB) forward to the current COB, optionally scaled.
                 The system <strong>flattens</strong> the target COB's existing original first,
@@ -688,7 +688,7 @@ with tab_workflow:
     st.markdown("<br/>", unsafe_allow_html=True)
 
     # ── Status State Machine ─────────────────────────────────────────────
-    section_title("Adjustment Lifecycle — Status State Machine", "🔄")
+    section_title("Adjustment Lifecycle — Status State Machine", "refresh-cw")
 
     _html(f"""
     <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0;overflow-x:auto">
@@ -696,7 +696,7 @@ with tab_workflow:
 
     <div style="display:flex;align-items:center;gap:0">
         <div style="background:#FFF3E0;border:2px solid {STATUS_COLORS['Pending']};border-radius:10px;padding:0.8rem 1rem;text-align:center;min-width:120px">
-            <div style="font-size:1.3rem">{STATUS_ICONS['Pending']}</div>
+            <div>{icon(STATUS_ICONS['Pending'], size=20, color=STATUS_COLORS['Pending'], valign="0")}</div>
             <div style="font-weight:700;font-size:0.82rem;color:{STATUS_COLORS['Pending']}">Pending</div>
             <div style="font-size:0.65rem;color:{P['grey_700']}">Initial state</div>
         </div>
@@ -705,7 +705,7 @@ with tab_workflow:
             <div style="font-size:0.6rem;color:{P['grey_700']}">SP_RUN_PIPELINE<br/>claims</div>
         </div>
         <div style="background:#E3F2FD;border:2px solid {STATUS_COLORS['Running']};border-radius:10px;padding:0.8rem 1rem;text-align:center;min-width:120px">
-            <div style="font-size:1.3rem">{STATUS_ICONS['Running']}</div>
+            <div>{icon(STATUS_ICONS['Running'], size=20, color=STATUS_COLORS['Running'], valign="0")}</div>
             <div style="font-weight:700;font-size:0.82rem;color:{STATUS_COLORS['Running']}">Running</div>
             <div style="font-size:0.65rem;color:{P['grey_700']}">Processing now</div>
         </div>
@@ -714,15 +714,15 @@ with tab_workflow:
             <div style="font-size:0.6rem;color:{P['grey_700']}">SP_PROCESS<br/>succeeds</div>
         </div>
         <div style="background:#E8F5E9;border:2px solid {STATUS_COLORS['Processed']};border-radius:10px;padding:0.8rem 1rem;text-align:center;min-width:120px">
-            <div style="font-size:1.3rem">{STATUS_ICONS['Processed']}</div>
+            <div>{icon(STATUS_ICONS['Processed'], size=20, color=STATUS_COLORS['Processed'], valign="0")}</div>
             <div style="font-weight:700;font-size:0.82rem;color:{STATUS_COLORS['Processed']}">Processed</div>
-            <div style="font-size:0.65rem;color:{P['grey_700']}">In the data ✔</div>
+            <div style="font-size:0.65rem;color:{P['grey_700']}">In the data {icon("check", size=12)}</div>
         </div>
     </div>
 
     <div style="display:flex;align-items:center;gap:0;padding-left:0">
         <div style="background:#E3F2FD;border:2px solid {STATUS_COLORS['Pending Approval']};border-radius:10px;padding:0.8rem 1rem;text-align:center;min-width:120px">
-            <div style="font-size:1.3rem">{STATUS_ICONS['Pending Approval']}</div>
+            <div>{icon(STATUS_ICONS['Pending Approval'], size=20, color=STATUS_COLORS['Pending Approval'], valign="0")}</div>
             <div style="font-weight:700;font-size:0.78rem;color:{STATUS_COLORS['Pending Approval']}">Pending Approval</div>
             <div style="font-size:0.65rem;color:{P['grey_700']}">Optional</div>
         </div>
@@ -731,7 +731,7 @@ with tab_workflow:
             <div style="font-size:0.6rem;color:{P['grey_700']}">Authorized<br/>approver<br/>(not submitter)</div>
         </div>
         <div style="background:#E0F2F1;border:2px solid {STATUS_COLORS['Approved']};border-radius:10px;padding:0.8rem 1rem;text-align:center;min-width:120px">
-            <div style="font-size:1.3rem">{STATUS_ICONS['Approved']}</div>
+            <div>{icon(STATUS_ICONS['Approved'], size=20, color=STATUS_COLORS['Approved'], valign="0")}</div>
             <div style="font-weight:700;font-size:0.82rem;color:{STATUS_COLORS['Approved']}">Approved</div>
             <div style="font-size:0.65rem;color:{P['grey_700']}">Ready to process</div>
         </div>
@@ -739,7 +739,7 @@ with tab_workflow:
             <div style="font-size:1.2rem;color:{P['grey_400']}">→</div>
             <div style="font-size:0.6rem;color:{P['grey_700']}">SP_RUN_PIPELINE<br/>claims</div>
         </div>
-        <div style="font-size:0.82rem;font-weight:700;color:{STATUS_COLORS['Running']}">⚡ Running → ✔ Processed</div>
+        <div style="font-size:0.82rem;font-weight:700;color:{STATUS_COLORS['Running']}">{icon("zap", size=13)} Running → {icon("check", size=12)} Processed</div>
     </div>
 
     <div style="display:flex;gap:2rem;flex-wrap:wrap;padding-left:2rem">
@@ -748,7 +748,7 @@ with tab_workflow:
             <div style="font-size:0.72rem;color:{P['grey_700']}">Submit (COB signed off)</div>
             <div style="font-size:1rem;color:{P['grey_400']}">→</div>
             <div style="background:{P['purple_lt']};border:2px solid {STATUS_COLORS['Rejected - SignedOff']};border-radius:10px;padding:0.5rem 0.8rem;text-align:center">
-                <div style="font-weight:700;font-size:0.78rem;color:{STATUS_COLORS['Rejected - SignedOff']}">🔒 Rejected - SignedOff</div>
+                <div style="font-weight:700;font-size:0.78rem;color:{STATUS_COLORS['Rejected - SignedOff']}">{icon("lock", size=13)} Rejected - SignedOff</div>
             </div>
         </div>
 
@@ -756,7 +756,7 @@ with tab_workflow:
             <div style="font-size:0.72rem;color:{P['grey_700']}">SP_PROCESS fails</div>
             <div style="font-size:1rem;color:{P['grey_400']}">→</div>
             <div style="background:#FFEBEE;border:2px solid {STATUS_COLORS.get('Failed', '#D32F2F')};border-radius:10px;padding:0.5rem 0.8rem;text-align:center">
-                <div style="font-weight:700;font-size:0.78rem;color:{STATUS_COLORS.get('Failed', '#D32F2F')}">❌ Failed</div>
+                <div style="font-weight:700;font-size:0.78rem;color:{STATUS_COLORS.get('Failed', '#D32F2F')}">{icon("x-circle", size=13)} Failed</div>
             </div>
         </div>
 
@@ -768,7 +768,7 @@ with tab_workflow:
 
     # ── Status Reference Table ───────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Status Reference", "📋")
+    section_title("Status Reference", "clipboard")
 
     status_data = [
         ("Pending",              "Initial state after submission or after retry",
@@ -791,24 +791,24 @@ with tab_workflow:
 
     for status, desc, transitions in status_data:
         color = STATUS_COLORS.get(status, "#9E9E9E")
-        icon  = STATUS_ICONS.get(status, "•")
+        status_svg = icon(STATUS_ICONS.get(status, ""), size=13, color=color)
         st.markdown(
             f'<div style="border-left:4px solid {color};padding:0.6rem 1rem;margin-bottom:0.5rem;'
             f'background:{color}11;border-radius:0 6px 6px 0">'
-            f'<span style="font-weight:700;color:{color}">{icon} {status}</span>'
+            f'<span style="font-weight:700;color:{color}">{status_svg} {status}</span>'
             f'<br/><span style="font-size:0.82rem;color:{P["grey_700"]}">{desc}</span>'
             f'<br/><span style="font-size:0.78rem;color:{P["grey_700"]}"><strong>Transitions:</strong> {transitions}</span>'
             f'</div>', unsafe_allow_html=True)
 
     # ── Workflow Diagrams ────────────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Workflow Scenarios", "📝")
+    section_title("Workflow Scenarios", "file-text")
 
     with st.expander("**Scenario 1: Ad-hoc Scale**", expanded=True):
         _html(f"""
         <div style="background:{P['grey_100']};border-radius:10px;padding:1rem;margin:0.5rem 0">
         <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:0.82rem">
-            <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">👤 User opens wizard</div>
+            <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">{icon("user", size=13)} User opens wizard</div>
             <span style="color:{P['grey_400']}">→</span>
             <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-weight:600">Selects scope + Scale type</div>
             <span style="color:{P['grey_400']}">→</span>
@@ -824,7 +824,7 @@ with tab_workflow:
             <span style="color:{P['grey_400']}">→</span>
             <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['primary']}">SP_RUN_PIPELINE</div>
             <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#E8F5E9;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['success']}">✔ Processed</div>
+            <div style="background:#E8F5E9;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['success']}">{icon("check", size=12)} Processed</div>
         </div>
         </div>
         <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:0.4rem">
@@ -838,7 +838,7 @@ with tab_workflow:
         _html(f"""
         <div style="background:{P['grey_100']};border-radius:10px;padding:1rem;margin:0.5rem 0">
         <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:0.82rem">
-            <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">⚙️ Admin creates template</div>
+            <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">{icon("settings", size=13)} Admin creates template</div>
             <span style="color:{P['grey_400']}">→</span>
             <div style="background:{P['purple_lt']};border-radius:6px;padding:4px 10px;font-weight:600;color:{P['purple']}">⏰ External scheduler instantiates</div>
             <span style="color:{P['grey_400']}">→</span>
@@ -848,7 +848,7 @@ with tab_workflow:
             <span style="color:{P['grey_400']}">→</span>
             <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['primary']}">SP_RUN_PIPELINE</div>
             <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#E8F5E9;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['success']}">✔ Processed</div>
+            <div style="background:#E8F5E9;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['success']}">{icon("check", size=12)} Processed</div>
         </div>
         </div>
         <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:0.4rem">
@@ -862,13 +862,13 @@ with tab_workflow:
         _html(f"""
         <div style="background:{P['grey_100']};border-radius:10px;padding:1rem;margin:0.5rem 0">
         <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:0.82rem">
-            <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">👤 User submits</div>
+            <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">{icon("user", size=13)} User submits</div>
             <span style="color:{P['grey_400']}">→</span>
             <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-weight:600">SP_SUBMIT checks VW_SIGNOFF_STATUS</div>
             <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['danger']}">COB = SIGNED_OFF ❌</div>
+            <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['danger']}">COB = SIGNED_OFF {icon("x-circle", size=13)}</div>
             <span style="color:{P['grey_400']}">→</span>
-            <div style="background:{P['purple_lt']};border-radius:6px;padding:4px 10px;font-weight:600;color:{P['purple']}">🔒 Rejected - SignedOff</div>
+            <div style="background:{P['purple_lt']};border-radius:6px;padding:4px 10px;font-weight:600;color:{P['purple']}">{icon("lock", size=13)} Rejected - SignedOff</div>
         </div>
         </div>
         <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:0.4rem">
@@ -881,17 +881,17 @@ with tab_workflow:
         _html(f"""
         <div style="background:{P['grey_100']};border-radius:10px;padding:1rem;margin:0.5rem 0">
         <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:0.82rem">
-            <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-weight:600">👤 User selects Entity Roll</div>
+            <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-weight:600">{icon("user", size=13)} User selects Entity Roll</div>
             <span style="color:{P['grey_400']}">→</span>
             <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-weight:600">Sets scope + COBs + Entity</div>
             <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:#E65100">⚠️ Pending Approval (mandatory)</div>
+            <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:#E65100">{icon("alert-triangle", size=13)} Pending Approval (mandatory)</div>
             <span style="color:{P['grey_400']}">→</span>
             <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">Approver reviews & approves</div>
             <span style="color:{P['grey_400']}">→</span>
             <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['danger']}">DELETE target COB+Entity</div>
             <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#E8F5E9;border-radius:6px;padding:4px 10px;font-weight:600;color:#2E7D32">INSERT from source COB ✔</div>
+            <div style="background:#E8F5E9;border-radius:6px;padding:4px 10px;font-weight:600;color:#2E7D32">INSERT from source COB {icon("check", size=12)}</div>
         </div>
         </div>
         <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:0.4rem">
@@ -909,7 +909,7 @@ with tab_workflow:
 
 with tab_processing:
 
-    section_title("Pipeline Architecture — 4 Independent Scope Pipelines", "⚙️")
+    section_title("Pipeline Architecture — 4 Independent Scope Pipelines", "settings")
 
     _html(f"""
     <div class="mcard" style="border-left:4px solid {P['info']};margin-bottom:0.8rem">
@@ -929,7 +929,7 @@ with tab_processing:
     </div>
     """)
 
-    section_title("SP_PROCESS_ADJUSTMENT — Core Engine", "⚙️")
+    section_title("SP_PROCESS_ADJUSTMENT — Core Engine", "settings")
 
     _html(f"""
     The processing engine is a **Python/Snowpark stored procedure** that reads Running adjustments
@@ -939,7 +939,7 @@ with tab_processing:
 
     # ── Scale Processing Flow ────────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Scale Path — 4-Way UNION ALL", "📊")
+    section_title("Scale Path — 4-Way UNION ALL", "bar-chart")
 
     _html(f"""
     <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0;overflow-x:auto">
@@ -1041,7 +1041,7 @@ with tab_processing:
 
     # ── Direct Processing Flow ───────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Direct Path — Upload / Line Items", "📤")
+    section_title("Direct Path — Upload / Line Items", "upload")
 
     _html(f"""
     <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0">
@@ -1068,7 +1068,7 @@ with tab_processing:
     """)
 
     # ── PowerBI Report Refresh ───────────────────────────────────────────
-    section_title("PowerBI Report Refresh", "📈")
+    section_title("PowerBI Report Refresh", "line-chart")
     st.markdown(f"""
     After processing completes, the system automatically queues a **PowerBI dataset refresh**
     by calling `FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS`. This writes to `METADATA.POWERBI_ACTION`,
@@ -1092,7 +1092,7 @@ with tab_processing:
 
     # ── Scale Factor Computation ─────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Scale Factor Computation", "🧮")
+    section_title("Scale Factor Computation", "sliders")
 
     _html(f"""
     <table style="width:100%;border-collapse:collapse;border:1px solid {P['border']};border-radius:8px;overflow:hidden;font-size:0.85rem">
@@ -1150,7 +1150,7 @@ with tab_processing:
 
 with tab_objects:
 
-    section_title("Complete Object Inventory", "🗄️")
+    section_title("Complete Object Inventory", "database")
 
     _html(f"""
     All objects live in database <code>DVLP_RAPTOR_NEWADJ</code>, schema <code>ADJUSTMENT_APP</code>
@@ -1212,7 +1212,7 @@ with tab_objects:
 
     # ── Key relationships ────────────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Object Relationships", "🔗")
+    section_title("Object Relationships", "layers")
 
     _html(f"""
     <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0;overflow-x:auto">
@@ -1242,15 +1242,15 @@ with tab_objects:
 
 with tab_ops:
 
-    section_title("Common Operations", "🛠️")
+    section_title("Common Operations", "settings")
 
     with st.expander("**How to: Retry a failed adjustment**", expanded=True):
         st.markdown("""
-        1. Go to **📋 Adjustments** → **❌ Errors / Rejected** tab
+        1. Go to **Adjustments** → **Errors / Rejected** tab
         2. Find the failed adjustment and expand it
         3. Review the error message in the red box
         4. Fix the underlying issue (e.g., missing data, dimension misconfig)
-        5. Click **🔄 Retry** — this resets the status to `Pending`
+        5. Click **Retry** — this resets the status to `Pending`
         6. The processing task will pick it up within 60 seconds
         """)
         st.markdown(
@@ -1288,7 +1288,7 @@ with tab_ops:
 
     with st.expander("**How to: Create a recurring template**"):
         st.markdown(f"""
-        1. Go to **⚙️ Admin** → **Recurring Templates** tab
+        1. Go to **Admin** → **Recurring Templates** tab
         2. Fill in the template form with the scope, type, and filter dimensions
         3. An **external scheduler** reads `ADJ_RECURRING_TEMPLATE` and creates `ADJ_HEADER`
            rows when each template's dependencies are met
@@ -1336,7 +1336,7 @@ with tab_ops:
 
     with st.expander("**How to: Investigate an overlap**"):
         st.markdown(f"""
-        1. Go to **🏠 Command Center** → Overlap Alerts panel
+        1. Go to **Command Center** → Overlap Alerts panel
         2. Note the two ADJ_IDs that overlap
         3. In Snowflake, query the details:
 
@@ -1347,7 +1347,7 @@ with tab_ops:
 
         4. The **most recent** adjustment (by `ADJUSTMENT_CREATED_TIMESTAMP`) always wins
            due to `DENSE_RANK` in the processing engine
-        5. If the older adjustment should win, delete the newer one from **📋 Adjustments**
+        5. If the older adjustment should win, delete the newer one from **Adjustments**
         """)
 
     with st.expander("**How to: Understand the audit trail**"):
@@ -1362,13 +1362,13 @@ with tab_ops:
         ORDER BY h.CHANGED_AT;
         ```
 
-        You can also see the full timeline in the **📋 Adjustments** page by expanding
+        You can also see the full timeline in the **Adjustments** page by expanding
         any adjustment card → **Status History** section.
         """)
 
     # ── Design Principles ────────────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Design Principles", "💡")
+    section_title("Design Principles", "info")
 
     principles = [
         ("Delta Pattern",       "Original FACT tables are never modified. Adjustments store only the offset. Reporting uses SUM(fact) + SUM(adjustment)."),

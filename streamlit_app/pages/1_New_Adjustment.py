@@ -24,7 +24,7 @@ st.set_page_config(
 from utils.styles import (
     inject_css, render_sidebar, render_step_bar, render_filter_chips,
     section_title, P, SCOPE_CONFIG, TYPE_CONFIG, CATEGORY_CONFIG,
-    fmt_adj_id,
+    fmt_adj_id, icon,
 )
 from utils.snowflake_conn import run_query, call_sp_df, current_user_name, safe_rerun
 
@@ -306,7 +306,7 @@ def _render_approval_flag(key_suffix: str) -> bool:
     _, c = st.columns([0.04, 0.96])
     with c:
         return st.checkbox(
-            "🔐 Requires Approval",
+            "Requires Approval",
             value=wiz.get("requires_approval", False),
             key=_k(key_suffix))
 
@@ -317,12 +317,12 @@ def render_direct_form() -> None:
 
     st.divider()
     if not wiz["process_type"]:
-        st.info("👆 Select a data scope to continue.")
+        st.info("Select a data scope to continue.")
         return
 
     expected_cols = _direct_expected_columns(wiz["process_type"])
 
-    section_title(f"Direct Adjustment — {wiz['process_type']} CSV", "📥")
+    section_title(f"Direct Adjustment — {wiz['process_type']} CSV", "upload")
     if expected_cols:
         _info_banner(
             'Paste a CSV of exact adjustment values. Expected columns: '
@@ -414,7 +414,7 @@ def render_direct_form() -> None:
                 f'<div style="background:#FFF3E0;border:2px solid #FFB74D;border-radius:10px;'
                 f'padding:1rem;margin:0.8rem 0">'
                 f'<div style="font-weight:700;font-size:0.92rem;color:#E65100;margin-bottom:0.4rem">'
-                f'⚠️ Existing adjustment found with the same Reference</div>'
+                f'{icon("alert-triangle", size=14, color="#B45309")} Existing adjustment found with the same Reference</div>'
                 f'<div style="font-size:0.83rem;color:#BF360C">'
                 f'<strong>Adj ID:</strong> {fmt_adj_id(dup_info[5])} &nbsp;·&nbsp; '
                 f'<strong>Entity:</strong> {dup_info[1]} &nbsp;·&nbsp; '
@@ -459,13 +459,13 @@ def render_direct_form() -> None:
 # ── Entity Roll ──────────────────────────────────────────────────────────────
 
 def render_entity_roll_form() -> None:
-    section_title("Entity Roll — Full Entity Copy", "🔄")
+    section_title("Entity Roll — Full Entity Copy", "refresh-cw")
 
     st.markdown(
         f'<div style="background:#FFF3E0;border:2px solid #FFB74D;border-radius:10px;'
         f'padding:1rem;margin-bottom:1rem">'
         f'<div style="font-weight:700;font-size:0.95rem;color:#E65100;margin-bottom:0.4rem">'
-        f'⚠️ Destructive Operation — Approval Required</div>'
+        f'{icon("alert-triangle", size=14, color="#B45309")} Destructive Operation — Approval Required</div>'
         f'<div style="font-size:0.84rem;color:#BF360C">'
         f'This operation will <strong>delete all existing data</strong> for the target COB + Entity '
         f'in both the FACT table and FACT ADJUSTED table, then <strong>copy all data</strong> from '
@@ -476,7 +476,7 @@ def render_entity_roll_form() -> None:
         unsafe_allow_html=True)
 
     # Scope selection
-    section_title("Data Scope", "🔍")
+    section_title("Data Scope", "search")
     scope_cols = st.columns(len(SCOPE_CONFIG))
     for i, (sk, cfg) in enumerate(SCOPE_CONFIG.items()):
         with scope_cols[i]:
@@ -485,7 +485,7 @@ def render_entity_roll_form() -> None:
                 f'<div style="background:{"#E3F2FD" if is_sel else P["white"]};'
                 f'border:2px solid {P["primary"] if is_sel else P["border"]};'
                 f'border-radius:10px;padding:0.6rem;text-align:center">'
-                f'<div style="font-size:1.3rem">{cfg.get("icon","📊")}</div>'
+                f'<div>{icon(cfg.get("icon","bar-chart"), size=20, color=cfg.get("color", P["grey_700"]), valign="0")}</div>'
                 f'<div style="font-weight:600;font-size:0.82rem">{sk}</div></div>',
                 unsafe_allow_html=True)
             if st.button(sk, key=_k(f"er_scope_{sk}"), use_container_width=True,
@@ -494,7 +494,7 @@ def render_entity_roll_form() -> None:
                 safe_rerun()
 
     if not wiz.get("process_type"):
-        st.info("👆 Select a scope to continue.")
+        st.info("Select a scope to continue.")
         return
 
     st.divider()
@@ -522,7 +522,7 @@ def render_entity_roll_form() -> None:
         height=60, key=_k("er_reason"), placeholder="e.g. Rolling MUSE VaR from previous business day")
 
     # Approval is always required — show locked checkbox
-    st.checkbox("🔐 Requires Approval", value=True, disabled=True, key=_k("er_approval"))
+    st.checkbox("Requires Approval", value=True, disabled=True, key=_k("er_approval"))
 
     st.markdown("<br/>", unsafe_allow_html=True)
     missing = [f for f, v in [("Scope", wiz.get("process_type")),
@@ -563,7 +563,7 @@ def _render_scope_selector(include_frtball: bool = True) -> None:
     explicit values, so the fan-out tag does not apply).
     """
     # ── Scope cards ───────────────────────────────────────────────────────
-    section_title("Data Scope", "🔍")
+    section_title("Data Scope", "search")
     scope_cols = st.columns(len(SCOPE_CONFIG))
     for i, (sk, cfg) in enumerate(SCOPE_CONFIG.items()):
         with scope_cols[i]:
@@ -588,7 +588,7 @@ def _render_scope_selector(include_frtball: bool = True) -> None:
             f'<div style="background:{P["success_lt"]};border:1px solid #A5D6A7;'
             f'border-radius:8px;padding:0.5rem 1rem;margin:0.5rem 0 0.3rem;'
             f'font-size:0.82rem;color:{P["success"]}">'
-            f'🏛️ <strong>FRTB selected</strong> — choose a sub-type</div>',
+            f'{icon("landmark", size=14, color=P["success"])} <strong>FRTB selected</strong> — choose a sub-type</div>',
             unsafe_allow_html=True)
         subtypes = {k: v for k, v in FRTB_SUBTYPE_CONFIG.items()
                     if include_frtball or k != "FRTBALL"}
@@ -616,14 +616,14 @@ def render_scaling_form() -> None:
 
     st.divider()
     if not wiz["process_type"]:
-        st.info("👆 Select a data scope to continue.")
+        st.info("Select a data scope to continue.")
         return
 
     # ── Adjustment Type  +  Date & Schedule ──────────────────────────────
     left_col, right_col = st.columns([3, 2], gap="large")
 
     with left_col:
-        section_title("Adjustment Type", "⚡")
+        section_title("Adjustment Type", "zap")
         type_cols = st.columns(len(TYPE_CONFIG))
         for i, (tk, tcfg) in enumerate(TYPE_CONFIG.items()):
             with type_cols[i]:
@@ -651,7 +651,7 @@ def render_scaling_form() -> None:
                 unsafe_allow_html=True)
 
     with right_col:
-        section_title("Date & Schedule", "📅")
+        section_title("Date & Schedule", "calendar")
         wiz["occurrence"] = st.radio(
             "Frequency", ["ADHOC", "RECURRING"],
             index=0 if wiz.get("occurrence", "ADHOC") == "ADHOC" else 1,
@@ -690,7 +690,7 @@ def render_scaling_form() -> None:
                 wiz["source_cobid"] = int(src_val.strip())
 
         if wiz["adjustment_type"] in ("Scale", "Roll"):
-            section_title("Scale Factor", "🔧")
+            section_title("Scale Factor", "sliders")
             wiz["scale_factor"] = st.number_input(
                 "Scale Factor", value=float(wiz.get("scale_factor", 1.0)),
                 min_value=-10.0, max_value=100.0, step=0.01, format="%.4f",
@@ -738,7 +738,7 @@ def render_scaling_form() -> None:
 
     pt = wiz.get("process_type", "")
 
-    section_title("Dimension Filters", "🎯")
+    section_title("Dimension Filters", "target")
     st.caption("Leave blank to include all values for that dimension.")
 
     # ── Tier 1: Main fields (always visible) ─────────────────────────────
@@ -882,7 +882,7 @@ if wiz["step"] in (1, 2):
 # ── STEP 1 : Category & Details ───────────────────────────────────────────────
 
 if wiz["step"] == 1:
-    section_title("Adjustment Category", "📂")
+    section_title("Adjustment Category", "layers")
     cat_cols = st.columns(len(CATEGORY_CONFIG))
     for i, (ck, ccfg) in enumerate(CATEGORY_CONFIG.items()):
         with cat_cols[i]:
@@ -907,7 +907,7 @@ if wiz["step"] == 1:
     st.divider()
 
     if not wiz["category"]:
-        st.info("👆 Select an adjustment category to continue.")
+        st.info("Select an adjustment category to continue.")
     elif wiz["category"] == "Direct Adjustment":
         render_direct_form()
     elif wiz["category"] == "Entity Roll":
@@ -922,7 +922,7 @@ elif wiz["step"] == 2:
     cat       = wiz.get("category") or "Scaling Adjustment"
     scope_cfg = SCOPE_CONFIG.get(wiz.get("process_type", ""), {})
 
-    section_title("Adjustment Summary", "📋")
+    section_title("Adjustment Summary", "file-text")
 
     # ── Summary banner ────────────────────────────────────────────────────
     if cat == "Direct Adjustment":
@@ -931,7 +931,7 @@ elif wiz["step"] == 2:
         st.markdown(
             f'<div class="mcard">'
             f'<div style="display:flex;gap:16px;align-items:center">'
-            f'<span style="font-size:2rem">📥</span>'
+            f'<span>{icon("upload", size=30, color=P["purple"], valign="0")}</span>'
             f'<div><div style="font-weight:700;font-size:1.1rem">'
             f'{wiz.get("process_type","")} — Direct</div>'
             f'<div style="font-size:0.85rem;color:{P["grey_700"]}">'
@@ -940,7 +940,7 @@ elif wiz["step"] == 2:
             f'{row_count:,} rows · COB: {wiz["cobid"]}'
             f'</div></div></div></div>', unsafe_allow_html=True)
         if df_up is not None:
-            section_title(f"Data Preview ({row_count:,} rows)", "📊")
+            section_title(f"Data Preview ({row_count:,} rows)", "table")
             st.dataframe(df_up.head(50), use_container_width=True, height=300)
 
         if wiz.get("_dup_adj_ids"):
@@ -949,7 +949,7 @@ elif wiz["step"] == 2:
                 f'<div style="background:#FFF3E0;border:2px solid #FFB74D;border-radius:10px;'
                 f'padding:1rem;margin:0.8rem 0">'
                 f'<div style="font-weight:700;font-size:0.92rem;color:#E65100">'
-                f'⚠️ Replacing {dup_count} existing adjustment(s) with reference '
+                f'{icon("alert-triangle", size=14, color="#B45309")} Replacing {dup_count} existing adjustment(s) with reference '
                 f'"{wiz.get("global_reference","")}" on COB {wiz.get("cobid","")}</div>'
                 f'<div style="font-size:0.83rem;color:#BF360C;margin-top:0.3rem">'
                 f'Previous adjustment data will be soft-deleted from ADJ_HEADER and '
@@ -960,7 +960,7 @@ elif wiz["step"] == 2:
         st.markdown(
             f'<div class="mcard" style="border-left:4px solid #E65100">'
             f'<div style="display:flex;gap:16px;align-items:center">'
-            f'<span style="font-size:2rem">🔄</span>'
+            f'<span>{icon("refresh-cw", size=30, color="#B45309", valign="0")}</span>'
             f'<div><div style="font-weight:700;font-size:1.1rem">'
             f'{wiz.get("process_type","")} — Entity Roll</div>'
             f'<div style="font-size:0.85rem;color:{P["grey_700"]}">'
@@ -971,7 +971,7 @@ elif wiz["step"] == 2:
         st.markdown(
             f'<div style="background:#FFF3E0;border:1px solid #FFB74D;border-radius:8px;'
             f'padding:0.75rem 1rem;margin-top:0.8rem;font-size:0.83rem;color:#E65100">'
-            f'⚠️ <strong>This will delete all {wiz.get("process_type","")} data for '
+            f'{icon("alert-triangle", size=14, color="#B45309")} <strong>This will delete all {wiz.get("process_type","")} data for '
             f'COB {wiz.get("cobid","")} / Entity {wiz.get("entity_code","")}</strong> '
             f'in both FACT and FACT ADJUSTED tables, then copy from '
             f'COB {wiz.get("source_cobid","")}. '
@@ -993,7 +993,7 @@ elif wiz["step"] == 2:
         st.markdown(
             f'<div class="mcard">'
             f'<div style="display:flex;gap:16px;align-items:center">'
-            f'<span style="font-size:2rem">{scope_cfg.get("icon","📊")}</span>'
+            f'<span>{icon(scope_cfg.get("icon","bar-chart"), size=30, color=scope_cfg.get("color", P["grey_700"]), valign="0")}</span>'
             f'<div><div style="font-weight:700;font-size:1.1rem">'
             f'{wiz.get("process_type","")} — {wiz.get("adjustment_type","")}</div>'
             f'<div style="font-size:0.85rem;color:{P["grey_700"]}">'
@@ -1004,7 +1004,7 @@ elif wiz["step"] == 2:
         render_filter_chips(wiz)
 
         # ── Impact Preview ─────────────────────────────────────────────────
-        section_title("Impact Preview", "👁️")
+        section_title("Impact Preview", "eye")
 
         if _is_entity_only(wiz):
             st.info(
@@ -1072,7 +1072,7 @@ elif wiz["step"] == 2:
 
                     if total_rows == 0:
                         st.warning(
-                            "⚠️ These filters match **0 rows**, so this adjustment would change "
+                            "These filters match **0 rows**, so this adjustment would change "
                             "nothing if submitted. This usually means one of your filter values "
                             "doesn't exist for the selected COB — for example a mistyped or "
                             "non-existent **entity, book, or measure-type code** — or the filter "
@@ -1111,10 +1111,10 @@ elif wiz["step"] == 2:
                         else:
                             btn1, btn2, _ = st.columns([1, 1, 3])
                             with btn1:
-                                if st.button("📊 Show Breakdown", key=_k("show_breakdown"), type="secondary", use_container_width=True):
+                                if st.button("Show Breakdown", key=_k("show_breakdown"), type="secondary", use_container_width=True):
                                     wiz["show_breakdown"] = True
                             with btn2:
-                                if st.button("🔍 Show Sample Rows", key=_k("show_sample"), type="secondary", use_container_width=True):
+                                if st.button("Show Sample Rows", key=_k("show_sample"), type="secondary", use_container_width=True):
                                     wiz["show_sample"] = True
 
                         if not _is_roll and wiz.get("show_breakdown"):
@@ -1137,7 +1137,7 @@ elif wiz["step"] == 2:
                             st.markdown(f"**Sample rows (up to 1,000 of {total_rows:,})**")
                             st.dataframe(df_sample, use_container_width=True, height=300)
 
-                with st.expander("🔍 Debug — request params",
+                with st.expander("Debug — request params",
                                  expanded=("ROWS_AFFECTED" not in df_sum.columns)):
                     st.code(json.dumps(preview_json, indent=2), language="json")
 
@@ -1152,9 +1152,9 @@ elif wiz["step"] == 2:
         _status = _res.get("status", "")
         _msg = _res.get("message", "Submission was not accepted.")
         if _status and _status != "Error":
-            st.error(f"❌ Not submitted — {_status}: {_msg}")
+            st.error(f"Not submitted — {_status}: {_msg}")
         else:
-            st.error(f"❌ {_msg}")
+            st.error(f"{_msg}")
 
     # ── Navigation ─────────────────────────────────────────────────────────
     st.divider()
@@ -1167,7 +1167,7 @@ elif wiz["step"] == 2:
             wiz["show_sample"]    = False
             safe_rerun()
     with nav2:
-        if st.button("🚀 Submit Adjustment", type="primary",
+        if st.button("Submit Adjustment", type="primary",
                      use_container_width=True, key=_k("submit")):
             wiz["result"] = None
             with st.spinner("Submitting adjustment…"):
@@ -1204,12 +1204,12 @@ elif wiz["step"] == 3:
     st.markdown(
         f'<div style="background:#E8F5E9;border:2px solid #A5D6A7;'
         f'border-radius:12px;padding:2.5rem;text-align:center;margin:1rem 0">'
-        f'<div style="font-size:3rem">✅</div>'
+        f'<div>{icon("check-circle", size=44, color=P["success"], valign="0")}</div>'
         f'<div style="font-size:1.4rem;font-weight:700;color:#2E7D32;margin-top:0.5rem">'
         f'Adjustment Submitted Successfully</div>'
         f'<div style="font-size:0.9rem;color:#388E3C;margin-top:0.4rem">{msg}</div>'
         f'<div style="font-size:0.82rem;color:{P["info"]};margin-top:0.8rem">'
-        f'⚡ Your adjustment is queued and will be processed automatically by the scope pipeline. '
+        f'Your adjustment is queued and will be processed automatically by the scope pipeline. '
         f'Track it on the Adjustment Pipeline page; once processed it is assigned a <strong>report ID</strong> '
         f'(the number shown in Adjustments, the Adjustment Pipeline, and your reports).</div>'
         f'</div>', unsafe_allow_html=True)
@@ -1223,7 +1223,7 @@ elif wiz["step"] == 3:
             unsafe_allow_html=True)
 
     st.markdown("<br/>", unsafe_allow_html=True)
-    if st.button("➕ Create Another Adjustment", use_container_width=True,
+    if st.button("Create Another Adjustment", use_container_width=True,
                  type="secondary", key="new_adj"):
         reset_wizard()
         safe_rerun()

@@ -9,7 +9,7 @@ import pandas as pd
 
 st.set_page_config(page_title="Admin · MUFG", page_icon="⚙️", layout="wide", initial_sidebar_state="expanded")
 
-from utils.styles import inject_css, render_sidebar, section_title, P, SCOPE_CONFIG
+from utils.styles import inject_css, render_sidebar, section_title, P, SCOPE_CONFIG, icon
 from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
 
 def _esc(val):
@@ -21,7 +21,7 @@ render_sidebar()
 
 user = current_user_name()
 
-st.markdown("## ⚙️ Admin — Configuration")
+st.markdown("## Admin — Configuration")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
     "Manage scope configurations, recurring templates, and view system reference. "
@@ -33,12 +33,12 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # ──────────────────────────────────────────────────────────────────────────────
 
 tab_scopes, tab_signoff, tab_approvers, tab_recurring, tab_schema, tab_sql = st.tabs([
-    "📊 Scope Configuration",
-    "🔒 Sign-Off Management",
-    "👤 Approvers",
-    "🔁 Recurring Templates",
-    "🗂️ Schema Reference",
-    "🔧 SQL Reference",
+    "Scope Configuration",
+    "Sign-Off Management",
+    "Approvers",
+    "Recurring Templates",
+    "Schema Reference",
+    "SQL Reference",
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -46,7 +46,7 @@ tab_scopes, tab_signoff, tab_approvers, tab_recurring, tab_schema, tab_sql = st.
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_scopes:
-    section_title("Configured Data Sources (ADJUSTMENTS_SETTINGS)", "📊")
+    section_title("Configured Data Sources (ADJUSTMENTS_SETTINGS)", "database")
     st.markdown(
         f'<div style="background:{P["info_lt"]};border:1px solid #90CAF9;border-radius:8px;'
         f'padding:0.7rem 1rem;margin-bottom:1rem;font-size:0.85rem">'
@@ -69,7 +69,7 @@ with tab_scopes:
             for _, row in df_settings.iterrows():
                 scope = str(row["PROCESS_TYPE"])
                 cfg = SCOPE_CONFIG.get(scope, {})
-                with st.expander(f'{cfg.get("icon", "📊")} {scope} — {row["FACT_TABLE"]}'):
+                with st.expander(f'{scope} — {row["FACT_TABLE"]}'):
                     c1, c2 = st.columns(2)
                     with c1:
                         section_title("Configuration")
@@ -100,7 +100,7 @@ with tab_scopes:
         st.warning(f"Could not load settings: {e}")
 
     st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Add / Edit Scope", "➕")
+    section_title("Add / Edit Scope", "settings")
     st.markdown(
         f'<div style="background:{P["grey_100"]};border-radius:8px;padding:1rem;'
         f'font-size:0.85rem;color:{P["grey_700"]}">'
@@ -117,7 +117,7 @@ with tab_scopes:
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_signoff:
-    section_title("COB Sign-Off Status", "🔒")
+    section_title("COB Sign-Off Status", "lock")
     st.markdown(
         f'<div style="background:{P["info_lt"]};border:1px solid #90CAF9;border-radius:8px;'
         f'padding:0.7rem 1rem;margin-bottom:1rem;font-size:0.85rem">'
@@ -149,7 +149,7 @@ with tab_signoff:
 
             # --- Toggle sign-off ---
             st.markdown("<br/>", unsafe_allow_html=True)
-            section_title("Toggle Sign-Off Status", "🔄")
+            section_title("Toggle Sign-Off Status", "refresh-cw")
             toggle_cols = st.columns(3)
             with toggle_cols[0]:
                 cob_options = sorted(df_signoff["COBID"].unique(), reverse=True)
@@ -165,7 +165,7 @@ with tab_signoff:
                 new_status = "OPEN" if current_status == "SIGNED_OFF" else "SIGNED_OFF"
                 st.markdown(f"<br/>", unsafe_allow_html=True)
                 if st.button(
-                    f"{'🔓 Reopen' if current_status == 'SIGNED_OFF' else '🔒 Sign Off'}",
+                    f"{'Reopen' if current_status == 'SIGNED_OFF' else 'Sign Off'}",
                     key="toggle_signoff_btn", type="primary"
                 ):
                     try:
@@ -191,7 +191,7 @@ with tab_signoff:
 
     # --- Add new sign-off entry ---
     st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Add Sign-Off Entry", "➕")
+    section_title("Add Sign-Off Entry", "lock")
     with st.form("new_signoff_form"):
         sc1, sc2, sc3 = st.columns(3)
         with sc1:
@@ -234,7 +234,7 @@ with tab_signoff:
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_approvers:
-    section_title("Authorized Approvers", "👤")
+    section_title("Authorized Approvers", "user")
     st.markdown(
         f'<span style="font-size:0.85rem;color:{P["grey_700"]}">'
         f'Users listed here can approve or reject adjustments in the Approval Queue. '
@@ -265,7 +265,7 @@ with tab_approvers:
 
             # Deactivate / reactivate
             st.markdown("<br/>", unsafe_allow_html=True)
-            section_title("Toggle Approver Status", "🔄")
+            section_title("Toggle Approver Status", "refresh-cw")
             toggle_cols = st.columns([2, 1, 1])
             with toggle_cols[0]:
                 approver_options = [
@@ -274,7 +274,7 @@ with tab_approvers:
                 ]
                 sel_approver = st.selectbox("Select approver", approver_options, key="toggle_approver")
             with toggle_cols[1]:
-                if st.button("✅ Activate", key="activate_approver_btn"):
+                if st.button("Activate", key="activate_approver_btn"):
                     approver_id = int(sel_approver.split("ID ")[1].split(")")[0])
                     try:
                         run_query(f"""
@@ -287,7 +287,7 @@ with tab_approvers:
                     except Exception as ex:
                         st.error(str(ex))
             with toggle_cols[2]:
-                if st.button("🚫 Deactivate", key="deactivate_approver_btn"):
+                if st.button("Deactivate", key="deactivate_approver_btn"):
                     approver_id = int(sel_approver.split("ID ")[1].split(")")[0])
                     try:
                         run_query(f"""
@@ -305,7 +305,7 @@ with tab_approvers:
         st.info(f"Approvers table not available: {e}")
 
     st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Add New Approver", "➕")
+    section_title("Add New Approver", "user")
 
     with st.form("new_approver_form"):
         ac1, ac2 = st.columns(2)
@@ -338,7 +338,7 @@ with tab_approvers:
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_recurring:
-    section_title("Recurring Adjustment Templates", "🔁")
+    section_title("Recurring Adjustment Templates", "refresh-cw")
     st.markdown(
         f'<div style="background:{P["info_lt"]};border:1px solid #90CAF9;border-radius:8px;'
         f'padding:0.7rem 1rem;margin-bottom:1rem;font-size:0.85rem">'
@@ -376,7 +376,7 @@ with tab_recurring:
         st.info(f"Recurring templates table not available: {e}")
 
     st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Create New Template", "➕")
+    section_title("Create New Template", "calendar")
 
     with st.form("new_template_form"):
         tc1, tc2, tc3 = st.columns(3)
@@ -426,7 +426,7 @@ with tab_recurring:
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_schema:
-    section_title("Database Schema Overview", "🗂️")
+    section_title("Database Schema Overview", "database")
 
     schema_items = [
         ("ADJUSTMENT_APP.ADJ_HEADER",            "TABLE",         "One row per adjustment — lifecycle, metadata, all dimension filters"),
@@ -455,7 +455,7 @@ with tab_schema:
     df_schema = pd.DataFrame(schema_items, columns=["Object", "Type", "Description"])
     st.dataframe(df_schema, use_container_width=True)
 
-    section_title("Key Design Principles", "💡")
+    section_title("Key Design Principles", "info")
     st.markdown("""
     **1. Streamlit-First** — Streamlit is the single entry point for all adjustments.
     No file-based staging tables. Users create, preview, and submit through the UI.
@@ -474,10 +474,10 @@ with tab_schema:
 
     **6. Sign-Off Guard** — When a COB is already signed off in `ADJ_SIGNOFF_STATUS`,
     the submit procedure rejects with "Rejected - SignedOff" status. Manage sign-off
-    status from the **🔒 Sign-Off Management** tab above.
+    status from the **Sign-Off Management** tab above.
     """)
 
-    section_title("System Statistics", "📈")
+    section_title("System Statistics", "line-chart")
     try:
         df_sys = run_query_df("""
             SELECT
@@ -502,7 +502,7 @@ with tab_schema:
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_sql:
-    section_title("Key Stored Procedures", "🔧")
+    section_title("Key Stored Procedures", "settings")
 
     procs = {
         "SP_SUBMIT_ADJUSTMENT": (
@@ -540,7 +540,7 @@ CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT('VaR', 'Scale', 20260328);"""),
         with st.expander(f"`{proc_name}` — {desc}"):
             st.code(code, language="sql")
 
-    section_title("Snowflake Tasks Configuration", "⚙️")
+    section_title("Snowflake Tasks Configuration", "timer")
     st.markdown("""
     Four independent scope tasks, each guarded by a standard stream on its queue view.
     Tasks fire every 1 minute **only when** the stream has data (INSERT or UPDATE on ADJ_HEADER

@@ -20,14 +20,14 @@ st.set_page_config(
 
 from utils.styles import (
     inject_css, render_sidebar, section_title,
-    P, SCOPE_CONFIG, fmt_adj_id,
+    P, SCOPE_CONFIG, fmt_adj_id, icon,
 )
 from utils.snowflake_conn import run_query, run_query_df
 
 inject_css()
 render_sidebar()
 
-st.markdown("## 🧾 Logs")
+st.markdown("## Logs")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
     f"What the engine did — processing runs, activity feed, and errors.</span>",
@@ -106,14 +106,14 @@ def _cob_filter(col="COBID"):
 st.markdown("<br/>", unsafe_allow_html=True)
 
 tab_runs, tab_activity, tab_errors = st.tabs(
-    ["⚡ Processing Runs", "🕐 Activity Feed", "❌ Errors"])
+    ["Processing Runs", "Activity Feed", "Errors"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — PROCESSING RUNS  (grouped by RUN_LOG_ID)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_runs:
-    section_title("Processing Runs", "⚡")
+    section_title("Processing Runs", "zap")
     st.markdown(
         f"<span style='color:{P['grey_700']};font-size:0.8rem'>"
         f"One row per processing batch (RUN_LOG_ID). Expand to see its adjustments."
@@ -152,9 +152,9 @@ with tab_runs:
             scope = str(r.get("PROCESS_TYPE", "") or "")
             scfg = SCOPE_CONFIG.get(scope, {})
             failed = int(r.get("FAILED_COUNT", 0) or 0)
-            run_icon = "❌" if failed else "✔️"
+            run_icon = "✗" if failed else "✓"
             header = (
-                f'{run_icon}  Run {int(r["RUN_LOG_ID"])}  ·  {scfg.get("icon","")} {scope}'
+                f'{run_icon}  Run {int(r["RUN_LOG_ID"])}  ·  {scope}'
                 f'  ·  {r.get("ADJUSTMENT_ACTION","")}  ·  COB {int(r["COBID"]) if pd.notna(r.get("COBID")) else "—"}'
                 f'  ·  {int(r.get("ADJ_COUNT",0))} adj  ·  {_fmt_int(r.get("TOTAL_RECORDS"))} rows'
                 f'  ·  {_fmt_dur(r.get("DURATION_SEC"))}'
@@ -196,7 +196,7 @@ with tab_runs:
                     for _, a in df_adj[df_adj["ERRORMESSAGE"].notna()].iterrows():
                         st.markdown(
                             f'<div class="overlap-box" style="margin-top:0.4rem">'
-                            f'<h4>❌ Adjustment {a.get("ADJUSTMENT_ID","?")} error</h4>'
+                            f'<h4>{icon("x-circle", size=13, color=P["danger"])} Adjustment {a.get("ADJUSTMENT_ID","?")} error</h4>'
                             f'<div style="font-size:0.8rem;font-family:monospace">'
                             f'{a["ERRORMESSAGE"]}</div></div>',
                             unsafe_allow_html=True)
@@ -206,7 +206,7 @@ with tab_runs:
 # TAB 2 — ACTIVITY FEED  (VW_RECENT_ACTIVITY)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_activity:
-    section_title("Activity Feed", "🕐")
+    section_title("Activity Feed", "clock")
     st.markdown(
         f"<span style='color:{P['grey_700']};font-size:0.8rem'>"
         f"Every submission and status change, newest first.</span>",
@@ -240,7 +240,7 @@ with tab_activity:
 # TAB 3 — ERRORS  (VW_ERRORS)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_errors:
-    section_title("Errors", "❌")
+    section_title("Errors", "x-circle")
     st.markdown(
         f"<span style='color:{P['grey_700']};font-size:0.8rem'>"
         f"Adjustments currently in Failed status.</span>",
@@ -261,18 +261,18 @@ with tab_errors:
         st.warning(f"Could not load errors: {e}")
 
     if df_err.empty:
-        st.success("No failed adjustments. 🎉")
+        st.success("No failed adjustments.")
     else:
         st.markdown(
             f'<div style="background:{P["danger_lt"]};border-left:4px solid {P["danger"]};'
             f'border-radius:8px;padding:0.6rem 1rem;margin-bottom:0.8rem;font-size:0.82rem">'
-            f'❌ <strong>{len(df_err)}</strong> failed adjustment(s)</div>',
+            f'{icon("x-circle", size=13, color=P["danger"])} <strong>{len(df_err)}</strong> failed adjustment(s)</div>',
             unsafe_allow_html=True)
         for _, e in df_err.iterrows():
             scope = str(e.get("PROCESS_TYPE", "") or "")
             scfg = SCOPE_CONFIG.get(scope, {})
             with st.expander(
-                f'❌ {scfg.get("icon","")} {scope} · {e.get("ADJUSTMENT_TYPE","")} · '
+                f'✗ {scope} · {e.get("ADJUSTMENT_TYPE","")} · '
                 f'COB {e.get("COBID","—")} · {_fmt_ts(e.get("ERROR_TIME"))}',
                 expanded=False,
             ):

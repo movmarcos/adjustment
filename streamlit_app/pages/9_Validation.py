@@ -14,7 +14,7 @@ import pandas as pd
 st.set_page_config(page_title="Validation · MUFG", page_icon="✅",
                    layout="wide", initial_sidebar_state="expanded")
 
-from utils.styles import inject_css, render_sidebar, P
+from utils.styles import inject_css, render_sidebar, P, icon
 from utils.snowflake_conn import run_query_df
 
 inject_css()
@@ -40,7 +40,7 @@ def _header(db: str, adj_id: int):
     return df.iloc[0] if not df.empty else None
 
 
-st.markdown("## ✅ Validation — Dev vs Prod adjustment")
+st.markdown("## Validation — Dev vs Prod adjustment")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
     f"Enter the two adjustment IDs (DIMENSION.ADJUSTMENT.ADJUSTMENT_ID — the "
@@ -203,13 +203,13 @@ if mism.empty and total_ok:
     st.markdown(
         f'<div style="background:{P["success_lt"]};border-left:4px solid {P["success"]};'
         f'border-radius:8px;padding:0.8rem 1rem;font-size:0.9rem">'
-        f'✅ <strong>Match.</strong> Dev #{dev_id_i} and Prod #{prod_id_i} agree across all '
+        f'{icon("check-circle", size=13, color=P["success"])} <strong>Match.</strong> Dev #{dev_id_i} and Prod #{prod_id_i} agree across all '
         f'{len(res)} {breakdown} values. Total {dev_total:,.2f}.</div>', unsafe_allow_html=True)
 else:
     st.markdown(
         f'<div style="background:{P["danger_lt"]};border-left:4px solid {P["danger"]};'
         f'border-radius:8px;padding:0.8rem 1rem;font-size:0.9rem">'
-        f'❌ <strong>{len(mism)} mismatch(es)</strong> of {len(res)}. '
+        f'{icon("x-circle", size=13, color=P["danger"])} <strong>{len(mism)} mismatch(es)</strong> of {len(res)}. '
         f'Total diff {dev_total - prod_total:,.2f} (dev {dev_total:,.2f} vs prod {prod_total:,.2f}).'
         f'</div>', unsafe_allow_html=True)
 

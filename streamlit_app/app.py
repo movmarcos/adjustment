@@ -17,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from utils.styles import inject_css, render_sidebar, section_title, P, SCOPE_CONFIG, fmt_adj_id
+from utils.styles import inject_css, render_sidebar, section_title, P, SCOPE_CONFIG, fmt_adj_id, icon
 from utils.snowflake_conn import run_query_df, current_user_name
 
 inject_css()
@@ -71,13 +71,16 @@ running = int(kpis.get("RUNNING", 0))
 pending = int(kpis.get("PENDING", 0)) + int(kpis.get("APPROVED", 0))
 
 if failed > 0:
-    health_color, health_label, health_dot = "#D32F2F", "CRITICAL", "🔴"
+    health_color, health_label = "#F87171", "CRITICAL"
 elif running > 0:
-    health_color, health_label, health_dot = "#1565C0", "PROCESSING", "🔵"
+    health_color, health_label = "#60A5FA", "PROCESSING"
 elif pending > 0:
-    health_color, health_label, health_dot = "#E65100", "QUEUED", "🟡"
+    health_color, health_label = "#FBBF24", "QUEUED"
 else:
-    health_color, health_label, health_dot = "#2E7D32", "HEALTHY", "🟢"
+    health_color, health_label = "#4ADE80", "HEALTHY"
+health_dot = (f'<span style="display:inline-block;width:8px;height:8px;'
+              f'border-radius:50%;background:{health_color};'
+              f'box-shadow:0 0 6px {health_color}AA;vertical-align:1px"></span>')
 
 # ──────────────────────────────────────────────────────────────────────────────
 # HEADER BANNER
@@ -91,8 +94,9 @@ st.markdown(f"""
   display:flex;justify-content:space-between;align-items:center;
   box-shadow:0 4px 24px rgba(0,0,0,.18)">
   <div>
-    <div style="font-size:1.5rem;font-weight:800;color:white;letter-spacing:.01em;line-height:1">
-      📊 Adjustment Engine
+    <div style="font-size:1.5rem;font-weight:800;color:white;letter-spacing:.01em;line-height:1;
+      display:flex;align-items:center;gap:10px">
+      {icon("bar-chart", size=22, color="white", valign="0")} Adjustment Engine
     </div>
     <div style="font-size:0.87rem;color:rgba(255,255,255,.55);margin-top:6px">
       Command Center &nbsp;·&nbsp; Welcome, <strong style="color:white">{user}</strong>
@@ -126,26 +130,31 @@ st.markdown(f"""
 queued = int(kpis.get("PENDING", 0)) + int(kpis.get("APPROVED", 0))
 
 kpi_items = [
-    ("Total",             int(kpis.get("TOTAL", 0)),           "All adjustments",      P["primary"],   "📋"),
-    ("Queued",            queued,                               "Pending + Approved",   P["warning"],   "⏸"),
-    ("Awaiting Approval", int(kpis.get("PENDING_APPROVAL", 0)), "Need approval",        P["info"],      "📝"),
-    ("Running",           int(kpis.get("RUNNING", 0)),          "Processing now",       P["info"],      "⚡"),
-    ("Processed",         int(kpis.get("PROCESSED", 0)),        "In the data",          P["success"],   "✔"),
-    ("Power BI",          pbi_pending,                           "Pending refreshes",    "#1565C0",      "📈"),
-    ("Overlaps",          int(kpis.get("OVERLAPS", 0)),         "Overlap alerts",       P["purple"],    "⚠️"),
+    ("Total",             int(kpis.get("TOTAL", 0)),           "All adjustments",      P["primary"],   "list"),
+    ("Queued",            queued,                               "Pending + Approved",   P["warning"],   "clock"),
+    ("Awaiting Approval", int(kpis.get("PENDING_APPROVAL", 0)), "Need approval",        P["info"],      "clipboard"),
+    ("Running",           int(kpis.get("RUNNING", 0)),          "Processing now",       P["info"],      "zap"),
+    ("Processed",         int(kpis.get("PROCESSED", 0)),        "In the data",          P["success"],   "check-circle"),
+    ("Power BI",          pbi_pending,                           "Pending refreshes",    P["info"],      "line-chart"),
+    ("Overlaps",          int(kpis.get("OVERLAPS", 0)),         "Overlap alerts",       P["purple"],    "alert-triangle"),
 ]
 
 cards_html = '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:10px;margin-bottom:1.4rem">'
-for label, val, sub, color, icon in kpi_items:
+for label, val, sub, color, icon_name in kpi_items:
     alert_style = f"box-shadow:0 0 0 2px {color}44;" if (label == "Power BI" and val > 0) or (label == "Overlaps" and val > 0) else ""
+    val_color = color if val > 0 else P["grey_400"]
     cards_html += f"""
-    <div style="background:white;border:1px solid {P['border']};border-top:3px solid {color};
-      border-radius:10px;padding:0.9rem 0.8rem;{alert_style}
-      box-shadow:0 2px 8px rgba(0,0,0,.05)">
-      <div style="font-size:0.62rem;font-weight:700;text-transform:uppercase;
-        letter-spacing:.08em;color:{P['grey_700']};margin-bottom:0.3rem">{label}</div>
-      <div style="font-size:1.75rem;font-weight:800;color:{color if val > 0 else P['grey_400']};
-        line-height:1">{icon} {val}</div>
+    <div style="position:relative;background:white;border:1px solid {P['border']};
+      border-radius:10px;padding:0.9rem 0.8rem 0.9rem 1rem;{alert_style}
+      box-shadow:0 1px 2px rgba(15,23,42,.05);overflow:hidden">
+      <div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:{color}"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.3rem">
+        <span style="font-size:0.62rem;font-weight:700;text-transform:uppercase;
+          letter-spacing:.08em;color:{P['grey_700']}">{label}</span>
+        {icon(icon_name, size=13, color=val_color, valign="0")}
+      </div>
+      <div style="font-size:1.75rem;font-weight:800;color:{val_color};
+        line-height:1;font-variant-numeric:tabular-nums">{val}</div>
       <div style="font-size:0.68rem;color:{P['grey_700']};margin-top:4px">{sub}</div>
     </div>"""
 cards_html += '</div>'
@@ -161,7 +170,7 @@ col_charts, col_alerts = st.columns([2.2, 1.8])
 with col_charts:
 
     # ── Scope & Status bar chart ─────────────────────────────────────────────
-    section_title("Adjustments by Scope & Status", "📊")
+    section_title("Adjustments by Scope & Status", "bar-chart")
     try:
         df_dash = run_query_df("""
             SELECT PROCESS_TYPE, RUN_STATUS,
@@ -202,7 +211,7 @@ with col_charts:
                            tickfont_color=P["grey_700"]),
                 yaxis=dict(showgrid=True, gridcolor="#F0F0F0", tickfont_size=10,
                            tickformat=",.0f", zeroline=False),
-                font_family="Inter",
+                font_family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif",
                 hoverlabel=dict(bgcolor="white", font_size=12),
             )
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
@@ -212,7 +221,7 @@ with col_charts:
         st.info(f"No data available: {e}")
 
     # ── COB Trend Charts ─────────────────────────────────────────────────────
-    section_title("Last 5 COBs — Activity Trend", "📈")
+    section_title("Last 5 COBs — Activity Trend", "line-chart")
     try:
         df_cob = run_query_df("""
             SELECT
@@ -259,7 +268,7 @@ with col_charts:
                                tickfont_color=P["grey_700"]),
                     yaxis=dict(showgrid=True, gridcolor="#F5F5F5", tickfont_size=10,
                                tickformat="d", zeroline=False),
-                    font_family="Inter",
+                    font_family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif",
                     hoverlabel=dict(bgcolor="white", font_size=12),
                 )
                 st.plotly_chart(fig1, use_container_width=True, config={"displayModeBar": False})
@@ -291,7 +300,7 @@ with col_charts:
                                tickfont_color=P["grey_700"]),
                     yaxis=dict(showgrid=True, gridcolor="#F5F5F5", tickfont_size=10,
                                tickformat=",.0f", zeroline=False),
-                    font_family="Inter",
+                    font_family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif",
                     hoverlabel=dict(bgcolor="white", font_size=12),
                 )
                 st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
@@ -305,7 +314,7 @@ with col_charts:
 with col_alerts:
 
     # ── Overlap Alerts ───────────────────────────────────────────────────────
-    section_title("Overlap Alerts", "⚠️")
+    section_title("Overlap Alerts", "alert-triangle")
     try:
         df_overlaps = run_query_df("""
             SELECT ADJ_ID_A, ADJ_ID_B, PROCESS_TYPE, ENTITY_A, ENTITY_B,
@@ -321,7 +330,7 @@ with col_alerts:
         st.markdown(
             f'<div style="background:#F1F8F1;border:1px solid #C8E6C9;border-radius:10px;'
             f'padding:1.5rem;text-align:center;margin-bottom:0.8rem">'
-            f'<div style="font-size:1.6rem">✅</div>'
+            f'<div>{icon("check-circle", size=26, color="#15803D", valign="0")}</div>'
             f'<div style="font-size:0.85rem;font-weight:600;color:#2E7D32;margin-top:6px">'
             f'No overlap alerts</div>'
             f'<div style="font-size:0.73rem;color:{P["grey_700"]};margin-top:4px">'
@@ -352,7 +361,7 @@ with col_alerts:
             f'overflow:hidden;margin-bottom:0.8rem">'
             f'<div style="background:#FFF8E1;border-bottom:2px solid #FFD54F;padding:0.55rem 0.8rem;'
             f'display:flex;justify-content:space-between;align-items:center">'
-            f'<span style="font-size:0.78rem;font-weight:700;color:#E65100">⚠️ Overlapping adjustments</span>'
+            f'<span style="font-size:0.78rem;font-weight:700;color:#E65100">{icon("alert-triangle", size=13, color="#B45309")} Overlapping adjustments</span>'
             f'<span style="background:#E65100;color:white;border-radius:99px;'
             f'padding:1px 9px;font-size:0.7rem;font-weight:700">{count}</span>'
             f'</div>'
@@ -373,7 +382,7 @@ with col_alerts:
             unsafe_allow_html=True)
 
     # ── Errors ───────────────────────────────────────────────────────────────
-    section_title("Current Errors", "❌")
+    section_title("Current Errors", "x-circle")
     try:
         df_errors = run_query_df("""
             SELECT DIMENSION_ADJ_ID, PROCESS_TYPE, ENTITY_CODE, ERRORMESSAGE, USERNAME, ERROR_TIME
@@ -388,7 +397,7 @@ with col_alerts:
         st.markdown(
             f'<div style="background:#F1F8F1;border:1px solid #C8E6C9;border-radius:10px;'
             f'padding:1.5rem;text-align:center">'
-            f'<div style="font-size:1.6rem">✅</div>'
+            f'<div>{icon("check-circle", size=26, color="#15803D", valign="0")}</div>'
             f'<div style="font-size:0.85rem;font-weight:600;color:#2E7D32;margin-top:6px">'
             f'No errors</div>'
             f'<div style="font-size:0.73rem;color:{P["grey_700"]};margin-top:4px">'
@@ -417,7 +426,7 @@ with col_alerts:
             f'overflow:hidden">'
             f'<div style="background:#FFEBEE;border-bottom:2px solid #FFCDD2;padding:0.55rem 0.8rem;'
             f'display:flex;justify-content:space-between;align-items:center">'
-            f'<span style="font-size:0.78rem;font-weight:700;color:{P["danger"]}">❌ Failed adjustments</span>'
+            f'<span style="font-size:0.78rem;font-weight:700;color:{P["danger"]}">{icon("x-circle", size=13, color=P["danger"])} Failed adjustments</span>'
             f'<span style="background:{P["danger"]};color:white;border-radius:99px;'
             f'padding:1px 9px;font-size:0.7rem;font-weight:700">{count}</span>'
             f'</div>'
@@ -437,7 +446,7 @@ with col_alerts:
 
     # ── Top Submitters ───────────────────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Top Submitters", "👤")
+    section_title("Top Submitters", "user")
     try:
         df_users = run_query_df("""
             SELECT USERNAME, COUNT(*) AS CNT
@@ -473,7 +482,7 @@ with col_alerts:
 # ──────────────────────────────────────────────────────────────────────────────
 
 st.markdown("<br/>", unsafe_allow_html=True)
-section_title("Recent Activity", "🕐")
+section_title("Recent Activity", "clock")
 
 
 def _fmt_duration(seconds):
@@ -501,7 +510,7 @@ try:
             PROCESS_TYPE                                                AS "Scope",
             ADJUSTMENT_TYPE                                             AS "Type",
             RUN_STATUS                                                  AS "Status",
-            IFF(IS_DELETED, '🗑️ Deleted', '')                          AS "Deleted",
+            IFF(IS_DELETED, 'Deleted', '')                          AS "Deleted",
             ENTITY_CODE                                                 AS "Entity",
             DEPARTMENT_CODE                                             AS "Dept",
             BOOK_CODE                                                   AS "Book",

@@ -21,7 +21,7 @@ st.set_page_config(
 from utils.styles import (
     inject_css, render_sidebar, render_lifecycle_bar, render_pipeline_diagram,
     section_title, render_status_timeline, fmt_adj_id,
-    P, SCOPE_CONFIG, STAGE_CONFIG,
+    P, SCOPE_CONFIG, STAGE_CONFIG, icon,
 )
 from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
 
@@ -103,7 +103,7 @@ except Exception as e:
 if df_track.empty:
     st.markdown(
         f'<div class="mcard" style="text-align:center;padding:2.5rem;color:{P["grey_700"]}">'
-        f'<div style="font-size:1.8rem">🕳️</div>'
+        f'<div>{icon("inbox", size=28, color=P["grey_400"], valign="0")}</div>'
         f'<div style="font-size:0.9rem;margin-top:0.5rem">No adjustments found</div>'
         f'</div>',
         unsafe_allow_html=True)
@@ -121,16 +121,16 @@ failed_count    = int((_status == "Failed").sum())
 
 c1, c2, c3, c4 = st.columns(4)
 stat_items = [
-    ("Pending / Approved", pending_count,   P["warning"], "⏸"),
-    ("Running",            running_count,   "#1565C0",    "⚡"),
-    ("Processed",          processed_count, P["success"], "✔"),
-    ("Failed",             failed_count,    P["danger"],  "✗"),
+    ("Pending / Approved", pending_count,   P["warning"], "clock"),
+    ("Running",            running_count,   P["info"],    "zap"),
+    ("Processed",          processed_count, P["success"], "check-circle"),
+    ("Failed",             failed_count,    P["danger"],  "x-circle"),
 ]
-for col, (label, val, color, icon) in zip([c1, c2, c3, c4], stat_items):
+for col, (label, val, color, icon_name) in zip([c1, c2, c3, c4], stat_items):
     col.markdown(
         f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
         f'border-top:3px solid {color};border-radius:8px;padding:0.8rem;text-align:center">'
-        f'<div style="font-size:1.6rem;font-weight:800;color:{color}">{icon} {val}</div>'
+        f'<div style="font-size:1.6rem;font-weight:800;color:{color};font-variant-numeric:tabular-nums">{icon(icon_name, size=15, color=color)} {val}</div>'
         f'<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.06em;'
         f'color:{P["grey_700"]};margin-top:3px">{label}</div>'
         f'</div>',
@@ -138,7 +138,7 @@ for col, (label, val, color, icon) in zip([c1, c2, c3, c4], stat_items):
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
-section_title("Snowflake Processing Pipeline", "🔧")
+section_title("Snowflake Processing Pipeline", "sliders")
 stage = 3 if running_count > 0 else (2 if pending_count > 0 else 5)
 render_pipeline_diagram(current_stage=stage)
 st.markdown(
@@ -157,7 +157,7 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # PIPELINE BOARD — overview by stage
 # ──────────────────────────────────────────────────────────────────────────────
 
-section_title("Pipeline Board", "📊")
+section_title("Pipeline Board", "table")
 
 BOARD_STAGES = [
     "Submitted", "Pending Approval", "Approved",
@@ -198,7 +198,7 @@ if not failed_df.empty:
     st.markdown(
         f'<div style="background:{P["danger_lt"]};border-left:4px solid {P["danger"]};'
         f'border-radius:8px;padding:0.6rem 1rem;margin:0.6rem 0;font-size:0.82rem">'
-        f'❌ <strong>{len(failed_df)}</strong> adjustment(s) in Failed/Rejected status</div>',
+        f'{icon("x-circle", size=13, color=P["danger"])} <strong>{len(failed_df)}</strong> adjustment(s) in Failed/Rejected status</div>',
         unsafe_allow_html=True)
 
 st.markdown("<br/>", unsafe_allow_html=True)
@@ -207,13 +207,13 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # RUNNING / WAITING — live items with Force-process
 # ──────────────────────────────────────────────────────────────────────────────
 
-section_title("Running & Waiting", "⚡")
+section_title("Running & Waiting", "zap")
 
 live_df = df_track[df_track["RUN_STATUS"].isin(["Pending", "Approved", "Running"])]
 if live_df.empty:
     st.markdown(
         f'<div class="mcard" style="text-align:center;padding:1.5rem;color:{P["grey_700"]}">'
-        f'✅ Nothing in flight — all adjustments are processed.</div>',
+        f'{icon("check-circle", size=13, color=P["success"])} Nothing in flight — all adjustments are processed.</div>',
         unsafe_allow_html=True)
 else:
     for _, qi in live_df.iterrows():
@@ -225,8 +225,10 @@ else:
         submitted_at = qi.get("SUBMITTED_AT", "")
         entity      = str(qi.get("ENTITY_CODE", "")) or "—"
 
-        status_color = "#1565C0" if run_status == "Running" else ("#00897B" if run_status == "Approved" else P["warning"])
-        status_icon  = "⚡" if run_status == "Running" else ("✅" if run_status == "Approved" else "⏸")
+        status_color = P["info"] if run_status == "Running" else ("#0F766E" if run_status == "Approved" else P["warning"])
+        status_icon  = icon("zap" if run_status == "Running"
+                            else ("check-circle" if run_status == "Approved" else "clock"),
+                            size=12, color=status_color)
         # No report number yet (assigned at processing) — short id keeps rows distinct.
         sub_txt = (submitted_at.strftime("%d %b %H:%M")
                    if hasattr(submitted_at, "strftime") and str(submitted_at) != "NaT"
@@ -238,7 +240,7 @@ else:
             f'  <div>'
             f'    <span style="font-weight:700;font-size:0.92rem">ADJ #{str(adj_id)[:8]}…</span>'
             f'    &nbsp;<span style="font-size:0.75rem;color:{P["grey_700"]}">'
-            f'    {scope_cfg.get("icon","")} {scope} · {adj_type} · Entity: {entity}</span>'
+            f'    {scope} · {adj_type} · Entity: {entity}</span>'
             f'  </div>'
             f'  <span style="font-size:0.75rem;font-weight:700;color:{status_color}">'
             f'  {status_icon} {run_status}</span>'
@@ -265,7 +267,7 @@ else:
                     if stuck:
                         st.markdown(
                             f"<span style='color:{P['danger']};font-size:0.76rem;font-weight:600'>"
-                            f"⚠ Waiting {wait_min} min — the task may have missed it; force it through.</span>",
+                            f"{icon('alert-triangle', size=12, color='#B45309')} Waiting {wait_min} min — the task may have missed it; force it through.</span>",
                             unsafe_allow_html=True)
                     else:
                         st.markdown(
@@ -287,7 +289,7 @@ else:
                     safe_rerun()
 
     st.markdown("<br/>", unsafe_allow_html=True)
-    if st.button("🔄 Refresh", type="primary"):
+    if st.button("Refresh", type="primary"):
         safe_rerun()
 
 st.markdown("<br/>", unsafe_allow_html=True)
@@ -296,7 +298,7 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # DETAIL TABLE
 # ──────────────────────────────────────────────────────────────────────────────
 
-section_title("Adjustment Details", "📋")
+section_title("Adjustment Details", "file-text")
 
 display_cols = [
     "DIMENSION_ADJ_ID", "PROCESS_TYPE", "ADJUSTMENT_TYPE", "ENTITY_CODE",
@@ -356,7 +358,7 @@ st.dataframe(df_display.style.hide(axis='index'), use_container_width=True, heig
 # DEEP DIVE
 # ──────────────────────────────────────────────────────────────────────────────
 
-section_title("Deep Dive", "🔎")
+section_title("Deep Dive", "search")
 
 def _fmt_ts(val):
     if val is None or str(val) in ("NaT", "None", ""):
@@ -393,7 +395,7 @@ for _, row in df_track.iterrows():
         col_detail, col_pbi = st.columns([1, 1])
 
         with col_detail:
-            section_title("Adjustment Info", "📋")
+            section_title("Adjustment Info", "file-text")
             info_rows = [
                 ("COB",           str(row.get("COBID", "—"))),
                 ("Scope",         scope),
@@ -419,7 +421,7 @@ for _, row in df_track.iterrows():
                 unsafe_allow_html=True)
 
         with col_pbi:
-            section_title("PowerBI Refresh", "📈")
+            section_title("PowerBI Refresh", "line-chart")
             pbi_rows = [
                 ("PBI Action ID",     str(row.get("PBI_ACTION_ID", "")) or "—"),
                 ("Queued",            _fmt_ts(row.get("PBI_QUEUED_AT"))),
@@ -442,7 +444,7 @@ for _, row in df_track.iterrows():
                 unsafe_allow_html=True)
 
             if row.get("PROCESSING_STARTED_AT"):
-                section_title("Processing", "⚡")
+                section_title("Processing", "zap")
                 proc_rows = [
                     ("Started",  _fmt_ts(row.get("PROCESSING_STARTED_AT"))),
                     ("Ended",    _fmt_ts(row.get("PROCESSING_ENDED_AT"))),
@@ -463,14 +465,14 @@ for _, row in df_track.iterrows():
         if row.get("ERRORMESSAGE"):
             st.markdown(
                 f'<div class="overlap-box" style="margin-top:0.5rem">'
-                f'<h4>❌ Error</h4>'
+                f'<h4>{icon("x-circle", size=13, color=P["danger"])} Error</h4>'
                 f'<div style="font-size:0.82rem;font-family:monospace">'
                 f'{row["ERRORMESSAGE"]}</div>'
                 f'</div>',
                 unsafe_allow_html=True)
 
         st.markdown("---")
-        section_title("Status History", "🕐")
+        section_title("Status History", "clock")
         try:
             history = run_query(f"""
                 SELECT NEW_STATUS, OLD_STATUS, CHANGED_BY, CHANGED_AT, COMMENT

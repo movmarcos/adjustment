@@ -14,7 +14,7 @@ from utils.styles import (
     inject_css, render_sidebar, render_filter_chips, render_status_timeline,
     render_lifecycle_bar,
     status_badge, section_title, P, SCOPE_CONFIG, STATUS_COLORS, STATUS_ICONS,
-    fmt_adj_id,
+    fmt_adj_id, icon,
 )
 from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
 
@@ -23,7 +23,7 @@ render_sidebar()
 
 user = current_user_name()
 
-st.markdown("## 📋 Adjustments")
+st.markdown("## Adjustments")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
     f"All adjustments, with full history and available actions. "
@@ -110,12 +110,12 @@ df_report_status = df_track
 # ──────────────────────────────────────────────────────────────────────────────
 
 tab_labels = {
-    "⏳ Pending":           ["Pending"],
-    "📝 Pending Approval":  ["Pending Approval"],
-    "✅ Approved":           ["Approved"],
-    "✔️ Processed":         ["Processed"],
-    "❌ Errors / Rejected": ["Failed", "Rejected", "Rejected - SignedOff"],
-    "🗑️ Deleted":           None,   # None = filter by IS_DELETED, not by status
+    "Pending":            ["Pending"],
+    "Pending Approval":   ["Pending Approval"],
+    "Approved":           ["Approved"],
+    "Processed":          ["Processed"],
+    "Errors / Rejected":  ["Failed", "Rejected", "Rejected - SignedOff"],
+    "Deleted":            None,   # None = filter by IS_DELETED, not by status
 }
 
 def _tab_df(label, statuses):
@@ -148,7 +148,7 @@ def render_adj_card(row):
     scope_cfg   = SCOPE_CONFIG.get(scope, {})
 
     with st.expander(
-        f'ADJ {adj_label} · {scope_cfg.get("icon","📊")} {scope} · '
+        f'ADJ {adj_label} · {scope} · '
         f'{adj_type} · {run_status} · {record_cnt} rows',
         expanded=False,
     ):
@@ -167,7 +167,7 @@ def render_adj_card(row):
             else:
                 st.markdown("<br/>", unsafe_allow_html=True)
 
-            section_title("Filters Applied", "🔍")
+            section_title("Filters Applied", "search")
             render_filter_chips(row)
 
             reason = row.get("REASON", "")
@@ -179,7 +179,7 @@ def render_adj_card(row):
             if row.get("ERRORMESSAGE"):
                 st.markdown(
                     f'<div class="overlap-box" style="margin-top:0.5rem">'
-                    f'<h4>❌ Error</h4>'
+                    f'<h4>{icon("x-circle", size=13, color=P["danger"])} Error</h4>'
                     f'<div style="font-size:0.82rem;font-family:monospace">{row["ERRORMESSAGE"]}</div>'
                     f'</div>',
                     unsafe_allow_html=True)
@@ -223,10 +223,10 @@ def render_adj_card(row):
                                     else "")
 
                     _rs_icons = {
-                        "Reports Ready": "✅",
-                        "Refreshing": "🔄",
-                        "Queued": "⏳",
-                        "Awaiting": "⏳",
+                        "Reports Ready": "check-circle",
+                        "Refreshing": "refresh-cw",
+                        "Queued": "clock",
+                        "Awaiting": "clock",
                     }
                     _rs_messages = {
                         "Reports Ready": f"Reports Ready ({_rs_time_str})",
@@ -235,16 +235,16 @@ def render_adj_card(row):
                         "Awaiting": "Awaiting report refresh",
                     }
                     _rs_colors = {
-                        "Reports Ready": "#2E7D32",
-                        "Refreshing": "#1565C0",
-                        "Queued": "#E65100",
-                        "Awaiting": "#757575",
+                        "Reports Ready": "#15803D",
+                        "Refreshing": "#1D4ED8",
+                        "Queued": "#B45309",
+                        "Awaiting": "#64748B",
                     }
-                    icon = _rs_icons.get(_rs_status, "")
-                    color = _rs_colors.get(_rs_status, "#757575")
+                    color = _rs_colors.get(_rs_status, "#64748B")
+                    _rs_icon = icon(_rs_icons.get(_rs_status, ""), size=12, color=color)
                     msg = _rs_messages.get(_rs_status, _rs_status)
                     meta_rows.append(("Report Status",
-                        f'<span style="color:{color};font-weight:600">{icon} {msg}</span>'))
+                        f'<span style="color:{color};font-weight:600">{_rs_icon} {msg}</span>'))
             rows_html = "".join(
                 f'<tr><td style="color:{P["grey_700"]};padding:3px 0;font-size:0.8rem;'
                 f'white-space:nowrap;padding-right:12px">{k}</td>'
@@ -259,7 +259,7 @@ def render_adj_card(row):
 
         # ── Status history ──────────────────────────────────────────────────
         st.markdown("---")
-        section_title("Status History", "🕐")
+        section_title("Status History", "clock")
         try:
             history = run_query(f"""
                 SELECT NEW_STATUS, OLD_STATUS, CHANGED_BY, CHANGED_AT, COMMENT
@@ -275,14 +275,14 @@ def render_adj_card(row):
 
         # ── Actions ─────────────────────────────────────────────────────────
         st.markdown("---")
-        section_title("Actions", "⚡")
+        section_title("Actions", "zap")
         if bool(row.get("IS_DELETED")):
-            st.caption("🗑️ This adjustment has been deleted — actions are disabled.")
+            st.caption("This adjustment has been deleted — actions are disabled.")
         act_cols = st.columns(4)   # deleted rows have RUN_STATUS='Deleted' → no buttons render
 
         if run_status in ("Pending", "Failed", "Processed"):
             with act_cols[0]:
-                if st.button("🗑️ Delete", key=f"del_{adj_id}", use_container_width=True):
+                if st.button("Delete", key=f"del_{adj_id}", use_container_width=True):
                     try:
                         process_type = str(row.get("PROCESS_TYPE", ""))
                         # Get DIMENSION_ADJ_ID — used for DIMENSION.ADJUSTMENT and FACT table deletes
@@ -345,7 +345,7 @@ def render_adj_card(row):
                     except Exception as ex:
                         st.error(str(ex))
             with act_cols[1]:
-                if st.button("🔐 Submit for Approval", key=f"approv_{adj_id}", use_container_width=True):
+                if st.button("Submit for Approval", key=f"approv_{adj_id}", use_container_width=True):
                     try:
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
@@ -365,7 +365,7 @@ def render_adj_card(row):
 
         elif run_status == "Pending Approval":
             with act_cols[0]:
-                if st.button("↩️ Recall to Pending", key=f"recall_{adj_id}", use_container_width=True):
+                if st.button("Recall to Pending", key=f"recall_{adj_id}", use_container_width=True):
                     try:
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
@@ -384,7 +384,7 @@ def render_adj_card(row):
                         st.error(str(ex))
         elif run_status == "Failed":
             with act_cols[0]:
-                if st.button("🔄 Retry", key=f"retry_{adj_id}",
+                if st.button("Retry", key=f"retry_{adj_id}",
                              use_container_width=True, type="primary"):
                     try:
                         run_query(f"""
@@ -414,7 +414,7 @@ for tab, (label, statuses) in zip(tabs, tab_labels.items()):
         if tab_adjs.empty:
             st.markdown(
                 f'<div class="mcard" style="text-align:center;padding:2.5rem;color:{P["grey_700"]}">'
-                f'<div style="font-size:1.8rem">🕳️</div>'
+                f'<div>{icon("inbox", size=28, color=P["grey_400"], valign="0")}</div>'
                 f'<div style="font-size:0.9rem;margin-top:0.5rem">No adjustments in this category</div>'
                 f'</div>',
                 unsafe_allow_html=True)
