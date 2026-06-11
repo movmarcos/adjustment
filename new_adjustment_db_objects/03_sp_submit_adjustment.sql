@@ -428,13 +428,28 @@ def main(session, p_adjustment):
                  'Submitted via Streamlit — {_esc(adjustment_type)} / {_esc(process_type)}')
         """).collect()
 
+        # Refer to the blocking adjustment by its report number (DIMENSION_ADJ_ID)
+        # — the integer users recognise — and only fall back to the internal hash
+        # when the blocker hasn't been processed yet (no report number assigned).
+        blocked_label = None
+        if blocked_by_adj_id:
+            try:
+                _brow = session.sql(
+                    f"SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER "
+                    f"WHERE ADJ_ID = '{_esc(blocked_by_adj_id)}'"
+                ).collect()
+                _bdim = _brow[0]["DIMENSION_ADJ_ID"] if _brow else None
+            except Exception:
+                _bdim = None
+            blocked_label = f"#{int(_bdim)}" if _bdim is not None else f"#{blocked_by_adj_id}"
+
         return {
             "adj_id":  adj_id,
             "status":  initial_status,
             "blocked_by": blocked_by_adj_id,
             "replaced": replaced_adj_ids,
-            "message": f"Adjustment {adj_id} created with status '{initial_status}'."
-                       + (f" Blocked by ADJ #{blocked_by_adj_id}." if blocked_by_adj_id else "")
+            "message": f"Created with status '{initial_status}'."
+                       + (f" Blocked by ADJ {blocked_label}." if blocked_by_adj_id else "")
                        + (f" Replaced {len(replaced_adj_ids)} previous adjustment(s)." if replaced_adj_ids else "")
         }
 
