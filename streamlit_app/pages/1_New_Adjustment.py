@@ -335,22 +335,67 @@ FILTER_KEYS = ["entity_code", "source_system_code", "department_code", "book_cod
               [k for k, _, _ in ALL_EXTRA_FIELDS]
 
 
-def _pills(options, key, default=None, format_func=None):
-    """Single-click segmented selector. st.pills when available; falls back to a
-    horizontal st.radio styled as pills by inject_css."""
-    fmt = format_func or str
-    if hasattr(st, "pills"):
-        return st.pills(" ", options, selection_mode="single",
-                        default=default if default in options else None,
-                        key=key, format_func=fmt, label_visibility="collapsed")
-    idx = options.index(default) if default in options else None
+def _btn(label, *, icon_name=None, **kwargs):
+    """st.button with a Material icon when the runtime supports the icon param."""
+    if icon_name:
+        try:
+            return st.button(label, icon=icon_name, **kwargs)
+        except TypeError:
+            pass
+    return st.button(label, **kwargs)
+
+
+def _pill_row(options, selected, key_prefix, fmt=None, icons=None):
+    """One-click segmented selector built from small buttons.
+
+    Buttons are used instead of st.radio/st.pills: the selection is driven
+    purely by wiz state (selected → primary red), so there is no widget
+    default-vs-state fight and a single click always takes effect.
+    Returns the clicked option, or None."""
+    cols = st.columns(len(options))
+    clicked = None
+    for i, opt in enumerate(options):
+        with cols[i]:
+            if _btn(fmt(opt) if fmt else str(opt),
+                    icon_name=(icons or {}).get(opt),
+                    key=_k(f"{key_prefix}_{opt}"),
+                    use_container_width=True,
+                    type="primary" if opt == selected else "secondary"):
+                clicked = opt
+    return clicked
+
+
+def _safe_int(v) -> int:
+    """int() that survives None and NaN (NaN is truthy, so `v or 0` won't)."""
     try:
-        return st.radio(" ", options, index=idx, horizontal=True,
-                        key=key, format_func=fmt, label_visibility="collapsed")
-    except Exception:
-        # Older Streamlit: index=None unsupported — preselect first option
-        return st.radio(" ", options, index=0, horizontal=True,
-                        key=key, format_func=fmt, label_visibility="collapsed")
+        if v is None or pd.isna(v):
+            return 0
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
+# Material icon shortcodes for the pill buttons (ignored on older Streamlit)
+CATEGORY_BTN_ICONS = {
+    "Scaling Adjustment": ":material/balance:",
+    "Direct Adjustment":  ":material/upload_file:",
+    "Entity Roll":        ":material/autorenew:",
+}
+SCOPE_BTN_ICONS = {
+    "VaR":         ":material/bar_chart:",
+    "Stress":      ":material/show_chart:",
+    "FRTB":        ":material/account_balance:",
+    "Sensitivity": ":material/adjust:",
+}
+TYPE_BTN_ICONS = {
+    "Scale":   ":material/bar_chart:",
+    "Flatten": ":material/remove_circle:",
+    "Roll":    ":material/autorenew:",
+}
+OCC_BTN_ICONS = {
+    "ADHOC":     ":material/event:",
+    "RECURRING": ":material/event_repeat:",
+}
 
 
 def _int_input(label, key, value, placeholder="e.g. 20260328"):
@@ -401,6 +446,8 @@ def _preview_payload() -> dict:
 def _fmt_money(v):
     """Compact money formatting (K/M/B/T) so big totals fit the ticket rows."""
     try:
+        if v is None or pd.isna(v):
+            return "—"
         n = float(v)
     except (TypeError, ValueError):
         return "—"
@@ -463,24 +510,27 @@ def _missing_fields() -> list:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _render_scope_pills(include_frtball: bool = True) -> None:
-    """Scope pills + FRTB sub-type pills. Sets wiz['process_type']."""
+    """Scope pill buttons + FRTB sub-type row. Sets wiz['process_type']."""
     section_title("Data Scope", "search")
-    groups = list(SCOPE_CONFIG.keys())
     current_group = "FRTB" if wiz.get("process_type") in FRTB_SUBTYPES \
                     else wiz.get("process_type")
-    sel = _pills(groups, key=_k(f"scope_{wiz.get('category')}"), default=current_group)
-    if sel and sel != current_group:
-        wiz["process_type"] = sel  # FRTB group defaults to plain FRTB sub-type
-    elif sel is None:
-        wiz["process_type"] = None
+    clicked = _pill_row(list(SCOPE_CONFIG.keys()), current_group,
+                        f"scope_{wiz.get('category')}", icons=SCOPE_BTN_ICONS)
+    if clicked and clicked != current_group:
+        wiz["process_type"] = clicked  # FRTB group starts on the plain FRTB sub-type
+        wiz["_preview_sum"] = None
+        safe_rerun()
 
     if wiz.get("process_type") in FRTB_SUBTYPES:
         subtypes = [k for k in FRTB_SUBTYPE_CONFIG
                     if include_frtball or k != "FRTBALL"]
-        sub = _pills(subtypes, key=_k(f"frtbsub_{wiz.get('category')}"),
-                     default=wiz["process_type"] if wiz["process_type"] in subtypes else "FRTB",
-                     format_func=lambda k: f"{k} — {FRTB_SUBTYPE_CONFIG[k]}")
-        wiz["process_type"] = sub or "FRTB"
+        sub = _pill_row(subtypes, wiz["process_type"],
+                        f"frtbsub_{wiz.get('category')}")
+        if sub and sub != wiz["process_type"]:
+            wiz["process_type"] = sub
+            wiz["_preview_sum"] = None
+            safe_rerun()
+        st.caption(FRTB_SUBTYPE_CONFIG.get(wiz["process_type"], ""))
 
 
 def _render_main_filters() -> None:
@@ -540,19 +590,24 @@ def render_scaling_form() -> None:
 
     # ── Type ─────────────────────────────────────────────────────────────
     section_title("Adjustment Type", "zap")
-    tsel = _pills(list(TYPE_CONFIG.keys()), key=_k("type_pills"),
-                  default=wiz.get("adjustment_type"),
-                  format_func=lambda k: f"{k} — {TYPE_CONFIG[k]['desc']}")
-    wiz["adjustment_type"] = tsel
-    if tsel:
-        st.caption(f"Formula: {TYPE_CONFIG[tsel]['formula']}")
+    tsel = _pill_row(list(TYPE_CONFIG.keys()), wiz.get("adjustment_type"),
+                     "type", icons=TYPE_BTN_ICONS)
+    if tsel and tsel != wiz.get("adjustment_type"):
+        wiz["adjustment_type"] = tsel
+        wiz["_preview_sum"] = None
+        safe_rerun()
+    if wiz.get("adjustment_type"):
+        tcfg = TYPE_CONFIG[wiz["adjustment_type"]]
+        st.caption(f"{tcfg['desc']} · Formula: {tcfg['formula']}")
 
     # ── Dates & factor ───────────────────────────────────────────────────
     section_title("Date & Schedule", "calendar")
-    occ = _pills(["ADHOC", "RECURRING"], key=_k("freq"),
-                 default=wiz.get("occurrence", "ADHOC"),
-                 format_func=lambda k: "Ad hoc" if k == "ADHOC" else "Recurring (daily)")
-    wiz["occurrence"] = occ or "ADHOC"
+    occ = _pill_row(["ADHOC", "RECURRING"], wiz.get("occurrence", "ADHOC"),
+                    "freq", icons=OCC_BTN_ICONS,
+                    fmt=lambda k: "Ad hoc" if k == "ADHOC" else "Recurring (daily)")
+    if occ and occ != wiz.get("occurrence"):
+        wiz["occurrence"] = occ
+        safe_rerun()
 
     d1, d2, d3 = st.columns(3)
     with d1:
@@ -806,9 +861,9 @@ def _ticket_html(missing: list) -> str:
                f'<div style="font-size:0.66rem;font-weight:700;text-transform:uppercase;'
                f'letter-spacing:.07em;color:{P["grey_700"]};margin-bottom:3px">Impact preview</div>'
                f'<div class="kv"><span class="k">Rows affected</span>'
-               f'<span class="v">{int(s.get("ROWS_AFFECTED") or 0):,}</span></div>'
+               f'<span class="v">{_safe_int(s.get("ROWS_AFFECTED")):,}</span></div>'
                f'<div class="kv"><span class="k">Non-zero rows</span>'
-               f'<span class="v">{int(s.get("NONZERO_ROWS") or 0):,}</span></div>'
+               f'<span class="v">{_safe_int(s.get("NONZERO_ROWS")):,}</span></div>'
                f'<div class="kv"><span class="k">Original</span>'
                f'<span class="v">{_fmt_money(s.get("TOTAL_CURRENT_VALUE"))}</span></div>'
                f'<div class="kv"><span class="k">Adjustment</span>'
@@ -917,13 +972,13 @@ left, right = st.columns([1.85, 1], gap="large")
 
 with left:
     section_title("Category", "layers")
-    cat = _pills(list(CATEGORY_CONFIG.keys()), key=_k("cat_pills"),
-                 default=wiz.get("category"),
-                 format_func=lambda k: k)
-    if cat != wiz.get("category"):
+    cat = _pill_row(list(CATEGORY_CONFIG.keys()), wiz.get("category"),
+                    "cat", icons=CATEGORY_BTN_ICONS)
+    if cat and cat != wiz.get("category"):
         wiz.update({"category": cat, "process_type": None, "adjustment_type": None,
                     "uploaded_df": None, "uploaded_file_name": None,
                     "_preview_sum": None, "_preview_err": None})
+        safe_rerun()
     if wiz.get("category"):
         st.caption(CATEGORY_CONFIG[wiz["category"]]["desc"])
 
@@ -945,20 +1000,25 @@ with right:
     cat = wiz.get("category")
 
     # ── Impact preview trigger (Scaling, narrow scope only) ─────────────
+    zero_rows = False
     if cat == "Scaling Adjustment" and not missing and not _is_entity_only(wiz):
-        if st.button("Run impact preview", use_container_width=True,
-                     key=_k("run_preview")):
+        if _btn("Run impact preview", icon_name=":material/visibility:",
+                use_container_width=True, key=_k("run_preview")):
             with st.spinner("Calculating impact…"):
                 _run_preview()
             safe_rerun()
         if wiz.get("_preview_err"):
             st.warning(f"Preview not available: {wiz['_preview_err']}")
         s = wiz.get("_preview_sum")
-        if s is not None and int(s.get("ROWS_AFFECTED") or 0) == 0:
+        preview_current = (s is not None and wiz.get("_preview_for")
+                           == json.dumps(_preview_payload(), sort_keys=True, default=str))
+        if preview_current and _safe_int(s.get("ROWS_AFFECTED")) == 0:
+            zero_rows = True
             st.warning(
                 "These filters match **0 rows**, so this adjustment would change "
-                "nothing if submitted. Double-check entity, book, and measure-type "
-                "codes for the selected COB before submitting.")
+                "nothing. One of the filter values probably doesn't exist for this "
+                "COB — double-check entity, book, and measure-type codes. "
+                "Submission is blocked until the preview finds matching rows.")
 
     # ── Direct: replacement confirmation ─────────────────────────────────
     dup_ok = True
@@ -976,8 +1036,9 @@ with right:
                  else _msg)
 
     # ── Submit ────────────────────────────────────────────────────────────
-    if st.button("Submit Adjustment", type="primary", use_container_width=True,
-                 key=_k("submit"), disabled=bool(missing) or not dup_ok):
+    if _btn("Submit Adjustment", icon_name=":material/send:", type="primary",
+            use_container_width=True, key=_k("submit"),
+            disabled=bool(missing) or not dup_ok or zero_rows):
         wiz["result"] = None
         with st.spinner("Submitting adjustment…"):
             result = _do_submit()
@@ -986,13 +1047,15 @@ with right:
         safe_rerun()
     if missing:
         st.caption("Submit unlocks when the ticket is complete.")
+    elif zero_rows:
+        st.caption("Submit is blocked: the current filters match no data.")
 
 
 # ── Full-width preview detail (breakdown / sample) ───────────────────────────
 if wiz.get("category") == "Scaling Adjustment" and wiz.get("_preview_sum") \
         and not missing and not _is_entity_only(wiz):
     s = wiz["_preview_sum"]
-    total_rows = int(s.get("ROWS_AFFECTED") or 0)
+    total_rows = _safe_int(s.get("ROWS_AFFECTED"))
     _is_roll = (wiz.get("adjustment_type") == "Roll"
                 and wiz.get("source_cobid")
                 and int(wiz.get("source_cobid")) != int(wiz["cobid"]))
