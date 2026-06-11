@@ -24,6 +24,7 @@ st.set_page_config(
 from utils.styles import (
     inject_css, render_sidebar, render_step_bar, render_filter_chips,
     section_title, P, SCOPE_CONFIG, TYPE_CONFIG, CATEGORY_CONFIG,
+    fmt_adj_id,
 )
 from utils.snowflake_conn import run_query, call_sp_df, current_user_name, safe_rerun
 
@@ -394,7 +395,7 @@ def render_direct_form() -> None:
     if wiz.get("cobid") and wiz.get("global_reference"):
         try:
             dup_rows = run_query(f"""
-                SELECT ADJ_ID, ENTITY_CODE, RUN_STATUS, USERNAME, CREATED_DATE
+                SELECT ADJ_ID, ENTITY_CODE, RUN_STATUS, USERNAME, CREATED_DATE, DIMENSION_ADJ_ID
                 FROM ADJUSTMENT_APP.ADJ_HEADER
                 WHERE COBID = {wiz['cobid']}
                   AND UPPER(GLOBAL_REFERENCE) = UPPER('{wiz["global_reference"].replace("'","''")}')
@@ -412,7 +413,7 @@ def render_direct_form() -> None:
                 f'<div style="font-weight:700;font-size:0.92rem;color:#E65100;margin-bottom:0.4rem">'
                 f'⚠️ Existing adjustment found with the same Reference</div>'
                 f'<div style="font-size:0.83rem;color:#BF360C">'
-                f'<strong>ADJ ID:</strong> {dup_info[0]} &nbsp;·&nbsp; '
+                f'<strong>Adj ID:</strong> {fmt_adj_id(dup_info[5])} &nbsp;·&nbsp; '
                 f'<strong>Entity:</strong> {dup_info[1]} &nbsp;·&nbsp; '
                 f'<strong>Status:</strong> {dup_info[2]} &nbsp;·&nbsp; '
                 f'<strong>User:</strong> {dup_info[3]}<br/>'
@@ -1171,9 +1172,23 @@ elif wiz["step"] == 3:
     result = wiz.get("result") or {}
     msg    = result.get("message", "Adjustment created successfully")
 
-    blocked_msg = ""
-    if "Blocked by ADJ #" in msg:
-        blocked_msg = msg
+    # The SP references the blocking adjustment by its internal hash. The blocker
+    # is still unprocessed (so it has no report number yet); users don't recognise
+    # the big hash, so shorten it to a compact id for display.
+    def _shorten_blocker(text):
+        marker = "Blocked by ADJ #"
+        i = text.find(marker)
+        if i == -1:
+            return text
+        j = i + len(marker)
+        k = j
+        while k < len(text) and text[k] not in " .":
+            k += 1
+        ident = text[j:k]
+        return text[:j] + ident[:8] + "…" + text[k:] if len(ident) > 8 else text
+
+    msg = _shorten_blocker(msg)
+    blocked_msg = msg if "Blocked by ADJ #" in msg else ""
 
     st.markdown(
         f'<div style="background:#E8F5E9;border:2px solid #A5D6A7;'
@@ -1184,7 +1199,8 @@ elif wiz["step"] == 3:
         f'<div style="font-size:0.9rem;color:#388E3C;margin-top:0.4rem">{msg}</div>'
         f'<div style="font-size:0.82rem;color:{P["info"]};margin-top:0.8rem">'
         f'⚡ Your adjustment is queued and will be processed automatically by the scope pipeline. '
-        f'You can monitor its progress in the Processing Queue.</div>'
+        f'Track it in the Processing Queue; once processed it is assigned a <strong>report ID</strong> '
+        f'(the number shown in My Work, the Adjustment Tracker, and your reports).</div>'
         f'</div>', unsafe_allow_html=True)
 
     if blocked_msg:
