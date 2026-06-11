@@ -448,7 +448,7 @@ with tab_schema:
         ("ADJUSTMENT_APP.VW_ERRORS",             "VIEW",          "Adjustments with Error status"),
 
         ("ADJUSTMENT_APP.VW_MY_WORK",            "VIEW",          "All adjustments — filtered by user in Streamlit"),
-        ("ADJUSTMENT_APP.VW_PROCESSING_QUEUE",   "VIEW",          "Active pipeline items with queue position"),
+        ("ADJUSTMENT_APP.VW_ADJUSTMENT_TRACK",   "VIEW",          "Full lifecycle per adjustment — drives the Adjustment Pipeline page"),
         ("ADJUSTMENT_APP.VW_APPROVAL_QUEUE",     "VIEW",          "Adjustments awaiting approval"),
     ]
 

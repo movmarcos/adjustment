@@ -364,7 +364,7 @@ with tab_architecture:
             <div style="background:{P['white']};border:1px solid {P['border']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
             👁️ VW_MY_WORK</div>
             <div style="background:{P['white']};border:1px solid {P['border']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            👁️ VW_PROCESSING_QUEUE</div>
+            👁️ VW_ADJUSTMENT_TRACK</div>
             <div style="background:{P['white']};border:1px solid {P['border']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
             👁️ VW_APPROVAL_QUEUE</div>
         </div>
@@ -1185,7 +1185,7 @@ with tab_objects:
         ("VW_RECENT_ACTIVITY",      "VIEW",            "08_views.sql",    "UNION of submissions + status transitions for the dashboard timeline."),
         ("VW_ERRORS",               "VIEW",            "08_views.sql",    "Adjustments currently in Error status."),
         ("VW_MY_WORK",              "VIEW",            "08_views.sql",    "All adjustments — Streamlit filters by CURRENT_USER()."),
-        ("VW_PROCESSING_QUEUE",     "VIEW",            "08_views.sql",    "Live queue with QUEUE_POSITION via ROW_NUMBER."),
+        ("VW_ADJUSTMENT_TRACK",     "VIEW",            "08_views.sql",    "Full lifecycle per adjustment — drives the Adjustment Pipeline page."),
         ("VW_APPROVAL_QUEUE",       "VIEW",            "08_views.sql",    "Adjustments awaiting approval. Filtered by RUN_STATUS = Pending Approval."),
         ("VW_REPORT_REFRESH_STATUS", "VIEW",             "08_views.sql", "Per-adjustment PowerBI refresh status. Joins ADJ_HEADER with POWERBI_ACTION."),
         ("METADATA.POWERBI_ACTION",  "TABLE (external)", "—",            "PowerBI refresh action queue. Written by UPDATE_POWERBI_FOR_ADJUSTMENTS, read by ControlM."),

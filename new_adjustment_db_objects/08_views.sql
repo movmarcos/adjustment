@@ -212,36 +212,14 @@ FROM ADJUSTMENT_APP.ADJ_HEADER h;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- 6. VW_PROCESSING_QUEUE — Adjustments currently being processed or pending
+-- 6. VW_PROCESSING_QUEUE — REMOVED
+-- The Processing Queue page was merged into the Adjustment Pipeline page, which
+-- reads VW_ADJUSTMENT_TRACK. This view's only consumer (and its meaningless
+-- ROW_NUMBER QUEUE_POSITION under the polling pipeline) is gone. Drop it on
+-- deploy so it doesn't linger in existing environments.
 -- ═══════════════════════════════════════════════════════════════════════════
 
-CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_PROCESSING_QUEUE
-    COMMENT = 'Live view of the processing pipeline. Pending and Running adjustments.'
-AS
-SELECT
-    h.ADJ_ID,
-    h.DIMENSION_ADJ_ID,
-    h.COBID,
-    h.PROCESS_TYPE,
-    h.ADJUSTMENT_TYPE,
-    h.ADJUSTMENT_ACTION,
-    h.ENTITY_CODE,
-    h.BOOK_CODE,
-    h.DEPARTMENT_CODE,
-    h.RUN_STATUS,
-    h.ADJUSTMENT_OCCURRENCE,
-    h.USERNAME                AS SUBMITTED_BY,
-    h.CREATED_DATE            AS SUBMITTED_AT,
-    -- Estimate queue position
-    ROW_NUMBER() OVER (
-        PARTITION BY h.PROCESS_TYPE
-        ORDER BY
-            CASE h.ADJUSTMENT_OCCURRENCE WHEN 'ADHOC' THEN 0 ELSE 1 END,
-            h.CREATED_DATE
-    ) AS QUEUE_POSITION
-FROM ADJUSTMENT_APP.ADJ_HEADER h
-WHERE h.RUN_STATUS IN ('Pending', 'Approved', 'Running')
-  AND h.IS_DELETED = FALSE;
+DROP VIEW IF EXISTS ADJUSTMENT_APP.VW_PROCESSING_QUEUE;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
