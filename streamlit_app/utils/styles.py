@@ -481,11 +481,25 @@ def inject_css():
     .stButton>button:focus-visible {{
         outline: 2px solid {P["info"]} !important; outline-offset: 2px !important;
     }}
+    /* Primary buttons = SELECTED state: quiet tint, red border + text.
+       Red no longer fills every selection — in a risk app a solid red wall
+       reads as "failed". Solid red is reserved for the Submit action below. */
     .stButton>button[kind="primary"], .stButton>button[data-testid="stBaseButton-primary"] {{
-        background: var(--brand) !important; border-color: var(--brand) !important;
-        color: white !important;
+        background: #FFF5F6 !important; border: 1.5px solid var(--brand) !important;
+        color: var(--brand) !important;
     }}
     .stButton>button[kind="primary"]:hover, .stButton>button[data-testid="stBaseButton-primary"]:hover {{
+        background: #FFE9EC !important;
+    }}
+    /* The one true call-to-action stays solid brand red (key-class hook;
+       on runtimes without st-key classes it degrades to the quiet style). */
+    div[class*="st-key-submit"] .stButton>button,
+    div[class*="st-key-submit"] button[data-testid="stBaseButton-primary"] {{
+        background: var(--brand) !important; border-color: var(--brand) !important;
+        color: #fff !important;
+    }}
+    div[class*="st-key-submit"] .stButton>button:hover,
+    div[class*="st-key-submit"] button[data-testid="stBaseButton-primary"]:hover {{
         background: var(--brand-dk) !important; border-color: var(--brand-dk) !important;
     }}
     [data-testid="stDataFrame"] {{
@@ -557,8 +571,8 @@ def inject_css():
     }}
     .sec-num {{
         width: 21px; height: 21px; border-radius: 50%; flex-shrink: 0;
-        background: #FFF0F3; border: 1px solid var(--brand);
-        color: var(--brand); font-size: 0.7rem; font-weight: 700;
+        background: {P["grey_100"]}; border: 1px solid #CBD5E1;
+        color: {P["grey_700"]}; font-size: 0.7rem; font-weight: 700;
         display: flex; align-items: center; justify-content: center;
         margin-top: 1px;
     }}
@@ -569,7 +583,7 @@ def inject_css():
     .sec-help {{ font-size: 0.76rem; color: var(--ink-2); margin-top: -1px; }}
 
     /* Ticket summary value states + completion progress */
-    .ticket .kv .v.v-set {{ color: var(--brand); font-weight: 700; }}
+    .ticket .kv .v.v-set {{ color: var(--ink); font-weight: 700; }}
     .ticket .kv .v.v-unset {{ color: var(--ink-3); font-weight: 500; font-style: italic; }}
     .ticket .t-prog {{
         margin-top: 0.85rem; border-top: 1px solid var(--border);
@@ -586,7 +600,7 @@ def inject_css():
         overflow: hidden; margin-bottom: 0.6rem;
     }}
     .prog-bar i {{
-        display: block; height: 100%; background: var(--brand);
+        display: block; height: 100%; background: #334155;
         border-radius: 3px; transition: width .2s ease-out;
     }}
     .ck-item {{
