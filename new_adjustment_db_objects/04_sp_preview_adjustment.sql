@@ -148,19 +148,21 @@ def main(session, p_adjustment):
     # All user-supplied values are escaped via _esc — these are EXECUTE AS CALLER
     # procs, so an unescaped value is both an injection vector and breaks on any
     # apostrophe in a code/name.
-    if has_entity_key:
+    # Every fact table carries text ENTITY_CODE, so filter it directly — this also
+    # matches how SP_PROCESS_ADJUSTMENT joins entity. Without it an invalid /
+    # non-existent entity code matched every row in the preview. The ENTITY_KEY
+    # lookup is only a fallback for a fact that somehow lacks ENTITY_CODE.
+    if has_entity_code:
+        val = adj.get("entity_code")
+        if val:
+            where_clauses.append(f"fact.ENTITY_CODE = '{_esc(val)}'")
+    elif has_entity_key:
         val = adj.get("entity_code")
         if val:
             where_clauses.append(
                 f"EXISTS (SELECT 1 FROM DIMENSION.ENTITY d "
                 f"WHERE d.ENTITY_KEY = fact.ENTITY_KEY AND d.ENTITY_CODE = '{_esc(val)}')"
             )
-    elif has_entity_code:
-        # Facts keyed by text ENTITY_CODE (e.g. VaR) — filter directly. Without
-        # this an invalid/non-existent entity code matched every row.
-        val = adj.get("entity_code")
-        if val:
-            where_clauses.append(f"fact.ENTITY_CODE = '{_esc(val)}'")
 
     if has_book_key:
         # BOOK attributes map to MANY books, so each is a semi-join on DIMENSION.BOOK
