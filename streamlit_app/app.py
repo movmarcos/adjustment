@@ -501,7 +501,13 @@ try:
             PROCESS_TYPE                                                AS "Scope",
             ADJUSTMENT_TYPE                                             AS "Type",
             RUN_STATUS                                                  AS "Status",
+            IFF(IS_DELETED, '🗑️ Deleted', '')                          AS "Deleted",
             ENTITY_CODE                                                 AS "Entity",
+            DEPARTMENT_CODE                                             AS "Dept",
+            BOOK_CODE                                                   AS "Book",
+            MEASURE_TYPE_CODE                                           AS "Measure",
+            SIMULATION_NAME                                             AS "Simulation",
+            VAR_COMPONENT_ID                                            AS "VaR Comp",
             USERNAME                                                    AS "User",
             RECORD_COUNT                                                AS "Records",
             CREATED_DATE                                                AS "Created",
@@ -509,7 +515,6 @@ try:
             PROCESS_DATE                                                AS "Ended",
             DATEDIFF('second', START_DATE, PROCESS_DATE)                AS DURATION_SECONDS
         FROM ADJUSTMENT_APP.ADJ_HEADER
-        WHERE IS_DELETED = FALSE
         ORDER BY CREATED_DATE DESC
         LIMIT 50
     """)

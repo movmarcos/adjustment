@@ -35,7 +35,7 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # FILTERS
 # ──────────────────────────────────────────────────────────────────────────────
 
-f1, f2, f3, f4, f5 = st.columns(5)
+f1, f2, f3, f4 = st.columns(4)
 with f1:
     filter_status = st.multiselect(
         "Status",
@@ -52,9 +52,6 @@ with f3:
 with f4:
     mine_only = st.checkbox("Only my adjustments", value=False,
                             help="When checked, shows only adjustments you submitted.")
-with f5:
-    show_deleted = st.checkbox("Show deleted", value=False,
-                               help="Include adjustments that have been soft-deleted.")
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -63,9 +60,9 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # ──────────────────────────────────────────────────────────────────────────────
 
 try:
+    # Deleted rows are loaded too — they live in their own "Deleted" tab; the
+    # active-status tabs filter them out below.
     where_clauses = ["1=1"]
-    if not show_deleted:
-        where_clauses.append("IS_DELETED = FALSE")
     if mine_only:
         where_clauses.append(f"SUBMITTED_BY = '{user}'")
     if filter_status:
@@ -118,9 +115,8 @@ tab_labels = {
     "✅ Approved":           ["Approved"],
     "✔️ Processed":         ["Processed"],
     "❌ Errors / Rejected": ["Failed", "Rejected", "Rejected - SignedOff"],
+    "🗑️ Deleted":           None,   # None = filter by IS_DELETED, not by status
 }
-if show_deleted:
-    tab_labels["🗑️ Deleted"] = None   # None = filter by IS_DELETED, not by status
 
 def _tab_df(label, statuses):
     if df_adjs.empty:
@@ -280,7 +276,9 @@ def render_adj_card(row):
         # ── Actions ─────────────────────────────────────────────────────────
         st.markdown("---")
         section_title("Actions", "⚡")
-        act_cols = st.columns(4)
+        if bool(row.get("IS_DELETED")):
+            st.caption("🗑️ This adjustment has been deleted — actions are disabled.")
+        act_cols = st.columns(4)   # deleted rows have RUN_STATUS='Deleted' → no buttons render
 
         if run_status in ("Pending", "Failed", "Processed"):
             with act_cols[0]:
