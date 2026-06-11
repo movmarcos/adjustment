@@ -299,6 +299,12 @@ def render_adj_card(row):
                                 RUN_STATUS = 'Deleted'
                             WHERE ADJ_ID = '{adj_id}'
                         """)
+                        run_query(f"""
+                            INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
+                                (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
+                            VALUES ('{adj_id}', '{run_status}', 'Deleted',
+                                    '{user}', 'Adjustment deleted')
+                        """)
                         # Soft-delete in DIMENSION.ADJUSTMENT (uses the dimension table's own ID)
                         if dim_adj_id:
                             try:
