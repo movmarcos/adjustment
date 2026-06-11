@@ -92,6 +92,7 @@ def main(session, p_adjustment):
     has_metric_local = metric_name in fact_columns and metric_name != metric_usd
     has_metric_usd   = metric_usd in fact_columns
     has_entity_key   = "ENTITY_KEY" in fact_columns
+    has_entity_code  = "ENTITY_CODE" in fact_columns
     has_book_key     = "BOOK_KEY" in fact_columns
     has_trade_key    = "TRADE_KEY" in fact_columns
     has_currency     = "CURRENCY_CODE" in fact_columns
@@ -154,6 +155,12 @@ def main(session, p_adjustment):
                 f"EXISTS (SELECT 1 FROM DIMENSION.ENTITY d "
                 f"WHERE d.ENTITY_KEY = fact.ENTITY_KEY AND d.ENTITY_CODE = '{_esc(val)}')"
             )
+    elif has_entity_code:
+        # Facts keyed by text ENTITY_CODE (e.g. VaR) — filter directly. Without
+        # this an invalid/non-existent entity code matched every row.
+        val = adj.get("entity_code")
+        if val:
+            where_clauses.append(f"fact.ENTITY_CODE = '{_esc(val)}'")
 
     if has_book_key:
         # BOOK attributes map to MANY books, so each is a semi-join on DIMENSION.BOOK
