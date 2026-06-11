@@ -369,11 +369,12 @@ def _pill_row(options, selected, key_prefix, fmt=None, icons=None, descs=None):
 
 
 def _sec(num: int, title: str, helper: str = "") -> None:
-    """Numbered section header inside a section card."""
+    """Numbered section header inside a section card, followed by a hairline."""
     help_html = f'<div class="sec-help">{helper}</div>' if helper else ""
     st.markdown(
         f'<div class="sec-head"><span class="sec-num">{num}</span>'
-        f'<div><div class="sec-title">{title}</div>{help_html}</div></div>',
+        f'<div><div class="sec-title">{title}</div>{help_html}</div></div>'
+        f'<div style="height:1px;background:{P["border"]};margin:2px 0 10px 0"></div>',
         unsafe_allow_html=True)
 
 

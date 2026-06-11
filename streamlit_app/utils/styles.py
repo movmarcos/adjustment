@@ -568,9 +568,7 @@ def inject_css():
     /* Numbered section headers */
     .sec-head {{
         display: flex; align-items: flex-start; gap: 10px;
-        margin: 0.1rem 0 0.75rem 0;
-        padding-bottom: 0.55rem;
-        border-bottom: 1px solid var(--border);
+        margin: 0.1rem 0 0.2rem 0;
     }}
     .sec-num {{
         width: 21px; height: 21px; border-radius: 50%; flex-shrink: 0;
