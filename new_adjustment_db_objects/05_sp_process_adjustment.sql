@@ -1234,7 +1234,14 @@ def main(session, process_type, adjustment_action, cobid):
 
             # Both legs carry the TARGET COBID so the surrogate key (which may
             # include COBID) nets source and target rows onto the same position.
-            er_keyed  = "*" if key_name == pk_expr else f"{pk_expr}, *"
+            # Net on a uniquely-named alias: the configured pk/key column can
+            # itself be a physical column of the adjustments table (FRTB scopes
+            # use a single FRTBSA_*_KEY column), and reusing its name makes the
+            # GROUP BY ambiguous (output alias vs source column).
+            if len(pk_parts) > 1:
+                er_keyed = f"{surrogate_key(pk_parts, 'EROL_NET_KEY_')}, *"
+            else:
+                er_keyed = f"{pk_parts[0]} AS EROL_NET_KEY_, *"
             ins_extra = [c for c in ('RUN_LOG_ID', 'LOAD_TIMESTAMP',
                                      'ADJUSTMENT_CREATED_TIMESTAMP') if c in fact_adj_cols]
             extra_sel = {'RUN_LOG_ID': str(run_log_id),
@@ -1267,7 +1274,7 @@ def main(session, process_type, adjustment_action, cobid):
             netted AS (
                 SELECT {er_any_non_metric}, {er_metric_sums}
                 FROM keyed
-                GROUP BY {key_name}
+                GROUP BY EROL_NET_KEY_
                 HAVING SUM({er_metric_usd}) <> 0
             )
             SELECT {int(cobid)}, {int(new_dim_adj_id)},
