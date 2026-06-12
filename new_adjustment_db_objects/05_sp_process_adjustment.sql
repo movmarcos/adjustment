@@ -646,7 +646,12 @@ def main(session, process_type, adjustment_action, cobid):
 
             # ANY_VALUE for the non-metric dimension columns in the netted CTE
             # (every row in a key group shares them; the metric is SUMmed there).
-            non_metric_any = ', '.join([f"ANY_VALUE({c}) AS {c}" for c in fact_non_metric_matched])
+            # The grouping key is excluded: for single-column PKs (FRTB scopes,
+            # FRTBSA_*_KEY) the key IS one of these columns, and selecting it
+            # both bare and as an ANY_VALUE alias makes the GROUP BY ambiguous.
+            non_metric_any = ', '.join([f"ANY_VALUE({c}) AS {c}"
+                                        for c in fact_non_metric_matched
+                                        if c != key_name])
 
             # ── Build perm INSERT column list (only cols in target adj table) ───
             _adj_set = set(fact_adj_cols)
