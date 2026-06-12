@@ -129,20 +129,18 @@ features. Anything ambiguous in the UI is a bug.
 
 ## Active work / recent state
 
-- **Entity Roll v2 (EROL)** — approved spec at
-  `docs/superpowers/specs/2026-06-11-entity-roll-flatten-design.md`,
-  implementation pending. Summary: replace the physical delete+copy in the
-  EntityRoll branch of `SP_PROCESS_ADJUSTMENT` with set-based offset legs
-  (−adjusted(target COB+entity) and +adjusted(source COB+entity) from
-  `FACT_ADJUSTED_TABLE`, netted per surrogate key into the
-  ADJUSTMENTS_TABLE under one new ADJUSTMENT_ID). No DML on FACT or the
-  combined view; deleting the adjustment restores the entity. Rename type
-  `Entity_Roll` → `EROL` end-to-end (UI payload, `ACTION_MAP` in
-  `03_sp_submit_adjustment.sql`, ADJ_HEADER, DIMENSION.ADJUSTMENT). Read the
-  spec before implementing — it covers SCD2 key fixes, summary rebuild,
-  RECORD_COUNT, and the test plan. **The UI wording for Entity Roll still
-  describes the old delete+copy behaviour and must be updated when the SP
-  changes.**
+- **Entity Roll v2 (EROL)** — IMPLEMENTED 2026-06-12 (spec at
+  `docs/superpowers/specs/2026-06-11-entity-roll-flatten-design.md`), but
+  **not yet deployed/verified against Snowflake**. The EntityRoll branch of
+  `SP_PROCESS_ADJUSTMENT` now writes set-based offset legs
+  (−adjusted(target COB+entity) + adjusted(source COB+entity) from
+  `FACT_ADJUSTED_TABLE`, netted per surrogate key) into the
+  ADJUSTMENTS_TABLE under one new ADJUSTMENT_ID — zero DML on FACT or the
+  combined view; deleting the adjustment restores the entity. Type renamed
+  to `EROL` end-to-end (UI payload, `ACTION_MAP` keeps `entity_roll` as a
+  legacy alias). Next step: deploy `03`+`05`, run
+  `new_adjustment_db_objects/tests/test_entity_roll_adjustment.sql` on a
+  test COB, and verify assertions (a)-(d) pass.
 - A concurrency redesign for the pipeline was audited and is pending
   approval — do not assume single-writer.
 

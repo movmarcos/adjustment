@@ -161,6 +161,62 @@ def log_status_history(session, adj_ids, old_status, new_status, changed_by="SYS
     """).collect()
 
 
+def apply_scd2_key_fix(session, fact_adj_tbl_name, adj_base_tbl_name, cobid):
+    """Rewrite source-COB SCD2 keys (TRADE/COMMON_INSTRUMENT/_FCD) on cross-COB
+    adjustment rows so they are valid for the target COB date. Same UPDATE the
+    Scale path runs inline for cross-COB Rolls; callable from the EntityRoll
+    path. Caller must verify the key columns exist in the adjustments table."""
+    session.sql(f"""
+    UPDATE {fact_adj_tbl_name} tgt
+    SET tgt.TRADE_KEY = src.TRADE_KEY_ADJ,
+        tgt.COMMON_INSTRUMENT_KEY = src.COMMON_INSTRUMENT_KEY_ADJ,
+        tgt.COMMON_INSTRUMENT_FCD_KEY = src.COMMON_INSTRUMENT_FCD_KEY_ADJ
+    FROM (
+        WITH adj_cte AS (
+            SELECT DISTINCT
+                f.ADJUSTMENT_ID, f.COBID, f.BOOK_KEY, f.TRADE_KEY,
+                f.COMMON_INSTRUMENT_KEY, f.COMMON_INSTRUMENT_FCD_KEY,
+                ad.SOURCE_COBID
+            FROM {fact_adj_tbl_name} f
+            INNER JOIN {adj_base_tbl_name} ad
+                ON f.ADJUSTMENT_ID = ad.DIMENSION_ADJ_ID AND f.COBID = ad.COBID
+            WHERE f.COBID = {cobid}
+              AND ad.COBID <> ad.SOURCE_COBID
+        )
+        SELECT DISTINCT
+            f.*,
+            td2.TRADE_KEY          AS TRADE_KEY_ADJ,
+            ci2.COMMON_INSTRUMENT_KEY AS COMMON_INSTRUMENT_KEY_ADJ,
+            cif.COMMON_INSTRUMENT_FCD_KEY AS COMMON_INSTRUMENT_FCD_KEY_ADJ
+        FROM adj_cte f
+        INNER JOIN DIMENSION.BOOK b   ON f.BOOK_KEY = b.BOOK_KEY
+        INNER JOIN DIMENSION.TRADE td ON td.TRADE_KEY = f.TRADE_KEY
+        INNER JOIN DIMENSION.TRADE td2
+            ON  td.TRADE_CODE = td2.TRADE_CODE
+            AND b.BOOK_CODE  = td2.BOOK_CODE
+            AND TO_DATE(f.SOURCE_COBID::STRING, 'YYYYMMDD')
+                BETWEEN td2.EFFECTIVE_START_DATE AND td2.EFFECTIVE_END_DATE
+        INNER JOIN DIMENSION.COMMON_INSTRUMENT ci
+            ON ci.COMMON_INSTRUMENT_KEY = f.COMMON_INSTRUMENT_KEY
+        INNER JOIN DIMENSION.COMMON_INSTRUMENT ci2
+            ON  ci.INSTRUMENT_CODE = ci2.INSTRUMENT_CODE
+            AND TO_DATE(f.SOURCE_COBID::STRING, 'YYYYMMDD')
+                BETWEEN ci2.EFFECTIVE_START_DATE AND ci2.EFFECTIVE_END_DATE
+        INNER JOIN DIMENSION.COMMON_INSTRUMENT_FCD cif
+            ON  ci2.INSTRUMENT_KEY = cif.INSTRUMENT_KEY
+            AND TO_DATE(f.SOURCE_COBID::STRING, 'YYYYMMDD')
+                BETWEEN cif.EFFECTIVE_START_DATE AND cif.EFFECTIVE_END_DATE
+        WHERE f.TRADE_KEY <> TRADE_KEY_ADJ
+           OR f.COMMON_INSTRUMENT_KEY <> COMMON_INSTRUMENT_KEY_ADJ
+           OR f.COMMON_INSTRUMENT_FCD_KEY <> COMMON_INSTRUMENT_FCD_KEY_ADJ
+    ) src
+    WHERE tgt.TRADE_KEY = src.TRADE_KEY
+      AND tgt.COMMON_INSTRUMENT_KEY = src.COMMON_INSTRUMENT_KEY
+      AND tgt.COMMON_INSTRUMENT_FCD_KEY = src.COMMON_INSTRUMENT_FCD_KEY
+      AND tgt.COBID = src.COBID
+    """).collect()
+
+
 # ── INSERT_SOURCE mapping for PowerBI ────────────────────────────────────
 PBI_INSERT_SOURCE = {
     'VAR':         'LOAD_VAR_ADJUSTMENT',
@@ -1074,12 +1130,15 @@ def main(session, process_type, adjustment_action, cobid):
             trigger_powerbi_refresh(session, process_type, run_log_id)
 
         # ═════════════════════════════════════════════════════════════════
-        # ENTITY ROLL PATH
-        # Full delete + copy: no delta calculation.
-        # 1. Delete target COB+entity from FACT_TABLE and FACT_ADJUSTED_TABLE
-        # 2. Copy source COB+entity into FACT_TABLE (replace COBID)
-        # 3. Copy source COB+entity adjustments into FACT_ADJUSTED_TABLE
-        #    (replace COBID, consolidate all source ADJUSTMENT_IDs → single new ID)
+        # ENTITY ROLL PATH (EROL)
+        # Flatten + copy via offset rows — NO physical deletes.
+        #   leg ① −adjusted(target COB+entity)  from FACT_ADJUSTED_TABLE
+        #   leg ② +adjusted(source COB+entity)  from FACT_ADJUSTED_TABLE
+        # netted per position into the ADJUSTMENTS_TABLE under one new
+        # ADJUSTMENT_ID, so combined(target) = adjusted(source).
+        # FACT_TABLE and FACT_ADJUSTED_TABLE receive zero DML; deleting the
+        # adjustment restores the entity's pre-roll adjusted state.
+        # Spec: docs/superpowers/specs/2026-06-11-entity-roll-flatten-design.md
         # ═════════════════════════════════════════════════════════════════
         elif adjustment_action.lower() == 'entityroll':
 
@@ -1106,95 +1165,175 @@ def main(session, process_type, adjustment_action, cobid):
             er_row = df_adj_er.collect()[0]
             source_cobid = er_row["SOURCE_COBID"]
             entity_code  = er_row["ENTITY_CODE"]
+            prior_dim_id = er_row["DIMENSION_ADJ_ID"]   # set if a previous run failed mid-way
 
             if not entity_code:
                 raise Exception("EntityRoll requires ENTITY_CODE")
             if not source_cobid or int(source_cobid) == int(cobid):
                 raise Exception("EntityRoll requires a SOURCE_COBID different from target COBID")
+            # The legs read the combined adjusted view; falling back to the raw
+            # fact table would silently ignore existing source-COB adjustments.
+            if not fact_adjusted_tbl_name or fact_adjusted_tbl_name == fact_tbl_name:
+                raise Exception(
+                    f"EntityRoll for {process_type} requires FACT_ADJUSTED_TABLE to be "
+                    f"configured in ADJUSTMENTS_SETTINGS (distinct from FACT_TABLE).")
 
             esc_entity = str(entity_code).replace("'", "''")
+            view_cols  = set(session.table(fact_adjusted_tbl_name).columns)
 
-            # ── Insert into DIMENSION.ADJUSTMENT ────────────────────────
-            # Must succeed: its ADJUSTMENT_ID is consolidated onto every copied
-            # adjustment row. Let a failure raise (→ batch Failed) rather than
-            # copying rows with a NULL id.
+            # ── Metric columns (same collapse rule as the Scale path) ─────
+            er_metric     = metric_name if metric_name in view_cols else metric_usd_name
+            er_metric_usd = metric_usd_name
+            if er_metric_usd not in view_cols:
+                raise Exception(
+                    f"EntityRoll: metric column {er_metric_usd} not found in "
+                    f"{fact_adjusted_tbl_name}")
+            er_metrics     = [er_metric_usd] if er_metric == er_metric_usd \
+                             else [er_metric, er_metric_usd]
+            er_metric_cols = ', '.join(er_metrics)
+            er_metric_sums = ', '.join(f"SUM({m}) AS {m}" for m in er_metrics)
+
+            # ── Non-metric columns of the ADJUSTMENTS_TABLE ───────────────
+            # Sourced from the combined view when present; KEY/ID columns the
+            # view lacks default to -1, anything else NULL (same convention as
+            # the Scale path's cross-COB roll leg).
+            er_exclude = {er_metric, er_metric_usd, 'COBID', 'ADJUSTMENT_ID',
+                          'ADJUSTMENT_CREATED_TIMESTAMP', 'RUN_LOG_ID', 'LOAD_TIMESTAMP',
+                          'RAVEN_FILENAME', 'RAVEN_FILE_ROW_NUMBER'}
+            er_non_metric = [c for c in fact_adj_cols if c not in er_exclude]
+
+            def _er_default(c):
+                return "-1" if c.split('_')[-1].upper() in ('KEY', 'ID') else "NULL"
+
+            er_select_non_metric = ', '.join(
+                (f"fact.{c}" if c in view_cols else f"{_er_default(c)} AS {c}")
+                for c in er_non_metric)
+            er_any_non_metric = ', '.join(f"ANY_VALUE({c}) AS {c}" for c in er_non_metric)
+
+            # ── Entity predicate against the combined view ────────────────
+            if 'ENTITY_CODE' in view_cols:
+                er_pred = f"fact.ENTITY_CODE = '{esc_entity}'"
+            elif 'ENTITY_KEY' in view_cols:
+                er_pred = (f"fact.ENTITY_KEY IN (SELECT ENTITY_KEY FROM DIMENSION.ENTITY "
+                           f"WHERE ENTITY_CODE = '{esc_entity}')")
+            else:
+                raise Exception(
+                    f"Cannot find entity column (ENTITY_CODE or ENTITY_KEY) in "
+                    f"{fact_adjusted_tbl_name}")
+
+            # ── Register in DIMENSION.ADJUSTMENT before any write ─────────
             dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str)
             new_dim_adj_id = list(dim_adj_map.values())[0] if dim_adj_map else None
             if new_dim_adj_id is None:
                 raise Exception("EntityRoll: DIMENSION.ADJUSTMENT insert returned no "
-                                "ADJUSTMENT_ID; aborting before any delete/copy.")
+                                "ADJUSTMENT_ID; aborting before any write.")
 
-            # ── Detect entity column name ───────────────────────────────
-            # FACT tables use ENTITY_CODE (text) or ENTITY_KEY (numeric surrogate).
-            entity_col = next((c for c in ('ENTITY_CODE', 'ENTITY_KEY') if c in fact_cols), None)
-            if not entity_col:
-                raise Exception(f"Cannot find entity column (ENTITY_CODE or ENTITY_KEY) in {fact_tbl_name}")
-            entity_adj_col = next((c for c in ('ENTITY_CODE', 'ENTITY_KEY') if c in fact_adj_cols), None)
-            if not entity_adj_col:
-                raise Exception(f"Cannot find entity column in {fact_adj_tbl_name}")
+            # ── Per-leg metric selects: flatten = ×−1, copy = as-is ────────
+            er_neg = ', '.join(f"fact.{m} * -1 AS {m}" for m in er_metrics)
+            er_pos = ', '.join(f"fact.{m} AS {m}" for m in er_metrics)
 
-            # Build the entity predicate. A text ENTITY_CODE column is compared
-            # directly; a numeric ENTITY_KEY column is resolved from the entity
-            # code via DIMENSION.ENTITY.
-            def _entity_pred(col_name):
-                if col_name == 'ENTITY_CODE':
-                    return f"{col_name} = '{esc_entity}'"
-                return (f"{col_name} IN (SELECT ENTITY_KEY FROM DIMENSION.ENTITY "
-                        f"WHERE ENTITY_CODE = '{esc_entity}')")
-            fact_pred = _entity_pred(entity_col)
-            adj_pred  = _entity_pred(entity_adj_col)
+            # Both legs carry the TARGET COBID so the surrogate key (which may
+            # include COBID) nets source and target rows onto the same position.
+            er_keyed  = "*" if key_name == pk_expr else f"{pk_expr}, *"
+            ins_extra = [c for c in ('RUN_LOG_ID', 'LOAD_TIMESTAMP',
+                                     'ADJUSTMENT_CREATED_TIMESTAMP') if c in fact_adj_cols]
+            extra_sel = {'RUN_LOG_ID': str(run_log_id),
+                         'LOAD_TIMESTAMP': 'CURRENT_TIMESTAMP()',
+                         'ADJUSTMENT_CREATED_TIMESTAMP': 'CURRENT_TIMESTAMP()'}
+            ins_cols  = ', '.join(['COBID', 'ADJUSTMENT_ID'] + er_non_metric
+                                  + er_metrics + ins_extra)
+            sel_extra = ''.join(f", {extra_sel[c]}" for c in ins_extra)
 
-            fact_select_cols = ', '.join([c for c in fact_cols if c != 'COBID'])
-            adj_select_cols  = ', '.join([c for c in fact_adj_cols if c not in ('COBID', 'ADJUSTMENT_ID')])
+            insert_sql = f"""
+            INSERT INTO {fact_adj_tbl_name} ({ins_cols})
+            WITH cte AS (
+                -- leg ① flatten: cancel everything the entity shows at the target COB
+                SELECT {int(cobid)} AS COBID, {er_select_non_metric}, {er_neg}
+                FROM {fact_adjusted_tbl_name} fact
+                WHERE fact.COBID = {int(cobid)} AND {er_pred}
+                  AND fact.{er_metric_usd} IS NOT NULL
+                UNION ALL
+                -- leg ② copy: the source COB's full adjusted values
+                SELECT {int(cobid)} AS COBID, {er_select_non_metric}, {er_pos}
+                FROM {fact_adjusted_tbl_name} fact
+                WHERE fact.COBID = {int(source_cobid)} AND {er_pred}
+                  AND fact.{er_metric_usd} IS NOT NULL
+            ),
+            keyed AS (
+                SELECT {er_keyed} FROM cte
+            ),
+            -- Net per position: rows identical at source and target cancel to
+            -- zero and are never written (HAVING) — only true differences land.
+            netted AS (
+                SELECT {er_any_non_metric}, {er_metric_sums}
+                FROM keyed
+                GROUP BY {key_name}
+                HAVING SUM({er_metric_usd}) <> 0
+            )
+            SELECT {int(cobid)}, {int(new_dim_adj_id)},
+                   {', '.join(er_non_metric)}, {er_metric_cols}{sel_extra}
+            FROM netted
+            """
 
-            # ── Atomic delete + copy ────────────────────────────────────
-            # Delete the target COB+entity then copy the source forward, all in one
-            # transaction so a failure can't leave the target partially wiped.
+            # ── Atomic re-run cleanup + insert ────────────────────────────
+            clear_ids = {int(new_dim_adj_id)}
+            if prior_dim_id is not None:
+                clear_ids.add(int(prior_dim_id))
+            clear_ids_str = ', '.join(str(i) for i in clear_ids)
+
             session.sql("BEGIN").collect()
             try:
-                session.sql(f"DELETE FROM {fact_tbl_name} "
-                            f"WHERE COBID = {int(cobid)} AND {fact_pred}").collect()
-                session.sql(f"DELETE FROM {fact_adjusted_tbl_name} "
-                            f"WHERE COBID = {int(cobid)} AND {adj_pred}").collect()
                 session.sql(f"""
-                    INSERT INTO {fact_tbl_name} (COBID, {fact_select_cols})
-                    SELECT {int(cobid)}, {fact_select_cols}
-                    FROM {fact_tbl_name}
-                    WHERE COBID = {int(source_cobid)} AND {fact_pred}
+                    DELETE FROM {fact_adj_tbl_name}
+                    WHERE COBID = {int(cobid)}
+                      AND ADJUSTMENT_ID IN ({clear_ids_str})
                 """).collect()
-                session.sql(f"""
-                    INSERT INTO {fact_adjusted_tbl_name} (COBID, ADJUSTMENT_ID, {adj_select_cols})
-                    SELECT {int(cobid)}, {int(new_dim_adj_id)}, {adj_select_cols}
-                    FROM {fact_adjusted_tbl_name}
-                    WHERE COBID = {int(source_cobid)} AND {adj_pred}
-                """).collect()
+                session.sql(insert_sql).collect()
                 session.sql("COMMIT").collect()
             except Exception:
                 session.sql("ROLLBACK").collect()
                 raise
 
-            fact_count = session.sql(f"SELECT COUNT(*) AS CNT FROM {fact_tbl_name} "
-                                     f"WHERE COBID = {int(cobid)} AND {fact_pred}").collect()[0]["CNT"]
-            adj_count = session.sql(f"SELECT COUNT(*) AS CNT FROM {fact_adjusted_tbl_name} "
-                                    f"WHERE COBID = {int(cobid)} AND {adj_pred}").collect()[0]["CNT"]
-            print(f"EntityRoll: copied {fact_count} fact rows + {adj_count} adjustment rows "
-                  f"for entity {entity_code} from COB {source_cobid} to {cobid}")
+            # ── SCD2 key fix (copied rows carry source-COB keys) ──────────
+            if {'BOOK_KEY', 'TRADE_KEY', 'COMMON_INSTRUMENT_KEY',
+                    'COMMON_INSTRUMENT_FCD_KEY'} <= set(fact_adj_cols):
+                apply_scd2_key_fix(session, fact_adj_tbl_name, adj_base_tbl_name, cobid)
 
-            # ── Update RECORD_COUNT in DIMENSION.ADJUSTMENT ─────────────
-            total_count = fact_count + adj_count
-            if new_dim_adj_id:
+            # ── Rebuild summary for the target COB ────────────────────────
+            if fact_adj_summary_name:
+                session.sql(f"DELETE FROM {fact_adj_summary_name} "
+                            f"WHERE COBID = {int(cobid)}").collect()
+                summary_non_metric = ', '.join([
+                    c for c in fact_adj_summary_cols
+                    if c not in {er_metric, er_metric_usd}
+                ])
                 session.sql(f"""
-                    UPDATE DIMENSION.ADJUSTMENT
-                    SET RECORD_COUNT = {total_count},
-                        RUN_STATUS   = 'Processed',
-                        PROCESS_DATE = CURRENT_TIMESTAMP()
-                    WHERE ADJUSTMENT_ID = {new_dim_adj_id}
+                    INSERT INTO {fact_adj_summary_name}
+                    ({summary_non_metric}, {er_metric_cols})
+                    SELECT {summary_non_metric}, {er_metric_sums}
+                    FROM {fact_adj_tbl_name}
+                    WHERE COBID = {int(cobid)}
+                    GROUP BY ALL
                 """).collect()
 
-            # ── Update ADJ_HEADER ───────────────────────────────────────
+            # ── Counts + bookkeeping ──────────────────────────────────────
+            rows_count = session.sql(f"""
+                SELECT COUNT(*) AS CNT FROM {fact_adj_tbl_name}
+                WHERE COBID = {int(cobid)} AND ADJUSTMENT_ID = {int(new_dim_adj_id)}
+            """).collect()[0]["CNT"]
+            print(f"EntityRoll: wrote {rows_count} net delta rows for entity "
+                  f"{entity_code} (flatten COB {cobid} + copy COB {source_cobid})")
+
+            session.sql(f"""
+                UPDATE DIMENSION.ADJUSTMENT
+                SET RECORD_COUNT = {rows_count},
+                    RUN_STATUS   = 'Processed',
+                    PROCESS_DATE = CURRENT_TIMESTAMP()
+                WHERE ADJUSTMENT_ID = {int(new_dim_adj_id)}
+            """).collect()
             session.sql(f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                SET RECORD_COUNT = {total_count},
+                SET RECORD_COUNT = {rows_count},
                     ADJUSTMENT_VALUE_IN_USD = NULL
                 WHERE ADJ_ID IN ({adj_ids_str})
             """).collect()
@@ -1202,9 +1341,10 @@ def main(session, process_type, adjustment_action, cobid):
             update_header_status(session, df_adj_er, cobid, "Processed")
             log_status_history(session, adj_ids, "Running", "Processed")
 
-            result["fact_rows_copied"]     = fact_count
-            result["adj_rows_copied"]      = adj_count
-            result["message"] = f"Entity Roll processed: {fact_count} fact rows + {adj_count} adjustment rows copied from COB {source_cobid} to {cobid}"
+            result["rows_inserted"] = rows_count
+            result["message"] = (
+                f"Entity Roll processed: {rows_count} net delta rows — entity "
+                f"{entity_code} adjusted view at COB {cobid} now mirrors COB {source_cobid}")
 
             # ── Close run log and trigger PowerBI refresh ──────────────
             try:

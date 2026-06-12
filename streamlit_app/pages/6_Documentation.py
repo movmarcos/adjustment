@@ -114,7 +114,7 @@ with tab_overview:
         f'<td style="padding:10px 14px;font-weight:600;font-size:0.9rem;white-space:nowrap">{icon("refresh-cw", size=13)} Entity Roll</td>'
         f'<td style="padding:10px 14px;font-size:0.85rem;color:{P["grey_700"]}">Full entity copy from source COB — deletes target, copies source (approval required)</td>'
         f'<td style="padding:10px 14px;font-family:monospace;font-size:0.82rem;'
-        f'background:{P["grey_100"]};border-radius:4px">DELETE target + INSERT FROM source</td>'
+        f'background:{P["grey_100"]};border-radius:4px">flatten target + copy source (offset rows)</td>'
         f'</tr>'
         f'<tr>'
         f'<td style="padding:10px 14px;font-weight:600;font-size:0.9rem;white-space:nowrap">{icon("upload", size=13)} Upload</td>'
@@ -414,8 +414,8 @@ with tab_workflow:
             <div style="background:#E8F5E9;border:1px solid {P['success']};border-radius:8px;padding:0.75rem 1rem;min-width:200px;flex:1">
                 <div style="font-weight:700;font-size:0.88rem">{icon("refresh-cw", size=13)} Entity Roll</div>
                 <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:4px">
-                Copy all data from a source COB/entity to a target. Destructive operation
-                that requires approval before processing.
+                Replace an entity's adjusted figures at the target COB with the source
+                COB's, written as one reversible adjustment. Requires approval.
                 </div>
             </div>
         </div>
@@ -891,11 +891,11 @@ with tab_workflow:
             <span style="color:{P['grey_400']}">→</span>
             <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['danger']}">DELETE target COB+Entity</div>
             <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#E8F5E9;border-radius:6px;padding:4px 10px;font-weight:600;color:#2E7D32">INSERT from source COB {icon("check", size=12)}</div>
+            <div style="background:#E8F5E9;border-radius:6px;padding:4px 10px;font-weight:600;color:#2E7D32">offset + copy rows written {icon("check", size=12)}</div>
         </div>
         </div>
         <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:0.4rem">
-        <strong>Key:</strong> Entity Roll is a destructive operation that <strong>always requires approval</strong>.
+        <strong>Key:</strong> Entity Roll replaces the entity's adjusted view with the source COB's (as reversible offset rows — nothing is physically deleted) and <strong>always requires approval</strong>.
         It deletes all data for the target COB + Entity in both FACT and FACT ADJUSTED tables, then copies
         all data from the source COB + Entity (replacing COBID). All source adjustment records are consolidated
         under a single new Adjustment ID. No delta calculation is performed.

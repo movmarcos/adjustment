@@ -1,7 +1,7 @@
 # Entity Roll v2 (EROL) — flatten + copy via offset rows
 
 Date: 2026-06-11
-Status: Approved (design); implementation pending
+Status: Implemented (2026-06-12) — SP branch, EROL rename, UI wording, test harness
 
 ## Problem
 

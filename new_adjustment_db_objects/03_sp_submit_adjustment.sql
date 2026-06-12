@@ -41,7 +41,8 @@ ACTION_MAP = {
     "flatten":      "Scale",
     "scale":        "Scale",
     "roll":         "Scale",
-    "entity_roll":  "EntityRoll",
+    "erol":         "EntityRoll",
+    "entity_roll":  "EntityRoll",   # legacy alias (pre-EROL rename)
     "upload":       "Direct",
     "direct":       "Direct",
 }
@@ -149,7 +150,7 @@ def main(session, p_adjustment):
     Expected JSON keys (all optional except marked required):
       cobid              (required)  int     COB date as YYYYMMDD
       process_type       (required)  str     VaR | Stress | FRTB | FRTBDRC | FRTBRRAO | Sensitivity | ES
-      adjustment_type    (required)  str     Flatten | Scale | Roll | Upload | Direct
+      adjustment_type    (required)  str     Flatten | Scale | Roll | Upload | Direct | EROL
       username           (required)  str     Streamlit user
       source_cobid                   int     Defaults to cobid
       scale_factor                   float   Defaults to 1.0

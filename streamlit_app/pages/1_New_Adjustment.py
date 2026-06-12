@@ -126,7 +126,7 @@ def _build_payload() -> dict:
         return {
             "cobid":                 wiz["cobid"],
             "process_type":          wiz["process_type"],
-            "adjustment_type":       "Entity_Roll",
+            "adjustment_type":       "EROL",
             "username":              current_user_name(),
             "source_cobid":          wiz.get("source_cobid") or wiz["cobid"],
             "reason":                wiz.get("reason", ""),
@@ -816,8 +816,10 @@ def render_entity_roll_form() -> None:
         f'<div style="font-weight:700;font-size:0.9rem;color:{P["warning"]};margin-bottom:0.3rem">'
         f'{icon("alert-triangle", size=14, color="#B45309")} Entity Roll replaces the whole entity — approval required</div>'
         f'<div style="font-size:0.82rem;color:{P["warning"]}">'
-        f'All data for the target COB + Entity is replaced by the source COB\'s data. '
-        f'Source adjustments are consolidated under one new Adjustment ID.</div></div>',
+        f'The entity\'s adjusted figures at the target COB are replaced by the source '
+        f'COB\'s adjusted figures, written as one reversible adjustment (offset rows — '
+        f'no data is physically deleted). Deleting the adjustment later restores the '
+        f'entity exactly.</div></div>',
         unsafe_allow_html=True)
 
     with _card():
@@ -845,7 +847,7 @@ def render_entity_roll_form() -> None:
         wiz["reason"] = st.text_area("Reason / Business Justification *",
                                      value=wiz.get("reason", ""), height=70, key=_k("er_reason"),
                                      placeholder="e.g. Rolling MUSE VaR from previous business day")
-    wiz["adjustment_type"]   = "Entity_Roll"
+    wiz["adjustment_type"]   = "EROL"
     wiz["requires_approval"] = True
 
 

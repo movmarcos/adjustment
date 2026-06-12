@@ -169,7 +169,7 @@ CATEGORY_CONFIG = {
     },
     "Entity Roll": {
         "icon": "refresh-cw", "color": "#B45309", "bg": "#FFFBEB",
-        "desc": "Full entity roll — copies all data from a source COB (approval required)",
+        "desc": "Replace an entity\'s figures with a source COB\'s (reversible, approval required)",
     },
 }
 
