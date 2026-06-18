@@ -775,6 +775,84 @@ def inject_css():
         font-size: 0.65rem;
         margin-top: 2px;
     }}
+
+    /* ──────────────────────────────────────────────────────────────────────
+       THEME LOCK — stay legible when the Snowflake/Snowsight host is DARK
+       ──────────────────────────────────────────────────────────────────────
+       The palette above pins LIGHT surfaces (white cards, light page bg,
+       light tints). On a dark host theme Streamlit leaves *inherited* text —
+       section/box titles, body copy, widget labels, captions, metrics — to
+       follow the host, so it turns near-white and vanishes on those pinned
+       surfaces (white-on-white). Pin the inherited foreground + the
+       theme-driven widget surfaces to the light palette so legibility never
+       depends on the host theme.
+       Scope: the main content area only — the sidebar keeps its own dark
+       styling above. Elements that set their OWN colour (the custom
+       components in this file, and Streamlit's coloured alerts) already carry
+       an explicit colour, so they are unaffected. */
+    [data-testid="stMainBlockContainer"] {{
+        color: var(--ink);
+        color-scheme: light;
+    }}
+    [data-testid="stMainBlockContainer"] h1,
+    [data-testid="stMainBlockContainer"] h2,
+    [data-testid="stMainBlockContainer"] h3,
+    [data-testid="stMainBlockContainer"] h4,
+    [data-testid="stMainBlockContainer"] h5,
+    [data-testid="stMainBlockContainer"] h6,
+    [data-testid="stMainBlockContainer"] [data-testid="stMarkdownContainer"],
+    [data-testid="stMainBlockContainer"] label,
+    [data-testid="stMainBlockContainer"] [data-testid="stWidgetLabel"],
+    [data-testid="stMainBlockContainer"] [data-testid="stWidgetLabel"] *,
+    [data-testid="stMainBlockContainer"] div[data-testid="stExpander"] summary {{
+        color: var(--ink);
+    }}
+    [data-testid="stMainBlockContainer"] [data-testid="stCaptionContainer"],
+    [data-testid="stMainBlockContainer"] [data-testid="stMetricLabel"] {{
+        color: var(--ink-2);
+    }}
+    [data-testid="stMainBlockContainer"] [data-testid="stMetricValue"] {{
+        color: var(--ink);
+    }}
+
+    /* Text / number / date inputs + select control: white field, dark text,
+       on any host theme (otherwise the host flips them to dark-on-dark). */
+    [data-testid="stMainBlockContainer"] input,
+    [data-testid="stMainBlockContainer"] textarea,
+    [data-testid="stMainBlockContainer"] [data-baseweb="select"] div {{
+        color: var(--ink) !important;
+    }}
+    [data-testid="stMainBlockContainer"] [data-baseweb="input"],
+    [data-testid="stMainBlockContainer"] [data-baseweb="base-input"],
+    [data-testid="stMainBlockContainer"] [data-baseweb="select"] > div,
+    [data-testid="stMainBlockContainer"] [data-baseweb="textarea"] {{
+        background-color: var(--card) !important;
+    }}
+    [data-testid="stMainBlockContainer"] input::placeholder,
+    [data-testid="stMainBlockContainer"] textarea::placeholder {{
+        color: var(--ink-3) !important;
+    }}
+
+    /* Pop-out menus (selectbox / multiselect / date picker) render in a portal
+       at <body>, OUTSIDE stMainBlockContainer — so pin them unscoped. */
+    [data-baseweb="popover"] [role="listbox"],
+    [data-baseweb="popover"] [data-baseweb="menu"],
+    [data-baseweb="popover"] ul {{
+        background-color: var(--card) !important;
+    }}
+    [data-baseweb="popover"] li[role="option"] {{ color: var(--ink) !important; }}
+    [data-baseweb="popover"] li[role="option"]:hover {{
+        background-color: {P["grey_100"]} !important;
+    }}
+    [data-baseweb="calendar"] {{
+        background-color: var(--card) !important; color: var(--ink) !important;
+    }}
+
+    /* Inline code stays readable on the light surface */
+    [data-testid="stMainBlockContainer"] code {{
+        background-color: {P["grey_100"]} !important;
+        color: {P["primary_dk"]} !important;
+    }}
     </style>
     """, unsafe_allow_html=True)
 
