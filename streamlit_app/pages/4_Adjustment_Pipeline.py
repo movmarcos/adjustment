@@ -353,6 +353,12 @@ df_display = df_display.rename(columns={
 })
 
 st.dataframe(df_display.style.hide(axis='index'), use_container_width=True, height=300)
+st.caption(
+    "**Total Duration** is the end-to-end lifecycle: from submission through "
+    "approval, processing, and Power BI report refresh (submitted → reports ready). "
+    "This differs from the Home page's **Processing Time**, which covers only the "
+    "engine run (started → ended)."
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DEEP DIVE

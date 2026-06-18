@@ -507,6 +507,7 @@ try:
         SELECT
             DIMENSION_ADJ_ID                                            AS "Adj ID",
             COBID                                                       AS "COB",
+            SOURCE_COBID                                                AS "Source COB",
             PROCESS_TYPE                                                AS "Scope",
             ADJUSTMENT_TYPE                                             AS "Type",
             RUN_STATUS                                                  AS "Status",
@@ -530,7 +531,10 @@ try:
 
     if not df_activity.empty:
         df_activity["Adj ID"] = df_activity["Adj ID"].apply(fmt_adj_id)
-        df_activity["Duration"] = df_activity["DURATION_SECONDS"].apply(
+        # Processing time = Started → Ended (engine run only). Distinct from the
+        # Adjustment Pipeline page's "Total Duration", which is the end-to-end
+        # lifecycle (submitted → Power BI reports ready).
+        df_activity["Processing Time"] = df_activity["DURATION_SECONDS"].apply(
             lambda v: _fmt_duration(v) if pd.notna(v) else "—"
         )
         df_activity = df_activity.drop(columns=["DURATION_SECONDS"])

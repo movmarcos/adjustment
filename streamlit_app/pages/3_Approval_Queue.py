@@ -201,6 +201,8 @@ else:
                     f'<table style="font-size:0.85rem;border-collapse:collapse;width:100%">'
                     f'<tr><td style="color:{P["grey_700"]};padding:3px 12px 3px 0;width:30%">COB</td>'
                     f'<td style="font-weight:600">{row.get("COBID", "—")}</td></tr>'
+                    f'<tr><td style="color:{P["grey_700"]};padding:3px 12px 3px 0">Source COB</td>'
+                    f'<td style="font-weight:600">{row.get("SOURCE_COBID", "—") if row.get("SOURCE_COBID") else "—"}</td></tr>'
                     f'<tr><td style="color:{P["grey_700"]};padding:3px 12px 3px 0">Type</td>'
                     f'<td style="font-weight:600">{adj_type}</td></tr>'
                     f'<tr><td style="color:{P["grey_700"]};padding:3px 12px 3px 0">Entity</td>'
