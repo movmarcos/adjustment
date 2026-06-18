@@ -161,62 +161,6 @@ def log_status_history(session, adj_ids, old_status, new_status, changed_by="SYS
     """).collect()
 
 
-def apply_scd2_key_fix(session, fact_adj_tbl_name, adj_base_tbl_name, cobid):
-    """Rewrite source-COB SCD2 keys (TRADE/COMMON_INSTRUMENT/_FCD) on cross-COB
-    adjustment rows so they are valid for the target COB date. Same UPDATE the
-    Scale path runs inline for cross-COB Rolls; callable from the EntityRoll
-    path. Caller must verify the key columns exist in the adjustments table."""
-    session.sql(f"""
-    UPDATE {fact_adj_tbl_name} tgt
-    SET tgt.TRADE_KEY = src.TRADE_KEY_ADJ,
-        tgt.COMMON_INSTRUMENT_KEY = src.COMMON_INSTRUMENT_KEY_ADJ,
-        tgt.COMMON_INSTRUMENT_FCD_KEY = src.COMMON_INSTRUMENT_FCD_KEY_ADJ
-    FROM (
-        WITH adj_cte AS (
-            SELECT DISTINCT
-                f.ADJUSTMENT_ID, f.COBID, f.BOOK_KEY, f.TRADE_KEY,
-                f.COMMON_INSTRUMENT_KEY, f.COMMON_INSTRUMENT_FCD_KEY,
-                ad.SOURCE_COBID
-            FROM {fact_adj_tbl_name} f
-            INNER JOIN {adj_base_tbl_name} ad
-                ON f.ADJUSTMENT_ID = ad.DIMENSION_ADJ_ID AND f.COBID = ad.COBID
-            WHERE f.COBID = {cobid}
-              AND ad.COBID <> ad.SOURCE_COBID
-        )
-        SELECT DISTINCT
-            f.*,
-            td2.TRADE_KEY          AS TRADE_KEY_ADJ,
-            ci2.COMMON_INSTRUMENT_KEY AS COMMON_INSTRUMENT_KEY_ADJ,
-            cif.COMMON_INSTRUMENT_FCD_KEY AS COMMON_INSTRUMENT_FCD_KEY_ADJ
-        FROM adj_cte f
-        INNER JOIN DIMENSION.BOOK b   ON f.BOOK_KEY = b.BOOK_KEY
-        INNER JOIN DIMENSION.TRADE td ON td.TRADE_KEY = f.TRADE_KEY
-        INNER JOIN DIMENSION.TRADE td2
-            ON  td.TRADE_CODE = td2.TRADE_CODE
-            AND b.BOOK_CODE  = td2.BOOK_CODE
-            AND TO_DATE(f.SOURCE_COBID::STRING, 'YYYYMMDD')
-                BETWEEN td2.EFFECTIVE_START_DATE AND td2.EFFECTIVE_END_DATE
-        INNER JOIN DIMENSION.COMMON_INSTRUMENT ci
-            ON ci.COMMON_INSTRUMENT_KEY = f.COMMON_INSTRUMENT_KEY
-        INNER JOIN DIMENSION.COMMON_INSTRUMENT ci2
-            ON  ci.INSTRUMENT_CODE = ci2.INSTRUMENT_CODE
-            AND TO_DATE(f.SOURCE_COBID::STRING, 'YYYYMMDD')
-                BETWEEN ci2.EFFECTIVE_START_DATE AND ci2.EFFECTIVE_END_DATE
-        INNER JOIN DIMENSION.COMMON_INSTRUMENT_FCD cif
-            ON  ci2.INSTRUMENT_KEY = cif.INSTRUMENT_KEY
-            AND TO_DATE(f.SOURCE_COBID::STRING, 'YYYYMMDD')
-                BETWEEN cif.EFFECTIVE_START_DATE AND cif.EFFECTIVE_END_DATE
-        WHERE f.TRADE_KEY <> TRADE_KEY_ADJ
-           OR f.COMMON_INSTRUMENT_KEY <> COMMON_INSTRUMENT_KEY_ADJ
-           OR f.COMMON_INSTRUMENT_FCD_KEY <> COMMON_INSTRUMENT_FCD_KEY_ADJ
-    ) src
-    WHERE tgt.TRADE_KEY = src.TRADE_KEY
-      AND tgt.COMMON_INSTRUMENT_KEY = src.COMMON_INSTRUMENT_KEY
-      AND tgt.COMMON_INSTRUMENT_FCD_KEY = src.COMMON_INSTRUMENT_FCD_KEY
-      AND tgt.COBID = src.COBID
-    """).collect()
-
-
 # ── INSERT_SOURCE mapping for PowerBI ────────────────────────────────────
 PBI_INSERT_SOURCE = {
     'VAR':         'LOAD_VAR_ADJUSTMENT',
@@ -953,7 +897,9 @@ def main(session, process_type, adjustment_action, cobid):
                 FROM netted
             )
             SELECT
-                ranked.* EXCLUDE (ROW_NUM),
+                COBID, ADJUSTMENT_ID, ADJUSTMENT_CREATED_TIMESTAMP,
+                {insert_non_metric},
+                {metric_col_list},
                 {run_log_id} AS RUN_LOG_ID,
                 CURRENT_TIMESTAMP() AS LOAD_TIMESTAMP
             FROM ranked
@@ -1306,10 +1252,18 @@ def main(session, process_type, adjustment_action, cobid):
                 session.sql("ROLLBACK").collect()
                 raise
 
-            # ── SCD2 key fix (copied rows carry source-COB keys) ──────────
-            if {'BOOK_KEY', 'TRADE_KEY', 'COMMON_INSTRUMENT_KEY',
-                    'COMMON_INSTRUMENT_FCD_KEY'} <= set(fact_adj_cols):
-                apply_scd2_key_fix(session, fact_adj_tbl_name, adj_base_tbl_name, cobid)
+            # ── No SCD2 key remap for Entity Roll ─────────────────────────
+            # EntityRoll is a straight copy from the combined/adjusted view:
+            # flatten the target COB's entity rows and copy the source COB's
+            # entity rows verbatim (keys included). It deliberately does NOT
+            # join BOOK / TRADE / COMMON_INSTRUMENT to rewrite source-COB SCD2
+            # keys to the target COB — that multi-dimension UPDATE was the main
+            # cost on this path, and the roll is defined to mirror the source
+            # COB's values as they stand in the adjusted table. The only
+            # dimension consulted is DIMENSION.ENTITY, in the INSERT predicate
+            # above (and only when the view lacks ENTITY_CODE).
+            # (The cross-COB Scale Roll path still remaps SCD2 keys via its own
+            #  inline `scd2_update`; that is independent of this path.)
 
             # ── Rebuild summary for the target COB ────────────────────────
             if fact_adj_summary_name:
