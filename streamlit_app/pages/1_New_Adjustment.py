@@ -435,6 +435,32 @@ def _int_input(label, key, value, placeholder="e.g. 20260328"):
     return int(raw.strip()) if raw.strip().isdigit() else None
 
 
+def _float_input(label, key, value, min_v=-10.0, max_v=100.0,
+                 help=None, placeholder="e.g. 1.05"):
+    """Type-only numeric input (no +/- steppers) returning a clamped float.
+
+    Unlike st.number_input, st.text_input has no stepper buttons, so it avoids
+    the per-click rerun lag that makes +/- unusable in Snowsight. Invalid or
+    out-of-range entries surface an inline error and fall back to the last value.
+    """
+    default = float(value if value is not None else 1.0)
+    shown = ("%.4f" % default).rstrip("0").rstrip(".")
+    raw = st.text_input(label, key=_k(key), value=shown,
+                        help=help, placeholder=placeholder)
+    s = raw.strip()
+    if not s:
+        return default
+    try:
+        v = float(s)
+    except ValueError:
+        st.error(f"“{raw}” is not a number — keeping {default:g}")
+        return default
+    if v < min_v or v > max_v:
+        st.error(f"Scale Factor must be between {min_v:g} and {max_v:g}")
+        return max(min_v, min(max_v, v))
+    return v
+
+
 def _info_banner(text: str) -> None:
     st.markdown(
         f'<div style="background:{P["info_lt"]};border:1px solid #BFDBFE;'
@@ -683,10 +709,10 @@ def _render_schedule_fields() -> None:
                                                       wiz.get("recurring_start_cobid"))
     with d3:
         if wiz.get("adjustment_type") in ("Scale", "Roll"):
-            wiz["scale_factor"] = st.number_input(
-                "Scale Factor", value=float(wiz.get("scale_factor", 1.0)),
-                min_value=-10.0, max_value=100.0, step=0.01, format="%.4f",
-                help="1.05 = +5%,  0.95 = −5%", key=_k("sf"))
+            wiz["scale_factor"] = _float_input(
+                "Scale Factor", "sf", wiz.get("scale_factor", 1.0),
+                min_v=-10.0, max_v=100.0,
+                help="1.05 = +5%,  0.95 = −5%")
 
     if wiz["occurrence"] == "RECURRING":
         r1, r2, _ = st.columns(3)
