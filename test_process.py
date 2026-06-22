@@ -5,13 +5,15 @@ Keeps running until adjustment data appears in FACT.VAR_MEASURES_ADJUSTMENT.
 import json
 import time
 
+import config
 from mufg_snowflakeconn import sfconnection as m_sf
 
 mufgconn = m_sf.MufgSnowflakeConn('dvlp', 'apd_raptor_sfk_depl@mufgsecurities.com')
 session = mufgconn.get_snowflake_session()
-session.use_role("DVLP_RAPTOR_OWNER")
-session.use_warehouse("DVLP_RAPTOR_WH_XS")
-session.use_database("DVLP_RAPTOR_NEWADJ")
+session.use_role(config.ROLE_OWNER)
+session.use_warehouse(config.DT_WH)
+session.use_database(config.DATABASE)
+session.use_schema(config.SCHEMA)
 
 print("=" * 70)
 print("STEP 0 — Inspect FACT table schemas")

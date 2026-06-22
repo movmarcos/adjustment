@@ -546,36 +546,16 @@ CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT('VaR', 'Scale', 20260328);"""),
     Tasks fire every 1 minute **only when** the stream has data (INSERT or UPDATE on ADJ_HEADER
     that matches the queue view filters).
     """)
-    st.code("""
--- VaR pipeline
-CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_VAR
-    WAREHOUSE = DVLP_RAVEN_WH_M
-    SCHEDULE  = '1 MINUTE'
-    WHEN SYSTEM$STREAM_HAS_DATA('ADJUSTMENT_APP.STREAM_QUEUE_VAR')
-AS
-    CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('VaR', '["VaR"]');
+    st.markdown("""
+    There are four scope tasks, all using **serverless compute** and the same pattern:
 
--- Stress pipeline
-CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS
-    WAREHOUSE = DVLP_RAVEN_WH_M
-    SCHEDULE  = '1 MINUTE'
-    WHEN SYSTEM$STREAM_HAS_DATA('ADJUSTMENT_APP.STREAM_QUEUE_STRESS')
-AS
-    CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('Stress', '["Stress"]');
+    - **`TASK_PROCESS_VAR`** — guarded by `STREAM_QUEUE_VAR`; runs the **VaR** pipeline.
+    - **`TASK_PROCESS_STRESS`** — guarded by `STREAM_QUEUE_STRESS`; runs the **Stress** pipeline.
+    - **`TASK_PROCESS_FRTB`** — guarded by `STREAM_QUEUE_FRTB`; runs the **FRTB** pipeline
+      (all sub-types: FRTB, FRTBDRC, FRTBRRAO, FRTBALL).
+    - **`TASK_PROCESS_SENSITIVITY`** — guarded by `STREAM_QUEUE_SENSITIVITY`; runs the **Sensitivity** pipeline.
 
--- FRTB pipeline (all sub-types: FRTB, FRTBDRC, FRTBRRAO, FRTBALL)
-CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB
-    WAREHOUSE = DVLP_RAVEN_WH_M
-    SCHEDULE  = '1 MINUTE'
-    WHEN SYSTEM$STREAM_HAS_DATA('ADJUSTMENT_APP.STREAM_QUEUE_FRTB')
-AS
-    CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('FRTB', '["FRTB","FRTBDRC","FRTBRRAO","FRTBALL"]');
-
--- Sensitivity pipeline
-CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY
-    WAREHOUSE = DVLP_RAVEN_WH_M
-    SCHEDULE  = '1 MINUTE'
-    WHEN SYSTEM$STREAM_HAS_DATA('ADJUSTMENT_APP.STREAM_QUEUE_SENSITIVITY')
-AS
-    CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('Sensitivity', '["Sensitivity"]');
-    """, language="sql")
+    Each task is scheduled every **1 minute** but only does work when its stream has new data,
+    at which point it calls `SP_RUN_PIPELINE` for that process type. The task definitions are
+    deployed from `06_tasks.sql` — they are not created from this app.
+    """)

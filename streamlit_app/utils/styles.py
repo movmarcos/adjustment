@@ -10,6 +10,17 @@ external requests, so they render inside the Streamlit-in-Snowflake sandbox
 """
 import streamlit as st
 
+# Every page imports this module, so bootstrap config.py onto sys.path here:
+# in SiS the stage root is already importable; locally config.py is at the repo
+# root, two levels above utils/. After this, any page can `import config`.
+try:
+    import config  # noqa: F401
+except ModuleNotFoundError:
+    import sys
+    import pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+    import config  # noqa: F401
+
 # ──────────────────────────────────────────────────────────────────────────────
 # COLOUR PALETTE
 # ──────────────────────────────────────────────────────────────────────────────

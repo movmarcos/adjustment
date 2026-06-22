@@ -15,13 +15,14 @@ st.set_page_config(page_title="Validation · MUFG", page_icon="✅",
                    layout="wide", initial_sidebar_state="expanded")
 
 from utils.styles import inject_css, render_sidebar, P, icon
-from utils.snowflake_conn import run_query_df
+from utils.snowflake_conn import run_query_df  # noqa: F401  (also puts config.py on sys.path)
+import config
 
 inject_css()
 render_sidebar()
 
-DEV_DB  = "DVLP_RAPTOR_NEWADJ"
-PROD_DB_DEFAULT = "PROD_RAPTOR"
+DEV_DB  = config.DATABASE
+PROD_DB_DEFAULT = config.PROD_DB
 
 # Preferred breakdown columns, in order — first that exists in the table wins.
 _PREFERRED_BREAKDOWN = [

@@ -27,7 +27,7 @@
 
 
 -- 0. ENVIRONMENT  ── change the database when running in PROD ──────────────────
-USE DATABASE DVLP_RAPTOR_NEWADJ;        -- <<< set to the PROD database for the prod run
+USE DATABASE {{DATABASE}};              -- <<< {{DATABASE}} = DATABASE in config.py; replace inline for a PROD run
 USE SCHEMA  ADJUSTMENT_APP;
 
 

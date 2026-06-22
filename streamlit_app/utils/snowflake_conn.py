@@ -6,6 +6,16 @@ When running locally, reads from connection.toml or env vars.
 """
 import streamlit as st
 
+try:
+    # In SiS, config.py is shipped to the stage root (on sys.path).
+    import config
+except ModuleNotFoundError:
+    # Local dev: config.py lives at the repo root, two levels above utils/.
+    import sys
+    import pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+    import config
+
 
 def safe_rerun():
     """Version-compatible rerun — works on both SiS and local Streamlit."""
@@ -23,7 +33,7 @@ def get_session():
             from snowflake.snowpark.context import get_active_session
             _sess = get_active_session()
             try:
-                _sess.sql("USE WAREHOUSE DVLP_RAVEN_WH_M").collect()
+                _sess.sql(f"USE WAREHOUSE {config.WAREHOUSE}").collect()
             except Exception:
                 pass
             st.session_state["snowpark_session"] = _sess
@@ -35,9 +45,9 @@ def get_session():
                 "account":   conn._connect_params.get("account", ""),
                 "user":      conn._connect_params.get("user", ""),
                 "password":  conn._connect_params.get("password", ""),
-                "warehouse": conn._connect_params.get("warehouse", ""),
-                "database":  conn._connect_params.get("database", "DVLP_RAPTOR_NEWADJ"),
-                "schema":    conn._connect_params.get("schema", "ADJUSTMENT_APP"),
+                "warehouse": conn._connect_params.get("warehouse", config.WAREHOUSE),
+                "database":  conn._connect_params.get("database", config.DATABASE),
+                "schema":    conn._connect_params.get("schema", config.SCHEMA),
             }).create()
     return st.session_state["snowpark_session"]
 

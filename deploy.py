@@ -1,5 +1,5 @@
 """
-deploy.py — Deploy all Snowflake objects + Streamlit app to DVLP_RAPTOR_NEWADJ
+deploy.py — Deploy all Snowflake objects + Streamlit app (target set in config.py)
 ================================================================================
 Usage:
     python deploy.py                      # Deploy everything (DB objects + Streamlit app)
@@ -16,6 +16,8 @@ import glob
 import argparse
 from pathlib import Path
 
+import config
+
 # ─── Connection ──────────────────────────────────────────────────────────────
 
 def get_session():
@@ -23,9 +25,10 @@ def get_session():
     from mufg_snowflakeconn import sfconnection as m_sf
     mufgconn = m_sf.MufgSnowflakeConn('dvlp', 'apd_raptor_sfk_depl@mufgsecurities.com')
     session = mufgconn.get_snowflake_session()
-    session.use_role("DVLP_RAPTOR_OWNER")
-    session.use_warehouse("DVLP_RAVEN_WH_M")
-    session.use_database("DVLP_RAPTOR_NEWADJ")
+    session.use_role(config.ROLE_OWNER)
+    session.use_warehouse(config.WAREHOUSE)
+    session.use_database(config.DATABASE)
+    session.use_schema(config.SCHEMA)
     return session
 
 
@@ -159,7 +162,7 @@ def deploy_db_objects(session):
         print(f"     {'─' * 50}")
 
         with open(sql_file, 'r', encoding='utf-8') as f:
-            sql_text = f.read()
+            sql_text = config.render(f.read())   # substitute {{TOKEN}} placeholders
 
         statements = split_sql_statements(sql_text)
         file_stmts = 0
@@ -227,6 +230,12 @@ def deploy_streamlit_app(session):
         fpath = app_dir / fname
         if fpath.exists():
             files_to_upload.append((fpath, ''))
+
+    # config.py — single source of truth, shipped to the stage root so the app
+    # can `import config` (stage root is on sys.path in SiS).
+    cfg_path = Path(__file__).parent / 'config.py'
+    if cfg_path.exists():
+        files_to_upload.append((cfg_path, ''))
 
     # utils/ directory
     utils_dir = app_dir / 'utils'
@@ -308,7 +317,7 @@ def deploy_streamlit_app(session):
     CREATE OR REPLACE STREAMLIT {streamlit_name}
         ROOT_LOCATION   = '@{stage_name}'
         MAIN_FILE       = 'app.py'
-        QUERY_WAREHOUSE = 'DVLP_RAVEN_WH_M'
+        QUERY_WAREHOUSE = '{config.WAREHOUSE}'
         COMMENT         = 'Adjustment Engine — MUFG. Unified adjustment management for VaR, Stress, FRTB, Sensitivity.'
     """
     try:
@@ -321,10 +330,10 @@ def deploy_streamlit_app(session):
     # ── Grant access ─────────────────────────────────────────────────────
     print(f"\n  🔐 Granting USAGE on Streamlit app...")
     try:
-        session.sql(f"GRANT USAGE ON STREAMLIT {streamlit_name} TO ROLE DVLP_RAPTOR_OWNER").collect()
-        print(f"     ✅ USAGE granted to DVLP_RAPTOR_OWNER")
-        session.sql(f"GRANT USAGE ON STREAMLIT {streamlit_name} TO ROLE DVLP_RAPTOR_RO").collect()
-        print(f"     ✅ USAGE granted to DVLP_RAPTOR_RO")
+        session.sql(f"GRANT USAGE ON STREAMLIT {streamlit_name} TO ROLE {config.ROLE_OWNER}").collect()
+        print(f"     ✅ USAGE granted to {config.ROLE_OWNER}")
+        session.sql(f"GRANT USAGE ON STREAMLIT {streamlit_name} TO ROLE {config.ROLE_RO}").collect()
+        print(f"     ✅ USAGE granted to {config.ROLE_RO}")
     except Exception as e:
         # May fail if role already owns it — that's fine
         print(f"     ℹ️  Grant note: {str(e)[:100]}")
@@ -694,8 +703,8 @@ def main():
 
     print("=" * 64)
     print("  Adjustment Engine — Snowflake Deployment")
-    print("  Database: DVLP_RAPTOR_NEWADJ")
-    print("  Schema:   ADJUSTMENT_APP")
+    print(f"  Database: {config.DATABASE}")
+    print(f"  Schema:   {config.SCHEMA}")
     print("=" * 64)
 
     # ── Connect ──────────────────────────────────────────────────────────

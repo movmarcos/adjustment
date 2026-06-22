@@ -12,7 +12,7 @@ USE SCHEMA ADJUSTMENT_APP;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- PREREQUISITE (run once by ACCOUNTADMIN):
---   GRANT READ SESSION ON ACCOUNT TO ROLE DVLP_RAPTOR_OWNER;
+--   GRANT READ SESSION ON ACCOUNT TO ROLE {{ROLE_OWNER}};
 -- This allows CURRENT_USER() to return the viewer's identity in SiS.
 -- Without it, CURRENT_USER() returns NULL and USERNAME will fail.
 -- ═══════════════════════════════════════════════════════════════════════════

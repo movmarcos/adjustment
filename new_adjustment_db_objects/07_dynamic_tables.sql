@@ -20,7 +20,7 @@ USE SCHEMA ADJUSTMENT_APP;
 
 CREATE OR ALTER DYNAMIC TABLE ADJUSTMENT_APP.DT_DASHBOARD
     TARGET_LAG = '1 MINUTE'
-    WAREHOUSE  = DVLP_RAPTOR_WH_XS
+    WAREHOUSE  = {{DT_WH}}
     COMMENT    = 'Pre-aggregated dashboard view of all adjustments. Auto-refreshes every minute.'
 AS
 SELECT
@@ -70,7 +70,7 @@ GROUP BY
 
 CREATE OR ALTER DYNAMIC TABLE ADJUSTMENT_APP.DT_OVERLAP_ALERTS
     TARGET_LAG = '1 MINUTE'
-    WAREHOUSE  = DVLP_RAPTOR_WH_XS
+    WAREHOUSE  = {{DT_WH}}
     COMMENT    = 'Detects overlapping adjustments. Streamlit queries this to warn users before submission.'
 AS
 WITH active_adjustments AS (

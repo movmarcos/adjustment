@@ -26,6 +26,7 @@ st.set_page_config(
 )
 
 from utils.styles import inject_css, render_sidebar, section_title, P, SCOPE_CONFIG, TYPE_CONFIG, STATUS_COLORS, STATUS_ICONS, icon
+import config
 
 inject_css()
 render_sidebar()
@@ -1153,7 +1154,7 @@ with tab_objects:
     section_title("Complete Object Inventory", "database")
 
     _html(f"""
-    All objects live in database <code>DVLP_RAPTOR_NEWADJ</code>, schema <code>ADJUSTMENT_APP</code>
+    All objects live in database <code>{config.DATABASE}</code>, schema <code>{config.SCHEMA}</code>
     (except target FACT.* and DIMENSION.* tables which are in existing schemas).
     """)
 
