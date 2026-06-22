@@ -28,7 +28,9 @@ def get_session():
     session.use_role(config.ROLE_OWNER)
     session.use_warehouse(config.WAREHOUSE)
     session.use_database(config.DATABASE)
-    session.use_schema(config.SCHEMA)
+    # NB: do not USE SCHEMA here — on a fresh database the schema does not exist
+    # yet. 01_tables.sql runs `CREATE SCHEMA IF NOT EXISTS` then `USE SCHEMA`
+    # before anything needs it.
     return session
 
 

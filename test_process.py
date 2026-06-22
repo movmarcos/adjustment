@@ -13,7 +13,6 @@ session = mufgconn.get_snowflake_session()
 session.use_role(config.ROLE_OWNER)
 session.use_warehouse(config.DT_WH)
 session.use_database(config.DATABASE)
-session.use_schema(config.SCHEMA)
 
 print("=" * 70)
 print("STEP 0 — Inspect FACT table schemas")
