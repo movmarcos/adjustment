@@ -7,23 +7,24 @@
 --     (a) adjusted(target, entity) == adjusted(source, entity)
 --     (b) FACT_TABLE at the target COB is untouched (zero DML)
 --     (c) DIMENSION.ADJUSTMENT row has ADJUSTMENT_TYPE = 'EROL'
---     (e) every prior entity-scoped adjustment at the target COB is now
---         IS_DELETED + RUN_STATUS='Superseded', and its rows are gone from the
---         ADJUSTMENTS_TABLE at the target COB
+--     (e) every prior adjustment for the entity at the target COB is wiped —
+--         no prior rows remain in the ADJUSTMENTS_TABLE, and the matching
+--         DIMENSION.ADJUSTMENT + ADJ_HEADER rows are IS_DELETED/'Superseded'
 --
 -- Notes
---   * Processing first SUPERSEDES every non-deleted adjustment whose
---     ADJ_HEADER.ENTITY_CODE = the rolled entity at the target COB (flags it
---     deleted, removes its ADJUSTMENTS_TABLE rows). Globals (ENTITY_CODE NULL)
---     are untouched. It then flattens the post-delete combined view and copies
---     the source COB, so combined(target) = adjusted(source).
---   * To exercise (e), seed a prior entity-scoped adjustment (e.g. a Scale on
---     the same entity+COB) BEFORE running this harness; it is captured at
---     baseline and checked after processing. With no priors, (e) is vacuously
---     PASS.
+--   * Processing WIPES every adjustment for the entity at the target COB:
+--     it flags all ADJ_HEADER + DIMENSION.ADJUSTMENT rows for the COB+entity
+--     deleted (adjustments can be loaded by external systems that bypass
+--     ADJ_HEADER) and DELETEs every entity row at the COB from the
+--     ADJUSTMENTS_TABLE, then rebuilds the entity from the source COB so
+--     combined(target) = adjusted(source).
+--   * To exercise (e), seed one or more prior adjustments for the same
+--     entity+COB BEFORE running this harness; they are captured at baseline
+--     (across DIMENSION + fact) and checked after processing. With no priors,
+--     (e) is vacuously PASS.
 --   * ⚠ SP_RUN_PIPELINE processes ALL eligible adjustments in the scope+COB.
 --     Run on a controlled test COB, or when no other pending work exists.
---   * The summary table for the target COB is rebuilt — expected.
+--   * The summary table for the rolled entity is rebuilt — expected.
 -- =============================================================================
 
 
@@ -63,17 +64,24 @@ SELECT
 
 SELECT * FROM EROL_TEST_BASELINE;
 
--- 2b. Capture prior entity-scoped adjustments at the target COB (for (e)).
---     These are exactly the rows the roll must supersede.
+-- 2b. Capture prior adjustments for the entity at the target COB (for (e)).
+--     The fact table is authoritative — it includes adjustments loaded by
+--     external systems that never created an ADJ_HEADER row.
 CREATE OR REPLACE TEMPORARY TABLE EROL_TEST_PRIORS AS
-SELECT ADJ_ID, DIMENSION_ADJ_ID
-FROM ADJ_HEADER
+SELECT DISTINCT ADJUSTMENT_ID
+FROM IDENTIFIER($q_adj_table)
 WHERE COBID = $p_cobid
-  AND ENTITY_CODE = $p_entity_code
-  AND IS_DELETED = FALSE
-  AND ADJUSTMENT_TYPE <> 'EROL';     -- exclude any EROL we are about to submit
+  AND ENTITY_KEY IN (SELECT ENTITY_KEY FROM DIMENSION.ENTITY WHERE ENTITY_CODE = $p_entity_code);
+-- NB: swap ENTITY_KEY → ENTITY_CODE above if this scope's adjustment table is
+-- keyed by ENTITY_CODE instead.
 
-SELECT COUNT(*) AS PRIOR_COUNT FROM EROL_TEST_PRIORS;
+-- Reconciliation: the three sources should agree on the entity's adjustments.
+SELECT
+  (SELECT COUNT(*) FROM ADJ_HEADER
+    WHERE COBID = $p_cobid AND ENTITY_CODE = $p_entity_code AND IS_DELETED = FALSE) AS HEADER_CNT,
+  (SELECT COUNT(*) FROM DIMENSION.ADJUSTMENT
+    WHERE COBID = $p_cobid AND ENTITY_CODE = $p_entity_code AND IS_DELETED = FALSE) AS DIM_CNT,
+  (SELECT COUNT(*) FROM EROL_TEST_PRIORS)                                          AS FACT_CNT;
 
 
 -- 3. SUBMIT  ── EROL adjustment via SP_SUBMIT_ADJUSTMENT ──────────────────────
@@ -150,20 +158,25 @@ CROSS JOIN (
     WHERE COBID = $p_cobid AND ADJUSTMENT_ID = $q_dim_id
 ) d;
 
--- 5e. (e) every captured prior entity-scoped adjustment is superseded and its
---     rows are gone from the adjustment table at the target COB.
+-- 5e. (e) every prior adjustment for the entity at the COB is wiped: no prior
+--     fact rows remain, and DIMENSION + ADJ_HEADER are superseded.
 SELECT
-    (SELECT COUNT(*) FROM EROL_TEST_PRIORS)                          AS PRIOR_COUNT,
-    IFF(NOT EXISTS (
-            SELECT 1 FROM EROL_TEST_PRIORS p
-            JOIN ADJ_HEADER h ON h.ADJ_ID = p.ADJ_ID
-            WHERE h.IS_DELETED = FALSE OR h.RUN_STATUS <> 'Superseded'),
-        'PASS', 'FAIL')                                              AS E1_HEADERS_SUPERSEDED,
+    (SELECT COUNT(*) FROM EROL_TEST_PRIORS)                          AS PRIOR_FACT_IDS,
     IFF(NOT EXISTS (
             SELECT 1 FROM IDENTIFIER($q_adj_table) a
-            JOIN EROL_TEST_PRIORS p ON a.ADJUSTMENT_ID = p.DIMENSION_ADJ_ID
-            WHERE a.COBID = $p_cobid),
-        'PASS', 'FAIL')                                              AS E2_PRIOR_ROWS_REMOVED;
+            JOIN EROL_TEST_PRIORS p ON a.ADJUSTMENT_ID = p.ADJUSTMENT_ID
+            WHERE a.COBID = $p_cobid AND a.ADJUSTMENT_ID <> $q_dim_id),
+        'PASS', 'FAIL')                                              AS E1_PRIOR_ROWS_REMOVED,
+    IFF(NOT EXISTS (
+            SELECT 1 FROM DIMENSION.ADJUSTMENT
+            WHERE COBID = $p_cobid AND ENTITY_CODE = $p_entity_code
+              AND ADJUSTMENT_ID <> $q_dim_id AND IS_DELETED = FALSE),
+        'PASS', 'FAIL')                                              AS E2_DIMENSION_SUPERSEDED,
+    IFF(NOT EXISTS (
+            SELECT 1 FROM ADJ_HEADER
+            WHERE COBID = $p_cobid AND ENTITY_CODE = $p_entity_code
+              AND ADJUSTMENT_TYPE <> 'EROL' AND IS_DELETED = FALSE),
+        'PASS', 'FAIL')                                              AS E3_HEADER_SUPERSEDED;
 
 
 -- 6. CLEANUP  ── optional, removes the test roll ──────────────────────────────

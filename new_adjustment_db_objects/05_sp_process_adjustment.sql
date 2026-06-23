@@ -1082,20 +1082,21 @@ def main(session, process_type, adjustment_action, cobid):
 
         # ═════════════════════════════════════════════════════════════════
         # ENTITY ROLL PATH (EROL) — destructive replace
-        # Supersede every prior entity-scoped adjustment at the target COB,
-        # then flatten + copy via offset rows under one new ADJUSTMENT_ID:
-        #   ⓪ supersede: flag prior ENTITY_CODE-scoped adjustments deleted
-        #               (ADJ_HEADER + DIMENSION.ADJUSTMENT) and DELETE their
-        #               rows from the ADJUSTMENTS_TABLE at the target COB.
-        #               Globals (ENTITY_CODE = NULL) are left untouched.
+        # The target COB's data for the entity is assumed wrong/missing (e.g. a
+        # bank holiday), so EVERY adjustment for the entity at the target COB is
+        # wiped and the entity is rebuilt from the source COB:
+        #   ⓪ wipe: flag every ADJ_HEADER + DIMENSION.ADJUSTMENT row for the
+        #          COB+entity deleted (adjustments may be loaded by external
+        #          systems that bypass ADJ_HEADER), and DELETE every entity row
+        #          at the COB from the ADJUSTMENTS_TABLE in one predicate.
         #   ① −adjusted(target COB+entity)  from FACT_ADJUSTED_TABLE
         #   ② +adjusted(source COB+entity)  from FACT_ADJUSTED_TABLE
         # netted per position into the ADJUSTMENTS_TABLE, so
         # combined(target) = adjusted(source). Leg ① reads the combined view
-        # AFTER the supersede DELETE (same transaction), so it flattens only the
-        # entity's original+global base — this is why the result is clean.
+        # AFTER the wipe (same transaction): with the entity's adjustments gone
+        # it flattens the entity's original values, which keeps the result clean.
         # FACT_TABLE / FACT_ADJUSTED_TABLE receive no DML. The summary table
-        # (scopes that configure one) is rebuilt last from the final rows.
+        # (scopes that configure one) is rebuilt last for the entity only.
         # Spec: docs/superpowers/specs/2026-06-23-entity-roll-destructive-replace-design.md
         # ═════════════════════════════════════════════════════════════════
         elif adjustment_action.lower() == 'entityroll':
@@ -1244,63 +1245,83 @@ def main(session, process_type, adjustment_action, cobid):
             FROM netted
             """
 
-            # ── Supersede prior entity-scoped adjustments ─────────────────
-            # Entity Roll replaces the entity wholesale, so any existing
-            # (non-deleted) adjustment scoped to THIS entity at the target COB
-            # is flagged deleted and its rows removed before the roll is
-            # written. Match is by ADJ_HEADER.ENTITY_CODE (case-insensitive
-            # collation); globals (ENTITY_CODE = NULL) never match, so they are
-            # left untouched. Unprocessed priors (no DIMENSION_ADJ_ID yet) have
-            # no fact rows to drop but are still flagged so they cannot later
-            # overwrite the roll.
-            prior_rows = session.sql(f"""
-                SELECT ADJ_ID, DIMENSION_ADJ_ID
-                FROM ADJUSTMENT_APP.ADJ_HEADER
-                WHERE COBID = {int(cobid)}
-                  AND ENTITY_CODE = '{esc_entity}'
-                  AND IS_DELETED = FALSE
-                  AND ADJ_ID NOT IN ({adj_ids_str})
-            """).collect()
-            prior_adj_ids = [r["ADJ_ID"] for r in prior_rows]
-            prior_dim_ids = [int(r["DIMENSION_ADJ_ID"]) for r in prior_rows
-                             if r["DIMENSION_ADJ_ID"] is not None]
-            prior_adj_ids_str = ', '.join(f"'{a}'" for a in prior_adj_ids)
+            # ── Supersede ALL adjustments for this entity at the target COB ─
+            # An Entity Roll means the target COB's data for the entity is wrong
+            # or missing (e.g. bank holiday), so every adjustment for the entity
+            # at that COB is wiped and the entity is rebuilt from the source COB.
+            # Adjustments can be loaded by EXTERNAL systems that bypass
+            # ADJ_HEADER, so the fact ADJUSTMENTS_TABLE / DIMENSION.ADJUSTMENT
+            # can hold more adjustments than ADJ_HEADER. We therefore flag every
+            # ADJ_HEADER + DIMENSION.ADJUSTMENT row for the COB+entity deleted
+            # (excluding this roll) and DELETE every entity row at the COB from
+            # the ADJUSTMENTS_TABLE in a single predicate (efficient — no per-ID
+            # list). Leg ① then reads the post-delete combined view (= the
+            # entity's original values), so combined(target) = adjusted(source).
 
-            # ── Atomic supersede + re-run cleanup + insert ────────────────
-            # clear_ids drops: this roll's own rows (idempotent re-run), any
-            # prior failed attempt of this roll, and every superseded entity
-            # adjustment's rows. The flatten leg then reads the post-delete
-            # combined view, so combined(target) = adjusted(source) cleanly.
-            clear_ids = {int(new_dim_adj_id)}
-            if prior_dim_id is not None:
-                clear_ids.add(int(prior_dim_id))
-            clear_ids.update(prior_dim_ids)
-            clear_ids_str = ', '.join(str(i) for i in clear_ids)
+            # Entity predicate for the fact ADJUSTMENTS_TABLE — match on whichever
+            # entity column(s) the table exposes so external rows (keyed by
+            # ENTITY_KEY) and roll rows (which may default ENTITY_KEY to -1 but
+            # carry ENTITY_CODE) are both caught.
+            _ent_preds = []
+            if 'ENTITY_KEY' in fact_adj_cols:
+                _ent_preds.append(
+                    f"ENTITY_KEY IN (SELECT ENTITY_KEY FROM DIMENSION.ENTITY "
+                    f"WHERE ENTITY_CODE = '{esc_entity}')")
+            if 'ENTITY_CODE' in fact_adj_cols:
+                _ent_preds.append(f"ENTITY_CODE = '{esc_entity}'")
+            if not _ent_preds:
+                raise Exception(
+                    f"EntityRoll: no ENTITY_KEY/ENTITY_CODE column in {fact_adj_tbl_name}")
+            er_adj_ent_pred = "(" + " OR ".join(_ent_preds) + ")"
 
+            # Reconciliation (informational): distinct adjustments per source.
+            recon = session.sql(f"""
+                SELECT
+                  (SELECT COUNT(*) FROM ADJUSTMENT_APP.ADJ_HEADER
+                    WHERE COBID = {int(cobid)} AND ENTITY_CODE = '{esc_entity}'
+                      AND IS_DELETED = FALSE
+                      AND ADJ_ID NOT IN ({adj_ids_str}))                  AS HEADER_CNT,
+                  (SELECT COUNT(*) FROM DIMENSION.ADJUSTMENT
+                    WHERE COBID = {int(cobid)} AND ENTITY_CODE = '{esc_entity}'
+                      AND IS_DELETED = FALSE
+                      AND ADJUSTMENT_ID <> {int(new_dim_adj_id)})         AS DIM_CNT,
+                  (SELECT COUNT(DISTINCT ADJUSTMENT_ID) FROM {fact_adj_tbl_name}
+                    WHERE COBID = {int(cobid)} AND {er_adj_ent_pred})     AS FACT_CNT
+            """).collect()[0]
+            _h, _d, _f = int(recon["HEADER_CNT"]), int(recon["DIM_CNT"]), int(recon["FACT_CNT"])
+            print(f"EntityRoll reconcile @ COB {cobid} / {entity_code}: "
+                  f"header={_h} dimension={_d} fact={_f} "
+                  f"({'match' if _d == _f else 'MISMATCH'})")
+            result["reconcile"] = {"header": _h, "dimension": _d, "fact": _f,
+                                   "match": (_d == _f)}
+
+            # ── Atomic wipe + insert ──────────────────────────────────────
             session.sql("BEGIN").collect()
             try:
-                if prior_adj_ids:
-                    session.sql(f"""
-                        UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                        SET IS_DELETED   = TRUE,
-                            RUN_STATUS   = 'Superseded',
-                            DELETED_BY   = 'ENTITY_ROLL',
-                            DELETED_DATE = CURRENT_TIMESTAMP(),
-                            ERRORMESSAGE = 'Superseded by Entity Roll {adj_ids[0]}'
-                        WHERE ADJ_ID IN ({prior_adj_ids_str})
-                    """).collect()
-                    if prior_dim_ids:
-                        _sup_dim_str = ', '.join(str(d) for d in prior_dim_ids)
-                        session.sql(f"""
-                            UPDATE DIMENSION.ADJUSTMENT
-                            SET IS_DELETED = TRUE,
-                                RUN_STATUS = 'Superseded'
-                            WHERE ADJUSTMENT_ID IN ({_sup_dim_str})
-                        """).collect()
+                # Flag superseded in DIMENSION.ADJUSTMENT (includes external rows)
+                session.sql(f"""
+                    UPDATE DIMENSION.ADJUSTMENT
+                    SET IS_DELETED = TRUE, RUN_STATUS = 'Superseded'
+                    WHERE COBID = {int(cobid)} AND ENTITY_CODE = '{esc_entity}'
+                      AND IS_DELETED = FALSE
+                      AND ADJUSTMENT_ID <> {int(new_dim_adj_id)}
+                """).collect()
+                # …and in ADJ_HEADER (the rows this tool tracks)
+                session.sql(f"""
+                    UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                    SET IS_DELETED   = TRUE,
+                        RUN_STATUS   = 'Superseded',
+                        DELETED_BY   = 'ENTITY_ROLL',
+                        DELETED_DATE = CURRENT_TIMESTAMP(),
+                        ERRORMESSAGE = 'Superseded by Entity Roll {adj_ids[0]}'
+                    WHERE COBID = {int(cobid)} AND ENTITY_CODE = '{esc_entity}'
+                      AND IS_DELETED = FALSE
+                      AND ADJ_ID NOT IN ({adj_ids_str})
+                """).collect()
+                # Wipe every entity row at the target COB (one predicate), then roll
                 session.sql(f"""
                     DELETE FROM {fact_adj_tbl_name}
-                    WHERE COBID = {int(cobid)}
-                      AND ADJUSTMENT_ID IN ({clear_ids_str})
+                    WHERE COBID = {int(cobid)} AND {er_adj_ent_pred}
                 """).collect()
                 session.sql(insert_sql).collect()
                 session.sql("COMMIT").collect()
@@ -1308,11 +1329,8 @@ def main(session, process_type, adjustment_action, cobid):
                 session.sql("ROLLBACK").collect()
                 raise
 
-            if prior_adj_ids:
-                log_status_history(session, prior_adj_ids, "Processed", "Superseded",
-                                   changed_by="ENTITY_ROLL")
-                print(f"EntityRoll: superseded {len(prior_adj_ids)} prior adjustment(s) "
-                      f"for entity {entity_code} at COB {cobid}")
+            print(f"EntityRoll: wiped {_f} prior adjustment(s) for entity "
+                  f"{entity_code} at COB {cobid} before applying the roll")
 
             # ── No SCD2 key remap for Entity Roll ─────────────────────────
             # EntityRoll is a straight copy from the combined/adjusted view:

@@ -868,32 +868,62 @@ def render_entity_roll_form() -> None:
                                                value=wiz.get("entity_code") or "",
                                                placeholder="e.g. MUSE")
 
-    # ── Supersede preview: prior entity-scoped adjustments at the target COB ──
-    wiz["_eroll_supersede_ids"] = []
-    if wiz.get("cobid") and (wiz.get("entity_code") or "").strip():
+    # ── Wipe preview + reconciliation across header / dimension / fact ──────
+    # Adjustments for an entity/COB can be loaded by external systems that
+    # bypass ADJ_HEADER, so DIMENSION.ADJUSTMENT and the fact table can hold
+    # more than ADJ_HEADER. Show all three counts and whether they match; the
+    # roll removes every one of them.
+    wiz["_eroll_remove_count"] = 0
+    if wiz.get("cobid") and (wiz.get("entity_code") or "").strip() and wiz.get("process_type"):
+        _cob = int(wiz["cobid"])
+        _ent = wiz["entity_code"].strip().replace("'", "''")
+        _pt  = wiz["process_type"].replace("'", "''")
+        h_cnt = d_cnt = f_cnt = None
         try:
-            sup_rows = run_query(f"""
-                SELECT ADJ_ID, DIMENSION_ADJ_ID
-                FROM ADJUSTMENT_APP.ADJ_HEADER
-                WHERE COBID = {int(wiz['cobid'])}
-                  AND ENTITY_CODE = '{wiz["entity_code"].strip().replace("'", "''")}'
-                  AND IS_DELETED = FALSE
-                ORDER BY CREATED_DATE DESC
+            _hd = run_query(f"""
+                SELECT
+                  (SELECT COUNT(*) FROM ADJUSTMENT_APP.ADJ_HEADER
+                    WHERE COBID = {_cob} AND ENTITY_CODE = '{_ent}' AND IS_DELETED = FALSE) AS H,
+                  (SELECT COUNT(*) FROM DIMENSION.ADJUSTMENT
+                    WHERE COBID = {_cob} AND ENTITY_CODE = '{_ent}' AND IS_DELETED = FALSE) AS D
             """)
+            if _hd:
+                h_cnt, d_cnt = int(_hd[0][0]), int(_hd[0][1])
         except Exception:
-            sup_rows = []
-        wiz["_eroll_supersede_ids"] = [r[0] for r in sup_rows]
-        if sup_rows:
+            pass
+        try:
+            _ft = run_query(f"""SELECT ADJUSTMENTS_TABLE FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
+                                WHERE UPPER(PROCESS_TYPE) = UPPER('{_pt}')""")
+            _fact_tbl = _ft[0][0] if _ft else None
+            if _fact_tbl:
+                _fc = run_query(f"""
+                    SELECT COUNT(DISTINCT ADJUSTMENT_ID) FROM {_fact_tbl}
+                    WHERE COBID = {_cob}
+                      AND ENTITY_KEY IN (SELECT ENTITY_KEY FROM DIMENSION.ENTITY
+                                         WHERE ENTITY_CODE = '{_ent}')
+                """)
+                f_cnt = int(_fc[0][0]) if _fc else None
+        except Exception:
+            f_cnt = None
+        wiz["_eroll_remove_count"] = max(d_cnt or 0, f_cnt or 0)
+        if wiz["_eroll_remove_count"] > 0:
+            _match = (d_cnt is not None and f_cnt is not None and d_cnt == f_cnt)
+            _fact_txt = "n/a" if f_cnt is None else str(f_cnt)
+            _recon = (f"sources — header {h_cnt} · dimension {d_cnt} · fact {_fact_txt}"
+                      + ("&nbsp; · match ✓" if _match
+                         else ("&nbsp; · ⚠ mismatch" if f_cnt is not None else "")))
             st.markdown(
                 f'<div style="background:{P["danger_lt"]};border:1px solid #FECACA;border-radius:10px;'
                 f'padding:0.8rem 1rem;margin:0.2rem 0 0.6rem">'
                 f'<div style="font-weight:700;font-size:0.88rem;color:{P["danger"]};margin-bottom:0.25rem">'
                 f'{icon("alert-triangle", size=14, color="#B91C1C")} '
-                f'{len(sup_rows)} existing adjustment(s) will be permanently removed</div>'
+                f'{wiz["_eroll_remove_count"]} existing adjustment(s) will be permanently removed</div>'
                 f'<div style="font-size:0.82rem;color:{P["danger"]}">'
-                f'Processing this roll flags those adjustments deleted and removes their '
-                f'data for <strong>{wiz["entity_code"].strip()}</strong> at COB '
-                f'<strong>{wiz["cobid"]}</strong>. Global adjustments are not affected.'
+                f'Processing this roll deletes <strong>all</strong> adjustment data for '
+                f'<strong>{wiz["entity_code"].strip()}</strong> at COB '
+                f'<strong>{wiz["cobid"]}</strong> (including any loaded by other systems) '
+                f'and rebuilds the entity from the source COB.<br/>'
+                f'<span style="font-size:0.76rem;opacity:0.85">{_recon}</span>'
                 f'</div></div>',
                 unsafe_allow_html=True)
 
@@ -1173,12 +1203,12 @@ with right:
     # ── Entity Roll: destructive-replace agreement ───────────────────────
     eroll_ok = True
     if cat == "Entity Roll":
-        _n_sup = len(wiz.get("_eroll_supersede_ids") or [])
+        _n_sup = wiz.get("_eroll_remove_count") or 0
         _sup_txt = (f"{_n_sup} existing adjustment(s) " if _n_sup
-                    else "any existing adjustments ")
+                    else "all existing adjustments ")
         eroll_ok = st.checkbox(
             f"I understand this Entity Roll will permanently remove {_sup_txt}"
-            f"for this entity at the target COB.",
+            f"for this entity at the target COB (including data from other systems).",
             key=_k("eroll_confirm"), value=False)
 
     # ── Previous submit error ─────────────────────────────────────────────
