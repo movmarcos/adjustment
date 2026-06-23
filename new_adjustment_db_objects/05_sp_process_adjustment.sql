@@ -1081,15 +1081,22 @@ def main(session, process_type, adjustment_action, cobid):
             trigger_powerbi_refresh(session, process_type, run_log_id)
 
         # ═════════════════════════════════════════════════════════════════
-        # ENTITY ROLL PATH (EROL)
-        # Flatten + copy via offset rows — NO physical deletes.
-        #   leg ① −adjusted(target COB+entity)  from FACT_ADJUSTED_TABLE
-        #   leg ② +adjusted(source COB+entity)  from FACT_ADJUSTED_TABLE
-        # netted per position into the ADJUSTMENTS_TABLE under one new
-        # ADJUSTMENT_ID, so combined(target) = adjusted(source).
-        # FACT_TABLE and FACT_ADJUSTED_TABLE receive zero DML; deleting the
-        # adjustment restores the entity's pre-roll adjusted state.
-        # Spec: docs/superpowers/specs/2026-06-11-entity-roll-flatten-design.md
+        # ENTITY ROLL PATH (EROL) — destructive replace
+        # Supersede every prior entity-scoped adjustment at the target COB,
+        # then flatten + copy via offset rows under one new ADJUSTMENT_ID:
+        #   ⓪ supersede: flag prior ENTITY_CODE-scoped adjustments deleted
+        #               (ADJ_HEADER + DIMENSION.ADJUSTMENT) and DELETE their
+        #               rows from the ADJUSTMENTS_TABLE at the target COB.
+        #               Globals (ENTITY_CODE = NULL) are left untouched.
+        #   ① −adjusted(target COB+entity)  from FACT_ADJUSTED_TABLE
+        #   ② +adjusted(source COB+entity)  from FACT_ADJUSTED_TABLE
+        # netted per position into the ADJUSTMENTS_TABLE, so
+        # combined(target) = adjusted(source). Leg ① reads the combined view
+        # AFTER the supersede DELETE (same transaction), so it flattens only the
+        # entity's original+global base — this is why the result is clean.
+        # FACT_TABLE / FACT_ADJUSTED_TABLE receive no DML. The summary table
+        # (scopes that configure one) is rebuilt last from the final rows.
+        # Spec: docs/superpowers/specs/2026-06-23-entity-roll-destructive-replace-design.md
         # ═════════════════════════════════════════════════════════════════
         elif adjustment_action.lower() == 'entityroll':
 
@@ -1162,9 +1169,13 @@ def main(session, process_type, adjustment_action, cobid):
             er_any_non_metric = ', '.join(f"ANY_VALUE({c}) AS {c}" for c in er_non_metric)
 
             # ── Entity predicate against the combined view ────────────────
+            # er_entity_col is the column the roll rows are reliably keyed by
+            # (the combined view's entity column); the summary rebuild reuses it.
             if 'ENTITY_CODE' in view_cols:
+                er_entity_col = 'ENTITY_CODE'
                 er_pred = f"fact.ENTITY_CODE = '{esc_entity}'"
             elif 'ENTITY_KEY' in view_cols:
+                er_entity_col = 'ENTITY_KEY'
                 er_pred = (f"fact.ENTITY_KEY IN (SELECT ENTITY_KEY FROM DIMENSION.ENTITY "
                            f"WHERE ENTITY_CODE = '{esc_entity}')")
             else:
@@ -1233,14 +1244,59 @@ def main(session, process_type, adjustment_action, cobid):
             FROM netted
             """
 
-            # ── Atomic re-run cleanup + insert ────────────────────────────
+            # ── Supersede prior entity-scoped adjustments ─────────────────
+            # Entity Roll replaces the entity wholesale, so any existing
+            # (non-deleted) adjustment scoped to THIS entity at the target COB
+            # is flagged deleted and its rows removed before the roll is
+            # written. Match is by ADJ_HEADER.ENTITY_CODE (case-insensitive
+            # collation); globals (ENTITY_CODE = NULL) never match, so they are
+            # left untouched. Unprocessed priors (no DIMENSION_ADJ_ID yet) have
+            # no fact rows to drop but are still flagged so they cannot later
+            # overwrite the roll.
+            prior_rows = session.sql(f"""
+                SELECT ADJ_ID, DIMENSION_ADJ_ID
+                FROM ADJUSTMENT_APP.ADJ_HEADER
+                WHERE COBID = {int(cobid)}
+                  AND ENTITY_CODE = '{esc_entity}'
+                  AND IS_DELETED = FALSE
+                  AND ADJ_ID NOT IN ({adj_ids_str})
+            """).collect()
+            prior_adj_ids = [r["ADJ_ID"] for r in prior_rows]
+            prior_dim_ids = [int(r["DIMENSION_ADJ_ID"]) for r in prior_rows
+                             if r["DIMENSION_ADJ_ID"] is not None]
+            prior_adj_ids_str = ', '.join(f"'{a}'" for a in prior_adj_ids)
+
+            # ── Atomic supersede + re-run cleanup + insert ────────────────
+            # clear_ids drops: this roll's own rows (idempotent re-run), any
+            # prior failed attempt of this roll, and every superseded entity
+            # adjustment's rows. The flatten leg then reads the post-delete
+            # combined view, so combined(target) = adjusted(source) cleanly.
             clear_ids = {int(new_dim_adj_id)}
             if prior_dim_id is not None:
                 clear_ids.add(int(prior_dim_id))
+            clear_ids.update(prior_dim_ids)
             clear_ids_str = ', '.join(str(i) for i in clear_ids)
 
             session.sql("BEGIN").collect()
             try:
+                if prior_adj_ids:
+                    session.sql(f"""
+                        UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                        SET IS_DELETED   = TRUE,
+                            RUN_STATUS   = 'Superseded',
+                            DELETED_BY   = 'ENTITY_ROLL',
+                            DELETED_DATE = CURRENT_TIMESTAMP(),
+                            ERRORMESSAGE = 'Superseded by Entity Roll {adj_ids[0]}'
+                        WHERE ADJ_ID IN ({prior_adj_ids_str})
+                    """).collect()
+                    if prior_dim_ids:
+                        _sup_dim_str = ', '.join(str(d) for d in prior_dim_ids)
+                        session.sql(f"""
+                            UPDATE DIMENSION.ADJUSTMENT
+                            SET IS_DELETED = TRUE,
+                                RUN_STATUS = 'Superseded'
+                            WHERE ADJUSTMENT_ID IN ({_sup_dim_str})
+                        """).collect()
                 session.sql(f"""
                     DELETE FROM {fact_adj_tbl_name}
                     WHERE COBID = {int(cobid)}
@@ -1251,6 +1307,12 @@ def main(session, process_type, adjustment_action, cobid):
             except Exception:
                 session.sql("ROLLBACK").collect()
                 raise
+
+            if prior_adj_ids:
+                log_status_history(session, prior_adj_ids, "Processed", "Superseded",
+                                   changed_by="ENTITY_ROLL")
+                print(f"EntityRoll: superseded {len(prior_adj_ids)} prior adjustment(s) "
+                      f"for entity {entity_code} at COB {cobid}")
 
             # ── No SCD2 key remap for Entity Roll ─────────────────────────
             # EntityRoll is a straight copy from the combined/adjusted view:
@@ -1265,20 +1327,37 @@ def main(session, process_type, adjustment_action, cobid):
             # (The cross-COB Scale Roll path still remaps SCD2 keys via its own
             #  inline `scd2_update`; that is independent of this path.)
 
-            # ── Rebuild summary for the target COB ────────────────────────
+            # ── Rebuild summary for the rolled entity at the target COB ────
+            # A roll only changes THIS entity's rows, so we rebuild only its
+            # summary slice instead of re-aggregating the whole COB (the old
+            # whole-COB GROUP BY ALL scaled with every adjustment at the COB and
+            # was the main cost / timeout on this path). The filter uses the
+            # column the roll rows are reliably keyed by (er_entity_col), and is
+            # only applied when that column exists in BOTH the adjustment and
+            # summary tables — otherwise we fall back to the whole-COB rebuild.
             if fact_adj_summary_name:
-                session.sql(f"DELETE FROM {fact_adj_summary_name} "
-                            f"WHERE COBID = {int(cobid)}").collect()
                 summary_non_metric = ', '.join([
                     c for c in fact_adj_summary_cols
                     if c not in {er_metric, er_metric_usd}
                 ])
+                if er_entity_col in fact_adj_cols and er_entity_col in fact_adj_summary_cols:
+                    if er_entity_col == 'ENTITY_KEY':
+                        er_sum_filter = (
+                            f"ENTITY_KEY IN (SELECT ENTITY_KEY FROM DIMENSION.ENTITY "
+                            f"WHERE ENTITY_CODE = '{esc_entity}')")
+                    else:
+                        er_sum_filter = f"ENTITY_CODE = '{esc_entity}'"
+                    er_sum_where = f" AND {er_sum_filter}"
+                else:
+                    er_sum_where = ""   # fall back to whole-COB rebuild
+                session.sql(f"DELETE FROM {fact_adj_summary_name} "
+                            f"WHERE COBID = {int(cobid)}{er_sum_where}").collect()
                 session.sql(f"""
                     INSERT INTO {fact_adj_summary_name}
                     ({summary_non_metric}, {er_metric_cols})
                     SELECT {summary_non_metric}, {er_metric_sums}
                     FROM {fact_adj_tbl_name}
-                    WHERE COBID = {int(cobid)}
+                    WHERE COBID = {int(cobid)}{er_sum_where}
                     GROUP BY ALL
                 """).collect()
 

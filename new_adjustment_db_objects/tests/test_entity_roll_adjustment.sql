@@ -1,18 +1,26 @@
 -- =============================================================================
--- TEST HARNESS — Entity Roll v2 (EROL): flatten + copy via offset rows
+-- TEST HARNESS — Entity Roll v3 (EROL): destructive replace + flatten/copy
 -- =============================================================================
 -- Purpose
 --   Submit ONE Entity Roll, approve it, process it synchronously, then verify
---   the spec's guarantees (docs/superpowers/specs/2026-06-11-entity-roll-flatten-design.md):
+--   (docs/superpowers/specs/2026-06-23-entity-roll-destructive-replace-design.md):
 --     (a) adjusted(target, entity) == adjusted(source, entity)
 --     (b) FACT_TABLE at the target COB is untouched (zero DML)
 --     (c) DIMENSION.ADJUSTMENT row has ADJUSTMENT_TYPE = 'EROL'
---     (d) deleting the adjustment's delta rows restores the pre-roll state
+--     (e) every prior entity-scoped adjustment at the target COB is now
+--         IS_DELETED + RUN_STATUS='Superseded', and its rows are gone from the
+--         ADJUSTMENTS_TABLE at the target COB
 --
 -- Notes
---   * EROL writes offset rows into the ADJUSTMENTS_TABLE only: leg ① cancels
---     the target entity's adjusted values, leg ② adds the source COB's, netted
---     per position. Nothing is deleted from FACT or the combined view.
+--   * Processing first SUPERSEDES every non-deleted adjustment whose
+--     ADJ_HEADER.ENTITY_CODE = the rolled entity at the target COB (flags it
+--     deleted, removes its ADJUSTMENTS_TABLE rows). Globals (ENTITY_CODE NULL)
+--     are untouched. It then flattens the post-delete combined view and copies
+--     the source COB, so combined(target) = adjusted(source).
+--   * To exercise (e), seed a prior entity-scoped adjustment (e.g. a Scale on
+--     the same entity+COB) BEFORE running this harness; it is captured at
+--     baseline and checked after processing. With no priors, (e) is vacuously
+--     PASS.
 --   * ⚠ SP_RUN_PIPELINE processes ALL eligible adjustments in the scope+COB.
 --     Run on a controlled test COB, or when no other pending work exists.
 --   * The summary table for the target COB is rebuilt — expected.
@@ -54,6 +62,18 @@ SELECT
 -- WHERE ENTITY_CODE = $p_entity_code)
 
 SELECT * FROM EROL_TEST_BASELINE;
+
+-- 2b. Capture prior entity-scoped adjustments at the target COB (for (e)).
+--     These are exactly the rows the roll must supersede.
+CREATE OR REPLACE TEMPORARY TABLE EROL_TEST_PRIORS AS
+SELECT ADJ_ID, DIMENSION_ADJ_ID
+FROM ADJ_HEADER
+WHERE COBID = $p_cobid
+  AND ENTITY_CODE = $p_entity_code
+  AND IS_DELETED = FALSE
+  AND ADJUSTMENT_TYPE <> 'EROL';     -- exclude any EROL we are about to submit
+
+SELECT COUNT(*) AS PRIOR_COUNT FROM EROL_TEST_PRIORS;
 
 
 -- 3. SUBMIT  ── EROL adjustment via SP_SUBMIT_ADJUSTMENT ──────────────────────
@@ -130,15 +150,27 @@ CROSS JOIN (
     WHERE COBID = $p_cobid AND ADJUSTMENT_ID = $q_dim_id
 ) d;
 
+-- 5e. (e) every captured prior entity-scoped adjustment is superseded and its
+--     rows are gone from the adjustment table at the target COB.
+SELECT
+    (SELECT COUNT(*) FROM EROL_TEST_PRIORS)                          AS PRIOR_COUNT,
+    IFF(NOT EXISTS (
+            SELECT 1 FROM EROL_TEST_PRIORS p
+            JOIN ADJ_HEADER h ON h.ADJ_ID = p.ADJ_ID
+            WHERE h.IS_DELETED = FALSE OR h.RUN_STATUS <> 'Superseded'),
+        'PASS', 'FAIL')                                              AS E1_HEADERS_SUPERSEDED,
+    IFF(NOT EXISTS (
+            SELECT 1 FROM IDENTIFIER($q_adj_table) a
+            JOIN EROL_TEST_PRIORS p ON a.ADJUSTMENT_ID = p.DIMENSION_ADJ_ID
+            WHERE a.COBID = $p_cobid),
+        'PASS', 'FAIL')                                              AS E2_PRIOR_ROWS_REMOVED;
 
--- 6. REVERSIBILITY (d) + CLEANUP  ── optional, removes the test adjustment ─────
--- Deleting the roll's delta rows must restore the pre-roll adjusted total.
+
+-- 6. CLEANUP  ── optional, removes the test roll ──────────────────────────────
+-- NB: the roll is no longer fully reversible — superseded priors were
+-- permanently removed, so deleting the roll restores the entity to its
+-- original + global state (NOT the pre-roll state with the old adjustments).
 -- DELETE FROM IDENTIFIER($q_adj_table) WHERE COBID = $p_cobid AND ADJUSTMENT_ID = $q_dim_id;
--- SELECT IFF(ABS(SUM(IDENTIFIER($q_metric_usd))
---            - (SELECT ADJUSTED_TARGET_BEFORE FROM EROL_TEST_BASELINE)) < 0.01,
---        'PASS', 'FAIL') AS D_DELETE_RESTORES
--- FROM IDENTIFIER($q_comb_table)
--- WHERE COBID = $p_cobid AND ENTITY_CODE = $p_entity_code;
 -- UPDATE ADJ_HEADER SET IS_DELETED = TRUE, RUN_STATUS = 'Deleted'
 -- WHERE COBID = $p_cobid AND ADJUSTMENT_TYPE = 'EROL'
 --   AND ENTITY_CODE = $p_entity_code AND DIMENSION_ADJ_ID = $q_dim_id;

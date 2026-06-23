@@ -837,15 +837,15 @@ def render_direct_form() -> None:
 
 def render_entity_roll_form() -> None:
     st.markdown(
-        f'<div style="background:{P["warning_lt"]};border:1px solid #FDE68A;border-radius:10px;'
+        f'<div style="background:{P["danger_lt"]};border:1px solid #FECACA;border-radius:10px;'
         f'padding:0.8rem 1rem;margin-bottom:0.6rem">'
-        f'<div style="font-weight:700;font-size:0.9rem;color:{P["warning"]};margin-bottom:0.3rem">'
-        f'{icon("alert-triangle", size=14, color="#B45309")} Entity Roll replaces the whole entity — approval required</div>'
-        f'<div style="font-size:0.82rem;color:{P["warning"]}">'
-        f'The entity\'s adjusted figures at the target COB are replaced by the source '
-        f'COB\'s adjusted figures, written as one reversible adjustment (offset rows — '
-        f'no data is physically deleted). Deleting the adjustment later restores the '
-        f'entity exactly.</div></div>',
+        f'<div style="font-weight:700;font-size:0.9rem;color:{P["danger"]};margin-bottom:0.3rem">'
+        f'{icon("alert-triangle", size=14, color="#B91C1C")} Entity Roll is destructive — approval required</div>'
+        f'<div style="font-size:0.82rem;color:{P["danger"]}">'
+        f'The entity\'s adjusted figures at the target COB are rebuilt from the source '
+        f'COB. <strong>Any existing adjustments for this entity at the target COB are '
+        f'permanently removed first</strong> (flagged deleted and their data deleted) — '
+        f'this cannot be undone.</div></div>',
         unsafe_allow_html=True)
 
     with _card():
@@ -867,6 +867,35 @@ def render_entity_roll_form() -> None:
             wiz["entity_code"] = st.text_input("Entity Code *", key=_k("er_entity"),
                                                value=wiz.get("entity_code") or "",
                                                placeholder="e.g. MUSE")
+
+    # ── Supersede preview: prior entity-scoped adjustments at the target COB ──
+    wiz["_eroll_supersede_ids"] = []
+    if wiz.get("cobid") and (wiz.get("entity_code") or "").strip():
+        try:
+            sup_rows = run_query(f"""
+                SELECT ADJ_ID, DIMENSION_ADJ_ID
+                FROM ADJUSTMENT_APP.ADJ_HEADER
+                WHERE COBID = {int(wiz['cobid'])}
+                  AND ENTITY_CODE = '{wiz["entity_code"].strip().replace("'", "''")}'
+                  AND IS_DELETED = FALSE
+                ORDER BY CREATED_DATE DESC
+            """)
+        except Exception:
+            sup_rows = []
+        wiz["_eroll_supersede_ids"] = [r[0] for r in sup_rows]
+        if sup_rows:
+            st.markdown(
+                f'<div style="background:{P["danger_lt"]};border:1px solid #FECACA;border-radius:10px;'
+                f'padding:0.8rem 1rem;margin:0.2rem 0 0.6rem">'
+                f'<div style="font-weight:700;font-size:0.88rem;color:{P["danger"]};margin-bottom:0.25rem">'
+                f'{icon("alert-triangle", size=14, color="#B91C1C")} '
+                f'{len(sup_rows)} existing adjustment(s) will be permanently removed</div>'
+                f'<div style="font-size:0.82rem;color:{P["danger"]}">'
+                f'Processing this roll flags those adjustments deleted and removes their '
+                f'data for <strong>{wiz["entity_code"].strip()}</strong> at COB '
+                f'<strong>{wiz["cobid"]}</strong>. Global adjustments are not affected.'
+                f'</div></div>',
+                unsafe_allow_html=True)
 
     with _card():
         _sec(4, "Business Context", "Why is this roll needed?")
@@ -1141,6 +1170,17 @@ with right:
             f"Replace {len(wiz['_dup_adj_ids'])} existing adjustment(s) with this upload",
             key=_k("dup_confirm"), value=False)
 
+    # ── Entity Roll: destructive-replace agreement ───────────────────────
+    eroll_ok = True
+    if cat == "Entity Roll":
+        _n_sup = len(wiz.get("_eroll_supersede_ids") or [])
+        _sup_txt = (f"{_n_sup} existing adjustment(s) " if _n_sup
+                    else "any existing adjustments ")
+        eroll_ok = st.checkbox(
+            f"I understand this Entity Roll will permanently remove {_sup_txt}"
+            f"for this entity at the target COB.",
+            key=_k("eroll_confirm"), value=False)
+
     # ── Previous submit error ─────────────────────────────────────────────
     _res = wiz.get("result") or {}
     if _res and not _is_submit_success(_res):
@@ -1152,7 +1192,7 @@ with right:
     # ── Submit ────────────────────────────────────────────────────────────
     if _btn("Submit Adjustment", icon_name=":material/send:", type="primary",
             use_container_width=True, key=_k("submit"),
-            disabled=bool(missing) or not dup_ok or zero_rows):
+            disabled=bool(missing) or not dup_ok or not eroll_ok or zero_rows):
         wiz["result"] = None
         with st.spinner("Submitting adjustment…"):
             result = _do_submit()
