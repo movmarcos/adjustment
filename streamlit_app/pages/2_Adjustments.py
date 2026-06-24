@@ -131,8 +131,8 @@ tab_names = [f"{lbl} ({counts[lbl]})" for lbl in tab_labels]
 tabs      = st.tabs(tab_names)
 
 
-def render_adj_card(row):
-    """Render one adjustment as an expandable card."""
+def render_adj_card(row, expanded=False):
+    """Render one adjustment's detail + actions (used as the grid's detail panel)."""
     adj_id      = row.get("ADJ_ID", "?")
     adj_label   = fmt_adj_id(row.get("DIMENSION_ADJ_ID"))
     scope       = str(row.get("PROCESS_TYPE", ""))
@@ -150,7 +150,7 @@ def render_adj_card(row):
     with st.expander(
         f'ADJ {adj_label} · {scope} · '
         f'{adj_type} · {run_status} · {record_cnt} rows',
-        expanded=False,
+        expanded=expanded,
     ):
         col_info, col_meta = st.columns([2, 1])
 
@@ -433,5 +433,40 @@ for tab, (label, statuses) in zip(tabs, tab_labels.items()):
         summary_html += '</div>'
         st.markdown(summary_html, unsafe_allow_html=True)
 
-        for _, row in tab_adjs.iterrows():
-            render_adj_card(row.to_dict())
+        # ── Grid: one row per adjustment (scannable); select a row for detail ─
+        tab_adjs = tab_adjs.reset_index(drop=True)
+        grid_df = pd.DataFrame({
+            "Adj ID":     tab_adjs["DIMENSION_ADJ_ID"].apply(fmt_adj_id),
+            "Scope":      tab_adjs["PROCESS_TYPE"],
+            "Type":       tab_adjs["ADJUSTMENT_TYPE"],
+            "Status":     tab_adjs["RUN_STATUS"],
+            "Entity":     tab_adjs.get("ENTITY_CODE", pd.Series(dtype=object)).fillna("—"),
+            "Book":       tab_adjs.get("BOOK_CODE", pd.Series(dtype=object)).fillna("—"),
+            "Records":    pd.to_numeric(tab_adjs["RECORD_COUNT"], errors="coerce"),
+            "Target COB": pd.to_numeric(tab_adjs["COBID"], errors="coerce"),
+            "Source COB": pd.to_numeric(tab_adjs.get("SOURCE_COBID"), errors="coerce"),
+            "Created by": tab_adjs["SUBMITTED_BY"],
+            "Created":    pd.to_datetime(tab_adjs["SUBMITTED_AT"], errors="coerce"),
+        })
+        event = st.dataframe(
+            grid_df, use_container_width=True, hide_index=True,
+            on_select="rerun", selection_mode="single-row", key=f"grid_{label}",
+            column_config={
+                "Records":    st.column_config.NumberColumn(format="%d"),
+                "Target COB": st.column_config.NumberColumn(format="%d"),
+                "Source COB": st.column_config.NumberColumn(format="%d"),
+                "Created":    st.column_config.DatetimeColumn(format="DD MMM YYYY HH:mm"),
+            },
+        )
+        _selstate = getattr(event, "selection", None)
+        if _selstate is None and isinstance(event, dict):
+            _selstate = event.get("selection")
+        if isinstance(_selstate, dict):
+            sel = _selstate.get("rows") or []
+        else:
+            sel = list(getattr(_selstate, "rows", []) or [])
+        if sel:
+            st.markdown("---")
+            render_adj_card(tab_adjs.iloc[sel[0]].to_dict(), expanded=True)
+        else:
+            st.caption("Select a row above to view its detail, history, and actions.")

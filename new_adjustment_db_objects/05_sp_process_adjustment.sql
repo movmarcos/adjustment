@@ -1174,7 +1174,7 @@ def main(session, process_type, adjustment_action, cobid):
                 return "-1" if c.split('_')[-1].upper() in ('KEY', 'ID') else "NULL"
 
             er_select_non_metric = ', '.join(
-                (f"fact.{c}" if c in view_cols else f"{_er_default(c)} AS {c}")
+                (f"fact.{c} AS {c}" if c in view_cols else f"{_er_default(c)} AS {c}")
                 for c in er_non_metric)
             er_any_non_metric = ', '.join(f"ANY_VALUE({c}) AS {c}" for c in er_non_metric)
 
@@ -1212,7 +1212,10 @@ def main(session, process_type, adjustment_action, cobid):
                          'ADJUSTMENT_CREATED_TIMESTAMP': 'CURRENT_TIMESTAMP()'}
             ins_cols  = ', '.join(['COBID', 'ADJUSTMENT_ID'] + er_non_metric
                                   + er_metrics + ins_extra)
-            sel_extra = ''.join(f", {extra_sel[c]}" for c in ins_extra)
+            # Alias every extra column — the legs are now materialized via
+            # CREATE TABLE AS SELECT, which requires a name for each column
+            # ("Missing column specification" otherwise).
+            sel_extra = ''.join(f", {extra_sel[c]} AS {c}" for c in ins_extra)
             # NB: er_flatten_insert / er_roll_insert are built AFTER the base probe
             # below, so the flatten can read the base FACT_TABLE directly.
 
@@ -1289,7 +1292,7 @@ def main(session, process_type, adjustment_action, cobid):
             else:
                 _flat_src, _flat_cols, _flat_pred = fact_adjusted_tbl_name, view_cols, er_pred
             _flat_non_metric = ', '.join(
-                (f"fact.{c}" if c in _flat_cols else f"{_er_default(c)} AS {c}")
+                (f"fact.{c} AS {c}" if c in _flat_cols else f"{_er_default(c)} AS {c}")
                 for c in er_non_metric)
             # Materialize each leg's heavy read into a TEMP table OUTSIDE the
             # transaction, against clean committed data. The transaction then only
