@@ -161,31 +161,46 @@ def log_status_history(session, adj_ids, old_status, new_status, changed_by="SYS
     """).collect()
 
 
-# ── INSERT_SOURCE mapping for PowerBI ────────────────────────────────────
+# ── PowerBI refresh config (per scope) ───────────────────────────────────
+# FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS:
+#   • arg1 (P_DATA_GROUP_NAME) must equal BATCH.RUN_LOG.proc_parameters — which
+#     we log as `process_type` — so its run-log lookup finds this run.
+#   • arg3 (P_INSERT_SOURCE) drives the inserts into POWERBI_PUBLISH_DETAIL /
+#     POWERBI_ACTION via METADATA.POWERBI_INSERT_SOURCES + the action view, which
+#     only recognise the var / stress / sensitivity data groups.
+# Only those three scopes are wired to PowerBI today; others are skipped (logged)
+# rather than calling the proc with an unsupported source.
 PBI_INSERT_SOURCE = {
     'VAR':         'LOAD_VAR_ADJUSTMENT',
     'STRESS':      'LOAD_STRESS_ADJUSTMENT',
     'SENSITIVITY': 'LOAD_SENSITIVITY_ADJUSTMENT',
-    'FRTB':        'LOAD_FRTB_ADJUSTMENT',
-    'FRTBDRC':     'LOAD_FRTB_ADJUSTMENT',
-    'FRTBRRAO':    'LOAD_FRTB_ADJUSTMENT',
-    'FRTBALL':     'LOAD_FRTB_ADJUSTMENT',
 }
 
 def trigger_powerbi_refresh(session, process_type, run_log_id):
-    """Call FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS to queue a PowerBI refresh."""
-    insert_source = PBI_INSERT_SOURCE.get(process_type.upper(),
-                                          f'LOAD_{process_type.upper()}_ADJUSTMENT')
+    """Queue a PowerBI refresh for VaR / Stress / Sensitivity.
+
+    Mirrors the original FACT.PROCESS_ADJUSTMENTS call: P_DATA_GROUP_NAME is the
+    UPPERCASE scope (e.g. 'VAR'), which must equal BATCH.RUN_LOG.proc_parameters
+    (also logged uppercase below), and P_INSERT_SOURCE = LOAD_<SCOPE>_ADJUSTMENT.
+    """
+    data_group = process_type.upper()
+    insert_source = PBI_INSERT_SOURCE.get(data_group)
+    if not insert_source:
+        print(f"PowerBI refresh skipped — '{process_type}' is not a published "
+              f"data group (only VaR / Stress / Sensitivity).")
+        return
     try:
         session.sql(f"""
             CALL FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS(
-                '{process_type}',
+                '{data_group}',
                 'RaptorReporting',
                 '{insert_source}',
                 '{run_log_id}',
                 '0'
             )
         """).collect()
+        print(f"PowerBI refresh queued — data_group={data_group} "
+              f"source={insert_source} run_log={run_log_id}")
     except Exception as pbi_err:
         print(f"Warning: PowerBI refresh trigger failed: {pbi_err}")
 
@@ -327,12 +342,16 @@ def main(session, process_type, adjustment_action, cobid):
         run_log_id = session.sql("SELECT BATCH.SEQ_RUN_LOG.NEXTVAL AS X").collect()[0]["X"]
         result["run_log_id"] = run_log_id
 
+        # proc_parameters is logged UPPERCASE so it matches the P_DATA_GROUP_NAME
+        # (also uppercase) that trigger_powerbi_refresh passes to
+        # FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS — the proc keys its run-log lookup
+        # on this column.
         session.sql(f"""
             CALL BATCH.LOAD_RUN_LOG(
                 {run_log_id},
                 {cobid},
                 'FACT.SP_PROCESS_ADJUSTMENT',
-                '{process_type}',
+                '{process_type.upper()}',
                 0, 0, 'false', ''
             )
         """).collect()
