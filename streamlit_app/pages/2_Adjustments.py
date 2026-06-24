@@ -433,40 +433,50 @@ for tab, (label, statuses) in zip(tabs, tab_labels.items()):
         summary_html += '</div>'
         st.markdown(summary_html, unsafe_allow_html=True)
 
-        # ── Grid: one row per adjustment (scannable); select a row for detail ─
+        # ── Grid: one row per adjustment (scannable) ─────────────────────────
+        # Pre-format every column as display strings so this works on the SiS
+        # Streamlit runtime (no st.column_config / no native row-selection).
         tab_adjs = tab_adjs.reset_index(drop=True)
+
+        def _int_str(v, commas=False):
+            try:
+                if v is None or v != v:
+                    return "—"
+                return f"{int(v):,}" if commas else str(int(v))
+            except (ValueError, TypeError):
+                return "—"
+
+        def _col(name):
+            return tab_adjs[name] if name in tab_adjs.columns else pd.Series([None] * len(tab_adjs))
+
         grid_df = pd.DataFrame({
-            "Adj ID":     tab_adjs["DIMENSION_ADJ_ID"].apply(fmt_adj_id),
-            "Scope":      tab_adjs["PROCESS_TYPE"],
-            "Type":       tab_adjs["ADJUSTMENT_TYPE"],
-            "Status":     tab_adjs["RUN_STATUS"],
-            "Entity":     tab_adjs.get("ENTITY_CODE", pd.Series(dtype=object)).fillna("—"),
-            "Book":       tab_adjs.get("BOOK_CODE", pd.Series(dtype=object)).fillna("—"),
-            "Records":    pd.to_numeric(tab_adjs["RECORD_COUNT"], errors="coerce"),
-            "Target COB": pd.to_numeric(tab_adjs["COBID"], errors="coerce"),
-            "Source COB": pd.to_numeric(tab_adjs.get("SOURCE_COBID"), errors="coerce"),
-            "Created by": tab_adjs["SUBMITTED_BY"],
-            "Created":    pd.to_datetime(tab_adjs["SUBMITTED_AT"], errors="coerce"),
+            "Adj ID":     _col("DIMENSION_ADJ_ID").apply(fmt_adj_id),
+            "Scope":      _col("PROCESS_TYPE").astype(str),
+            "Type":       _col("ADJUSTMENT_TYPE").astype(str),
+            "Status":     _col("RUN_STATUS").astype(str),
+            "Entity":     _col("ENTITY_CODE").fillna("—").astype(str),
+            "Book":       _col("BOOK_CODE").fillna("—").astype(str),
+            "Records":    _col("RECORD_COUNT").apply(lambda v: _int_str(v, commas=True)),
+            "Target COB": _col("COBID").apply(_int_str),
+            "Source COB": _col("SOURCE_COBID").apply(_int_str),
+            "Created by": _col("SUBMITTED_BY").fillna("—").astype(str),
+            "Created":    pd.to_datetime(_col("SUBMITTED_AT"), errors="coerce")
+                            .dt.strftime("%d %b %Y %H:%M").fillna("—"),
         })
-        event = st.dataframe(
-            grid_df, use_container_width=True, hide_index=True,
-            on_select="rerun", selection_mode="single-row", key=f"grid_{label}",
-            column_config={
-                "Records":    st.column_config.NumberColumn(format="%d"),
-                "Target COB": st.column_config.NumberColumn(format="%d"),
-                "Source COB": st.column_config.NumberColumn(format="%d"),
-                "Created":    st.column_config.DatetimeColumn(format="DD MMM YYYY HH:mm"),
-            },
-        )
-        _selstate = getattr(event, "selection", None)
-        if _selstate is None and isinstance(event, dict):
-            _selstate = event.get("selection")
-        if isinstance(_selstate, dict):
-            sel = _selstate.get("rows") or []
-        else:
-            sel = list(getattr(_selstate, "rows", []) or [])
-        if sel:
+        st.dataframe(grid_df.style.hide(axis="index"), use_container_width=True)
+
+        # ── Pick a row for its detail + actions (selectbox = version-safe) ───
+        def _opt_label(i):
+            if i is None:
+                return "— select an adjustment to view detail / actions —"
+            r = tab_adjs.iloc[i]
+            return (f'{fmt_adj_id(r.get("DIMENSION_ADJ_ID"))} · {r.get("PROCESS_TYPE")} · '
+                    f'{r.get("ADJUSTMENT_TYPE")} · {r.get("RUN_STATUS")} · '
+                    f'{r.get("ENTITY_CODE") or "—"}')
+
+        choice = st.selectbox(
+            "Open an adjustment", options=[None] + list(range(len(tab_adjs))),
+            format_func=_opt_label, key=f"sel_{label}", label_visibility="collapsed")
+        if choice is not None:
             st.markdown("---")
-            render_adj_card(tab_adjs.iloc[sel[0]].to_dict(), expanded=True)
-        else:
-            st.caption("Select a row above to view its detail, history, and actions.")
+            render_adj_card(tab_adjs.iloc[choice].to_dict(), expanded=True)
