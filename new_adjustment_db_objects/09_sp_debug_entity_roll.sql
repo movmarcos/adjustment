@@ -189,7 +189,7 @@ WHERE COBID = {cobid} AND {er_adj_ent_pred}
 INSERT INTO {fact_adj_tbl_name} ({ins_cols})
 SELECT {cobid} AS COBID, {NEW_ID} AS ADJUSTMENT_ID, {flat_non_metric}, {er_neg}{sel_extra}
 FROM {flat_src} fact
-WHERE fact.COBID = {cobid} AND {flat_pred} AND fact.{er_metric_usd} IS NOT NULL
+WHERE fact.COBID = {cobid} AND {flat_pred} AND fact.{er_metric_usd} IS NOT NULL AND fact.{er_metric_usd} <> 0
 """)
     else:
         out.append("-- ===== 5. FLATTEN insert SKIPPED (target base empty) =====\n")
@@ -198,7 +198,7 @@ WHERE fact.COBID = {cobid} AND {flat_pred} AND fact.{er_metric_usd} IS NOT NULL
 INSERT INTO {fact_adj_tbl_name} ({ins_cols})
 SELECT {cobid} AS COBID, {NEW_ID} AS ADJUSTMENT_ID, {er_select_non_metric}, {er_pos}{sel_extra}
 FROM {fact_adjusted_tbl_name} fact
-WHERE fact.COBID = {source_cobid} AND {er_pred} AND fact.{er_metric_usd} IS NOT NULL
+WHERE fact.COBID = {source_cobid} AND {er_pred} AND fact.{er_metric_usd} IS NOT NULL AND fact.{er_metric_usd} <> 0
 """)
 
     if fact_adj_summary_name:

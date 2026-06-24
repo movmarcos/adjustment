@@ -1291,24 +1291,42 @@ def main(session, process_type, adjustment_action, cobid):
             _flat_non_metric = ', '.join(
                 (f"fact.{c}" if c in _flat_cols else f"{_er_default(c)} AS {c}")
                 for c in er_non_metric)
-            er_flatten_insert = f"""
-            INSERT INTO {fact_adj_tbl_name} ({ins_cols})
-            SELECT {int(cobid)} AS COBID, {int(new_dim_adj_id)} AS ADJUSTMENT_ID,
-                   {_flat_non_metric}, {er_neg}{sel_extra}
-            FROM {_flat_src} fact
-            WHERE fact.COBID = {int(cobid)} AND {_flat_pred}
-              AND fact.{er_metric_usd} IS NOT NULL
-            """
-            er_roll_insert = f"""
-            INSERT INTO {fact_adj_tbl_name} ({ins_cols})
+            # Materialize each leg's heavy read into a TEMP table OUTSIDE the
+            # transaction, against clean committed data. The transaction then only
+            # flags, deletes, and inserts from the temp tables. Reading the
+            # combined view (which itself reads the ADJUSTMENTS_TABLE) *inside* the
+            # transaction — after the DELETE/flatten on that same table — forced a
+            # full re-scan of the uncommitted table with no pruning, which made the
+            # SP run several times slower than the same statements run standalone.
+            er_roll_select = f"""
             SELECT {int(cobid)} AS COBID, {int(new_dim_adj_id)} AS ADJUSTMENT_ID,
                    {er_select_non_metric}, {er_pos}{sel_extra}
             FROM {fact_adjusted_tbl_name} fact
             WHERE fact.COBID = {int(source_cobid)} AND {er_pred}
-              AND fact.{er_metric_usd} IS NOT NULL
+              AND fact.{er_metric_usd} IS NOT NULL AND fact.{er_metric_usd} <> 0
             """
+            session.sql(
+                f"CREATE OR REPLACE TEMPORARY TABLE EROL_ROLL_STAGE AS {er_roll_select}"
+            ).collect()
+            er_roll_insert = (f"INSERT INTO {fact_adj_tbl_name} ({ins_cols}) "
+                              f"SELECT * FROM EROL_ROLL_STAGE")
 
-            # ── Atomic wipe + insert ──────────────────────────────────────
+            er_flatten_insert = None
+            if do_flatten:
+                er_flat_select = f"""
+                SELECT {int(cobid)} AS COBID, {int(new_dim_adj_id)} AS ADJUSTMENT_ID,
+                       {_flat_non_metric}, {er_neg}{sel_extra}
+                FROM {_flat_src} fact
+                WHERE fact.COBID = {int(cobid)} AND {_flat_pred}
+                  AND fact.{er_metric_usd} IS NOT NULL AND fact.{er_metric_usd} <> 0
+                """
+                session.sql(
+                    f"CREATE OR REPLACE TEMPORARY TABLE EROL_FLAT_STAGE AS {er_flat_select}"
+                ).collect()
+                er_flatten_insert = (f"INSERT INTO {fact_adj_tbl_name} ({ins_cols}) "
+                                     f"SELECT * FROM EROL_FLAT_STAGE")
+
+            # ── Atomic wipe + insert (fast: temp-table inserts only) ──────
             session.sql("BEGIN").collect()
             try:
                 # Flag superseded in DIMENSION.ADJUSTMENT (includes external rows)
