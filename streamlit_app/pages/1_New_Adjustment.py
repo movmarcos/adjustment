@@ -596,22 +596,76 @@ def _render_scope_pills(include_frtball: bool = True) -> None:
         st.caption(FRTB_SUBTYPE_CONFIG.get(wiz["process_type"], ""))
 
 
+# ── Reference-data dropdowns (entity / department / book) ───────────────────
+# Codes are validated against DIMENSION.ENTITY and DIMENSION.BOOK so users pick
+# from real values instead of free-typing (and Book is filtered by Department).
+# Lists are loaded once per session; if a dimension can't be read, the field
+# falls back to free text so the form still works.
+def _ref_rows(sql: str, cache_key: str):
+    if cache_key not in st.session_state:
+        try:
+            st.session_state[cache_key] = run_query(sql)
+        except Exception:
+            st.session_state[cache_key] = []
+    return st.session_state[cache_key]
+
+
+def _entity_options():
+    rows = _ref_rows(
+        "SELECT DISTINCT ENTITY_CODE FROM DIMENSION.ENTITY "
+        "WHERE ENTITY_CODE IS NOT NULL ORDER BY ENTITY_CODE", "_ref_entities")
+    return [str(r[0]) for r in rows if r[0] is not None]
+
+
+def _book_dept_rows():
+    return _ref_rows(
+        "SELECT DISTINCT BOOK_CODE, DEPARTMENT_CODE FROM DIMENSION.BOOK "
+        "WHERE BOOK_CODE IS NOT NULL", "_ref_books")
+
+
+def _dept_options():
+    return sorted({str(r[1]) for r in _book_dept_rows() if r[1] is not None})
+
+
+def _book_options(dept):
+    dept = (dept or "").strip()
+    return sorted({str(r[0]) for r in _book_dept_rows()
+                   if r[0] is not None and (not dept or str(r[1]) == dept)})
+
+
+def _code_select(label, key, value, options, help=None, placeholder="— select —"):
+    """Dropdown over reference codes; free-text fallback when none are available."""
+    if not options:
+        return st.text_input(label, value=value or "", key=key + "_txt",
+                             help=help).strip()
+    cur = (value or "").strip()
+    opts = [""] + list(options)
+    if cur and cur not in opts:          # keep an already-set value selectable
+        opts.insert(1, cur)
+    idx = opts.index(cur) if cur in opts else 0
+    return st.selectbox(label, opts, index=idx, key=key, help=help,
+                        format_func=lambda x: placeholder if x == "" else x)
+
+
 def _render_main_filters() -> None:
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        wiz["entity_code"] = st.text_input("Entity Code *", key=_k("entity"),
-                                           value=wiz.get("entity_code") or "",
-                                           placeholder="e.g. MUSI")
+        wiz["entity_code"] = _code_select(
+            "Entity Code *", _k("entity_dd"), wiz.get("entity_code"),
+            _entity_options(), placeholder="— select entity —")
     with c2:
         wiz["source_system_code"] = st.text_input("Source System", key=_k("src_sys"),
                                                   value=wiz.get("source_system_code") or "",
                                                   placeholder="e.g. MS")
     with c3:
-        wiz["department_code"] = st.text_input("Department Code †", key=_k("dept"),
-                                               value=wiz.get("department_code") or "")
+        wiz["department_code"] = _code_select(
+            "Department Code †", _k("dept_dd"), wiz.get("department_code"),
+            _dept_options(), placeholder="— any —")
     with c4:
-        wiz["book_code"] = st.text_input("Book Code †", key=_k("book"),
-                                         value=wiz.get("book_code") or "")
+        wiz["book_code"] = _code_select(
+            "Book Code †", _k("book_dd"), wiz.get("book_code"),
+            _book_options(wiz.get("department_code")), placeholder="— any —",
+            help="Filtered by the selected Department")
     st.caption("Blank = all values for that dimension · † at least one of Department or Book")
 
 
@@ -864,9 +918,9 @@ def render_entity_roll_form() -> None:
             wiz["source_cobid"] = _int_input("Source COB (YYYYMMDD) *", "er_src_cobid",
                                              wiz.get("source_cobid"), placeholder="e.g. 20260327")
         with g3:
-            wiz["entity_code"] = st.text_input("Entity Code *", key=_k("er_entity"),
-                                               value=wiz.get("entity_code") or "",
-                                               placeholder="e.g. MUSE")
+            wiz["entity_code"] = _code_select(
+                "Entity Code *", _k("er_entity_dd"), wiz.get("entity_code"),
+                _entity_options(), placeholder="— select entity —")
 
     # ── Wipe preview + reconciliation across header / dimension / fact ──────
     # Adjustments for an entity/COB can be loaded by external systems that
