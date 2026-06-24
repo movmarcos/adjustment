@@ -1213,34 +1213,8 @@ def main(session, process_type, adjustment_action, cobid):
             ins_cols  = ', '.join(['COBID', 'ADJUSTMENT_ID'] + er_non_metric
                                   + er_metrics + ins_extra)
             sel_extra = ''.join(f", {extra_sel[c]}" for c in ins_extra)
-
-            # Two straight INSERTs instead of UNION ALL + a surrogate-key GROUP BY
-            # net. Both write under the new ADJUSTMENT_ID at the TARGET COBID:
-            #   leg ① flatten — negate the entity's current combined at the target
-            #     (= its base, since the entity's adjustments were just wiped), so
-            #     the base cancels out;
-            #   leg ② roll   — copy the source COB's combined as-is.
-            # The combined view SUMs both rows per position, so
-            # combined(target) = combined(source). Dropping the net (which only
-            # collapsed offsetting rows into one and skipped zero-change positions)
-            # turns an hour-long GROUP BY over the whole combined set into two
-            # plain table scans — at the cost of storing both legs' rows.
-            er_flatten_insert = f"""
-            INSERT INTO {fact_adj_tbl_name} ({ins_cols})
-            SELECT {int(cobid)} AS COBID, {int(new_dim_adj_id)} AS ADJUSTMENT_ID,
-                   {er_select_non_metric}, {er_neg}{sel_extra}
-            FROM {fact_adjusted_tbl_name} fact
-            WHERE fact.COBID = {int(cobid)} AND {er_pred}
-              AND fact.{er_metric_usd} IS NOT NULL
-            """
-            er_roll_insert = f"""
-            INSERT INTO {fact_adj_tbl_name} ({ins_cols})
-            SELECT {int(cobid)} AS COBID, {int(new_dim_adj_id)} AS ADJUSTMENT_ID,
-                   {er_select_non_metric}, {er_pos}{sel_extra}
-            FROM {fact_adjusted_tbl_name} fact
-            WHERE fact.COBID = {int(source_cobid)} AND {er_pred}
-              AND fact.{er_metric_usd} IS NOT NULL
-            """
+            # NB: er_flatten_insert / er_roll_insert are built AFTER the base probe
+            # below, so the flatten can read the base FACT_TABLE directly.
 
             # ── Supersede ALL adjustments for this entity at the target COB ─
             # An Entity Roll means the target COB's data for the entity is wrong
@@ -1278,25 +1252,61 @@ def main(session, process_type, adjustment_action, cobid):
             esc_pt = str(process_type).replace("'", "''")
             er_pt_pred = f"UPPER(PROCESS_TYPE) = UPPER('{esc_pt}')"
 
-            # Reconciliation from the small metadata tables only — the fact table
-            # is NOT scanned here (the DELETE below reports its own row count).
-            recon = session.sql(f"""
-                SELECT
-                  (SELECT COUNT(*) FROM ADJUSTMENT_APP.ADJ_HEADER
-                    WHERE COBID = {int(cobid)} AND ENTITY_CODE = '{esc_entity}'
-                      AND {er_pt_pred}
-                      AND IS_DELETED = FALSE
-                      AND ADJ_ID NOT IN ({adj_ids_str}))                  AS HEADER_CNT,
-                  (SELECT COUNT(*) FROM DIMENSION.ADJUSTMENT
-                    WHERE COBID = {int(cobid)} AND ENTITY_CODE = '{esc_entity}'
-                      AND {er_pt_pred}
-                      AND IS_DELETED = FALSE
-                      AND ADJUSTMENT_ID <> {int(new_dim_adj_id)})         AS DIM_CNT
-            """).collect()[0]
-            _h, _d = int(recon["HEADER_CNT"]), int(recon["DIM_CNT"])
-            print(f"EntityRoll reconcile @ COB {cobid} / {entity_code}: "
-                  f"header={_h} dimension={_d}")
-            result["reconcile"] = {"header": _h, "dimension": _d}
+            # The flatten leg cancels the entity's BASE at the target. A roll is
+            # usually run because that base is MISSING (e.g. bank holiday), in
+            # which case there is nothing to cancel — skip the flatten and avoid a
+            # second read of the (expensive) combined view at the target. Detected
+            # with a cheap LIMIT-1 probe on the base FACT_TABLE.
+            base_cols = set(session.table(fact_tbl_name).columns)
+            if 'ENTITY_CODE' in base_cols:
+                base_ent_pred = f"ENTITY_CODE = '{esc_entity}'"
+            elif 'ENTITY_KEY' in base_cols and entity_keys_csv:
+                base_ent_pred = f"ENTITY_KEY IN ({entity_keys_csv})"
+            else:
+                base_ent_pred = None
+            do_flatten = True
+            if base_ent_pred:
+                do_flatten = bool(session.sql(
+                    f"SELECT 1 FROM {fact_tbl_name} "
+                    f"WHERE COBID = {int(cobid)} AND {base_ent_pred} LIMIT 1").collect())
+            print(f"EntityRoll @ COB {cobid} / {entity_code}: target base "
+                  f"{'present → flatten + roll' if do_flatten else 'empty → roll only'}")
+
+            # ── Build the two INSERTs (no UNION/net — just two plain scans) ─
+            # leg ① flatten — negate the entity's BASE at the target so it
+            #   cancels. Read the BASE FACT_TABLE directly (a plain table scan),
+            #   NOT the combined view: after the wipe combined(target) = base, and
+            #   re-deriving it through the base+adjustment view at the target is
+            #   exactly the expensive read that was running for an hour. Falls back
+            #   to the combined view only if the base lacks the metric columns.
+            # leg ② roll — copy the source COB's combined as-is (this read is the
+            #   irreducible ~1-min scan, same as a manual roll).
+            # The combined view SUMs both legs per position ⇒
+            #   combined(target) = combined(source).
+            _flat_from_base = base_ent_pred is not None and all(m in base_cols for m in er_metrics)
+            if _flat_from_base:
+                _flat_src, _flat_cols, _flat_pred = fact_tbl_name, base_cols, base_ent_pred
+            else:
+                _flat_src, _flat_cols, _flat_pred = fact_adjusted_tbl_name, view_cols, er_pred
+            _flat_non_metric = ', '.join(
+                (f"fact.{c}" if c in _flat_cols else f"{_er_default(c)} AS {c}")
+                for c in er_non_metric)
+            er_flatten_insert = f"""
+            INSERT INTO {fact_adj_tbl_name} ({ins_cols})
+            SELECT {int(cobid)} AS COBID, {int(new_dim_adj_id)} AS ADJUSTMENT_ID,
+                   {_flat_non_metric}, {er_neg}{sel_extra}
+            FROM {_flat_src} fact
+            WHERE fact.COBID = {int(cobid)} AND {_flat_pred}
+              AND fact.{er_metric_usd} IS NOT NULL
+            """
+            er_roll_insert = f"""
+            INSERT INTO {fact_adj_tbl_name} ({ins_cols})
+            SELECT {int(cobid)} AS COBID, {int(new_dim_adj_id)} AS ADJUSTMENT_ID,
+                   {er_select_non_metric}, {er_pos}{sel_extra}
+            FROM {fact_adjusted_tbl_name} fact
+            WHERE fact.COBID = {int(source_cobid)} AND {er_pred}
+              AND fact.{er_metric_usd} IS NOT NULL
+            """
 
             # ── Atomic wipe + insert ──────────────────────────────────────
             session.sql("BEGIN").collect()
@@ -1330,16 +1340,17 @@ def main(session, process_type, adjustment_action, cobid):
                     WHERE COBID = {int(cobid)} AND {er_adj_ent_pred}
                 """).collect()
                 rows_wiped = int(_del[0][0]) if _del and _del[0] is not None else 0
-                session.sql(er_flatten_insert).collect()   # leg ① negate base
-                session.sql(er_roll_insert).collect()      # leg ② copy source
+                if do_flatten:
+                    session.sql(er_flatten_insert).collect()   # leg ① negate base
+                session.sql(er_roll_insert).collect()          # leg ② copy source
                 session.sql("COMMIT").collect()
             except Exception:
                 session.sql("ROLLBACK").collect()
                 raise
 
-            result["reconcile"]["rows_wiped"] = rows_wiped
-            print(f"EntityRoll: wiped {rows_wiped} row(s) across {_d} adjustment(s) "
-                  f"for entity {entity_code} at COB {cobid} before applying the roll")
+            result["reconcile"] = {"rows_wiped": rows_wiped, "flattened": do_flatten}
+            print(f"EntityRoll: wiped {rows_wiped} row(s) for entity "
+                  f"{entity_code} at COB {cobid} before applying the roll")
 
             # ── No SCD2 key remap for Entity Roll ─────────────────────────
             # EntityRoll is a straight copy from the combined/adjusted view:
@@ -1355,39 +1366,52 @@ def main(session, process_type, adjustment_action, cobid):
             #  inline `scd2_update`; that is independent of this path.)
 
             # ── Rebuild summary for the rolled entity at the target COB ────
-            # A roll only changes THIS entity's rows, so we rebuild only its
-            # summary slice instead of re-aggregating the whole COB (the old
-            # whole-COB GROUP BY ALL scaled with every adjustment at the COB and
-            # was the main cost / timeout on this path). The filter uses the
-            # column the roll rows are reliably keyed by (er_entity_col), and is
-            # only applied when that column exists in BOTH the adjustment and
-            # summary tables — otherwise we fall back to the whole-COB rebuild.
+            # A roll only changes THIS entity's rows, so rebuild ONLY its summary
+            # slice — never re-aggregate the whole COB (that scan across every
+            # entity at the COB is what made this run for many minutes even on a
+            # Large warehouse). The summary and adjustment tables may key the
+            # entity by DIFFERENT columns (e.g. summary by ENTITY_KEY, adjustment
+            # by ENTITY_CODE), so each side is scoped by ITS OWN column — requiring
+            # a shared column would silently drop to the slow whole-COB rebuild.
             if fact_adj_summary_name:
                 summary_non_metric = ', '.join([
                     c for c in fact_adj_summary_cols
                     if c not in {er_metric, er_metric_usd}
                 ])
-                # Direct entity predicate shared by the summary DELETE and the
-                # fact-table read — a column present in BOTH tables, filtered as a
-                # literal (no DIMENSION.ENTITY sub-select). Falls back to a
-                # whole-COB rebuild only if no common entity column exists.
-                if 'ENTITY_CODE' in fact_adj_summary_cols and 'ENTITY_CODE' in fact_adj_cols:
-                    er_sum_where = f" AND ENTITY_CODE = '{esc_entity}'"
-                elif ('ENTITY_KEY' in fact_adj_summary_cols and 'ENTITY_KEY' in fact_adj_cols
-                      and entity_keys_csv):
-                    er_sum_where = f" AND ENTITY_KEY IN ({entity_keys_csv})"
+
+                def _entity_where(cols):
+                    if 'ENTITY_CODE' in cols:
+                        return f"ENTITY_CODE = '{esc_entity}'"
+                    if 'ENTITY_KEY' in cols and entity_keys_csv:
+                        return f"ENTITY_KEY IN ({entity_keys_csv})"
+                    return None
+
+                _sum_pred = _entity_where(fact_adj_summary_cols)   # summary side
+                _adj_pred = _entity_where(fact_adj_cols)           # adjustment side
+                if _sum_pred and _adj_pred:
+                    session.sql(f"DELETE FROM {fact_adj_summary_name} "
+                                f"WHERE COBID = {int(cobid)} AND {_sum_pred}").collect()
+                    session.sql(f"""
+                        INSERT INTO {fact_adj_summary_name}
+                        ({summary_non_metric}, {er_metric_cols})
+                        SELECT {summary_non_metric}, {er_metric_sums}
+                        FROM {fact_adj_tbl_name}
+                        WHERE COBID = {int(cobid)} AND {_adj_pred}
+                        GROUP BY ALL
+                    """).collect()
                 else:
-                    er_sum_where = ""   # fall back to whole-COB rebuild
-                session.sql(f"DELETE FROM {fact_adj_summary_name} "
-                            f"WHERE COBID = {int(cobid)}{er_sum_where}").collect()
-                session.sql(f"""
-                    INSERT INTO {fact_adj_summary_name}
-                    ({summary_non_metric}, {er_metric_cols})
-                    SELECT {summary_non_metric}, {er_metric_sums}
-                    FROM {fact_adj_tbl_name}
-                    WHERE COBID = {int(cobid)}{er_sum_where}
-                    GROUP BY ALL
-                """).collect()
+                    # Last resort (a table has no entity column): whole-COB rebuild.
+                    print("EntityRoll: summary rebuilt whole-COB (no entity column) — slow")
+                    session.sql(f"DELETE FROM {fact_adj_summary_name} "
+                                f"WHERE COBID = {int(cobid)}").collect()
+                    session.sql(f"""
+                        INSERT INTO {fact_adj_summary_name}
+                        ({summary_non_metric}, {er_metric_cols})
+                        SELECT {summary_non_metric}, {er_metric_sums}
+                        FROM {fact_adj_tbl_name}
+                        WHERE COBID = {int(cobid)}
+                        GROUP BY ALL
+                    """).collect()
 
             # ── Counts + bookkeeping ──────────────────────────────────────
             rows_count = session.sql(f"""
