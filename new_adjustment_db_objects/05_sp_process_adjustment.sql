@@ -1140,6 +1140,15 @@ def main(session, process_type, adjustment_action, cobid):
             esc_entity = str(entity_code).replace("'", "''")
             view_cols  = set(session.table(fact_adjusted_tbl_name).columns)
 
+            # Resolve the entity's surrogate key(s) ONCE → a literal IN list, so
+            # no scan (leg reads, the wipe DELETE, the summary rebuild) has to
+            # embed a correlated DIMENSION.ENTITY sub-select. esc_entity is used
+            # directly wherever a table exposes ENTITY_CODE.
+            entity_keys_csv = ", ".join(
+                str(r["ENTITY_KEY"]) for r in session.sql(
+                    f"SELECT ENTITY_KEY FROM DIMENSION.ENTITY "
+                    f"WHERE ENTITY_CODE = '{esc_entity}'").collect())
+
             # ── Metric columns (same collapse rule as the Scale path) ─────
             er_metric     = metric_name if metric_name in view_cols else metric_usd_name
             er_metric_usd = metric_usd_name
@@ -1177,8 +1186,9 @@ def main(session, process_type, adjustment_action, cobid):
                 er_pred = f"fact.ENTITY_CODE = '{esc_entity}'"
             elif 'ENTITY_KEY' in view_cols:
                 er_entity_col = 'ENTITY_KEY'
-                er_pred = (f"fact.ENTITY_KEY IN (SELECT ENTITY_KEY FROM DIMENSION.ENTITY "
-                           f"WHERE ENTITY_CODE = '{esc_entity}')")
+                if not entity_keys_csv:
+                    raise Exception(f"EntityRoll: no ENTITY_KEY found for entity {entity_code}")
+                er_pred = f"fact.ENTITY_KEY IN ({entity_keys_csv})"
             else:
                 raise Exception(
                     f"Cannot find entity column (ENTITY_CODE or ENTITY_KEY) in "
@@ -1195,16 +1205,6 @@ def main(session, process_type, adjustment_action, cobid):
             er_neg = ', '.join(f"fact.{m} * -1 AS {m}" for m in er_metrics)
             er_pos = ', '.join(f"fact.{m} AS {m}" for m in er_metrics)
 
-            # Both legs carry the TARGET COBID so the surrogate key (which may
-            # include COBID) nets source and target rows onto the same position.
-            # Net on a uniquely-named alias: the configured pk/key column can
-            # itself be a physical column of the adjustments table (FRTB scopes
-            # use a single FRTBSA_*_KEY column), and reusing its name makes the
-            # GROUP BY ambiguous (output alias vs source column).
-            if len(pk_parts) > 1:
-                er_keyed = f"{surrogate_key(pk_parts, 'EROL_NET_KEY_')}, *"
-            else:
-                er_keyed = f"{pk_parts[0]} AS EROL_NET_KEY_, *"
             ins_extra = [c for c in ('RUN_LOG_ID', 'LOAD_TIMESTAMP',
                                      'ADJUSTMENT_CREATED_TIMESTAMP') if c in fact_adj_cols]
             extra_sel = {'RUN_LOG_ID': str(run_log_id),
@@ -1214,35 +1214,32 @@ def main(session, process_type, adjustment_action, cobid):
                                   + er_metrics + ins_extra)
             sel_extra = ''.join(f", {extra_sel[c]}" for c in ins_extra)
 
-            insert_sql = f"""
+            # Two straight INSERTs instead of UNION ALL + a surrogate-key GROUP BY
+            # net. Both write under the new ADJUSTMENT_ID at the TARGET COBID:
+            #   leg ① flatten — negate the entity's current combined at the target
+            #     (= its base, since the entity's adjustments were just wiped), so
+            #     the base cancels out;
+            #   leg ② roll   — copy the source COB's combined as-is.
+            # The combined view SUMs both rows per position, so
+            # combined(target) = combined(source). Dropping the net (which only
+            # collapsed offsetting rows into one and skipped zero-change positions)
+            # turns an hour-long GROUP BY over the whole combined set into two
+            # plain table scans — at the cost of storing both legs' rows.
+            er_flatten_insert = f"""
             INSERT INTO {fact_adj_tbl_name} ({ins_cols})
-            WITH cte AS (
-                -- leg ① flatten: cancel everything the entity shows at the target COB
-                SELECT {int(cobid)} AS COBID, {er_select_non_metric}, {er_neg}
-                FROM {fact_adjusted_tbl_name} fact
-                WHERE fact.COBID = {int(cobid)} AND {er_pred}
-                  AND fact.{er_metric_usd} IS NOT NULL
-                UNION ALL
-                -- leg ② copy: the source COB's full adjusted values
-                SELECT {int(cobid)} AS COBID, {er_select_non_metric}, {er_pos}
-                FROM {fact_adjusted_tbl_name} fact
-                WHERE fact.COBID = {int(source_cobid)} AND {er_pred}
-                  AND fact.{er_metric_usd} IS NOT NULL
-            ),
-            keyed AS (
-                SELECT {er_keyed} FROM cte
-            ),
-            -- Net per position: rows identical at source and target cancel to
-            -- zero and are never written (HAVING) — only true differences land.
-            netted AS (
-                SELECT {er_any_non_metric}, {er_metric_sums}
-                FROM keyed
-                GROUP BY EROL_NET_KEY_
-                HAVING SUM({er_metric_usd}) <> 0
-            )
-            SELECT {int(cobid)}, {int(new_dim_adj_id)},
-                   {', '.join(er_non_metric)}, {er_metric_cols}{sel_extra}
-            FROM netted
+            SELECT {int(cobid)} AS COBID, {int(new_dim_adj_id)} AS ADJUSTMENT_ID,
+                   {er_select_non_metric}, {er_neg}{sel_extra}
+            FROM {fact_adjusted_tbl_name} fact
+            WHERE fact.COBID = {int(cobid)} AND {er_pred}
+              AND fact.{er_metric_usd} IS NOT NULL
+            """
+            er_roll_insert = f"""
+            INSERT INTO {fact_adj_tbl_name} ({ins_cols})
+            SELECT {int(cobid)} AS COBID, {int(new_dim_adj_id)} AS ADJUSTMENT_ID,
+                   {er_select_non_metric}, {er_pos}{sel_extra}
+            FROM {fact_adjusted_tbl_name} fact
+            WHERE fact.COBID = {int(source_cobid)} AND {er_pred}
+              AND fact.{er_metric_usd} IS NOT NULL
             """
 
             # ── Supersede ALL adjustments for this entity at the target COB ─
@@ -1258,21 +1255,21 @@ def main(session, process_type, adjustment_action, cobid):
             # list). Leg ① then reads the post-delete combined view (= the
             # entity's original values), so combined(target) = adjusted(source).
 
-            # Entity predicate for the fact ADJUSTMENTS_TABLE — match on whichever
-            # entity column(s) the table exposes so external rows (keyed by
-            # ENTITY_KEY) and roll rows (which may default ENTITY_KEY to -1 but
-            # carry ENTITY_CODE) are both caught.
-            _ent_preds = []
-            if 'ENTITY_KEY' in fact_adj_cols:
-                _ent_preds.append(
-                    f"ENTITY_KEY IN (SELECT ENTITY_KEY FROM DIMENSION.ENTITY "
-                    f"WHERE ENTITY_CODE = '{esc_entity}')")
+            # Direct entity predicate for the fact ADJUSTMENTS_TABLE. Filter by
+            # ENTITY_CODE straight on the table — NO DIMENSION.ENTITY sub-select
+            # and NO OR — so Snowflake prunes by COBID + ENTITY_CODE instead of
+            # scanning the table for a semi-join (the old sub-select/OR is what
+            # made the DELETE take minutes). Fall back to a literal ENTITY_KEY
+            # list (resolved once) only if the table has no ENTITY_CODE column.
             if 'ENTITY_CODE' in fact_adj_cols:
-                _ent_preds.append(f"ENTITY_CODE = '{esc_entity}'")
-            if not _ent_preds:
+                er_adj_ent_pred = f"ENTITY_CODE = '{esc_entity}'"
+            elif 'ENTITY_KEY' in fact_adj_cols:
+                if not entity_keys_csv:
+                    raise Exception(f"EntityRoll: no ENTITY_KEY found for entity {entity_code}")
+                er_adj_ent_pred = f"ENTITY_KEY IN ({entity_keys_csv})"
+            else:
                 raise Exception(
                     f"EntityRoll: no ENTITY_KEY/ENTITY_CODE column in {fact_adj_tbl_name}")
-            er_adj_ent_pred = "(" + " OR ".join(_ent_preds) + ")"
 
             # ADJ_HEADER / DIMENSION.ADJUSTMENT hold every scope, so the flags and
             # counts must be restricted to THIS roll's process type — otherwise a
@@ -1281,7 +1278,8 @@ def main(session, process_type, adjustment_action, cobid):
             esc_pt = str(process_type).replace("'", "''")
             er_pt_pred = f"UPPER(PROCESS_TYPE) = UPPER('{esc_pt}')"
 
-            # Reconciliation (informational): distinct adjustments per source.
+            # Reconciliation from the small metadata tables only — the fact table
+            # is NOT scanned here (the DELETE below reports its own row count).
             recon = session.sql(f"""
                 SELECT
                   (SELECT COUNT(*) FROM ADJUSTMENT_APP.ADJ_HEADER
@@ -1293,16 +1291,12 @@ def main(session, process_type, adjustment_action, cobid):
                     WHERE COBID = {int(cobid)} AND ENTITY_CODE = '{esc_entity}'
                       AND {er_pt_pred}
                       AND IS_DELETED = FALSE
-                      AND ADJUSTMENT_ID <> {int(new_dim_adj_id)})         AS DIM_CNT,
-                  (SELECT COUNT(DISTINCT ADJUSTMENT_ID) FROM {fact_adj_tbl_name}
-                    WHERE COBID = {int(cobid)} AND {er_adj_ent_pred})     AS FACT_CNT
+                      AND ADJUSTMENT_ID <> {int(new_dim_adj_id)})         AS DIM_CNT
             """).collect()[0]
-            _h, _d, _f = int(recon["HEADER_CNT"]), int(recon["DIM_CNT"]), int(recon["FACT_CNT"])
+            _h, _d = int(recon["HEADER_CNT"]), int(recon["DIM_CNT"])
             print(f"EntityRoll reconcile @ COB {cobid} / {entity_code}: "
-                  f"header={_h} dimension={_d} fact={_f} "
-                  f"({'match' if _d == _f else 'MISMATCH'})")
-            result["reconcile"] = {"header": _h, "dimension": _d, "fact": _f,
-                                   "match": (_d == _f)}
+                  f"header={_h} dimension={_d}")
+            result["reconcile"] = {"header": _h, "dimension": _d}
 
             # ── Atomic wipe + insert ──────────────────────────────────────
             session.sql("BEGIN").collect()
@@ -1329,19 +1323,23 @@ def main(session, process_type, adjustment_action, cobid):
                       AND IS_DELETED = FALSE
                       AND ADJ_ID NOT IN ({adj_ids_str})
                 """).collect()
-                # Wipe every entity row at the target COB (one predicate), then roll
-                session.sql(f"""
+                # Wipe every entity row at the target COB (one direct predicate),
+                # then roll. Capture the rows-deleted count Snowflake returns.
+                _del = session.sql(f"""
                     DELETE FROM {fact_adj_tbl_name}
                     WHERE COBID = {int(cobid)} AND {er_adj_ent_pred}
                 """).collect()
-                session.sql(insert_sql).collect()
+                rows_wiped = int(_del[0][0]) if _del and _del[0] is not None else 0
+                session.sql(er_flatten_insert).collect()   # leg ① negate base
+                session.sql(er_roll_insert).collect()      # leg ② copy source
                 session.sql("COMMIT").collect()
             except Exception:
                 session.sql("ROLLBACK").collect()
                 raise
 
-            print(f"EntityRoll: wiped {_f} prior adjustment(s) for entity "
-                  f"{entity_code} at COB {cobid} before applying the roll")
+            result["reconcile"]["rows_wiped"] = rows_wiped
+            print(f"EntityRoll: wiped {rows_wiped} row(s) across {_d} adjustment(s) "
+                  f"for entity {entity_code} at COB {cobid} before applying the roll")
 
             # ── No SCD2 key remap for Entity Roll ─────────────────────────
             # EntityRoll is a straight copy from the combined/adjusted view:
@@ -1369,14 +1367,15 @@ def main(session, process_type, adjustment_action, cobid):
                     c for c in fact_adj_summary_cols
                     if c not in {er_metric, er_metric_usd}
                 ])
-                if er_entity_col in fact_adj_cols and er_entity_col in fact_adj_summary_cols:
-                    if er_entity_col == 'ENTITY_KEY':
-                        er_sum_filter = (
-                            f"ENTITY_KEY IN (SELECT ENTITY_KEY FROM DIMENSION.ENTITY "
-                            f"WHERE ENTITY_CODE = '{esc_entity}')")
-                    else:
-                        er_sum_filter = f"ENTITY_CODE = '{esc_entity}'"
-                    er_sum_where = f" AND {er_sum_filter}"
+                # Direct entity predicate shared by the summary DELETE and the
+                # fact-table read — a column present in BOTH tables, filtered as a
+                # literal (no DIMENSION.ENTITY sub-select). Falls back to a
+                # whole-COB rebuild only if no common entity column exists.
+                if 'ENTITY_CODE' in fact_adj_summary_cols and 'ENTITY_CODE' in fact_adj_cols:
+                    er_sum_where = f" AND ENTITY_CODE = '{esc_entity}'"
+                elif ('ENTITY_KEY' in fact_adj_summary_cols and 'ENTITY_KEY' in fact_adj_cols
+                      and entity_keys_csv):
+                    er_sum_where = f" AND ENTITY_KEY IN ({entity_keys_csv})"
                 else:
                     er_sum_where = ""   # fall back to whole-COB rebuild
                 session.sql(f"DELETE FROM {fact_adj_summary_name} "

@@ -900,9 +900,7 @@ def render_entity_roll_form() -> None:
             if _fact_tbl:
                 _fc = run_query(f"""
                     SELECT COUNT(DISTINCT ADJUSTMENT_ID) FROM {_fact_tbl}
-                    WHERE COBID = {_cob}
-                      AND ENTITY_KEY IN (SELECT ENTITY_KEY FROM DIMENSION.ENTITY
-                                         WHERE ENTITY_CODE = '{_ent}')
+                    WHERE COBID = {_cob} AND ENTITY_CODE = '{_ent}'
                 """)
                 f_cnt = int(_fc[0][0]) if _fc else None
         except Exception:

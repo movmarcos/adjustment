@@ -137,29 +137,25 @@ SET q_dim_id = (SELECT DIMENSION_ADJ_ID FROM ADJ_HEADER
 
 
 -- 5. ASSERTIONS ────────────────────────────────────────────────────────────────
--- (a) net delta written == adjusted(source) − adjusted(target before):
---     original(target) + Σ(deltas) must equal adjusted(source)
--- (b) fact rows at the target COB unchanged
+-- (a) combined(target, entity) now mirrors combined(source, entity) — measured
+--     directly after processing (the roll wipes + rebuilds, so comparing the
+--     final combined is the correct check)
+-- (b) FACT_TABLE (base) at the target COB unchanged
 -- (c) DIMENSION.ADJUSTMENT.ADJUSTMENT_TYPE = 'EROL', Processed
 SELECT
     b.ADJUSTED_SOURCE,
-    b.ADJUSTED_TARGET_BEFORE,
-    d.NET_DELTA,
-    b.ADJUSTED_TARGET_BEFORE + d.NET_DELTA                          AS ADJUSTED_TARGET_AFTER,
-    IFF(ABS(COALESCE(b.ADJUSTED_TARGET_BEFORE,0) + COALESCE(d.NET_DELTA,0)
-            - COALESCE(b.ADJUSTED_SOURCE,0)) < 0.01,
+    (SELECT SUM(IDENTIFIER($q_metric_usd)) FROM IDENTIFIER($q_comb_table)
+       WHERE COBID = $p_cobid AND ENTITY_CODE = $p_entity_code)      AS ADJUSTED_TARGET_AFTER,
+    IFF(ABS(COALESCE((SELECT SUM(IDENTIFIER($q_metric_usd)) FROM IDENTIFIER($q_comb_table)
+                        WHERE COBID = $p_cobid AND ENTITY_CODE = $p_entity_code), 0)
+            - COALESCE(b.ADJUSTED_SOURCE, 0)) < 0.01,
         'PASS', 'FAIL')                                             AS A_TARGET_MIRRORS_SOURCE,
     IFF(b.FACT_ROWS_TARGET_COB =
         (SELECT COUNT(*) FROM IDENTIFIER($q_fact_table) WHERE COBID = $p_cobid),
         'PASS', 'FAIL')                                             AS B_FACT_TABLE_UNTOUCHED,
     (SELECT IFF(ADJUSTMENT_TYPE = 'EROL' AND RUN_STATUS = 'Processed', 'PASS', 'FAIL')
      FROM DIMENSION.ADJUSTMENT WHERE ADJUSTMENT_ID = $q_dim_id)     AS C_DIMENSION_TYPE_EROL
-FROM EROL_TEST_BASELINE b
-CROSS JOIN (
-    SELECT COALESCE(SUM(IDENTIFIER($q_metric_usd)), 0) AS NET_DELTA
-    FROM IDENTIFIER($q_adj_table)
-    WHERE COBID = $p_cobid AND ADJUSTMENT_ID = $q_dim_id
-) d;
+FROM EROL_TEST_BASELINE b;
 
 -- 5e. (e) every prior adjustment for the entity at the COB is wiped: no prior
 --     fact rows remain, and DIMENSION + ADJ_HEADER are superseded.

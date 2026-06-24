@@ -53,10 +53,15 @@ Sequence (reconciliation first, then the wipe + roll inside `BEGIN/COMMIT`):
    `IS_DELETED, RUN_STATUS='Superseded', DELETED_BY, DELETED_DATE, ERRORMESSAGE`.
 4. **Wipe rows** — `DELETE FROM <ADJUSTMENTS_TABLE> WHERE COBID=target AND
    <entity predicate>` (single predicate, all adjustments — no per-ID list).
-5. **Flatten + copy** — the existing `insert_sql` runs unchanged. It reads the
-   combined view *after* the wipe (same transaction): with the entity's
-   adjustments gone, leg ① flattens the entity's original values ⇒
-   `combined(target) = adjusted(source)`.
+5. **Flatten + roll** — **two straight INSERTs** under the new `ADJUSTMENT_ID`
+   (not a `UNION ALL` + surrogate-key `GROUP BY` net):
+   - leg ① flatten: `SELECT … metric * -1 FROM combined WHERE COBID = target AND
+     <entity>` — negates the entity's current combined at the target (= its base,
+     since its adjustments were just wiped), so the base cancels;
+   - leg ② roll: `SELECT … metric FROM combined WHERE COBID = source AND <entity>`
+     — copies the source COB's combined.
+   The combined view SUMs both legs per position ⇒ `combined(target) =
+   combined(source)`. See Performance for why the net was dropped.
 6. **Summary** — entity-scoped rebuild (see Performance).
 
 ### Correctness — why wipe-first is safe here
@@ -87,6 +92,23 @@ mechanism — no change to the netting SQL.
   Roll will permanently remove N existing adjustment(s) … (including data from
   other systems)".
 - **Gate** — Submit `disabled` gains `or not eroll_ok`.
+
+## Performance — the big wins
+
+Three things made the roll run for an hour and time out; all are fixed:
+
+1. **No surrogate-key netting.** The old INSERT did `UNION ALL` of both legs, built
+   a surrogate key per row, and `GROUP BY`'d the whole combined set with `HAVING
+   SUM <> 0`. That GROUP BY over the entire entity's combined rows was the
+   hour-long step. Replaced by two plain `INSERT … SELECT` scans (flatten + roll).
+   Trade-off: both legs' rows are stored instead of one netted row per position —
+   the combined view/summary still sum correctly. Manual benchmark of the
+   equivalent copy: ~1 min.
+2. **No sub-selects in scans.** Entity filters are literal (`ENTITY_CODE = …`, or a
+   one-time-resolved `ENTITY_KEY IN (…)` list) instead of a correlated
+   `DIMENSION.ENTITY` sub-select embedded in every scan/DELETE.
+3. **The wipe DELETE is a single direct predicate** (`COBID + ENTITY_CODE`), and
+   the reconciliation no longer full-scans the fact table during processing.
 
 ## Performance — entity-scoped summary rebuild
 
