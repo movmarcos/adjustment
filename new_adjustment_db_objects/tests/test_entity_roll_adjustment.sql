@@ -75,12 +75,15 @@ WHERE COBID = $p_cobid
 -- NB: swap ENTITY_KEY → ENTITY_CODE above if this scope's adjustment table is
 -- keyed by ENTITY_CODE instead.
 
--- Reconciliation: the three sources should agree on the entity's adjustments.
+-- Reconciliation: the three sources should agree on the entity's adjustments
+-- for THIS process type (header/dimension hold every scope).
 SELECT
   (SELECT COUNT(*) FROM ADJ_HEADER
-    WHERE COBID = $p_cobid AND ENTITY_CODE = $p_entity_code AND IS_DELETED = FALSE) AS HEADER_CNT,
+    WHERE COBID = $p_cobid AND ENTITY_CODE = $p_entity_code
+      AND UPPER(PROCESS_TYPE) = UPPER($p_process_type) AND IS_DELETED = FALSE)     AS HEADER_CNT,
   (SELECT COUNT(*) FROM DIMENSION.ADJUSTMENT
-    WHERE COBID = $p_cobid AND ENTITY_CODE = $p_entity_code AND IS_DELETED = FALSE) AS DIM_CNT,
+    WHERE COBID = $p_cobid AND ENTITY_CODE = $p_entity_code
+      AND UPPER(PROCESS_TYPE) = UPPER($p_process_type) AND IS_DELETED = FALSE)     AS DIM_CNT,
   (SELECT COUNT(*) FROM EROL_TEST_PRIORS)                                          AS FACT_CNT;
 
 
@@ -170,11 +173,13 @@ SELECT
     IFF(NOT EXISTS (
             SELECT 1 FROM DIMENSION.ADJUSTMENT
             WHERE COBID = $p_cobid AND ENTITY_CODE = $p_entity_code
+              AND UPPER(PROCESS_TYPE) = UPPER($p_process_type)
               AND ADJUSTMENT_ID <> $q_dim_id AND IS_DELETED = FALSE),
         'PASS', 'FAIL')                                              AS E2_DIMENSION_SUPERSEDED,
     IFF(NOT EXISTS (
             SELECT 1 FROM ADJ_HEADER
             WHERE COBID = $p_cobid AND ENTITY_CODE = $p_entity_code
+              AND UPPER(PROCESS_TYPE) = UPPER($p_process_type)
               AND ADJUSTMENT_TYPE <> 'EROL' AND IS_DELETED = FALSE),
         'PASS', 'FAIL')                                              AS E3_HEADER_SUPERSEDED;
 

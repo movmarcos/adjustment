@@ -1274,15 +1274,24 @@ def main(session, process_type, adjustment_action, cobid):
                     f"EntityRoll: no ENTITY_KEY/ENTITY_CODE column in {fact_adj_tbl_name}")
             er_adj_ent_pred = "(" + " OR ".join(_ent_preds) + ")"
 
+            # ADJ_HEADER / DIMENSION.ADJUSTMENT hold every scope, so the flags and
+            # counts must be restricted to THIS roll's process type — otherwise a
+            # VaR roll would also flag the entity's Stress/FRTB adjustments, whose
+            # rows live in other fact tables and are not being wiped.
+            esc_pt = str(process_type).replace("'", "''")
+            er_pt_pred = f"UPPER(PROCESS_TYPE) = UPPER('{esc_pt}')"
+
             # Reconciliation (informational): distinct adjustments per source.
             recon = session.sql(f"""
                 SELECT
                   (SELECT COUNT(*) FROM ADJUSTMENT_APP.ADJ_HEADER
                     WHERE COBID = {int(cobid)} AND ENTITY_CODE = '{esc_entity}'
+                      AND {er_pt_pred}
                       AND IS_DELETED = FALSE
                       AND ADJ_ID NOT IN ({adj_ids_str}))                  AS HEADER_CNT,
                   (SELECT COUNT(*) FROM DIMENSION.ADJUSTMENT
                     WHERE COBID = {int(cobid)} AND ENTITY_CODE = '{esc_entity}'
+                      AND {er_pt_pred}
                       AND IS_DELETED = FALSE
                       AND ADJUSTMENT_ID <> {int(new_dim_adj_id)})         AS DIM_CNT,
                   (SELECT COUNT(DISTINCT ADJUSTMENT_ID) FROM {fact_adj_tbl_name}
@@ -1303,6 +1312,7 @@ def main(session, process_type, adjustment_action, cobid):
                     UPDATE DIMENSION.ADJUSTMENT
                     SET IS_DELETED = TRUE, RUN_STATUS = 'Superseded'
                     WHERE COBID = {int(cobid)} AND ENTITY_CODE = '{esc_entity}'
+                      AND {er_pt_pred}
                       AND IS_DELETED = FALSE
                       AND ADJUSTMENT_ID <> {int(new_dim_adj_id)}
                 """).collect()
@@ -1315,6 +1325,7 @@ def main(session, process_type, adjustment_action, cobid):
                         DELETED_DATE = CURRENT_TIMESTAMP(),
                         ERRORMESSAGE = 'Superseded by Entity Roll {adj_ids[0]}'
                     WHERE COBID = {int(cobid)} AND ENTITY_CODE = '{esc_entity}'
+                      AND {er_pt_pred}
                       AND IS_DELETED = FALSE
                       AND ADJ_ID NOT IN ({adj_ids_str})
                 """).collect()

@@ -883,9 +883,11 @@ def render_entity_roll_form() -> None:
             _hd = run_query(f"""
                 SELECT
                   (SELECT COUNT(*) FROM ADJUSTMENT_APP.ADJ_HEADER
-                    WHERE COBID = {_cob} AND ENTITY_CODE = '{_ent}' AND IS_DELETED = FALSE) AS H,
+                    WHERE COBID = {_cob} AND ENTITY_CODE = '{_ent}'
+                      AND UPPER(PROCESS_TYPE) = UPPER('{_pt}') AND IS_DELETED = FALSE) AS H,
                   (SELECT COUNT(*) FROM DIMENSION.ADJUSTMENT
-                    WHERE COBID = {_cob} AND ENTITY_CODE = '{_ent}' AND IS_DELETED = FALSE) AS D
+                    WHERE COBID = {_cob} AND ENTITY_CODE = '{_ent}'
+                      AND UPPER(PROCESS_TYPE) = UPPER('{_pt}') AND IS_DELETED = FALSE) AS D
             """)
             if _hd:
                 h_cnt, d_cnt = int(_hd[0][0]), int(_hd[0][1])
