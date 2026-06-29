@@ -14,7 +14,7 @@ from utils.styles import (
     inject_css, render_sidebar, render_filter_chips, render_status_timeline,
     render_lifecycle_bar,
     status_badge, section_title, P, SCOPE_CONFIG, STATUS_COLORS, STATUS_ICONS,
-    fmt_adj_id, icon, render_activity_grid,
+    fmt_adj_id, icon, render_activity_grid, SELECTION_UNSUPPORTED,
 )
 from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
 
@@ -382,7 +382,7 @@ def render_adj_card(row, expanded=False):
 
 # ── Browse + act ───────────────────────────────────────────────────────────────
 
-show_deleted = st.toggle(
+show_deleted = st.checkbox(
     "Show deleted", value=False,
     help="Include deleted adjustments. Hidden by default.")
 
@@ -398,13 +398,28 @@ total = len(df_adjs)
 shown = len(view_df)
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.82rem'>"
-    f"Showing {shown} of {total} adjustments. Click a row to view details and actions."
+    f"Showing {shown} of {total} adjustments. Select one to view its details and actions."
     f"</span>",
     unsafe_allow_html=True)
 
 selected = render_activity_grid(
     view_df, selectable=True, key="adj_grid",
     empty_msg="No adjustments match the current filter.")
+
+# Older Streamlit-in-Snowflake runtimes lack native row-selection; fall back to
+# a selectbox picker (same no-tabs single-grid design, just a different control).
+if selected is SELECTION_UNSUPPORTED:
+    def _opt_label(i):
+        if i is None:
+            return "— select an adjustment to view details / actions —"
+        r = view_df.iloc[i]
+        return (f'{fmt_adj_id(r.get("DIMENSION_ADJ_ID"))} · {r.get("PROCESS_TYPE")} · '
+                f'{r.get("ADJUSTMENT_TYPE")} · {r.get("RUN_STATUS")} · '
+                f'{r.get("ENTITY_CODE") or "—"}')
+    choice = st.selectbox(
+        "Open an adjustment", options=[None] + list(range(len(view_df))),
+        format_func=_opt_label, key="adj_pick", label_visibility="collapsed")
+    selected = view_df.iloc[choice].to_dict() if choice is not None else None
 
 if selected is not None:
     st.markdown("---")

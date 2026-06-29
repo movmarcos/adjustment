@@ -93,3 +93,22 @@ def test_deleted_nan_is_not_deleted():
 def test_deleted_none_is_not_deleted():
     df = build_activity_grid_df(pd.DataFrame([_row(IS_DELETED=None, USERNAME="x", CREATED_DATE=pd.NaT)]))
     assert df.iloc[0]["Deleted"] == ""
+
+
+class _FakeST:
+    def __init__(self, version):
+        self.__version__ = version
+
+
+def test_supports_df_selection_version_gate():
+    from utils.styles import _supports_df_selection
+    assert _supports_df_selection(_FakeST("1.35.0")) is True
+    assert _supports_df_selection(_FakeST("1.40.2")) is True
+    assert _supports_df_selection(_FakeST("2.0.0")) is True
+    assert _supports_df_selection(_FakeST("1.22.0")) is False   # no native selection
+    assert _supports_df_selection(_FakeST("1.18.1")) is False
+
+
+def test_supports_df_selection_bad_version_is_false():
+    from utils.styles import _supports_df_selection
+    assert _supports_df_selection(_FakeST("not-a-version")) is False
