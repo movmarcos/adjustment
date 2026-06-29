@@ -1157,6 +1157,111 @@ def render_lifecycle_bar(track_row: dict):
         unsafe_allow_html=True)
 
 
+# ── Activity grid (shared by Home + Adjustments) ──────────────────────────────
+
+# Canonical display columns, in order. Both grids render exactly these.
+ACTIVITY_GRID_COLS = [
+    "Adj ID", "COB", "Source COB", "Scope", "Type", "Status", "Deleted",
+    "Entity", "Dept", "Book", "Measure", "Simulation", "VaR Comp", "User",
+    "Records", "Created", "Started", "Ended", "Processing Time",
+]
+
+STATUS_STYLE = {
+    "Processed":        f"color:{P['success']};font-weight:600",
+    "Failed":           f"color:{P['danger']};font-weight:600",
+    "Running":          f"color:{P['info']};font-weight:600",
+    "Pending":          f"color:{P['warning']};font-weight:600",
+    "Approved":         "color:#00897B;font-weight:600",
+    "Pending Approval": f"color:{P['info']};font-weight:600",
+}
+
+
+def _fmt_duration(seconds):
+    """Human-readable duration from a seconds count (e.g. 65 -> '1m 5s')."""
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return "—"
+    if s < 0:
+        return "—"
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60}s"
+    return f"{s // 3600}h {(s % 3600) // 60}m"
+
+
+def _grid_int_str(v, commas=False):
+    try:
+        if v is None or v != v:          # None or NaN
+            return "—"
+        return f"{int(v):,}" if commas else str(int(v))
+    except (ValueError, TypeError):
+        return "—"
+
+
+def build_activity_grid_df(df_source):
+    """Build the canonical 19-column display frame from a raw ADJ_HEADER-style
+    (or VW_MY_WORK) frame. Every cell is a display string. Pure pandas — no
+    Streamlit. Empty input returns an empty frame with the canonical columns."""
+    import pandas as pd
+
+    if df_source is None or df_source.empty:
+        return pd.DataFrame(columns=ACTIVITY_GRID_COLS)
+
+    df = df_source.reset_index(drop=True)
+    n = len(df)
+
+    def col(name, default=None):
+        return df[name] if name in df.columns else pd.Series([default] * n)
+
+    def pick(primary, alt):
+        if primary in df.columns:
+            return df[primary]
+        if alt in df.columns:
+            return df[alt]
+        return pd.Series([None] * n)
+
+    def fmt_dt(series):
+        return pd.to_datetime(series, errors="coerce").dt.strftime("%d %b %Y %H:%M").fillna("—")
+
+    start = pd.to_datetime(col("START_DATE"), errors="coerce")
+    end = pd.to_datetime(col("PROCESS_DATE"), errors="coerce")
+    dur_secs = (end - start).dt.total_seconds()
+
+    out = pd.DataFrame({
+        "Adj ID":          col("DIMENSION_ADJ_ID").apply(fmt_adj_id),
+        "COB":             col("COBID").apply(_grid_int_str),
+        "Source COB":      col("SOURCE_COBID").apply(_grid_int_str),
+        "Scope":           col("PROCESS_TYPE").fillna("—").astype(str),
+        "Type":            col("ADJUSTMENT_TYPE").fillna("—").astype(str),
+        "Status":          col("RUN_STATUS").fillna("—").astype(str),
+        "Deleted":         col("IS_DELETED").apply(lambda v: "Deleted" if bool(v) else ""),
+        "Entity":          col("ENTITY_CODE").fillna("—").astype(str),
+        "Dept":            col("DEPARTMENT_CODE").fillna("—").astype(str),
+        "Book":            col("BOOK_CODE").fillna("—").astype(str),
+        "Measure":         col("MEASURE_TYPE_CODE").fillna("—").astype(str),
+        "Simulation":      col("SIMULATION_NAME").fillna("—").astype(str),
+        "VaR Comp":        col("VAR_COMPONENT_ID").fillna("—").astype(str),
+        "User":            pick("USERNAME", "SUBMITTED_BY").fillna("—").astype(str),
+        "Records":         col("RECORD_COUNT").apply(lambda v: _grid_int_str(v, commas=True)),
+        "Created":         fmt_dt(pick("CREATED_DATE", "SUBMITTED_AT")),
+        "Started":         fmt_dt(col("START_DATE")),
+        "Ended":           fmt_dt(col("PROCESS_DATE")),
+        "Processing Time": dur_secs.apply(lambda v: _fmt_duration(v) if v == v else "—"),
+    })
+    return out[ACTIVITY_GRID_COLS]
+
+
+def resolve_selected_adjustment(df_source, selection_rows):
+    """Map a positional row selection back to the original source row dict.
+    Returns None when nothing is selected."""
+    if not selection_rows:
+        return None
+    idx = selection_rows[0]
+    return df_source.reset_index(drop=True).iloc[idx].to_dict()
+
+
 def render_sidebar():
     """Render the branded sidebar: MUFG logo, compact nav, user at bottom."""
     from utils.snowflake_conn import current_user_name
