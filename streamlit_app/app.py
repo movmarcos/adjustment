@@ -17,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from utils.styles import inject_css, render_sidebar, section_title, P, SCOPE_CONFIG, fmt_adj_id, icon
+from utils.styles import inject_css, render_sidebar, section_title, P, SCOPE_CONFIG, fmt_adj_id, icon, render_activity_grid
 from utils.snowflake_conn import run_query_df, current_user_name
 
 inject_css()
@@ -485,75 +485,20 @@ st.markdown("<br/>", unsafe_allow_html=True)
 section_title("Recent Activity", "clock")
 
 
-def _fmt_duration(seconds):
-    """Format a number of seconds as a human-readable string."""
-    try:
-        s = int(seconds)
-    except (TypeError, ValueError):
-        return "—"
-    if s < 0:
-        return "—"
-    if s < 60:
-        return f"{s}s"
-    if s < 3600:
-        return f"{s // 60}m {s % 60}s"
-    return f"{s // 3600}h {(s % 3600) // 60}m"
-
-
 try:
     # Query ADJ_HEADER directly — avoids VW_RECENT_ACTIVITY's cross-table JOIN
     # which can fail if ADJ_STATUS_HISTORY.ADJ_ID type differs from ADJ_HEADER.ADJ_ID.
     df_activity = run_query_df("""
         SELECT
-            DIMENSION_ADJ_ID                                            AS "Adj ID",
-            COBID                                                       AS "COB",
-            SOURCE_COBID                                                AS "Source COB",
-            PROCESS_TYPE                                                AS "Scope",
-            ADJUSTMENT_TYPE                                             AS "Type",
-            RUN_STATUS                                                  AS "Status",
-            IFF(IS_DELETED, 'Deleted', '')                          AS "Deleted",
-            ENTITY_CODE                                                 AS "Entity",
-            DEPARTMENT_CODE                                             AS "Dept",
-            BOOK_CODE                                                   AS "Book",
-            MEASURE_TYPE_CODE                                           AS "Measure",
-            SIMULATION_NAME                                             AS "Simulation",
-            VAR_COMPONENT_ID                                            AS "VaR Comp",
-            USERNAME                                                    AS "User",
-            RECORD_COUNT                                                AS "Records",
-            CREATED_DATE                                                AS "Created",
-            START_DATE                                                  AS "Started",
-            PROCESS_DATE                                                AS "Ended",
-            DATEDIFF('second', START_DATE, PROCESS_DATE)                AS DURATION_SECONDS
+            DIMENSION_ADJ_ID, COBID, SOURCE_COBID, PROCESS_TYPE, ADJUSTMENT_TYPE,
+            RUN_STATUS, IS_DELETED, ENTITY_CODE, DEPARTMENT_CODE, BOOK_CODE,
+            MEASURE_TYPE_CODE, SIMULATION_NAME, VAR_COMPONENT_ID, USERNAME,
+            RECORD_COUNT, CREATED_DATE, START_DATE, PROCESS_DATE
         FROM ADJUSTMENT_APP.ADJ_HEADER
         ORDER BY CREATED_DATE DESC
         LIMIT 50
     """)
-
-    if not df_activity.empty:
-        df_activity["Adj ID"] = df_activity["Adj ID"].apply(fmt_adj_id)
-        # Processing time = Started → Ended (engine run only). Distinct from the
-        # Adjustment Pipeline page's "Total Duration", which is the end-to-end
-        # lifecycle (submitted → Power BI reports ready).
-        df_activity["Processing Time"] = df_activity["DURATION_SECONDS"].apply(
-            lambda v: _fmt_duration(v) if pd.notna(v) else "—"
-        )
-        df_activity = df_activity.drop(columns=["DURATION_SECONDS"])
-
-        STATUS_STYLE = {
-            "Processed":        f"color:{P['success']};font-weight:600",
-            "Failed":           f"color:{P['danger']};font-weight:600",
-            "Running":          f"color:{P['info']};font-weight:600",
-            "Pending":          f"color:{P['warning']};font-weight:600",
-            "Approved":         "color:#00897B;font-weight:600",
-            "Pending Approval": f"color:{P['info']};font-weight:600",
-        }
-        st.dataframe(
-            df_activity.style.map(lambda v: STATUS_STYLE.get(v, ""), subset=["Status"])
-                             .hide(axis="index"),
-            use_container_width=True,
-            height=380,
-        )
-    else:
-        st.info("No adjustments yet.")
+    render_activity_grid(df_activity, selectable=False,
+                         empty_msg="No adjustments yet.")
 except Exception as e:
     st.warning(f"Could not load recent activity: {e}")
