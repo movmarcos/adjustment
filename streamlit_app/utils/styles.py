@@ -1262,6 +1262,38 @@ def resolve_selected_adjustment(df_source, selection_rows):
     return df_source.reset_index(drop=True).iloc[idx].to_dict()
 
 
+def render_activity_grid(df_source, *, selectable=False, key=None,
+                         height=380, empty_msg="No adjustments yet."):
+    """Render the shared 19-column activity grid. Display-only by default;
+    when selectable=True, a single-row click returns that adjustment as a dict
+    (else None). Uses native st.dataframe selection (Streamlit >= 1.35)."""
+    import streamlit as st
+
+    if df_source is None or df_source.empty:
+        st.info(empty_msg)
+        return None
+
+    grid_df = build_activity_grid_df(df_source)
+    styler = (grid_df.style
+              .map(lambda v: STATUS_STYLE.get(v, ""), subset=["Status"])
+              .hide(axis="index"))
+
+    if not selectable:
+        st.dataframe(styler, use_container_width=True, height=height)
+        return None
+
+    event = st.dataframe(
+        styler, use_container_width=True, height=height,
+        on_select="rerun", selection_mode="single-row", key=key,
+    )
+    rows = []
+    try:
+        rows = event.selection.rows           # Streamlit >= 1.35 selection payload
+    except AttributeError:
+        rows = (event or {}).get("selection", {}).get("rows", [])
+    return resolve_selected_adjustment(df_source, rows)
+
+
 def render_sidebar():
     """Render the branded sidebar: MUFG logo, compact nav, user at bottom."""
     from utils.snowflake_conn import current_user_name
