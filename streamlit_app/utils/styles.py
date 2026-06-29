@@ -1236,7 +1236,7 @@ def build_activity_grid_df(df_source):
         "Scope":           col("PROCESS_TYPE").fillna("—").astype(str),
         "Type":            col("ADJUSTMENT_TYPE").fillna("—").astype(str),
         "Status":          col("RUN_STATUS").fillna("—").astype(str),
-        "Deleted":         col("IS_DELETED").apply(lambda v: "Deleted" if bool(v) else ""),
+        "Deleted":         col("IS_DELETED").apply(lambda v: "Deleted" if (v is not None and v == v and bool(v)) else ""),
         "Entity":          col("ENTITY_CODE").fillna("—").astype(str),
         "Dept":            col("DEPARTMENT_CODE").fillna("—").astype(str),
         "Book":            col("BOOK_CODE").fillna("—").astype(str),

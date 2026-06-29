@@ -82,3 +82,14 @@ def test_resolve_selected_adjustment_maps_back_to_source_row():
 def test_resolve_selected_adjustment_empty_returns_none():
     src = pd.DataFrame([_row()])
     assert resolve_selected_adjustment(src, []) is None
+
+
+def test_deleted_nan_is_not_deleted():
+    # A NaN IS_DELETED must render as "" (not "Deleted") — matches the page
+    # filter which treats null as not-deleted.
+    df = build_activity_grid_df(pd.DataFrame([_row(IS_DELETED=float("nan"), USERNAME="x", CREATED_DATE=pd.NaT)]))
+    assert df.iloc[0]["Deleted"] == ""
+
+def test_deleted_none_is_not_deleted():
+    df = build_activity_grid_df(pd.DataFrame([_row(IS_DELETED=None, USERNAME="x", CREATED_DATE=pd.NaT)]))
+    assert df.iloc[0]["Deleted"] == ""
