@@ -14,7 +14,7 @@ from utils.styles import (
     inject_css, render_sidebar, render_filter_chips, render_status_timeline,
     render_lifecycle_bar,
     status_badge, section_title, P, SCOPE_CONFIG, STATUS_COLORS, STATUS_ICONS,
-    fmt_adj_id, icon,
+    fmt_adj_id, icon, render_activity_grid,
 )
 from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
 
@@ -104,31 +104,6 @@ except Exception:
 
 # Backwards compat alias
 df_report_status = df_track
-
-# ──────────────────────────────────────────────────────────────────────────────
-# STATUS TABS
-# ──────────────────────────────────────────────────────────────────────────────
-
-tab_labels = {
-    "Pending":            ["Pending"],
-    "Pending Approval":   ["Pending Approval"],
-    "Approved":           ["Approved"],
-    "Processed":          ["Processed"],
-    "Errors / Rejected":  ["Failed", "Rejected", "Rejected - SignedOff"],
-    "Deleted":            None,   # None = filter by IS_DELETED, not by status
-}
-
-def _tab_df(label, statuses):
-    if df_adjs.empty:
-        return pd.DataFrame()
-    is_del = df_adjs["IS_DELETED"].fillna(False).astype(bool)
-    if statuses is None:                          # Deleted tab
-        return df_adjs[is_del]
-    return df_adjs[df_adjs["RUN_STATUS"].isin(statuses) & ~is_del]
-
-counts    = {lbl: len(_tab_df(lbl, st)) for lbl, st in tab_labels.items()}
-tab_names = [f"{lbl} ({counts[lbl]})" for lbl in tab_labels]
-tabs      = st.tabs(tab_names)
 
 
 def render_adj_card(row, expanded=False):
@@ -405,78 +380,32 @@ def render_adj_card(row, expanded=False):
                         st.error(str(ex))
 
 
-# ── Render tabs ────────────────────────────────────────────────────────────────
+# ── Browse + act ───────────────────────────────────────────────────────────────
 
-for tab, (label, statuses) in zip(tabs, tab_labels.items()):
-    with tab:
-        tab_adjs = _tab_df(label, statuses)
+show_deleted = st.toggle(
+    "Show deleted", value=False,
+    help="Include deleted adjustments. Hidden by default.")
 
-        if tab_adjs.empty:
-            st.markdown(
-                f'<div class="mcard" style="text-align:center;padding:2.5rem;color:{P["grey_700"]}">'
-                f'<div>{icon("inbox", size=28, color=P["grey_400"], valign="0")}</div>'
-                f'<div style="font-size:0.9rem;margin-top:0.5rem">No adjustments in this category</div>'
-                f'</div>',
-                unsafe_allow_html=True)
-            continue
+if df_adjs.empty:
+    view_df = df_adjs
+else:
+    is_del = df_adjs["IS_DELETED"].fillna(False).astype(bool)
+    view_df = df_adjs if show_deleted else df_adjs[~is_del]
 
-        # Quick summary row by scope
-        scopes_in_tab = tab_adjs["PROCESS_TYPE"].unique()
-        summary_html = '<div style="display:flex;gap:16px;margin-bottom:1rem;flex-wrap:wrap">'
-        for scope_key in scopes_in_tab:
-            cnt = int(tab_adjs[tab_adjs["PROCESS_TYPE"] == scope_key].shape[0])
-            cfg = SCOPE_CONFIG.get(scope_key, {})
-            summary_html += (
-                f'<div style="background:{cfg.get("bg", P["grey_100"])};border-radius:6px;'
-                f'padding:4px 10px;font-size:0.78rem;font-weight:600;color:{cfg.get("color", P["grey_700"])}">'
-                f'{icon(cfg.get("icon", ""), size=12)} {cfg.get("label", scope_key)} · {cnt}</div>')
-        summary_html += '</div>'
-        st.markdown(summary_html, unsafe_allow_html=True)
+view_df = view_df.reset_index(drop=True)
 
-        # ── Grid: one row per adjustment (scannable) ─────────────────────────
-        # Pre-format every column as display strings so this works on the SiS
-        # Streamlit runtime (no st.column_config / no native row-selection).
-        tab_adjs = tab_adjs.reset_index(drop=True)
+total = len(df_adjs)
+shown = len(view_df)
+st.markdown(
+    f"<span style='color:{P['grey_700']};font-size:0.82rem'>"
+    f"Showing {shown} of {total} adjustments. Click a row to view details and actions."
+    f"</span>",
+    unsafe_allow_html=True)
 
-        def _int_str(v, commas=False):
-            try:
-                if v is None or v != v:
-                    return "—"
-                return f"{int(v):,}" if commas else str(int(v))
-            except (ValueError, TypeError):
-                return "—"
+selected = render_activity_grid(
+    view_df, selectable=True, key="adj_grid",
+    empty_msg="No adjustments match the current filter.")
 
-        def _col(name):
-            return tab_adjs[name] if name in tab_adjs.columns else pd.Series([None] * len(tab_adjs))
-
-        grid_df = pd.DataFrame({
-            "Adj ID":     _col("DIMENSION_ADJ_ID").apply(fmt_adj_id),
-            "Scope":      _col("PROCESS_TYPE").astype(str),
-            "Type":       _col("ADJUSTMENT_TYPE").astype(str),
-            "Status":     _col("RUN_STATUS").astype(str),
-            "Entity":     _col("ENTITY_CODE").fillna("—").astype(str),
-            "Book":       _col("BOOK_CODE").fillna("—").astype(str),
-            "Records":    _col("RECORD_COUNT").apply(lambda v: _int_str(v, commas=True)),
-            "Target COB": _col("COBID").apply(_int_str),
-            "Source COB": _col("SOURCE_COBID").apply(_int_str),
-            "Created by": _col("SUBMITTED_BY").fillna("—").astype(str),
-            "Created":    pd.to_datetime(_col("SUBMITTED_AT"), errors="coerce")
-                            .dt.strftime("%d %b %Y %H:%M").fillna("—"),
-        })
-        st.dataframe(grid_df.style.hide(axis="index"), use_container_width=True)
-
-        # ── Pick a row for its detail + actions (selectbox = version-safe) ───
-        def _opt_label(i):
-            if i is None:
-                return "— select an adjustment to view detail / actions —"
-            r = tab_adjs.iloc[i]
-            return (f'{fmt_adj_id(r.get("DIMENSION_ADJ_ID"))} · {r.get("PROCESS_TYPE")} · '
-                    f'{r.get("ADJUSTMENT_TYPE")} · {r.get("RUN_STATUS")} · '
-                    f'{r.get("ENTITY_CODE") or "—"}')
-
-        choice = st.selectbox(
-            "Open an adjustment", options=[None] + list(range(len(tab_adjs))),
-            format_func=_opt_label, key=f"sel_{label}", label_visibility="collapsed")
-        if choice is not None:
-            st.markdown("---")
-            render_adj_card(tab_adjs.iloc[choice].to_dict(), expanded=True)
+if selected is not None:
+    st.markdown("---")
+    render_adj_card(selected, expanded=True)
