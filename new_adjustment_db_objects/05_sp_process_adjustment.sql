@@ -284,16 +284,58 @@ def surrogate_key(list_key, key_name):
     return f"MD5(CAST({joined} AS TEXT)) AS {key_name}"
 
 
-def _erlog(session, log_rows, step, sql_text):
-    """Run one EntityRoll statement, capturing its wall-clock duration, Snowflake
-    QUERY_ID, and rows affected into `log_rows` (in-memory; flushed later by
-    _flush_erol_log). Pure pass-through: runs the exact SQL and returns its
-    result rows, so callers that read a count still work. Never raises on the
-    instrumentation itself."""
+def _erl_s(v):
+    """SQL string literal (quote-escaped) or NULL."""
+    return "NULL" if v is None else "'" + str(v).replace("'", "''") + "'"
+
+
+def _erl_n(v):
+    """SQL numeric literal or NULL."""
+    try:
+        return str(int(v))
+    except (TypeError, ValueError):
+        return "NULL"
+
+
+def _erlog(session, ctx, step, sql_text):
+    """Run one EntityRoll statement with REAL-TIME logging to EROL_PROCESS_LOG.
+
+    A 'RUNNING' row is written (and committed, when outside the wipe/insert
+    transaction) BEFORE the statement starts, so a slow or stuck step is visible
+    from another session WHILE it runs. After the statement finishes the row is
+    updated to 'DONE' with its wall-clock duration, rows affected, and Snowflake
+    QUERY_ID. Pure pass-through: runs the exact SQL and returns its result rows.
+
+    NOTE: the wipe DELETE and the flatten/roll INSERTs run inside an explicit
+    transaction, so their rows only become visible at COMMIT. The heavy staging
+    reads (stage_roll / stage_flatten) and the summary rebuild run OUTSIDE it, so
+    those are live — which is where a slow roll almost always spends its time."""
     import time, re
+    ctx["seq"] += 1
+    seq = ctx["seq"]
+    rl  = _erl_n(ctx["run_log_id"])
+
+    # 1) RUNNING marker BEFORE the (possibly slow / stuck) statement.
+    try:
+        sql_lit = "$erlog$" + (sql_text or "").replace("$erlog$", "") + "$erlog$"
+        session.sql(
+            "INSERT INTO ADJUSTMENT_APP.EROL_PROCESS_LOG "
+            "(RUN_LOG_ID, PROCESS_TYPE, COBID, SOURCE_COBID, ENTITY_CODE, "
+            "ADJUSTMENT_ID, STEP_SEQ, STEP_NAME, STATUS, STARTED_AT, SQL_TEXT) "
+            f"SELECT {rl}, {_erl_s(ctx['pt'])}, {_erl_n(ctx['cobid'])}, "
+            f"{_erl_n(ctx['source_cobid'])}, {_erl_s(ctx['entity'])}, "
+            f"{_erl_n(ctx['adj_id'])}, {seq}, {_erl_s(step)}, 'RUNNING', "
+            f"CURRENT_TIMESTAMP(), {sql_lit}"
+        ).collect()
+    except Exception as _le:
+        print(f"EROL log (start) failed (non-fatal): {_le}")
+
+    # 2) the real statement
     t0 = time.time()
-    res = session.sql(sql_text).collect()          # the real statement
+    res = session.sql(sql_text).collect()
     dur = round(time.time() - t0, 2)
+
+    # 3) capture query id + rows, mark DONE
     qid = None
     try:
         qid = session.sql("SELECT LAST_QUERY_ID()").collect()[0][0]
@@ -303,48 +345,36 @@ def _erlog(session, log_rows, step, sql_text):
     try:
         # DML returns a single "number of rows ..." cell; CREATE TABLE AS returns
         # a status string (no count) → rows stays NULL (the matching INSERT step
-        # carries the count). Parse a leading integer when present.
+        # carries the count).
         if res and res[0] is not None and len(res[0]) == 1:
             m = re.search(r'-?\d[\d,]*', str(res[0][0]))
             if m:
                 rows = int(m.group(0).replace(',', ''))
     except Exception:
         rows = None
-    log_rows.append({"seq": len(log_rows) + 1, "step": step,
-                     "qid": qid, "rows": rows, "dur": dur, "sql": sql_text})
+    try:
+        session.sql(
+            "UPDATE ADJUSTMENT_APP.EROL_PROCESS_LOG SET STATUS = 'DONE', "
+            f"ENDED_AT = CURRENT_TIMESTAMP(), DURATION_SEC = {dur}, "
+            f"ROWS_AFFECTED = {_erl_n(rows)}, QUERY_ID = {_erl_s(qid)} "
+            f"WHERE RUN_LOG_ID = {rl} AND STEP_SEQ = {seq}"
+        ).collect()
+    except Exception as _le:
+        print(f"EROL log (end) failed (non-fatal): {_le}")
     return res
 
 
-def _flush_erol_log(session, log_rows, run_log_id, process_type, cobid,
-                    source_cobid, entity_code, adjustment_id):
-    """Persist accumulated EntityRoll step diagnostics to EROL_PROCESS_LOG in one
-    INSERT. Best-effort: a logging failure must never affect the roll result."""
-    if not log_rows:
-        return
+def _erol_mark_failed(session, ctx):
+    """On error, flip any still-'RUNNING' steps for this run to 'FAILED' so the
+    log shows where it stopped. Best-effort; only affects committed rows."""
     try:
-        def _n(v):
-            try:
-                return str(int(v))
-            except (TypeError, ValueError):
-                return "NULL"
-        def _s(v):
-            return "NULL" if v is None else "'" + str(v).replace("'", "''") + "'"
-        rows_sql = []
-        for r in log_rows:
-            sql_lit = "$erlog$" + (r["sql"] or "").replace("$erlog$", "") + "$erlog$"
-            rows_sql.append(
-                f"({_n(run_log_id)}, {_s(process_type)}, {_n(cobid)}, "
-                f"{_n(source_cobid)}, {_s(entity_code)}, {_n(adjustment_id)}, "
-                f"{_n(r['seq'])}, {_s(r['step'])}, {_s(r['qid'])}, "
-                f"{_n(r['rows'])}, {r['dur']}, {sql_lit})")
         session.sql(
-            "INSERT INTO ADJUSTMENT_APP.EROL_PROCESS_LOG "
-            "(RUN_LOG_ID, PROCESS_TYPE, COBID, SOURCE_COBID, ENTITY_CODE, "
-            "ADJUSTMENT_ID, STEP_SEQ, STEP_NAME, QUERY_ID, ROWS_AFFECTED, "
-            "DURATION_SEC, SQL_TEXT) VALUES " + ", ".join(rows_sql)).collect()
-        print(f"EROL_PROCESS_LOG: wrote {len(log_rows)} step row(s).")
-    except Exception as _fe:
-        print(f"EROL_PROCESS_LOG flush failed (non-fatal): {_fe}")
+            "UPDATE ADJUSTMENT_APP.EROL_PROCESS_LOG "
+            "SET STATUS = 'FAILED', ENDED_AT = CURRENT_TIMESTAMP() "
+            f"WHERE RUN_LOG_ID = {_erl_n(ctx['run_log_id'])} AND STATUS = 'RUNNING'"
+        ).collect()
+    except Exception:
+        pass
 
 
 def main(session, process_type, adjustment_action, cobid):
@@ -1183,11 +1213,6 @@ def main(session, process_type, adjustment_action, cobid):
         # ═════════════════════════════════════════════════════════════════
         elif adjustment_action.lower() == 'entityroll':
 
-            # Per-statement diagnostics accumulator (flushed to EROL_PROCESS_LOG
-            # at the end, and in the error handler so a slow/timed-out roll still
-            # records which steps completed). See _erlog / _flush_erol_log.
-            _erol_log = []
-
             df_adj_er = df_adj.filter(
                 (col('ADJUSTMENT_ACTION') == 'EntityRoll') &
                 (col('IS_POSITIVE_ADJUSTMENT') == True)
@@ -1287,6 +1312,13 @@ def main(session, process_type, adjustment_action, cobid):
             if new_dim_adj_id is None:
                 raise Exception("EntityRoll: DIMENSION.ADJUSTMENT insert returned no "
                                 "ADJUSTMENT_ID; aborting before any write.")
+
+            # Real-time diagnostics context for _erlog (every heavy step below logs
+            # a RUNNING row before it starts and DONE after). All identifiers are
+            # known by here and unchanged for the rest of the roll.
+            _erctx = {"run_log_id": run_log_id, "pt": process_type, "cobid": cobid,
+                      "source_cobid": source_cobid, "entity": entity_code,
+                      "adj_id": new_dim_adj_id, "seq": 0}
 
             # ── Per-leg metric selects: flatten = ×−1, copy = as-is ────────
             er_neg = ', '.join(f"fact.{m} * -1 AS {m}" for m in er_metrics)
@@ -1395,7 +1427,7 @@ def main(session, process_type, adjustment_action, cobid):
             WHERE fact.COBID = {int(source_cobid)} AND {er_pred}
               AND fact.{er_metric_usd} IS NOT NULL AND fact.{er_metric_usd} <> 0
             """
-            _erlog(session, _erol_log, "stage_roll (combined view @ source)",
+            _erlog(session, _erctx, "stage_roll (combined view @ source)",
                    f"CREATE OR REPLACE TEMPORARY TABLE EROL_ROLL_STAGE AS {er_roll_select}")
             er_roll_insert = (f"INSERT INTO {fact_adj_tbl_name} ({ins_cols}) "
                               f"SELECT * FROM EROL_ROLL_STAGE")
@@ -1409,7 +1441,7 @@ def main(session, process_type, adjustment_action, cobid):
                 WHERE fact.COBID = {int(cobid)} AND {_flat_pred}
                   AND fact.{er_metric_usd} IS NOT NULL AND fact.{er_metric_usd} <> 0
                 """
-                _erlog(session, _erol_log, "stage_flatten (base @ target)",
+                _erlog(session, _erctx, "stage_flatten (base @ target)",
                        f"CREATE OR REPLACE TEMPORARY TABLE EROL_FLAT_STAGE AS {er_flat_select}")
                 er_flatten_insert = (f"INSERT INTO {fact_adj_tbl_name} ({ins_cols}) "
                                      f"SELECT * FROM EROL_FLAT_STAGE")
@@ -1441,15 +1473,15 @@ def main(session, process_type, adjustment_action, cobid):
                 """).collect()
                 # Wipe every entity row at the target COB (one direct predicate),
                 # then roll. Capture the rows-deleted count Snowflake returns.
-                _del = _erlog(session, _erol_log, "wipe_delete (target COB+entity)", f"""
+                _del = _erlog(session, _erctx, "wipe_delete (target COB+entity)", f"""
                     DELETE FROM {fact_adj_tbl_name}
                     WHERE COBID = {int(cobid)} AND {er_adj_ent_pred}
                 """)
                 rows_wiped = int(_del[0][0]) if _del and _del[0] is not None else 0
                 if do_flatten:
-                    _erlog(session, _erol_log, "flatten_insert (leg ① negate base)",
+                    _erlog(session, _erctx, "flatten_insert (leg ① negate base)",
                            er_flatten_insert)                  # leg ① negate base
-                _erlog(session, _erol_log, "roll_insert (leg ② copy source)",
+                _erlog(session, _erctx, "roll_insert (leg ② copy source)",
                        er_roll_insert)                         # leg ② copy source
                 session.sql("COMMIT").collect()
             except Exception:
@@ -1497,10 +1529,10 @@ def main(session, process_type, adjustment_action, cobid):
                 _sum_pred = _entity_where(fact_adj_summary_cols)   # summary side
                 _adj_pred = _entity_where(fact_adj_cols)           # adjustment side
                 if _sum_pred and _adj_pred:
-                    _erlog(session, _erol_log, "summary_delete (entity slice)",
+                    _erlog(session, _erctx, "summary_delete (entity slice)",
                            f"DELETE FROM {fact_adj_summary_name} "
                            f"WHERE COBID = {int(cobid)} AND {_sum_pred}")
-                    _erlog(session, _erol_log, "summary_insert (entity slice)", f"""
+                    _erlog(session, _erctx, "summary_insert (entity slice)", f"""
                         INSERT INTO {fact_adj_summary_name}
                         ({summary_non_metric}, {er_metric_cols})
                         SELECT {summary_non_metric}, {er_metric_sums}
@@ -1511,10 +1543,10 @@ def main(session, process_type, adjustment_action, cobid):
                 else:
                     # Last resort (a table has no entity column): whole-COB rebuild.
                     print("EntityRoll: summary rebuilt whole-COB (no entity column) — slow")
-                    _erlog(session, _erol_log, "summary_delete (whole COB)",
+                    _erlog(session, _erctx, "summary_delete (whole COB)",
                            f"DELETE FROM {fact_adj_summary_name} "
                            f"WHERE COBID = {int(cobid)}")
-                    _erlog(session, _erol_log, "summary_insert (whole COB)", f"""
+                    _erlog(session, _erctx, "summary_insert (whole COB)", f"""
                         INSERT INTO {fact_adj_summary_name}
                         ({summary_non_metric}, {er_metric_cols})
                         SELECT {summary_non_metric}, {er_metric_sums}
@@ -1562,10 +1594,6 @@ def main(session, process_type, adjustment_action, cobid):
                 print(f"Warning: Run log close failed: {rl_err}")
             trigger_powerbi_refresh(session, process_type, run_log_id)
 
-            # Persist this roll's per-statement timing/rows to EROL_PROCESS_LOG.
-            _flush_erol_log(session, _erol_log, run_log_id, process_type, cobid,
-                            source_cobid, entity_code, new_dim_adj_id)
-
         else:
             result["message"] = f"Invalid adjustment_action: {adjustment_action}"
 
@@ -1574,13 +1602,10 @@ def main(session, process_type, adjustment_action, cobid):
         print(f"Error: {error_msg}")
         result["message"] = f"Error: {error_msg}"
 
-        # Even on failure, persist whatever Entity Roll steps completed so the
-        # slow/failing step is visible in EROL_PROCESS_LOG.
-        if adjustment_action.lower() == 'entityroll' and '_erol_log' in dir():
-            _flush_erol_log(
-                session, _erol_log, locals().get('run_log_id'), process_type,
-                cobid, locals().get('source_cobid'), locals().get('entity_code'),
-                locals().get('new_dim_adj_id'))
+        # On failure, flip the still-RUNNING step to FAILED so the log pinpoints
+        # where the roll stopped (its RUNNING row was already committed live).
+        if adjustment_action.lower() == 'entityroll' and '_erctx' in dir():
+            _erol_mark_failed(session, _erctx)
 
         # Try to mark as Failed
         try:

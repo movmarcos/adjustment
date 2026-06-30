@@ -474,6 +474,41 @@ LEFT JOIN ADJUSTMENT_APP.VW_REPORT_REFRESH_STATUS r ON r.ADJ_ID = h.ADJ_ID;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- VW_EROL_PROCESS_LOG — readable report over EROL_PROCESS_LOG
+-- One row per Entity Roll step. For a step still RUNNING, ELAPSED_SEC is the
+-- live seconds since it started (so a stuck step shows a growing number);
+-- PCT_OF_RUN is each step's share of its run's total time. Order newest first.
+--   SELECT * FROM ADJUSTMENT_APP.VW_EROL_PROCESS_LOG
+--   WHERE ENTITY_CODE = '<entity>' AND COBID = <target_cob>;
+-- ═══════════════════════════════════════════════════════════════════════════
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_EROL_PROCESS_LOG
+    COMMENT = 'Readable per-step report for Entity Roll runs; live ELAPSED_SEC for in-flight steps.'
+AS
+SELECT
+    RUN_LOG_ID,
+    PROCESS_TYPE,
+    COBID,
+    SOURCE_COBID,
+    ENTITY_CODE,
+    ADJUSTMENT_ID,
+    STEP_SEQ,
+    STEP_NAME,
+    STATUS,
+    STARTED_AT,
+    ENDED_AT,
+    CASE WHEN STATUS = 'RUNNING'
+         THEN DATEDIFF('second', STARTED_AT, CURRENT_TIMESTAMP())
+         ELSE DURATION_SEC END                               AS ELAPSED_SEC,
+    ROWS_AFFECTED,
+    ROUND(100 * COALESCE(DURATION_SEC, 0)
+          / NULLIF(SUM(COALESCE(DURATION_SEC, 0))
+                   OVER (PARTITION BY RUN_LOG_ID), 0), 1)     AS PCT_OF_RUN,
+    QUERY_ID,
+    SQL_TEXT
+FROM ADJUSTMENT_APP.EROL_PROCESS_LOG;
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- VERIFY
 -- ═══════════════════════════════════════════════════════════════════════════
 

@@ -490,15 +490,15 @@ ALTER TABLE ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
     DROP COLUMN IF EXISTS ADJUSTMENT_BASE_TABLE;
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- EROL_PROCESS_LOG — per-statement diagnostics for Entity Roll runs
--- Populated by SP_PROCESS_ADJUSTMENT's EntityRoll path: one row per heavy
--- statement with its wall-clock duration, rows affected, and Snowflake QUERY_ID
--- (join QUERY_ID to QUERY_HISTORY for partitions scanned / bytes spilled).
--- Written on success AND on failure, so a slow/timed-out roll still shows the
--- last step it reached. Append-only — query it to see where a slow VaR roll
--- spends its time:
---     SELECT * FROM ADJUSTMENT_APP.EROL_PROCESS_LOG
---     ORDER BY LOGGED_AT DESC, STEP_SEQ;
+-- EROL_PROCESS_LOG — REAL-TIME per-statement diagnostics for Entity Roll runs
+-- SP_PROCESS_ADJUSTMENT's EntityRoll path writes a 'RUNNING' row BEFORE each
+-- heavy statement and updates it to 'DONE' after — so while a slow step runs you
+-- can query this table from another session and see which step is in-flight and
+-- for how long. Each row carries wall-clock duration, rows affected, and the
+-- Snowflake QUERY_ID (join to QUERY_HISTORY for partitions scanned / spill).
+-- The wipe/flatten/roll INSERTs run inside a transaction (visible only at COMMIT);
+-- the heavy staging reads + summary rebuild are live. Append-only.
+--     SELECT * FROM ADJUSTMENT_APP.VW_EROL_PROCESS_LOG;   -- report view
 -- ═══════════════════════════════════════════════════════════════════════════
 CREATE OR ALTER TABLE ADJUSTMENT_APP.EROL_PROCESS_LOG (
     LOGGED_AT       TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
@@ -510,12 +510,15 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.EROL_PROCESS_LOG (
     ADJUSTMENT_ID   NUMBER(38,0),
     STEP_SEQ        NUMBER(38,0),
     STEP_NAME       VARCHAR,
+    STATUS          VARCHAR,            -- RUNNING | DONE | FAILED
+    STARTED_AT      TIMESTAMP_NTZ(9),
+    ENDED_AT        TIMESTAMP_NTZ(9),
     QUERY_ID        VARCHAR,
     ROWS_AFFECTED   NUMBER(38,0),
     DURATION_SEC    FLOAT,
     SQL_TEXT        VARCHAR
 )
-COMMENT = 'Per-statement timing/rows/query_id for Entity Roll runs (SP_PROCESS_ADJUSTMENT).';
+COMMENT = 'Real-time per-statement timing/rows/query_id for Entity Roll runs (SP_PROCESS_ADJUSTMENT).';
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
