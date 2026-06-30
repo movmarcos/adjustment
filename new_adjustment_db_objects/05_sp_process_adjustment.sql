@@ -1442,10 +1442,23 @@ def main(session, process_type, adjustment_action, cobid):
                 WHERE fact.COBID = {int(cobid)} AND {_flat_pred}
                   AND fact.{er_metric_usd} IS NOT NULL AND fact.{er_metric_usd} <> 0
                 """
-                _erlog(session, _erctx, "stage_flatten (base @ target)",
-                       f"CREATE OR REPLACE TEMPORARY TABLE EROL_FLAT_STAGE AS {er_flat_select}")
-                er_flatten_insert = (f"INSERT INTO {fact_adj_tbl_name} ({ins_cols}) "
-                                     f"SELECT * FROM EROL_FLAT_STAGE")
+                if _flat_from_base:
+                    # The flatten reads the BASE FACT_TABLE, which this proc never
+                    # writes — so it prunes fine even inside the transaction. Insert
+                    # it DIRECTLY and skip the temp materialization (a full extra
+                    # read+write pass over the entity's rows). The roll leg still
+                    # stages, because its combined view reads the ADJUSTMENTS_TABLE
+                    # the wipe modifies (an in-transaction read of that table after
+                    # the wipe would not prune).
+                    er_flatten_insert = (f"INSERT INTO {fact_adj_tbl_name} ({ins_cols}) "
+                                         f"{er_flat_select}")
+                else:
+                    # Fallback: flatten reads the combined/adjusted view, so it must
+                    # be staged outside the transaction to prune (same as the roll).
+                    _erlog(session, _erctx, "stage_flatten (adjusted view @ target)",
+                           f"CREATE OR REPLACE TEMPORARY TABLE EROL_FLAT_STAGE AS {er_flat_select}")
+                    er_flatten_insert = (f"INSERT INTO {fact_adj_tbl_name} ({ins_cols}) "
+                                         f"SELECT * FROM EROL_FLAT_STAGE")
 
             # ── Atomic wipe + insert (fast: temp-table inserts only) ──────
             session.sql("BEGIN").collect()
