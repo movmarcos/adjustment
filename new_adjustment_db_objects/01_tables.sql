@@ -490,6 +490,35 @@ ALTER TABLE ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
     DROP COLUMN IF EXISTS ADJUSTMENT_BASE_TABLE;
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- EROL_PROCESS_LOG — per-statement diagnostics for Entity Roll runs
+-- Populated by SP_PROCESS_ADJUSTMENT's EntityRoll path: one row per heavy
+-- statement with its wall-clock duration, rows affected, and Snowflake QUERY_ID
+-- (join QUERY_ID to QUERY_HISTORY for partitions scanned / bytes spilled).
+-- Written on success AND on failure, so a slow/timed-out roll still shows the
+-- last step it reached. Append-only — query it to see where a slow VaR roll
+-- spends its time:
+--     SELECT * FROM ADJUSTMENT_APP.EROL_PROCESS_LOG
+--     ORDER BY LOGGED_AT DESC, STEP_SEQ;
+-- ═══════════════════════════════════════════════════════════════════════════
+CREATE OR ALTER TABLE ADJUSTMENT_APP.EROL_PROCESS_LOG (
+    LOGGED_AT       TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
+    RUN_LOG_ID      NUMBER(38,0),
+    PROCESS_TYPE    VARCHAR,
+    COBID           NUMBER(38,0),
+    SOURCE_COBID    NUMBER(38,0),
+    ENTITY_CODE     VARCHAR,
+    ADJUSTMENT_ID   NUMBER(38,0),
+    STEP_SEQ        NUMBER(38,0),
+    STEP_NAME       VARCHAR,
+    QUERY_ID        VARCHAR,
+    ROWS_AFFECTED   NUMBER(38,0),
+    DURATION_SEC    FLOAT,
+    SQL_TEXT        VARCHAR
+)
+COMMENT = 'Per-statement timing/rows/query_id for Entity Roll runs (SP_PROCESS_ADJUSTMENT).';
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- 8. VERIFY
 -- ═══════════════════════════════════════════════════════════════════════════
 SELECT 'ADJ_HEADER' AS OBJECT, COUNT(*) AS ROW_COUNT FROM ADJUSTMENT_APP.ADJ_HEADER
