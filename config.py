@@ -15,7 +15,6 @@ DATABASE   = "DVLP_RAPTOR_NEWADJ"   # app database (deploy session + app + tests
 SCHEMA     = "ADJUSTMENT_APP"       # app schema (same name in every environment)
 WAREHOUSE  = "DVLP_RAVEN_WH_M"      # deploy session + Streamlit QUERY_WAREHOUSE
 DT_WH      = "DVLP_RAPTOR_WH_XS"    # dynamic-table refresh warehouse
-PROCESS_WH = "DVLP_RAVEN_WH_M"      # heavy-roll processing task (provisioned, not serverless)
 ROLE_OWNER = "DVLP_RAPTOR_OWNER"    # owning role (deploy + grants)
 ROLE_RO    = "DVLP_RAPTOR_RO"       # read-only role (grants)
 PROD_DB    = "PROD_RAPTOR"          # cross-DB validation compare target
@@ -30,7 +29,6 @@ _TOKENS = {
     "SCHEMA":     SCHEMA,
     "WAREHOUSE":  WAREHOUSE,
     "DT_WH":      DT_WH,
-    "PROCESS_WH": PROCESS_WH,
     "ROLE_OWNER": ROLE_OWNER,
     "ROLE_RO":    ROLE_RO,
     "PROD_DB":    PROD_DB,
