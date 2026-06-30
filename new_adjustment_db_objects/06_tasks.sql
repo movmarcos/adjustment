@@ -23,7 +23,7 @@ USE SCHEMA ADJUSTMENT_APP;
 -- ─── VaR ───────────────────────────────────────────────────────────────────
 
 CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_VAR
-    USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'LARGE'
+    USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'MEDIUM'
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible VaR adjustments.'
 AS
