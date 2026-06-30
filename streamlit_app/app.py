@@ -131,8 +131,8 @@ queued = int(kpis.get("PENDING", 0)) + int(kpis.get("APPROVED", 0))
 
 kpi_items = [
     ("Total",             int(kpis.get("TOTAL", 0)),           "All adjustments",      P["primary"],   "list"),
-    ("Queued",            queued,                               "Pending + Approved",   P["warning"],   "clock"),
     ("Awaiting Approval", int(kpis.get("PENDING_APPROVAL", 0)), "Need approval",        P["info"],      "clipboard"),
+    ("Queued",            queued,                               "Pending + Approved",   P["warning"],   "clock"),
     ("Running",           int(kpis.get("RUNNING", 0)),          "Processing now",       P["info"],      "zap"),
     ("Processed",         int(kpis.get("PROCESSED", 0)),        "In the data",          P["success"],   "check-circle"),
     ("Power BI",          pbi_pending,                           "Pending refreshes",    P["info"],      "line-chart"),
