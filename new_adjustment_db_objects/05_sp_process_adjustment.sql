@@ -316,8 +316,9 @@ def _erlog(session, ctx, step, sql_text):
     rl  = _erl_n(ctx["run_log_id"])
 
     # 1) RUNNING marker BEFORE the (possibly slow / stuck) statement.
+    #    SQL_TEXT is escaped with standard '' doubling (Snowflake has no custom
+    #    dollar-quote tags); multi-line text is fine inside a single-quoted string.
     try:
-        sql_lit = "$erlog$" + (sql_text or "").replace("$erlog$", "") + "$erlog$"
         session.sql(
             "INSERT INTO ADJUSTMENT_APP.EROL_PROCESS_LOG "
             "(RUN_LOG_ID, PROCESS_TYPE, COBID, SOURCE_COBID, ENTITY_CODE, "
@@ -325,7 +326,7 @@ def _erlog(session, ctx, step, sql_text):
             f"SELECT {rl}, {_erl_s(ctx['pt'])}, {_erl_n(ctx['cobid'])}, "
             f"{_erl_n(ctx['source_cobid'])}, {_erl_s(ctx['entity'])}, "
             f"{_erl_n(ctx['adj_id'])}, {seq}, {_erl_s(step)}, 'RUNNING', "
-            f"CURRENT_TIMESTAMP(), {sql_lit}"
+            f"CURRENT_TIMESTAMP(), {_erl_s(sql_text)}"
         ).collect()
     except Exception as _le:
         print(f"EROL log (start) failed (non-fatal): {_le}")
