@@ -21,9 +21,17 @@
 USE SCHEMA ADJUSTMENT_APP;
 
 -- ─── VaR ───────────────────────────────────────────────────────────────────
-
+-- VaR runs on a PROVISIONED warehouse ({{PROCESS_WH}}), not serverless. VaR fact
+-- rows are exploded per (position × scenario × subcomponent), so an Entity Roll
+-- moves billions of rows. Serverless task compute right-sizes from run history
+-- and was under-provisioning this irregular, heavy workload — the same roll that
+-- ran in minutes on a provisioned MEDIUM warehouse took ~1 hour on the serverless
+-- task. A provisioned warehouse gives the roll consistent, full compute.
+-- Trade-off: the every-minute poll keeps this warehouse warm (serverless only
+-- billed sub-second empty runs); use a warehouse with a short AUTO_SUSPEND, or
+-- size {{PROCESS_WH}} up for more margin under the 15-minute target.
 CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_VAR
-    USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'LARGE'
+    WAREHOUSE = {{PROCESS_WH}}
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible VaR adjustments.'
 AS
