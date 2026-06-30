@@ -46,9 +46,14 @@ with f2:
         "Scope", list(SCOPE_CONFIG.keys()),
         default=[], key="mw_scope")
 with f3:
+    # Option values are the raw ADJUSTMENT_TYPE codes (used directly in the SQL
+    # filter); the label maps the cryptic "EROL" code to "Entity Roll".
+    _type_labels = {"Flatten": "Flatten", "Scale": "Scale", "Roll": "Roll",
+                    "EROL": "Entity Roll"}
     filter_type = st.multiselect(
-        "Type", ["Flatten", "Scale", "Roll"],
-        default=[], key="mw_type")
+        "Type", list(_type_labels.keys()),
+        default=[], key="mw_type",
+        format_func=lambda v: _type_labels.get(v, v))
 with f4:
     mine_only = st.checkbox("Only my adjustments", value=False,
                             help="When checked, shows only adjustments you submitted.")
