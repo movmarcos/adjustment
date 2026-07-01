@@ -55,12 +55,6 @@ entity_opts = [str(v) for v in _distinct("ENTITY_CODE")]
 dept_opts   = [str(v) for v in _distinct("DEPARTMENT_CODE")]
 user_opts   = [str(v) for v in _distinct("SUBMITTED_BY")]
 
-def _cob_label(v):
-    try:
-        return pd.to_datetime(str(int(v)), format="%Y%m%d").strftime("%d %b %Y")
-    except Exception:
-        return str(v)
-
 f1, f2, f3, f4 = st.columns(4)
 with f1:
     filter_status = st.multiselect(
@@ -87,7 +81,7 @@ with f4:
 f5, f6, f7, f8 = st.columns(4)
 with f5:
     filter_cob = st.multiselect("COB", cob_opts, default=[], key="mw_cob",
-                                format_func=_cob_label)
+                                format_func=lambda v: str(v))
 with f6:
     filter_entity = st.multiselect("Entity", entity_opts, default=[], key="mw_entity")
 with f7:
