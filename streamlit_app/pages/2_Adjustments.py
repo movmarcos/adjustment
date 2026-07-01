@@ -35,6 +35,32 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # FILTERS
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Distinct dimension values for the COB / Entity / Department / User filters below
+# (reads the app's adjustment headers only — small, one lightweight query).
+try:
+    _fopts = run_query_df("""
+        SELECT DISTINCT COBID, ENTITY_CODE, DEPARTMENT_CODE, SUBMITTED_BY
+        FROM ADJUSTMENT_APP.VW_MY_WORK
+    """)
+except Exception:
+    _fopts = pd.DataFrame(columns=["COBID", "ENTITY_CODE", "DEPARTMENT_CODE", "SUBMITTED_BY"])
+
+def _distinct(col, reverse=False):
+    if _fopts.empty or col not in _fopts.columns:
+        return []
+    return sorted(_fopts[col].dropna().unique().tolist(), reverse=reverse)
+
+cob_opts    = [int(v) for v in _distinct("COBID", reverse=True)]
+entity_opts = [str(v) for v in _distinct("ENTITY_CODE")]
+dept_opts   = [str(v) for v in _distinct("DEPARTMENT_CODE")]
+user_opts   = [str(v) for v in _distinct("SUBMITTED_BY")]
+
+def _cob_label(v):
+    try:
+        return pd.to_datetime(str(int(v)), format="%Y%m%d").strftime("%d %b %Y")
+    except Exception:
+        return str(v)
+
 f1, f2, f3, f4 = st.columns(4)
 with f1:
     filter_status = st.multiselect(
@@ -58,6 +84,17 @@ with f4:
     mine_only = st.checkbox("Only my adjustments", value=False,
                             help="When checked, shows only adjustments you submitted.")
 
+f5, f6, f7, f8 = st.columns(4)
+with f5:
+    filter_cob = st.multiselect("COB", cob_opts, default=[], key="mw_cob",
+                                format_func=_cob_label)
+with f6:
+    filter_entity = st.multiselect("Entity", entity_opts, default=[], key="mw_entity")
+with f7:
+    filter_dept = st.multiselect("Department", dept_opts, default=[], key="mw_dept")
+with f8:
+    filter_user = st.multiselect("User", user_opts, default=[], key="mw_user")
+
 st.markdown("<br/>", unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -79,6 +116,18 @@ try:
     if filter_type:
         in_list = ",".join(f"'{s}'" for s in filter_type)
         where_clauses.append(f"ADJUSTMENT_TYPE IN ({in_list})")
+    if filter_cob:
+        in_list = ",".join(str(int(c)) for c in filter_cob)
+        where_clauses.append(f"COBID IN ({in_list})")
+    if filter_entity:
+        in_list = ",".join("'" + str(e).replace("'", "''") + "'" for e in filter_entity)
+        where_clauses.append(f"ENTITY_CODE IN ({in_list})")
+    if filter_dept:
+        in_list = ",".join("'" + str(d).replace("'", "''") + "'" for d in filter_dept)
+        where_clauses.append(f"DEPARTMENT_CODE IN ({in_list})")
+    if filter_user:
+        in_list = ",".join("'" + str(u).replace("'", "''") + "'" for u in filter_user)
+        where_clauses.append(f"SUBMITTED_BY IN ({in_list})")
 
     where_sql = " AND ".join(where_clauses)
     df_adjs = run_query_df(f"""
