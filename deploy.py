@@ -473,7 +473,7 @@ def clean_schema(session):
     # 6. Tables (repo-managed only — NEVER the preserved base tables)
     for tbl in ('ADJ_HEADER', 'ADJ_LINE_ITEM', 'ADJ_LINE_ITEM_JSON', 'ADJ_STATUS_HISTORY',
                 'ADJUSTMENTS_SETTINGS', 'ADJ_RECURRING_TEMPLATE', 'DIRECT_SCOPE_SCHEMA',
-                'ADJ_APPROVERS', 'ADJ_SIGNOFF_STATUS'):
+                'ADJ_APPROVERS', 'ADJ_SIGNOFF_STATUS', 'ADJ_CATEGORY'):
         assert tbl not in _PRESERVE_TABLES
         drops.append(f"DROP TABLE IF EXISTS ADJUSTMENT_APP.{tbl}")
 

@@ -183,6 +183,7 @@ def main(session, p_adjustment):
       murex_group                    str
       adjustment_value_in_usd        float   For Direct only
       adjustment_occurrence          str     ADHOC (default) | RECURRING
+      adjustment_category (optional)  str     Category label; stored in ADJ_HEADER.ADJUSTMENT_CATEGORY
       global_reference               str
       file_name                      str     Original CSV filename (Upload)
 
@@ -285,12 +286,13 @@ def main(session, p_adjustment):
         # with the same COBID + GLOBAL_REFERENCE and remove their FACT data.
         global_ref = adj.get("global_reference")
         replaced_adj_ids = []
-        if global_ref and str(global_ref).strip():
+        if str(adjustment_type).lower() == 'direct' and global_ref and str(global_ref).strip():
             dup_rows = session.sql(f"""
                 SELECT ADJ_ID, PROCESS_TYPE
                 FROM ADJUSTMENT_APP.ADJ_HEADER
                 WHERE COBID = {cobid}
                   AND UPPER(GLOBAL_REFERENCE) = UPPER('{_esc(global_ref)}')
+                  AND UPPER(ADJUSTMENT_TYPE) = 'DIRECT'
                   AND IS_DELETED = FALSE
             """).collect()
 
@@ -391,6 +393,7 @@ def main(session, p_adjustment):
             "MUREX_FAMILY":                adj.get("murex_family"),
             "MUREX_GROUP":                 adj.get("murex_group"),
             "ADJUSTMENT_VALUE_IN_USD":     adj.get("adjustment_value_in_usd"),
+            "ADJUSTMENT_CATEGORY":         adj.get("adjustment_category"),
             "REASON":                      adj.get("reason"),
             "RUN_STATUS":                  initial_status,
             "IS_POSITIVE_ADJUSTMENT":      True,

@@ -73,6 +73,7 @@ _WIZ_DEFAULTS: dict = {
     "murex_family":           None,
     "murex_group":            None,
     "reason":                 "",
+    "adjustment_category":    None,
     "requires_approval":      False,
     # Direct Adjustment upload
     "global_reference":       None,
@@ -120,6 +121,7 @@ def _build_payload() -> dict:
             "adjustment_occurrence": "ADHOC",
             "file_name":             wiz.get("uploaded_file_name", ""),
             "global_reference":      wiz.get("global_reference", ""),
+            "adjustment_category":   wiz.get("adjustment_category"),
         }
 
     if cat == "Entity Roll":
@@ -133,6 +135,8 @@ def _build_payload() -> dict:
             "entity_code":           wiz.get("entity_code", ""),
             "requires_approval":     True,
             "adjustment_occurrence": "ADHOC",
+            "global_reference":      wiz.get("global_reference"),
+            "adjustment_category":   wiz.get("adjustment_category"),
         }
 
     # Scaling Adjustment
@@ -147,6 +151,9 @@ def _build_payload() -> dict:
         "adjustment_occurrence": wiz.get("occurrence", "ADHOC"),
         "requires_approval":     wiz.get("requires_approval", False),
     }
+    payload["adjustment_category"] = wiz.get("adjustment_category")
+    if wiz.get("global_reference"):
+        payload["global_reference"] = wiz.get("global_reference")
     if wiz.get("occurrence") == "RECURRING":
         payload["recurring_start_cobid"] = wiz.get("recurring_start_cobid")
         payload["recurring_end_cobid"]   = wiz.get("recurring_end_cobid")
@@ -526,20 +533,22 @@ def _completion_checks() -> list:
         return checks
     if cat == "Direct Adjustment":
         checks += [
-            ("Data scope",  bool(wiz.get("process_type"))),
-            ("CSV data",    wiz.get("uploaded_df") is not None),
-            ("COB date",    bool(wiz.get("cobid"))),
-            ("Entity code", bool((wiz.get("entity_code") or "").strip())),
-            ("Reference",   bool((wiz.get("global_reference") or "").strip())),
-            ("Reason",      bool((wiz.get("reason") or "").strip())),
+            ("Data scope",          bool(wiz.get("process_type"))),
+            ("CSV data",            wiz.get("uploaded_df") is not None),
+            ("COB date",            bool(wiz.get("cobid"))),
+            ("Entity code",         bool((wiz.get("entity_code") or "").strip())),
+            ("Reference",           bool((wiz.get("global_reference") or "").strip())),
+            ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
+            ("Reason",              bool((wiz.get("reason") or "").strip())),
         ]
     elif cat == "Entity Roll":
         checks += [
-            ("Data scope",  bool(wiz.get("process_type"))),
-            ("Target COB",  bool(wiz.get("cobid"))),
-            ("Source COB",  bool(wiz.get("source_cobid"))),
-            ("Entity code", bool((wiz.get("entity_code") or "").strip())),
-            ("Reason",      bool((wiz.get("reason") or "").strip())),
+            ("Data scope",          bool(wiz.get("process_type"))),
+            ("Target COB",          bool(wiz.get("cobid"))),
+            ("Source COB",          bool(wiz.get("source_cobid"))),
+            ("Entity code",         bool((wiz.get("entity_code") or "").strip())),
+            ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
+            ("Reason",              bool((wiz.get("reason") or "").strip())),
         ]
         if wiz.get("cobid") and wiz.get("source_cobid") \
                 and wiz["cobid"] == wiz["source_cobid"]:
@@ -560,6 +569,7 @@ def _completion_checks() -> list:
             ("Department or Book code",
              bool((wiz.get("department_code") or "").strip())
              or bool((wiz.get("book_code") or "").strip())),
+            ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
             ("Reason", bool((wiz.get("reason") or "").strip())),
         ]
     return checks
@@ -614,6 +624,13 @@ def _entity_options():
     rows = _ref_rows(
         "SELECT DISTINCT ENTITY_CODE FROM DIMENSION.ENTITY "
         "WHERE ENTITY_CODE IS NOT NULL ORDER BY ENTITY_CODE", "_ref_entities")
+    return [str(r[0]) for r in rows if r[0] is not None]
+
+
+def _category_options():
+    rows = _ref_rows(
+        "SELECT CATEGORY_NAME FROM ADJUSTMENT_APP.ADJ_CATEGORY "
+        "WHERE IS_ACTIVE = TRUE ORDER BY SORT_ORDER, CATEGORY_NAME", "_ref_categories")
     return [str(r[0]) for r in rows if r[0] is not None]
 
 
@@ -743,6 +760,13 @@ def render_scaling_form() -> None:
     # ── Reason ───────────────────────────────────────────────────────────
     with _card():
         _sec(6, "Business Context", "Why is this adjustment needed?")
+        wiz["adjustment_category"] = _code_select(
+            "Adjustment Category *", _k("adj_category"),
+            wiz.get("adjustment_category"), _category_options()) or None
+        wiz["global_reference"] = st.text_input(
+            "Reference", key=_k("scale_ref"),
+            value=wiz.get("global_reference") or "",
+            help="Optional free-text reference for this adjustment.").strip() or None
         wiz["reason"] = st.text_area("Reason / Business Justification *",
                                      value=wiz.get("reason", ""), height=70,
                                      key=_k("reason"))
@@ -850,6 +874,9 @@ def render_direct_form() -> None:
 
     with _card():
         _sec(5, "Business Context", "Why is this adjustment needed?")
+        wiz["adjustment_category"] = _code_select(
+            "Adjustment Category *", _k("var_adj_category"),
+            wiz.get("adjustment_category"), _category_options()) or None
         wiz["reason"] = st.text_area("Reason / Business Justification *",
                                      value=wiz.get("reason", ""), height=70,
                                      key=_k("var_reason"))
@@ -983,6 +1010,13 @@ def render_entity_roll_form() -> None:
 
     with _card():
         _sec(4, "Business Context", "Why is this roll needed?")
+        wiz["adjustment_category"] = _code_select(
+            "Adjustment Category *", _k("er_adj_category"),
+            wiz.get("adjustment_category"), _category_options()) or None
+        wiz["global_reference"] = st.text_input(
+            "Reference", key=_k("er_ref"),
+            value=wiz.get("global_reference") or "",
+            help="Optional free-text reference for this roll.").strip() or None
         wiz["reason"] = st.text_area("Reason / Business Justification *",
                                      value=wiz.get("reason", ""), height=70, key=_k("er_reason"),
                                      placeholder="e.g. Rolling MUSE VaR from previous business day")

@@ -73,6 +73,7 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER (
     ADJUSTMENT_VALUE_IN_USD     NUMBER(20,6),
 
     -- Business context
+    ADJUSTMENT_CATEGORY         VARCHAR(100)  COLLATE 'en-ci',   -- from ADJ_CATEGORY; required in UI
     REASON                      VARCHAR(1000) COLLATE 'en-ci',
 
     -- Cross-reference to dimension table
@@ -522,6 +523,41 @@ COMMENT = 'Real-time per-statement timing/rows/query_id for Entity Roll runs (SP
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- ADJ_CATEGORY — managed list of adjustment categories for the New Adjustment
+-- page. Seed-only (edit here + redeploy to change). Seed is idempotent.
+-- ═══════════════════════════════════════════════════════════════════════════
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_CATEGORY (
+    CATEGORY_NAME  VARCHAR(100) NOT NULL,          -- stored value + display label
+    IS_ACTIVE      BOOLEAN          DEFAULT TRUE,
+    SORT_ORDER     NUMBER(38,0),
+    CREATED_DATE   TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
+    CONSTRAINT PK_ADJ_CATEGORY PRIMARY KEY (CATEGORY_NAME)
+)
+COMMENT = 'Managed list of adjustment categories for the New Adjustment page.';
+
+DELETE FROM ADJUSTMENT_APP.ADJ_CATEGORY;
+INSERT INTO ADJUSTMENT_APP.ADJ_CATEGORY (CATEGORY_NAME, SORT_ORDER) VALUES
+    ('Adjusted by MRM Upload', 10),
+    ('Bank Holiday', 20),
+    ('Booking Error', 30),
+    ('IT-Other', 40),
+    ('Late Booking', 50),
+    ('Market Data Error', 60),
+    ('Missing Trade', 70),
+    ('Model Limitation', 80),
+    ('Murex System Limitation', 90),
+    ('New Business Issue', 100),
+    ('PRO Cash Adjustment', 110),
+    ('QuantServer System Issue', 120),
+    ('QuIC System Limitation', 130),
+    ('Raptor Reporting Issue', 140),
+    ('Reference Data Error', 150),
+    ('Structured Trade Issue', 160),
+    ('Time Series Issue', 170),
+    ('Valuation Source Issue', 180),
+    ('VaR Window Issue', 190);
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- 8. VERIFY
 -- ═══════════════════════════════════════════════════════════════════════════
 SELECT 'ADJ_HEADER' AS OBJECT, COUNT(*) AS ROW_COUNT FROM ADJUSTMENT_APP.ADJ_HEADER
@@ -530,4 +566,5 @@ UNION ALL SELECT 'ADJ_STATUS_HISTORY', COUNT(*) FROM ADJUSTMENT_APP.ADJ_STATUS_H
 UNION ALL SELECT 'ADJUSTMENTS_SETTINGS', COUNT(*) FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
 UNION ALL SELECT 'ADJ_RECURRING_TEMPLATE', COUNT(*) FROM ADJUSTMENT_APP.ADJ_RECURRING_TEMPLATE
 UNION ALL SELECT 'ADJ_SIGNOFF_STATUS', COUNT(*) FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-UNION ALL SELECT 'ADJ_APPROVERS', COUNT(*) FROM ADJUSTMENT_APP.ADJ_APPROVERS;
+UNION ALL SELECT 'ADJ_APPROVERS', COUNT(*) FROM ADJUSTMENT_APP.ADJ_APPROVERS
+UNION ALL SELECT 'ADJ_CATEGORY', COUNT(*) FROM ADJUSTMENT_APP.ADJ_CATEGORY;
