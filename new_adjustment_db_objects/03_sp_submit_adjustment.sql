@@ -292,6 +292,7 @@ def main(session, p_adjustment):
                 FROM ADJUSTMENT_APP.ADJ_HEADER
                 WHERE COBID = {cobid}
                   AND UPPER(GLOBAL_REFERENCE) = UPPER('{_esc(global_ref)}')
+                  AND UPPER(ADJUSTMENT_TYPE) = 'DIRECT'
                   AND IS_DELETED = FALSE
             """).collect()
 
