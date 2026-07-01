@@ -1,4 +1,3 @@
---select dayname(to_date(cast(20260627 as string), 'yyyyMMdd'));
 
 use DVLP_RAPTOR_NEWADJ_2;
 -- Adjustment reconciliation query with COALESCE-based dimension filters
@@ -338,26 +337,29 @@ SELECT
     a.SOURCE_COBID,
     r.ROLL_SOURCE_VALUE,
     a.REASON,
-    -- Expected value per adjustment type
+    -- Expected COMBINED value (base + adjustment) after the adjustment:
+    --   Flatten → 0 (position zeroed)
+    --   Scale   → original × scale_factor
+    --   Roll    → scale_factor × adjusted(source)   (scale_factor = 1 for a plain roll)
     CASE a.ADJUSTMENT_TYPE
-        WHEN 'Roll'    THEN av.ADJUSTMENT_VALUE + o.ORIGINAL_VALUE
-        WHEN 'Flatten' THEN o.ORIGINAL_VALUE * -1
-        WHEN 'Scale'   THEN o.ORIGINAL_VALUE * a.SCALE_FACTOR
+        WHEN 'Roll'    THEN COALESCE(a.SCALE_FACTOR, 1) * r.ROLL_SOURCE_VALUE
+        WHEN 'Flatten' THEN 0
+        WHEN 'Scale'   THEN o.ORIGINAL_VALUE * COALESCE(a.SCALE_FACTOR, 1)
     END AS EXPECTED_VALUE,
-    -- Difference (should be 0 if reconciled)
+    -- Difference = achieved combined (original + adjustment) − expected  (≈ 0 if reconciled)
     CASE a.ADJUSTMENT_TYPE
-        WHEN 'Roll'    THEN r.ROLL_SOURCE_VALUE - (av.ADJUSTMENT_VALUE + o.ORIGINAL_VALUE)
-        WHEN 'Flatten' THEN av.ADJUSTMENT_VALUE - (o.ORIGINAL_VALUE * -1)
-        WHEN 'Scale'   THEN av.ADJUSTMENT_VALUE + (o.ORIGINAL_VALUE * a.SCALE_FACTOR)
+        WHEN 'Roll'    THEN (IFNULL(o.ORIGINAL_VALUE,0) + av.ADJUSTMENT_VALUE) - (COALESCE(a.SCALE_FACTOR,1) * r.ROLL_SOURCE_VALUE)
+        WHEN 'Flatten' THEN (IFNULL(o.ORIGINAL_VALUE,0) + av.ADJUSTMENT_VALUE)
+        WHEN 'Scale'   THEN (o.ORIGINAL_VALUE + av.ADJUSTMENT_VALUE) - (o.ORIGINAL_VALUE * COALESCE(a.SCALE_FACTOR,1))
     END AS RECON_DIFFERENCE,
     -- Reconciliation status
     CASE
         WHEN av.ADJUSTMENT_VALUE IS NULL THEN 'MISSING ADJUSTMENT'
         WHEN o.ORIGINAL_VALUE IS NULL AND a.ADJUSTMENT_TYPE IN ('Flatten', 'Scale') THEN 'MISSING ORIGINAL'
         WHEN r.ROLL_SOURCE_VALUE IS NULL AND a.ADJUSTMENT_TYPE = 'Roll' THEN 'MISSING ROLL SOURCE'
-        WHEN a.ADJUSTMENT_TYPE = 'Roll' AND ABS(r.ROLL_SOURCE_VALUE - (av.ADJUSTMENT_VALUE + ifnull(o.ORIGINAL_VALUE,0))) < 0.01 THEN 'RECONCILED'
-        WHEN a.ADJUSTMENT_TYPE = 'Flatten' AND ABS(av.ADJUSTMENT_VALUE - (o.ORIGINAL_VALUE * -1)) < 0.01 THEN 'RECONCILED'
-        WHEN a.ADJUSTMENT_TYPE = 'Scale' AND ABS(av.ADJUSTMENT_VALUE + (o.ORIGINAL_VALUE * a.SCALE_FACTOR)) < 0.01 THEN 'RECONCILED'
+        WHEN a.ADJUSTMENT_TYPE = 'Roll'    AND ABS((IFNULL(o.ORIGINAL_VALUE,0) + av.ADJUSTMENT_VALUE) - (COALESCE(a.SCALE_FACTOR,1) * r.ROLL_SOURCE_VALUE)) < 0.01 THEN 'RECONCILED'
+        WHEN a.ADJUSTMENT_TYPE = 'Flatten' AND ABS(IFNULL(o.ORIGINAL_VALUE,0) + av.ADJUSTMENT_VALUE) < 0.01 THEN 'RECONCILED'
+        WHEN a.ADJUSTMENT_TYPE = 'Scale'   AND ABS((o.ORIGINAL_VALUE + av.ADJUSTMENT_VALUE) - (o.ORIGINAL_VALUE * COALESCE(a.SCALE_FACTOR,1))) < 0.01 THEN 'RECONCILED'
         ELSE 'BREAK'
     END AS RECON_STATUS
 FROM adj a
@@ -380,6 +382,95 @@ LEFT JOIN roll_original_values r
       AND r.TRADE_TYPOLOGY  IS NOT DISTINCT FROM a.TRADE_TYPE
       AND a.ADJUSTMENT_TYPE = 'Roll'
 ORDER BY a.COBID, a.DEPARTMENT_CODE, a.BOOK_CODE;
+
+
+
+
+
+-- ══════════════════════════════════════════════════════════════════════════════
+-- ENTITY ROLL (EROL) RECONCILIATION
+-- EROL destructively replaces an entity at the TARGET COB with the SOURCE COB's
+-- values, so the check is a single identity at the ENTITY level:
+--        combined(TARGET COB, entity)  ==  combined(SOURCE COB, entity)
+-- (combined = base + all adjustmenSTED views.)
+-- ══════════════════════════════════════════════════════════════════════════════
+WITH erol AS (
+    SELECT
+        h.DIMENSION_ADJ_ID AS DEV_A
+        h.PROCESS_TYPE,
+        h.ENTITY_CODE,
+        h.COBID            AS TARGET_COBID,
+        h.SOURCE_COBID,
+        h.REASON
+    FROM ADJUSTMENT_APP.ADJ_HEADER
+    WHERE h.RUN_STATUS       = 'Processed'
+      AND h.IS_DELETED       = FALS
+      AND h.DIMENSION_ADJ_ID IS NOT NULL
+      AND h.ADJUSTMENT_TYPE  = 'ERO
+),
+-- Combined value per entity at evetargets + sources),
+-- one scan per scope.
+combined_by_entity AS (
+    -- VaR: the combined view exposes ENTITY_CODE directly (no DIMENSION.BOOK join).
+    SELECT 'VaR' AS PROCESS_TYPE, v
+           SUM(v.PNL_VECTOR_VALUE_IN_USD) AS COMBINED_VALUE
+    FROM FACT.VAR_MEASURES_COMBINED
+    WHERE v.COBID IN (SELECT TARGET_COBID FROM erol WHERE PROCESS_TYPE='VaR'
+                      UNION
+                      SELECT SOURCE_COBID FROM erol WHERE PROCESS_TYPE='VaR')
+      AND v.ENTITY_CODE IN (SELECT PROCESS_TYPE='VaR')
+    GROUP BY v.COBID, v.ENTITY_CODE
+
+    UNION ALL
+
+    -- Stress: resolve entity via DIMENSION.BOOK (mirrors the main query's Roll leg).
+    SELECT 'Stress', s.COBID, b.ENTL_IN_USD)
+    FROM FACT.STRESS_MEASURES_COMBINED s
+    INNER JOIN DIMENSION.BOOK b ON
+    WHERE s.COBID IN (SELECT TARGET_COBID FROM erol WHERE PROCESS_TYPE='Stress'
+                      UNION
+                      SELECT SOURCE_COBID FROM erol WHERE PROCESS_TYPE='Stress')
+      AND b.ENTITY_CODE IN (SELECT ENTITY_CODE FROM erol WHERE PROCESS_TYPE='Stress')
+    GROUP BY s.COBID, b.ENTITY_CODE
+
+    UNION ALL
+
+    -- Sensitivity: resolve entity via DIMENSION.BOOK.
+    SELECT 'Sensitivity', se.COBID, b.ENTITY_CODE, SUM(se.MEASURE_VALUE_USD)
+    FROM FACT.SENSITIVITY_MEASURES_ADJUSTED se
+    INNER JOIN DIMENSION.BOOK b ON b.BOOK_KEY = se.BOOK_KEY
+    WHERE se.COBID IN (SELECT TARGET_COBID FROM erol WHERE PROCESS_TYPE='Sensitivity'
+                       UNION
+                       SELECT SOURCE_COBID FROM erol WHERE PROCESS_TYPE='Sensitivity')
+      AND b.ENTITY_CODE IN (SELECT ENTITY_CODE FROM erol WHERE PROCESS_TYPE='Sensitivity')
+    GROUP BY se.COBID, b.ENTITY_CODE
+)
+SELECT
+    e.DEV_ADJ_ID,
+    e.PROCESS_TYPE,
+    e.ENTITY_CODE,
+    e.TARGET_COBID,
+    e.SOURCE_COBID,
+    tgt.COMBINED_VALUE                       AS TARGET_COMBINED,
+    src.COMBINED_VALUE                       AS SOURCE_COMBINED,
+    tgt.COMBINED_VALUE - src.COMBINED_VALUE  AS RECON_DIFFERENCE,   -- ≈ 0 if reconciled
+    e.REASON,
+    CASE
+        WHEN tgt.COMBINED_VALUE IS NULL THEN 'MISSING TARGET'
+        WHEN src.COMBINED_VALUE IS NULL THEN 'MISSING SOURCE'
+        WHEN ABS(tgt.COMBINED_VALUE - src.COMBINED_VALUE) < 0.01 THEN 'RECONCILED'
+        ELSE 'BREAK'
+    END AS RECON_STATUS
+FROM erol e
+LEFT JOIN combined_by_entity tgt
+       ON tgt.PROCESS_TYPE = e.PROCESS_TYPE
+      AND tgt.COBID        = e.TARGET_COBID
+      AND tgt.ENTITY_CODE  = e.ENTITY_CODE
+LEFT JOIN combined_by_entity src
+       ON src.PROCESS_TYPE = e.PROCESS_TYPE
+      AND src.COBID        = e.SOURCE_COBID
+      AND src.ENTITY_CODE  = e.ENTITY_CODE
+ORDER BY e.PROCESS_TYPE, e.ENTITY_CODE, e.TARGET_COBID;
 
 
 
