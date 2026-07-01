@@ -73,7 +73,6 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER (
     ADJUSTMENT_VALUE_IN_USD     NUMBER(20,6),
 
     -- Business context
-    ADJUSTMENT_CATEGORY         VARCHAR(100)  COLLATE 'en-ci',   -- from ADJ_CATEGORY; required in UI
     REASON                      VARCHAR(1000) COLLATE 'en-ci',
 
     -- Cross-reference to dimension table
@@ -103,6 +102,8 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER (
     FILE_NAME                   VARCHAR(500) COLLATE 'en-ci',    -- For CSV uploads via Streamlit
     APPROVAL_ID                 NUMBER(38,0),                     -- Optional: set when requires_approval = true
     BLOCKED_BY_ADJ_ID           VARCHAR(36)  DEFAULT NULL,        -- FK to ADJ_HEADER.ADJ_ID; NULL = eligible to run
+    
+    ADJUSTMENT_CATEGORY         VARCHAR(100)  COLLATE 'en-ci',   -- from ADJ_CATEGORY; required in UI
 
     CONSTRAINT PK_ADJ_HEADER PRIMARY KEY (ADJ_ID)
 )
