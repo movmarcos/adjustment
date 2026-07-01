@@ -383,3 +383,22 @@ ORDER BY a.COBID, a.DEPARTMENT_CODE, a.BOOK_CODE;
 
 
 
+Adjusted by MRM Upload
+Bank Holiday
+Booking Error
+IT-Other
+Late Booking
+Market Data Error
+Missing Trade
+Model Limitation
+Murex System Limitation
+New Business Issue
+PRO Cash Adjustment
+QuantServer System Issue
+QuIC System Limitation
+Raptor Reporting Issue
+Reference Data Error
+Structured Trade Issue
+Time Series Issue
+Valuation Source Issue
+VaR Window Issue
