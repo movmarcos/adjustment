@@ -111,6 +111,22 @@ def main(session, scope, pipeline_types):
 
     results = []
 
+    # ── 0. FAST EXIT ─────────────────────────────────────────────────────────
+    #    Empty polls dominate — every minute, mostly nothing to do. Before the
+    #    overlap reads, TEMP_QUEUE build, and unblock pass (≈6 statements), do ONE
+    #    cheap probe: if this scope has no Pending/Approved/Running row there is
+    #    nothing to block, claim, process, or unblock. Blocked rows are Pending
+    #    (so they ARE counted here) → this never strands a release.
+    has_work = session.sql(f"""
+        SELECT 1 FROM ADJUSTMENT_APP.ADJ_HEADER
+        WHERE PROCESS_TYPE IN ({pipeline_in})
+          AND RUN_STATUS IN ('Pending', 'Approved', 'Running')
+          AND IS_DELETED = FALSE
+        LIMIT 1
+    """).collect()
+    if not has_work:
+        return json.dumps({"scope": scope, "message": "Idle — no pending/approved/running rows"})
+
     # ── 1. OVERLAP BLOCKING ─────────────────────────────────────────────────
     #    Wrapped in try/except: overlap blocking is best-effort. If it fails,
     #    we still proceed to enumerate and process adjustments. The worst case
