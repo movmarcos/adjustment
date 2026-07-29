@@ -124,29 +124,102 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# KPI STRIP
+# COB SCOPE — every panel on this page respects this selection
+# ──────────────────────────────────────────────────────────────────────────────
+
+try:
+    _cob_rows = run_query_df("""
+        SELECT DISTINCT COBID FROM ADJUSTMENT_APP.ADJ_HEADER
+        WHERE IS_DELETED = FALSE ORDER BY COBID DESC LIMIT 60
+    """)
+    _all_cobs = [int(c) for c in _cob_rows["COBID"]] if not _cob_rows.empty else []
+except Exception:
+    _all_cobs = []
+
+_rc1, _rc2 = st.columns([1, 3.4])
+with _rc1:
+    cob_range = st.selectbox(
+        "COB range", ["Last 5 COBs", "Latest COB", "Last 10 COBs",
+                      "Last 30 COBs", "All COBs"],
+        index=0, key="home_cob_range",
+        help="Every number and panel on this page covers only this COB range.")
+_take = {"Latest COB": 1, "Last 5 COBs": 5, "Last 10 COBs": 10,
+         "Last 30 COBs": 30}.get(cob_range)
+sel_cobs = _all_cobs if _take is None else _all_cobs[:_take]
+if _take is None:
+    cob_where = "1=1"
+    _range_txt = (f"all COBs (latest: {_all_cobs[0]})" if _all_cobs
+                  else "all COBs")
+elif sel_cobs:
+    cob_where = "COBID IN (" + ",".join(str(c) for c in sel_cobs) + ")"
+    _range_txt = (f"COB {sel_cobs[0]}" if len(sel_cobs) == 1 else
+                  f"COBs {min(sel_cobs)} – {max(sel_cobs)} "
+                  f"({len(sel_cobs)} dates)")
+else:
+    cob_where = "1=1"
+    _range_txt = "no COBs yet"
+with _rc2:
+    st.markdown(
+        f'<div style="margin-top:1.85rem">'
+        f'<span style="background:{P["info_lt"]};border:1px solid #BFDBFE;'
+        f'border-radius:99px;padding:4px 14px;font-size:0.78rem;font-weight:600;'
+        f'color:{P["grey_900"]}">'
+        f'{icon("clock", size=12, color=P["info"])} Showing {_range_txt}'
+        f'</span></div>',
+        unsafe_allow_html=True)
+
+# Re-scope the KPI totals to the selection (the first load above was unscoped).
+try:
+    df_kpi = run_query_df(f"""
+        SELECT
+            COALESCE(SUM(TOTAL_ADJUSTMENTS), 0)       AS TOTAL,
+            COALESCE(SUM(PENDING_COUNT), 0)            AS PENDING,
+            COALESCE(SUM(PENDING_APPROVAL_COUNT), 0)   AS PENDING_APPROVAL,
+            COALESCE(SUM(APPROVED_COUNT), 0)           AS APPROVED,
+            COALESCE(SUM(RUNNING_COUNT), 0)            AS RUNNING,
+            COALESCE(SUM(PROCESSED_COUNT), 0)          AS PROCESSED,
+            COALESCE(SUM(FAILED_COUNT), 0)             AS FAILED,
+            COALESCE(SUM(OVERLAP_ALERTS), 0)           AS OVERLAPS
+        FROM ADJUSTMENT_APP.VW_DASHBOARD_KPI
+        WHERE {cob_where}
+    """)
+    kpis = df_kpi.iloc[0].to_dict() if not df_kpi.empty else {}
+except Exception:
+    pass
+
+# ──────────────────────────────────────────────────────────────────────────────
+# KPI STRIP — each card LINKS to the Adjustments page with the matching
+# status pre-filtered (?status=...; the page reads the query param). Plain
+# <a> links because st.switch_page needs Streamlit 1.30 and SiS runs 1.26.
 # ──────────────────────────────────────────────────────────────────────────────
 
 queued = int(kpis.get("PENDING", 0)) + int(kpis.get("APPROVED", 0))
 
 kpi_items = [
-    ("Total",             int(kpis.get("TOTAL", 0)),           "All adjustments",      P["primary"],   "list"),
-    ("Awaiting Approval", int(kpis.get("PENDING_APPROVAL", 0)), "Need approval",        P["info"],      "clipboard"),
-    ("Queued",            queued,                               "Pending + Approved",   P["warning"],   "clock"),
-    ("Running",           int(kpis.get("RUNNING", 0)),          "Processing now",       P["info"],      "zap"),
-    ("Processed",         int(kpis.get("PROCESSED", 0)),        "In the data",          P["success"],   "check-circle"),
-    ("Power BI",          pbi_pending,                           "Pending refreshes",    P["info"],      "line-chart"),
-    ("Overlaps",          int(kpis.get("OVERLAPS", 0)),         "Overlap alerts",       P["purple"],    "alert-triangle"),
+    ("Total",             int(kpis.get("TOTAL", 0)),           "All adjustments — open list", P["primary"], "list",           "Adjustments"),
+    ("Awaiting Approval", int(kpis.get("PENDING_APPROVAL", 0)), "Need approval",        P["info"],    "clipboard",      "Adjustments?status=Pending%20Approval"),
+    ("Queued",            queued,                               "Pending + Approved",   P["warning"], "clock",          "Adjustments?status=Pending,Approved"),
+    ("Running",           int(kpis.get("RUNNING", 0)),          "Processing now",       P["info"],    "zap",            "Adjustments?status=Running"),
+    ("Processed",         int(kpis.get("PROCESSED", 0)),        "In the data",          P["success"], "check-circle",   "Adjustments?status=Processed"),
+    ("Power BI",          pbi_pending,                           "Pending (24h) — open pipeline", P["info"], "line-chart", "Adjustment_Pipeline"),
+    ("Overlaps",          int(kpis.get("OVERLAPS", 0)),         "Overlap alerts",       P["purple"],  "alert-triangle", "Adjustment_Pipeline"),
 ]
 
-cards_html = '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:10px;margin-bottom:1.4rem">'
-for label, val, sub, color, icon_name in kpi_items:
+cards_html = ('<style>.kpi-link{text-decoration:none;color:inherit;display:block}'
+              '.kpi-link:hover .kpi-card{transform:translateY(-1px);'
+              'box-shadow:0 4px 14px rgba(15,23,42,.12)}</style>'
+              '<div style="display:grid;grid-template-columns:repeat(7,1fr);'
+              'gap:10px;margin-bottom:1.4rem">')
+for label, val, sub, color, icon_name, href in kpi_items:
     alert_style = f"box-shadow:0 0 0 2px {color}44;" if (label == "Power BI" and val > 0) or (label == "Overlaps" and val > 0) else ""
     val_color = color if val > 0 else P["grey_400"]
     cards_html += f"""
-    <div style="position:relative;background:white;border:1px solid {P['border']};
+    <a class="kpi-link" href="{href}" target="_self"
+       title="Open {label.lower()} — click to drill in">
+    <div class="kpi-card" style="position:relative;background:white;border:1px solid {P['border']};
       border-radius:10px;padding:0.9rem 0.8rem 0.9rem 1rem;{alert_style}
-      box-shadow:0 1px 2px rgba(15,23,42,.05);overflow:hidden">
+      box-shadow:0 1px 2px rgba(15,23,42,.05);overflow:hidden;cursor:pointer;
+      transition:transform .12s ease-out, box-shadow .12s ease-out">
       <div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:{color}"></div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.3rem">
         <span style="font-size:0.62rem;font-weight:700;text-transform:uppercase;
@@ -156,7 +229,7 @@ for label, val, sub, color, icon_name in kpi_items:
       <div style="font-size:1.75rem;font-weight:800;color:{val_color};
         line-height:1;font-variant-numeric:tabular-nums">{val}</div>
       <div style="font-size:0.68rem;color:{P['grey_700']};margin-top:4px">{sub}</div>
-    </div>"""
+    </div></a>"""
 cards_html += '</div>'
 st.markdown(cards_html, unsafe_allow_html=True)
 
@@ -172,10 +245,11 @@ with col_charts:
     # ── Scope & Status bar chart ─────────────────────────────────────────────
     section_title("Adjustments by Scope & Status", "bar-chart")
     try:
-        df_dash = run_query_df("""
+        df_dash = run_query_df(f"""
             SELECT PROCESS_TYPE, RUN_STATUS,
                    SUM(ADJUSTMENT_COUNT) AS CNT
             FROM ADJUSTMENT_APP.DT_DASHBOARD
+            WHERE {cob_where}
             GROUP BY PROCESS_TYPE, RUN_STATUS
             ORDER BY PROCESS_TYPE, RUN_STATUS
         """)
@@ -220,20 +294,22 @@ with col_charts:
     except Exception as e:
         st.info(f"No data available: {e}")
 
-    # ── COB Trend Charts ─────────────────────────────────────────────────────
-    section_title("Last 5 COBs — Activity Trend", "line-chart")
+    # ── COB Trend Charts (selected range, capped at the 10 most recent) ─────
+    _trend_cobs = (sel_cobs if sel_cobs else _all_cobs)[:10]
+    section_title(
+        f"Activity Trend — {len(_trend_cobs)} COB(s)" if _trend_cobs
+        else "Activity Trend", "line-chart")
     try:
-        df_cob = run_query_df("""
+        _trend_where = ("COBID IN (" + ",".join(str(c) for c in _trend_cobs) + ")"
+                        if _trend_cobs else "1=0")
+        df_cob = run_query_df(f"""
             SELECT
                 COBID, PROCESS_TYPE,
                 COUNT(*)                        AS ADJ_COUNT,
                 COALESCE(SUM(RECORD_COUNT), 0)  AS ROW_COUNT
             FROM ADJUSTMENT_APP.ADJ_HEADER
             WHERE IS_DELETED = FALSE
-              AND COBID IN (
-                  SELECT DISTINCT COBID FROM ADJUSTMENT_APP.ADJ_HEADER
-                  WHERE IS_DELETED = FALSE ORDER BY COBID DESC LIMIT 5
-              )
+              AND {_trend_where}
             GROUP BY COBID, PROCESS_TYPE
             ORDER BY COBID, PROCESS_TYPE
         """)
@@ -316,10 +392,11 @@ with col_alerts:
     # ── Overlap Alerts ───────────────────────────────────────────────────────
     section_title("Overlap Alerts", "alert-triangle")
     try:
-        df_overlaps = run_query_df("""
+        df_overlaps = run_query_df(f"""
             SELECT ADJ_ID_A, ADJ_ID_B, PROCESS_TYPE, ENTITY_A, ENTITY_B,
                    BOOK_A, BOOK_B, COBID, ALERT_MESSAGE
             FROM ADJUSTMENT_APP.DT_OVERLAP_ALERTS
+            WHERE {cob_where}
             ORDER BY COBID DESC
             LIMIT 100
         """)
@@ -384,9 +461,10 @@ with col_alerts:
     # ── Errors ───────────────────────────────────────────────────────────────
     section_title("Current Errors", "x-circle")
     try:
-        df_errors = run_query_df("""
+        df_errors = run_query_df(f"""
             SELECT DIMENSION_ADJ_ID, PROCESS_TYPE, ENTITY_CODE, ERRORMESSAGE, USERNAME, ERROR_TIME
             FROM ADJUSTMENT_APP.VW_ERRORS
+            WHERE {cob_where}
             ORDER BY ERROR_TIME DESC
             LIMIT 100
         """)
@@ -448,10 +526,10 @@ with col_alerts:
     st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Top Submitters", "user")
     try:
-        df_users = run_query_df("""
+        df_users = run_query_df(f"""
             SELECT USERNAME, COUNT(*) AS CNT
             FROM ADJUSTMENT_APP.ADJ_HEADER
-            WHERE IS_DELETED = FALSE
+            WHERE IS_DELETED = FALSE AND {cob_where}
             GROUP BY USERNAME ORDER BY CNT DESC LIMIT 5
         """)
         if not df_users.empty:
@@ -488,13 +566,14 @@ section_title("Recent Activity", "clock")
 try:
     # Query ADJ_HEADER directly — avoids VW_RECENT_ACTIVITY's cross-table JOIN
     # which can fail if ADJ_STATUS_HISTORY.ADJ_ID type differs from ADJ_HEADER.ADJ_ID.
-    df_activity = run_query_df("""
+    df_activity = run_query_df(f"""
         SELECT
             DIMENSION_ADJ_ID, COBID, SOURCE_COBID, PROCESS_TYPE, ADJUSTMENT_TYPE,
             RUN_STATUS, IS_DELETED, ENTITY_CODE, DEPARTMENT_CODE, BOOK_CODE,
             MEASURE_TYPE_CODE, SIMULATION_NAME, VAR_COMPONENT_ID, USERNAME,
             RECORD_COUNT, CREATED_DATE, START_DATE, PROCESS_DATE
         FROM ADJUSTMENT_APP.ADJ_HEADER
+        WHERE {cob_where}
         ORDER BY CREATED_DATE DESC
         LIMIT 50
     """)

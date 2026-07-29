@@ -56,6 +56,27 @@ entity_opts = [str(v) for v in _distinct("ENTITY_CODE")]
 dept_opts   = [str(v) for v in _distinct("DEPARTMENT_CODE")]
 user_opts   = [str(v) for v in _distinct("SUBMITTED_BY")]
 
+# ── Deep link from the Home KPI cards: ?status=Running / Pending,Approved ──
+# Applied once per distinct param value, BEFORE the widget is instantiated,
+# so the user can still clear/change the filter afterwards.
+def _qp_status():
+    try:
+        if hasattr(st, "query_params"):                       # Streamlit ≥1.30
+            raw = st.query_params.get("status")
+            return raw if isinstance(raw, str) or raw is None else (raw[0] if raw else None)
+        vals = st.experimental_get_query_params().get("status")   # 1.26
+        return vals[0] if vals else None
+    except Exception:
+        return None
+
+_status_param = _qp_status()
+if _status_param and st.session_state.get("_applied_status_param") != _status_param:
+    _wanted = [s.strip() for s in _status_param.split(",")
+               if s.strip() in STATUS_COLORS]
+    if _wanted:
+        st.session_state["mw_status"] = _wanted
+    st.session_state["_applied_status_param"] = _status_param
+
 f1, f2, f3, f4 = st.columns(4)
 with f1:
     filter_status = st.multiselect(
