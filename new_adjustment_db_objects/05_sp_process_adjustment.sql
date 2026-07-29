@@ -1298,13 +1298,18 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             _supersede_dims = [k for k in pk_parts if k.upper() != 'COBID']
             if _supersede_dims:
                 # dim_ids_str holds DIMENSION.ADJUSTMENT NUMBERs — no quoting needed.
-                # EQUAL_NULL: NULL-safe equality. Netting COALESCEs NULL key
-                # parts into the surrogate key, so the supersede must treat
-                # NULL = NULL as a match too — plain `=` never matches NULLs
-                # and left older NULL-keyed rows alive next to the new ones
-                # (double counting).
+                # NULL-safe equality, expressed as sentinel-coalesced `=` (the
+                # netting CTE's exact surrogate-key convention) rather than
+                # EQUAL_NULL: EQUAL_NULL(a, b) is not an `expr = expr`
+                # predicate, so the optimizer could not hash-join the EXISTS
+                # and degraded to an effectively cartesian join — a 1M-row
+                # FRTB flatten went from ~3 to ~16 minutes. COALESCE(CAST(..
+                # AS TEXT), sentinel) = COALESCE(..) keeps NULL = NULL
+                # matching (no double counting) AND the hash-joinable shape.
                 _pos_join = " AND ".join(
-                    [f"EQUAL_NULL(fa.{k}, cur.{k})" for k in _supersede_dims]
+                    f"COALESCE(CAST(fa.{k} AS TEXT), '_dbt_utils_surrogate_key_null_') = "
+                    f"COALESCE(CAST(cur.{k} AS TEXT), '_dbt_utils_surrogate_key_null_')"
+                    for k in _supersede_dims
                 )
                 session.sql(f"""
                     DELETE FROM {fact_adj_tbl_name} fa
