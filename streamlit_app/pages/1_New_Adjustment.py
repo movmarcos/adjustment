@@ -604,7 +604,7 @@ def _card():
     unlike CSS on Streamlit's wrapper test-ids)."""
     try:
         c = st.container(border=True)
-    except TypeError:
+    except Exception:   # some runtimes raise StreamlitAPIException, not TypeError
         c = st.container()
     with c:
         yield
@@ -1517,7 +1517,7 @@ _SIGNOFF_BLOCKED = ("SIGNED_OFF", "REOPEN_REQUESTED")
 def _signoff_feed_cfg():
     """Cached upstream-feed config from ADJ_APP_CONFIG."""
     if "_signoff_feed_cfg" not in st.session_state:
-        cfg = {"enabled": True, "table": "BATCH.PUBLISH_SIGNOF_STATUS"}
+        cfg = {"enabled": True, "table": "BATCH.PUBLISH_SIGNOFF_STATUS"}
         try:
             rows = run_query("""
                 SELECT CONFIG_KEY, CONFIG_VALUE FROM ADJUSTMENT_APP.ADJ_APP_CONFIG

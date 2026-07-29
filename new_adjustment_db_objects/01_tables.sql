@@ -592,7 +592,7 @@ USING (
     SELECT 'EMAIL_INTEGRATION', 'ADJ_EMAIL_INT',
            'Name of the Snowflake email notification integration SP_NOTIFY sends through.'
     UNION ALL
-    SELECT 'SIGNOFF_FEED_TABLE', 'BATCH.PUBLISH_SIGNOF_STATUS',
+    SELECT 'SIGNOFF_FEED_TABLE', 'BATCH.PUBLISH_SIGNOFF_STATUS',
            'Unified upstream sign-off feed (COBID, ENTITY_CODE, PROCESS_TYPE, SUB_TYPE, PUBLISH_STATUS, SIGNOFF_UPDATE_TIME). Adjust here if the migration lands under a different name.'
     UNION ALL
     SELECT 'SIGNOFF_FEED_ENABLED', 'true',
@@ -601,6 +601,17 @@ USING (
 ON t.CONFIG_KEY = s.CONFIG_KEY
 WHEN NOT MATCHED THEN INSERT (CONFIG_KEY, CONFIG_VALUE, DESCRIPTION)
 VALUES (s.CONFIG_KEY, s.CONFIG_VALUE, s.DESCRIPTION);
+
+-- One-time correction: SIGNOFF_FEED_TABLE was first seeded with a misspelled
+-- default (PUBLISH_SIGNOF_STATUS, single F). The seed MERGE never overwrites
+-- existing values, so fix ONLY that known-bad value here — an admin-set
+-- custom table name is preserved.
+UPDATE ADJUSTMENT_APP.ADJ_APP_CONFIG
+SET CONFIG_VALUE = 'BATCH.PUBLISH_SIGNOFF_STATUS',
+    UPDATED_BY   = 'DEPLOY',
+    UPDATED_AT   = CURRENT_TIMESTAMP()
+WHERE CONFIG_KEY = 'SIGNOFF_FEED_TABLE'
+  AND CONFIG_VALUE = 'BATCH.PUBLISH_SIGNOF_STATUS';
 
 
 -- Who receives what. Recipients must be Snowflake users of this account with

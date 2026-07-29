@@ -157,7 +157,7 @@ def check_signoff(session, process_type, cobid, entity_code=None):
     blocked row — entity-level or '*' — blocks it.
 
     Upstream: the unified publish feed (ADJ_APP_CONFIG.SIGNOFF_FEED_TABLE,
-    default BATCH.PUBLISH_SIGNOF_STATUS) keyed by COBID + ENTITY_CODE +
+    default BATCH.PUBLISH_SIGNOFF_STATUS) keyed by COBID + ENTITY_CODE +
     PROCESS_TYPE. An upstream 'FRTB' row covers FRTB, FRTBDRC and FRTBRRAO
     (no separate entries exist for DRC/RRAO). SUB_TYPE NULL/'' (VaR-style
     rows) and 'NonCVA' count; 'CVA' rows do not. An upstream sign-off is
@@ -194,7 +194,7 @@ def check_signoff(session, process_type, cobid, entity_code=None):
     if _app_cfg(session, "SIGNOFF_FEED_ENABLED", "true").strip().lower() != "true":
         return False
     feed = _app_cfg(session, "SIGNOFF_FEED_TABLE",
-                    "BATCH.PUBLISH_SIGNOF_STATUS").strip()
+                    "BATCH.PUBLISH_SIGNOFF_STATUS").strip()
     if pt_esc in ("FRTB", "FRTBDRC", "FRTBRRAO"):
         pt_match = f"UPPER(u.PROCESS_TYPE) IN ('FRTB', '{pt_esc}')"
     else:

@@ -1540,10 +1540,12 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
 def bordered_container():
     """Version-safe st.container(border=True): the border kwarg needs
     Streamlit ≥ 1.29, but SiS runs 1.26 (the minimum that supports
-    st.file_uploader). Falls back to a plain container on older runtimes."""
+    st.file_uploader). Falls back to a plain container on older runtimes.
+    Catches broadly on purpose — some runtimes surface the unknown-kwarg as
+    a StreamlitAPIException rather than a TypeError."""
     try:
         return st.container(border=True)
-    except TypeError:
+    except Exception:
         return st.container()
 
 

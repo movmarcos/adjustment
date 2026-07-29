@@ -4,7 +4,7 @@
 --
 -- The COB sign-off is owned by another system shared across many consumers.
 -- The unified feed table (ADJ_APP_CONFIG.SIGNOFF_FEED_TABLE, default
--- BATCH.PUBLISH_SIGNOF_STATUS) carries one row per COBID + ENTITY_CODE +
+-- BATCH.PUBLISH_SIGNOFF_STATUS) carries one row per COBID + ENTITY_CODE +
 -- PROCESS_TYPE (+ SUB_TYPE):
 --
 --   COBID, ENTITY_CODE, PROCESS_TYPE, SUB_TYPE, PUBLISH_STATUS, SIGNOFF_UPDATE_TIME
@@ -76,7 +76,7 @@ def main(session):
                            "message": "SIGNOFF_FEED_ENABLED is false — feed "
                                       "sync is paused (migration in progress)."})
     feed = _cfg(session, "SIGNOFF_FEED_TABLE",
-                "BATCH.PUBLISH_SIGNOF_STATUS").strip()
+                "BATCH.PUBLISH_SIGNOFF_STATUS").strip()
 
     min_cobid = session.sql(
         f"SELECT TO_NUMBER(TO_CHAR(DATEADD(day, -{LOOKBACK_DAYS}, CURRENT_DATE()), 'YYYYMMDD')) AS C"
