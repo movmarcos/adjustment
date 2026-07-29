@@ -9,7 +9,8 @@ import pandas as pd
 
 st.set_page_config(page_title="Admin · MUFG", page_icon="⚙️", layout="wide", initial_sidebar_state="expanded")
 
-from utils.styles import inject_css, render_sidebar, section_title, P, SCOPE_CONFIG, icon
+from utils.styles import (inject_css, render_sidebar, section_title, P,
+                          SCOPE_CONFIG, icon, render_df_table)
 from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
 
 def _esc(val):
@@ -20,6 +21,34 @@ inject_css()
 render_sidebar()
 
 user = current_user_name()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AUTHORIZATION GATE
+# This page manages approvers, sign-off, and scope config — the controls the
+# 4-eyes workflow depends on — so access must itself be controlled. While
+# ADJ_ADMINS is empty the page runs in bootstrap mode (open, with a warning)
+# so the first admin can be registered in the Approvers tab.
+# ──────────────────────────────────────────────────────────────────────────────
+_admin_bootstrap = False
+try:
+    _admin_rows = run_query(
+        "SELECT USERNAME FROM ADJUSTMENT_APP.ADJ_ADMINS WHERE IS_ACTIVE = TRUE")
+except Exception:
+    _admin_rows = []
+if not _admin_rows:
+    _admin_bootstrap = True
+    st.warning(
+        "**No page administrators are configured yet** — this Admin page is "
+        "currently open to every user. Add the first administrator in the "
+        "*Approvers* tab to lock it down.")
+else:
+    _admin_users = {str(r["USERNAME"]).strip().upper() for r in _admin_rows}
+    if str(user).strip().upper() not in _admin_users:
+        st.markdown("## Admin — Configuration")
+        st.error(
+            f"You ({user}) are not authorized to use the Admin page. "
+            f"Ask an existing administrator to add you in the Approvers tab.")
+        st.stop()
 
 st.markdown("## Admin — Configuration")
 st.markdown(
@@ -32,14 +61,151 @@ st.markdown("<br/>", unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
 
-tab_scopes, tab_signoff, tab_approvers, tab_recurring, tab_schema, tab_sql = st.tabs([
+(tab_health, tab_scopes, tab_signoff, tab_approvers, tab_recurring,
+ tab_notify, tab_schema, tab_sql) = st.tabs([
+    "System Health",
     "Scope Configuration",
     "Sign-Off Management",
     "Approvers",
     "Recurring Templates",
+    "Notifications",
     "Schema Reference",
     "SQL Reference",
 ])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 0 — SYSTEM HEALTH
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_health:
+    section_title("System Health", "activity")
+    st.caption("Live health of the processing pipeline. Anything red needs a "
+               "human; amber is worth a look.")
+
+    def _health_card(col, label, value, state, sub=""):
+        color = {"ok": P["success"], "warn": "#B45309",
+                 "bad": P["danger"]}.get(state, P["grey_700"])
+        col.markdown(
+            f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
+            f'border-top:3px solid {color};border-radius:8px;padding:0.75rem;'
+            f'text-align:center;min-height:92px">'
+            f'<div style="font-size:1.25rem;font-weight:800;color:{color}">{value}</div>'
+            f'<div style="font-size:0.72rem;text-transform:uppercase;'
+            f'letter-spacing:.05em;color:{P["grey_700"]};margin-top:2px">{label}</div>'
+            + (f'<div style="font-size:0.68rem;color:{P["grey_700"]};'
+               f'margin-top:2px">{sub}</div>' if sub else "")
+            + '</div>', unsafe_allow_html=True)
+
+    # ── Tasks ────────────────────────────────────────────────────────────────
+    st.markdown("<div style='height:0.4rem'></div>", unsafe_allow_html=True)
+    section_title("Tasks", "settings")
+    try:
+        _tasks = run_query("SHOW TASKS LIKE 'TASK_%' IN SCHEMA ADJUSTMENT_APP")
+        if _tasks:
+            tcols = st.columns(min(len(_tasks), 5))
+            for i, t in enumerate(_tasks):
+                name  = str(t["name"])
+                state = str(t["state"]).lower()
+                _health_card(
+                    tcols[i % len(tcols)],
+                    name.replace("TASK_", "").replace("_", " ").title(),
+                    state.title(),
+                    "ok" if state == "started" else "bad",
+                    "polling" if state == "started" else "NOT RUNNING — resume it")
+            if any(str(t["state"]).lower() != "started" for t in _tasks):
+                st.error("One or more tasks are suspended — the pipeline is NOT "
+                         "processing for those scopes. Ask the deploy owner to "
+                         "run the resume step (ALTER TASK … RESUME).")
+        else:
+            st.warning("No tasks found in ADJUSTMENT_APP — has the deploy run?")
+    except Exception as ex:
+        st.info(f"Task state not available: {ex}")
+
+    # ── Queue & processing ───────────────────────────────────────────────────
+    section_title("Queue & Processing", "zap")
+    try:
+        _q = run_query("""
+            SELECT
+                COUNT(CASE WHEN RUN_STATUS IN ('Pending','Approved')
+                           AND BLOCKED_BY_ADJ_ID IS NULL THEN 1 END) AS QUEUED,
+                COUNT(CASE WHEN RUN_STATUS IN ('Pending','Approved')
+                           AND BLOCKED_BY_ADJ_ID IS NOT NULL THEN 1 END) AS BLOCKED,
+                COUNT(CASE WHEN RUN_STATUS = 'Running' THEN 1 END) AS RUNNING,
+                COUNT(CASE WHEN RUN_STATUS = 'Failed'
+                           AND PROCESS_DATE >= DATEADD(hour, -24,
+                               CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9))
+                           THEN 1 END) AS FAILED_24H,
+                DATEDIFF('minute',
+                    MIN(CASE WHEN RUN_STATUS IN ('Pending','Approved')
+                             AND BLOCKED_BY_ADJ_ID IS NULL THEN CREATED_DATE END),
+                    CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9)
+                ) AS OLDEST_QUEUED_MIN,
+                DATEDIFF('minute',
+                    MIN(CASE WHEN RUN_STATUS = 'Running' THEN START_DATE END),
+                    CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9)
+                ) AS OLDEST_RUNNING_MIN
+            FROM ADJUSTMENT_APP.ADJ_HEADER
+            WHERE IS_DELETED = FALSE
+        """)
+        q = _q[0] if _q else None
+        if q is not None:
+            oq  = q["OLDEST_QUEUED_MIN"]
+            orn = q["OLDEST_RUNNING_MIN"]
+            h1, h2, h3, h4, h5 = st.columns(5)
+            _health_card(h1, "Queued", int(q["QUEUED"] or 0),
+                         "warn" if oq is not None and int(oq) > 5 else "ok",
+                         f"oldest {int(oq)} min" if oq is not None else "")
+            _health_card(h2, "Blocked", int(q["BLOCKED"] or 0),
+                         "warn" if int(q["BLOCKED"] or 0) else "ok",
+                         "waiting behind overlaps")
+            _health_card(h3, "Running", int(q["RUNNING"] or 0),
+                         "bad" if orn is not None and int(orn) > 240
+                         else ("warn" if orn is not None and int(orn) > 180 else "ok"),
+                         f"oldest {int(orn)} min" if orn is not None else "")
+            _health_card(h4, "Failed (24h)", int(q["FAILED_24H"] or 0),
+                         "bad" if int(q["FAILED_24H"] or 0) else "ok",
+                         "Retry from the Adjustments page")
+            # PBI backlog (external table — best effort)
+            try:
+                _pbi = run_query("""
+                    SELECT COUNT(*) AS C FROM METADATA.POWERBI_ACTION
+                    WHERE START_TIME IS NULL
+                      AND REQUEST_TIME >= DATEADD(day, -3, CURRENT_TIMESTAMP())
+                """)
+                pbi_waiting = int(_pbi[0]["C"]) if _pbi else 0
+                _health_card(h5, "PBI refreshes waiting", pbi_waiting,
+                             "warn" if pbi_waiting > 5 else "ok",
+                             "picked up ~every 5 min")
+            except Exception:
+                _health_card(h5, "PBI refreshes waiting", "n/a", "warn",
+                             "METADATA.POWERBI_ACTION not readable")
+    except Exception as ex:
+        st.info(f"Queue stats not available: {ex}")
+
+    # ── Notifications ────────────────────────────────────────────────────────
+    section_title("Notifications (24h)", "mail")
+    try:
+        _n = run_query("""
+            SELECT
+                COUNT(CASE WHEN STATUS = 'SENT' THEN 1 END)   AS SENT,
+                COUNT(CASE WHEN STATUS = 'FAILED' THEN 1 END) AS FAILED,
+                COUNT(CASE WHEN STATUS = 'SKIPPED_DISABLED' THEN 1 END) AS SKIPPED
+            FROM ADJUSTMENT_APP.ADJ_NOTIFICATION_LOG
+            WHERE CREATED_AT >= DATEADD(hour, -24, CURRENT_TIMESTAMP())
+        """)
+        n = _n[0] if _n else None
+        if n is not None:
+            n1, n2, n3 = st.columns(3)
+            _health_card(n1, "Sent", int(n["SENT"] or 0), "ok")
+            _health_card(n2, "Failed", int(n["FAILED"] or 0),
+                         "bad" if int(n["FAILED"] or 0) else "ok",
+                         "see the Notifications tab log")
+            _health_card(n3, "Skipped (disabled)", int(n["SKIPPED"] or 0),
+                         "warn" if int(n["SKIPPED"] or 0) else "ok",
+                         "master switch is off")
+    except Exception as ex:
+        st.info(f"Notification stats not available: {ex}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — SCOPE CONFIGURATION
@@ -121,35 +287,64 @@ with tab_signoff:
     st.markdown(
         f'<div style="background:{P["info_lt"]};border:1px solid #90CAF9;border-radius:8px;'
         f'padding:0.7rem 1rem;margin-bottom:1rem;font-size:0.85rem">'
-        f'When a COB is <strong>signed off</strong> for a scope, no new adjustments can be '
-        f'submitted for that COB/process type combination. The submit procedure will reject '
-        f'the request with status "Rejected - SignedOff". '
-        f'Use this panel to manage sign-off status.'
+        f'The <strong>first sign-off</strong> for a COB/scope arrives from the upstream '
+        f'publish system and is synced in automatically (also on a 30-minute task). '
+        f'While a COB is <strong>SIGNED_OFF</strong> or has a <strong>re-open request '
+        f'pending</strong>, no new adjustments can be submitted. Business users request a '
+        f're-open from the New Adjustment page; approvers action it on the Approval Queue '
+        f'page; once re-opened and finished, the COB is signed off again from the app. '
+        f'This panel is the admin override — every change here is written to '
+        f'<code>ADJ_SIGNOFF_HISTORY</code>.'
         f'</div>',
         unsafe_allow_html=True)
+
+    def _so_hist(cobid, scope, entity, old_status, new_status, comment):
+        run_query(f"""
+            INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
+                (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
+            VALUES ({int(cobid)}, '{_esc(scope)}', '{_esc(entity or "*")}',
+                    '{_esc(old_status)}',
+                    '{_esc(new_status)}', '{_esc(user)}', '{_esc(comment)}')
+        """)
+
+    if st.button("Sync from upstream feed now", key="signoff_sync_btn"):
+        try:
+            res = run_query("CALL ADJUSTMENT_APP.SP_SYNC_SIGNOFF_STATUS()")
+            st.success(f"Sync complete: {res[0][0] if res else 'no result'}")
+        except Exception as ex:
+            st.error(f"Sync failed. The database reported: {ex}")
 
     # --- Current sign-off status ---
     try:
         df_signoff = run_query_df("""
-            SELECT COBID, PROCESS_TYPE, SIGN_OFF_STATUS, SIGN_OFF_BY,
-                   SIGN_OFF_TIMESTAMP, UPDATED_DATE
+            SELECT COBID, PROCESS_TYPE, ENTITY_CODE, SIGN_OFF_STATUS, SIGNOFF_SOURCE,
+                   SIGN_OFF_BY, SIGN_OFF_TIMESTAMP,
+                   REOPEN_REQUESTED_BY, REOPEN_REQUESTED_AT, REOPEN_REASON,
+                   REOPEN_APPROVED_BY, REOPEN_APPROVED_AT, UPDATED_DATE
             FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
             ORDER BY COBID DESC, PROCESS_TYPE
         """)
 
         if not df_signoff.empty:
-            signed_ct = int(df_signoff[df_signoff["SIGN_OFF_STATUS"] == "SIGNED_OFF"].shape[0])
-            open_ct   = len(df_signoff) - signed_ct
-            sm1, sm2, sm3 = st.columns(3)
+            _blocked = df_signoff["SIGN_OFF_STATUS"].str.upper().isin(
+                ["SIGNED_OFF", "REOPEN_REQUESTED"])
+            sm1, sm2, sm3, sm4 = st.columns(4)
             sm1.metric("Total Entries", len(df_signoff))
-            sm2.metric("Signed Off", signed_ct)
-            sm3.metric("Open", open_ct)
+            sm2.metric("Blocked (signed off / request pending)", int(_blocked.sum()))
+            sm3.metric("Re-opened", int((df_signoff["SIGN_OFF_STATUS"].str.upper()
+                                         == "REOPENED").sum()))
+            sm4.metric("Open", int((~_blocked).sum()
+                                   - int((df_signoff["SIGN_OFF_STATUS"].str.upper()
+                                          == "REOPENED").sum())))
 
-            st.dataframe(df_signoff, use_container_width=True, height=300)
+            render_df_table(df_signoff, max_rows=200, height=300)
 
-            # --- Toggle sign-off ---
+            # --- Admin override (audited) ---
             st.markdown("<br/>", unsafe_allow_html=True)
-            section_title("Toggle Sign-Off Status", "refresh-cw")
+            section_title("Admin Override", "refresh-cw")
+            st.caption(
+                "Normal path: re-open via the Approval Queue, re-sign-off from the "
+                "New Adjustment page. Use these only when that flow is not possible.")
             toggle_cols = st.columns(3)
             with toggle_cols[0]:
                 cob_options = sorted(df_signoff["COBID"].unique(), reverse=True)
@@ -157,35 +352,79 @@ with tab_signoff:
             with toggle_cols[1]:
                 scope_options = sorted(df_signoff[df_signoff["COBID"] == sel_cob]["PROCESS_TYPE"].unique())
                 sel_scope = st.selectbox("Process Type", scope_options, key="signoff_toggle_scope")
+            _ent_opts = sorted(df_signoff[
+                (df_signoff["COBID"] == sel_cob)
+                & (df_signoff["PROCESS_TYPE"] == sel_scope)
+            ]["ENTITY_CODE"].fillna("*").unique())
+            sel_entity = st.selectbox(
+                "Entity ('*' = whole scope)", _ent_opts or ["*"],
+                key="signoff_toggle_entity")
+            current_row = df_signoff[
+                (df_signoff["COBID"] == sel_cob)
+                & (df_signoff["PROCESS_TYPE"] == sel_scope)
+                & (df_signoff["ENTITY_CODE"].fillna("*") == sel_entity)
+            ]
+            current_status = (str(current_row["SIGN_OFF_STATUS"].values[0]).upper()
+                              if not current_row.empty else "OPEN")
             with toggle_cols[2]:
-                current_row = df_signoff[
-                    (df_signoff["COBID"] == sel_cob) & (df_signoff["PROCESS_TYPE"] == sel_scope)
-                ]
-                current_status = current_row["SIGN_OFF_STATUS"].values[0] if not current_row.empty else "OPEN"
-                new_status = "OPEN" if current_status == "SIGNED_OFF" else "SIGNED_OFF"
-                st.markdown(f"<br/>", unsafe_allow_html=True)
-                if st.button(
-                    f"{'Reopen' if current_status == 'SIGNED_OFF' else 'Sign Off'}",
-                    key="toggle_signoff_btn", type="primary"
-                ):
+                st.markdown("<br/>", unsafe_allow_html=True)
+                st.caption(f"Current status: {current_status}")
+
+            ov1, ov2 = st.columns(2)
+            with ov1:
+                if st.button("Re-open (admin override)", key="admin_reopen_btn",
+                             disabled=current_status not in ("SIGNED_OFF", "REOPEN_REQUESTED")):
                     try:
-                        ts = "CURRENT_TIMESTAMP()" if new_status == "SIGNED_OFF" else "NULL"
-                        by = f"'{_esc(user)}'" if new_status == "SIGNED_OFF" else "NULL"
-                        run_query(f"""
+                        rows = run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-                            SET SIGN_OFF_STATUS    = '{_esc(new_status)}',
-                                SIGN_OFF_BY        = {by},
-                                SIGN_OFF_TIMESTAMP = {ts},
+                            SET SIGN_OFF_STATUS    = 'REOPENED',
+                                REOPEN_APPROVED_BY = '{_esc(user)}',
+                                REOPEN_APPROVED_AT = CURRENT_TIMESTAMP(),
                                 UPDATED_DATE       = CURRENT_TIMESTAMP()
                             WHERE COBID = {int(sel_cob)}
                               AND PROCESS_TYPE = '{_esc(sel_scope)}'
+                              AND UPPER(ENTITY_CODE) = UPPER('{_esc(sel_entity)}')
+                              AND UPPER(SIGN_OFF_STATUS) IN ('SIGNED_OFF', 'REOPEN_REQUESTED')
                         """)
-                        st.success(f"COB {sel_cob} / {sel_scope} → {new_status}")
+                        n = int(rows[0][0]) if rows else 0
+                        if n:
+                            _so_hist(sel_cob, sel_scope, sel_entity, current_status, "REOPENED",
+                                     "Admin override re-open")
+                            st.success(f"COB {sel_cob} / {sel_scope} / {sel_entity} re-opened.")
+                        else:
+                            st.warning("Nothing changed — status moved on; refresh.")
                         safe_rerun()
                     except Exception as ex:
-                        st.error(f"Failed to update sign-off: {ex}")
+                        st.error(f"Re-open failed: {ex}")
+            with ov2:
+                if st.button("Sign off (admin override)", key="admin_signoff_btn",
+                             disabled=current_status == "SIGNED_OFF"):
+                    try:
+                        rows = run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+                            SET SIGN_OFF_STATUS    = 'SIGNED_OFF',
+                                SIGN_OFF_BY        = '{_esc(user)}',
+                                SIGN_OFF_TIMESTAMP = CURRENT_TIMESTAMP(),
+                                SIGNOFF_SOURCE     = 'ADMIN',
+                                UPDATED_DATE       = CURRENT_TIMESTAMP()
+                            WHERE COBID = {int(sel_cob)}
+                              AND PROCESS_TYPE = '{_esc(sel_scope)}'
+                              AND UPPER(ENTITY_CODE) = UPPER('{_esc(sel_entity)}')
+                              AND UPPER(SIGN_OFF_STATUS) <> 'SIGNED_OFF'
+                        """)
+                        n = int(rows[0][0]) if rows else 0
+                        if n:
+                            _so_hist(sel_cob, sel_scope, sel_entity, current_status, "SIGNED_OFF",
+                                     "Admin override sign-off")
+                            st.success(f"COB {sel_cob} / {sel_scope} / {sel_entity} signed off.")
+                        else:
+                            st.warning("Nothing changed — status moved on; refresh.")
+                        safe_rerun()
+                    except Exception as ex:
+                        st.error(f"Sign-off failed: {ex}")
         else:
-            st.info("No sign-off entries yet. Use the form below to create one.")
+            st.info("No sign-off entries yet — run the upstream sync above, or "
+                    "use the form below to create one manually.")
     except Exception as e:
         st.info(f"Sign-off table not available: {e}")
 
@@ -193,12 +432,15 @@ with tab_signoff:
     st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Add Sign-Off Entry", "lock")
     with st.form("new_signoff_form"):
-        sc1, sc2, sc3 = st.columns(3)
+        sc1, sc2, sc3, sc4 = st.columns(4)
         with sc1:
             so_cobid = st.text_input("COBID", placeholder="e.g. 20260328", key="so_cobid")
         with sc2:
             so_scope = st.selectbox("Process Type", list(SCOPE_CONFIG.keys()), key="so_scope")
         with sc3:
+            so_entity = st.text_input("Entity ('*' = whole scope)", value="*",
+                                      key="so_entity")
+        with sc4:
             so_status = st.selectbox("Initial Status", ["OPEN", "SIGNED_OFF"], key="so_status")
 
         so_submit = st.form_submit_button("Add Entry", type="primary")
@@ -212,17 +454,25 @@ with tab_signoff:
                     cobid_int = int(so_cobid.strip())
                     run_query(f"""
                         MERGE INTO ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS tgt
-                        USING (SELECT {cobid_int} AS COBID, '{_esc(so_scope)}' AS PROCESS_TYPE) src
+                        USING (SELECT {cobid_int} AS COBID, '{_esc(so_scope)}' AS PROCESS_TYPE,
+                                      '{_esc((so_entity or "*").strip() or "*")}' AS ENTITY_CODE) src
                         ON tgt.COBID = src.COBID AND tgt.PROCESS_TYPE = src.PROCESS_TYPE
+                           AND UPPER(tgt.ENTITY_CODE) = UPPER(src.ENTITY_CODE)
                         WHEN MATCHED THEN UPDATE SET
                             SIGN_OFF_STATUS    = '{_esc(so_status)}',
                             SIGN_OFF_BY        = {by},
                             SIGN_OFF_TIMESTAMP = {ts},
+                            SIGNOFF_SOURCE     = 'ADMIN',
                             UPDATED_DATE       = CURRENT_TIMESTAMP()
                         WHEN NOT MATCHED THEN INSERT
-                            (COBID, PROCESS_TYPE, SIGN_OFF_STATUS, SIGN_OFF_BY, SIGN_OFF_TIMESTAMP)
-                        VALUES ({cobid_int}, '{_esc(so_scope)}', '{_esc(so_status)}', {by}, {ts})
+                            (COBID, PROCESS_TYPE, ENTITY_CODE, SIGN_OFF_STATUS, SIGN_OFF_BY,
+                             SIGN_OFF_TIMESTAMP, SIGNOFF_SOURCE)
+                        VALUES ({cobid_int}, '{_esc(so_scope)}', src.ENTITY_CODE,
+                                '{_esc(so_status)}', {by}, {ts}, 'ADMIN')
                     """)
+                    _so_hist(cobid_int, so_scope, (so_entity or "*").strip() or "*",
+                             "OPEN", so_status,
+                             "Manual entry created on the Admin page")
                     st.success(f"Sign-off entry created: COB {so_cobid.strip()} / {so_scope} = {so_status}")
                     safe_rerun()
                 except Exception as ex:
@@ -261,7 +511,7 @@ with tab_approvers:
                 f'</span>',
                 unsafe_allow_html=True)
 
-            st.dataframe(df_approvers, use_container_width=True, height=300)
+            render_df_table(df_approvers, max_rows=200, height=300)
 
             # Deactivate / reactivate
             st.markdown("<br/>", unsafe_allow_html=True)
@@ -332,6 +582,84 @@ with tab_approvers:
                 except Exception as ex:
                     st.error(f"Failed to add approver: {ex}")
 
+    # ── Page administrators (gate for THIS Admin page) ────────────────────────
+    st.markdown("<br/>", unsafe_allow_html=True)
+    section_title("Page Administrators", "lock")
+    st.caption(
+        "Only users listed here (active) can open the Admin page. While the list "
+        "is empty the page is open to everyone — add the first administrator to "
+        "lock it down. You cannot deactivate yourself.")
+    try:
+        df_admins = run_query_df("""
+            SELECT ADMIN_ID, USERNAME, IS_ACTIVE, ADDED_BY, ADDED_DATE
+            FROM ADJUSTMENT_APP.ADJ_ADMINS
+            ORDER BY USERNAME
+        """)
+        if not df_admins.empty:
+            render_df_table(df_admins, max_rows=100, height=300)
+            adm_cols = st.columns([2, 1, 1])
+            with adm_cols[0]:
+                admin_options = [
+                    f"{r['USERNAME']} (ID {r['ADMIN_ID']}) — {'Active' if r['IS_ACTIVE'] else 'Inactive'}"
+                    for _, r in df_admins.iterrows()
+                ]
+                sel_admin = st.selectbox("Select administrator", admin_options,
+                                         key="toggle_admin")
+            _sel_admin_id   = int(sel_admin.split("ID ")[1].split(")")[0])
+            _sel_admin_user = sel_admin.split(" (ID ")[0].strip().upper()
+            with adm_cols[1]:
+                if st.button("Activate", key="activate_admin_btn"):
+                    try:
+                        run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_ADMINS
+                            SET IS_ACTIVE = TRUE
+                            WHERE ADMIN_ID = {_sel_admin_id}
+                        """)
+                        st.success("Administrator activated.")
+                        safe_rerun()
+                    except Exception as ex:
+                        st.error(f"Failed to activate administrator: {ex}")
+            with adm_cols[2]:
+                _is_self = _sel_admin_user == str(user).strip().upper()
+                if st.button("Deactivate", key="deactivate_admin_btn",
+                             disabled=_is_self,
+                             help="You cannot deactivate yourself." if _is_self else None):
+                    try:
+                        run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_ADMINS
+                            SET IS_ACTIVE = FALSE
+                            WHERE ADMIN_ID = {_sel_admin_id}
+                        """)
+                        st.success("Administrator deactivated.")
+                        safe_rerun()
+                    except Exception as ex:
+                        st.error(f"Failed to deactivate administrator: {ex}")
+        else:
+            st.info("No page administrators yet — the Admin page is open to "
+                    "everyone until the first one is added.")
+    except Exception as e:
+        st.info(f"Administrators table not available: {e}")
+
+    with st.form("new_admin_form"):
+        adm_username = st.text_input(
+            "Username", placeholder="e.g. JSMITH", key="admin_user",
+            help="Snowflake username as returned by CURRENT_USER().")
+        adm_submit = st.form_submit_button("Add Administrator", type="primary")
+        if adm_submit:
+            if not adm_username.strip():
+                st.error("Username is required.")
+            else:
+                try:
+                    run_query(f"""
+                        INSERT INTO ADJUSTMENT_APP.ADJ_ADMINS
+                            (USERNAME, IS_ACTIVE, ADDED_BY)
+                        VALUES (UPPER('{_esc(adm_username.strip())}'), TRUE, '{_esc(user)}')
+                    """)
+                    st.success(f"Administrator {adm_username.strip().upper()} added.")
+                    safe_rerun()
+                except Exception as ex:
+                    st.error(f"Failed to add administrator: {ex}")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — RECURRING TEMPLATES
@@ -342,10 +670,11 @@ with tab_recurring:
     st.markdown(
         f'<div style="background:{P["info_lt"]};border:1px solid #90CAF9;border-radius:8px;'
         f'padding:0.7rem 1rem;margin-bottom:1rem;font-size:0.85rem">'
-        f'Recurring templates are automatically instantiated by the '
-        f'<code>INSTANTIATE_RECURRING_TASK</code> (every 5 min). When a new business date '
-        f'falls within the template\'s START_COBID → END_COBID range, a new ADJ_HEADER '
-        f'row is created and enters the normal processing pipeline.'
+        f'{icon("alert-triangle", size=13, color="#B45309")} <strong>Recurring '
+        f'processing is not live yet.</strong> Templates saved here are stored '
+        f'but nothing instantiates them automatically — the instantiation task '
+        f'is planned for a future release. Until then, submit each COB\'s '
+        f'adjustment manually from the New Adjustment page.'
         f'</div>',
         unsafe_allow_html=True)
 
@@ -369,7 +698,7 @@ with tab_recurring:
                 f'</span>',
                 unsafe_allow_html=True)
 
-            st.dataframe(df_templates, use_container_width=True, height=300)
+            render_df_table(df_templates, max_rows=200, height=300)
         else:
             st.info("No recurring templates configured yet.")
     except Exception as e:
@@ -422,7 +751,210 @@ with tab_recurring:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — SCHEMA REFERENCE
+# TAB 5 — NOTIFICATIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_notify:
+    section_title("Email Notifications", "mail")
+    st.markdown(
+        f'<div style="background:{P["info_lt"]};border:1px solid #90CAF9;border-radius:8px;'
+        f'padding:0.7rem 1rem;margin-bottom:1rem;font-size:0.85rem">'
+        f'Emails are sent through a Snowflake <strong>email notification '
+        f'integration</strong> created by the DBA team (see '
+        f'<code>docs/TICKET_email_notification_integration.md</code>). '
+        f'Everything here can be configured before that exists — nothing is '
+        f'sent while the master switch is off (attempts are logged as '
+        f'<code>SKIPPED_DISABLED</code>). Recipients must be Snowflake users '
+        f'of this account with a <strong>verified</strong> profile email.'
+        f'</div>',
+        unsafe_allow_html=True)
+
+    # ── Master switch + integration name ─────────────────────────────────────
+    try:
+        _cfg_rows = run_query("""
+            SELECT CONFIG_KEY, CONFIG_VALUE FROM ADJUSTMENT_APP.ADJ_APP_CONFIG
+            WHERE CONFIG_KEY IN ('NOTIFICATIONS_ENABLED', 'EMAIL_INTEGRATION')
+        """)
+        _cfg = {str(r["CONFIG_KEY"]): str(r["CONFIG_VALUE"] or "") for r in (_cfg_rows or [])}
+    except Exception as ex:
+        _cfg = {}
+        st.warning(f"Could not read notification config: {ex}")
+
+    _enabled_now = _cfg.get("NOTIFICATIONS_ENABLED", "false").strip().lower() == "true"
+    _integ_now   = _cfg.get("EMAIL_INTEGRATION", "ADJ_EMAIL_INT")
+
+    nc1, nc2, nc3 = st.columns([1, 2, 1])
+    with nc1:
+        n_enabled = st.toggle("Notifications enabled", value=_enabled_now,
+                              key="ntf_enabled")
+    with nc2:
+        n_integ = st.text_input("Email integration name", value=_integ_now,
+                                key="ntf_integration",
+                                help="Exact name of the DBA-created notification "
+                                     "integration (e.g. ADJ_EMAIL_INT).")
+    with nc3:
+        st.markdown("<br/>", unsafe_allow_html=True)
+        if st.button("Save settings", key="ntf_save", type="primary",
+                     use_container_width=True):
+            try:
+                for key, val in (("NOTIFICATIONS_ENABLED",
+                                  "true" if n_enabled else "false"),
+                                 ("EMAIL_INTEGRATION", n_integ.strip())):
+                    run_query(f"""
+                        UPDATE ADJUSTMENT_APP.ADJ_APP_CONFIG
+                        SET CONFIG_VALUE = '{_esc(val)}',
+                            UPDATED_BY = '{_esc(user)}',
+                            UPDATED_AT = CURRENT_TIMESTAMP()
+                        WHERE CONFIG_KEY = '{_esc(key)}'
+                    """)
+                st.success("Notification settings saved.")
+                safe_rerun()
+            except Exception as ex:
+                st.error(f"Failed to save settings: {ex}")
+
+    if not _enabled_now:
+        st.caption("Master switch is OFF — events are logged but no email is "
+                   "sent. Flip it on once the DBA ticket is done and the test "
+                   "below succeeds.")
+
+    # ── Test send (bypasses the master switch on purpose) ────────────────────
+    section_title("Send Test Email", "send")
+    t1, t2 = st.columns([2, 1])
+    with t1:
+        test_email = st.text_input(
+            "Recipient (verified Snowflake-user email)", key="ntf_test_email",
+            placeholder="e.g. your.name@mufg.com")
+    with t2:
+        st.markdown("<br/>", unsafe_allow_html=True)
+        if st.button("Send test", key="ntf_test_btn", use_container_width=True,
+                     disabled=not test_email.strip()):
+            try:
+                import json as _json
+                _tp = _json.dumps({"email": test_email.strip()}).replace("'", "''")
+                res = run_query(f"CALL ADJUSTMENT_APP.SP_NOTIFY('test', '{_tp}')")
+                try:
+                    out = _json.loads(str(res[0][0])) if res else {}
+                except (ValueError, TypeError, IndexError):
+                    out = {}
+                if out.get("sent"):
+                    st.success("Test email sent — check the inbox (and that "
+                               "no-reply@snowflake.net is not filtered).")
+                else:
+                    st.warning(f"Test did not send: "
+                               f"{out.get('errors') or out.get('status') or res[0][0]}")
+            except Exception as ex:
+                st.error(f"Test failed: {ex}")
+
+    # ── Recipients / preferences ─────────────────────────────────────────────
+    st.markdown("<br/>", unsafe_allow_html=True)
+    section_title("Recipients", "user")
+    st.caption(
+        "Who gets notified of what. “My outcomes” = the user's own adjustments "
+        "Processed/Failed. “Approvals” = new items in the Approval Queue and "
+        "COB re-open requests (only useful for registered approvers).")
+    try:
+        df_prefs = run_query_df("""
+            SELECT PREF_ID, USERNAME, EMAIL, NOTIFY_MY_OUTCOMES,
+                   NOTIFY_APPROVALS, IS_ACTIVE, ADDED_BY, ADDED_DATE
+            FROM ADJUSTMENT_APP.ADJ_NOTIFICATION_PREFS
+            ORDER BY USERNAME
+        """)
+        if not df_prefs.empty:
+            render_df_table(df_prefs, max_rows=100, height=300)
+            pcols = st.columns([2, 1, 1])
+            with pcols[0]:
+                pref_options = [
+                    f"{r['USERNAME']} (ID {r['PREF_ID']}) — "
+                    f"{'Active' if r['IS_ACTIVE'] else 'Inactive'}"
+                    for _, r in df_prefs.iterrows()
+                ]
+                sel_pref = st.selectbox("Select recipient", pref_options,
+                                        key="ntf_pref_pick")
+            _sel_pref_id = int(sel_pref.split("ID ")[1].split(")")[0])
+            with pcols[1]:
+                if st.button("Activate", key="ntf_pref_on"):
+                    try:
+                        run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_NOTIFICATION_PREFS
+                            SET IS_ACTIVE = TRUE WHERE PREF_ID = {_sel_pref_id}
+                        """)
+                        st.success("Recipient activated.")
+                        safe_rerun()
+                    except Exception as ex:
+                        st.error(f"Failed: {ex}")
+            with pcols[2]:
+                if st.button("Deactivate", key="ntf_pref_off"):
+                    try:
+                        run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_NOTIFICATION_PREFS
+                            SET IS_ACTIVE = FALSE WHERE PREF_ID = {_sel_pref_id}
+                        """)
+                        st.success("Recipient deactivated.")
+                        safe_rerun()
+                    except Exception as ex:
+                        st.error(f"Failed: {ex}")
+        else:
+            st.info("No recipients configured yet — add the first one below.")
+    except Exception as ex:
+        st.info(f"Preferences table not available: {ex}")
+
+    with st.form("ntf_new_pref_form"):
+        np1, np2 = st.columns(2)
+        with np1:
+            np_user = st.text_input("Snowflake username", placeholder="e.g. JSMITH",
+                                    key="ntf_new_user")
+        with np2:
+            np_email = st.text_input("Email (verified on their Snowflake user)",
+                                     placeholder="e.g. j.smith@mufg.com",
+                                     key="ntf_new_email")
+        np3, np4 = st.columns(2)
+        with np3:
+            np_outcomes = st.checkbox("Notify their adjustment outcomes",
+                                      value=True, key="ntf_new_outcomes")
+        with np4:
+            np_approvals = st.checkbox("Notify approver events",
+                                       value=False, key="ntf_new_approvals")
+        np_submit = st.form_submit_button("Add Recipient", type="primary")
+        if np_submit:
+            if not np_user.strip() or not np_email.strip() or "@" not in np_email:
+                st.error("Username and a valid email are required.")
+            else:
+                try:
+                    run_query(f"""
+                        INSERT INTO ADJUSTMENT_APP.ADJ_NOTIFICATION_PREFS
+                            (USERNAME, EMAIL, NOTIFY_MY_OUTCOMES,
+                             NOTIFY_APPROVALS, IS_ACTIVE, ADDED_BY)
+                        VALUES (UPPER('{_esc(np_user.strip())}'),
+                                '{_esc(np_email.strip())}',
+                                {'TRUE' if np_outcomes else 'FALSE'},
+                                {'TRUE' if np_approvals else 'FALSE'},
+                                TRUE, '{_esc(user)}')
+                    """)
+                    st.success(f"Recipient {np_user.strip().upper()} added.")
+                    safe_rerun()
+                except Exception as ex:
+                    st.error(f"Failed to add recipient: {ex}")
+
+    # ── Recent notification log ──────────────────────────────────────────────
+    st.markdown("<br/>", unsafe_allow_html=True)
+    section_title("Recent Notifications", "clock")
+    try:
+        df_nlog = run_query_df("""
+            SELECT CREATED_AT, EVENT_TYPE, STATUS, RECIPIENTS, SUBJECT, ERROR
+            FROM ADJUSTMENT_APP.ADJ_NOTIFICATION_LOG
+            ORDER BY CREATED_AT DESC
+            LIMIT 50
+        """)
+        if df_nlog.empty:
+            st.caption("No notification attempts yet.")
+        else:
+            render_df_table(df_nlog, max_rows=50, height=320)
+    except Exception as ex:
+        st.info(f"Notification log not available: {ex}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — SCHEMA REFERENCE
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_schema:
@@ -453,7 +985,7 @@ with tab_schema:
     ]
 
     df_schema = pd.DataFrame(schema_items, columns=["Object", "Type", "Description"])
-    st.dataframe(df_schema, use_container_width=True)
+    render_df_table(df_schema, max_rows=200)
 
     section_title("Key Design Principles", "info")
     st.markdown("""

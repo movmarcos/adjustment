@@ -124,6 +124,8 @@ STATUS_COLORS = {
     "Failed":               "#DC2626",
     "Rejected":             "#B91C1C",
     "Rejected - SignedOff": "#7E22CE",
+    "Replaced":             "#9333EA",   # superseded by a newer upload (same COB+Reference)
+    "Superseded":           "#475569",   # removed by an Entity Roll rebuild
     "Deleted":              "#64748B",
 }
 
@@ -137,8 +139,16 @@ STATUS_ICONS = {
     "Failed":               "x-circle",
     "Rejected":             "ban",
     "Rejected - SignedOff": "lock",
+    "Replaced":             "layers",
+    "Superseded":           "refresh-cw",
     "Deleted":              "trash",
 }
+
+# Every PROCESS_TYPE value that can exist on ADJ_HEADER — for FILTER widgets.
+# (SCOPE_CONFIG deliberately lists only the four top-level scopes because the
+# New Adjustment page builds its scope pills from it; the FRTB sub-types would
+# not belong there. Filters, however, must be able to reach every stored value.)
+ALL_SCOPES = ["VaR", "Stress", "Sensitivity", "FRTB", "FRTBDRC", "FRTBRRAO"]
 
 SCOPE_CONFIG = {
     "VaR":         {"icon": "bar-chart",  "color": "#D50032", "bg": "#FFF0F3", "label": "VaR"},
@@ -864,6 +874,157 @@ def inject_css():
         background-color: {P["grey_100"]} !important;
         color: {P["primary_dk"]} !important;
     }}
+
+    /* ═══ THEME GUARD — pin the light design in browser/Snowsight DARK mode ═══
+       The app forces a light canvas (stAppViewContainer → --bg above), but
+       Streamlit's text and widget chrome still follow the viewer's theme:
+       in dark mode that painted near-white text and dark inputs onto the
+       light background. These rules pin every foreground/surface the app
+       relies on. In light mode they are no-ops (they match the theme).
+       NOTE: broad text rules avoid `span`/`div` on purpose — the app's own
+       HTML colours those inline and must keep winning. */
+
+    /* Base text: headings, paragraphs, list items, labels, table cells */
+    [data-testid="stMainBlockContainer"] :is(h1,h2,h3,h4,h5,h6) {{
+        color: var(--ink) !important;
+    }}
+    [data-testid="stMainBlockContainer"] :is(p, li, label) {{
+        color: var(--ink) !important;
+    }}
+    [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p,
+    [data-testid="stMainBlockContainer"] small {{
+        color: var(--ink-2) !important;
+    }}
+    [data-testid="stMainBlockContainer"] hr {{
+        border-color: var(--border) !important;
+    }}
+
+    /* Text-entry widgets */
+    .stTextInput input, .stTextArea textarea,
+    .stNumberInput input, .stDateInput input {{
+        background-color: var(--card) !important;
+        color: var(--ink) !important;
+        border-color: var(--border) !important;
+        caret-color: var(--ink) !important;
+    }}
+    .stTextInput > div > div, .stTextArea > div > div,
+    .stNumberInput > div > div, .stDateInput > div > div {{
+        background-color: var(--card) !important;
+        border-color: var(--border) !important;
+    }}
+    [data-testid="stMainBlockContainer"] input::placeholder,
+    [data-testid="stMainBlockContainer"] textarea::placeholder {{
+        color: var(--ink-3) !important;
+    }}
+
+    /* Select / multiselect surfaces + their dropdown menus */
+    .stSelectbox [data-baseweb="select"] > div,
+    .stMultiSelect [data-baseweb="select"] > div {{
+        background-color: var(--card) !important;
+        border-color: var(--border) !important;
+    }}
+    [data-baseweb="select"] div, [data-baseweb="select"] span,
+    [data-baseweb="select"] input {{
+        color: var(--ink) !important;
+    }}
+    [data-baseweb="select"] svg {{ fill: var(--ink-2) !important; }}
+    [data-baseweb="popover"] > div, [data-baseweb="menu"],
+    ul[role="listbox"] {{
+        background-color: var(--card) !important;
+    }}
+    [data-baseweb="popover"] [role="option"],
+    ul[role="listbox"] li {{
+        color: var(--ink) !important;
+    }}
+
+    /* Buttons: secondary = light surface, primary = brand red */
+    .stButton button, .stDownloadButton button, .stFormSubmitButton button {{
+        border: 1px solid var(--border) !important;
+    }}
+    .stButton button[kind="secondary"],
+    .stDownloadButton button,
+    .stFormSubmitButton button[kind="secondaryFormSubmit"] {{
+        background-color: var(--card) !important;
+        color: var(--ink) !important;
+    }}
+    .stButton button[kind="primary"],
+    .stFormSubmitButton button[kind="primaryFormSubmit"] {{
+        background-color: var(--brand) !important;
+        border-color: var(--brand) !important;
+        color: #FFFFFF !important;
+    }}
+    .stButton button[kind="primary"] p {{ color: #FFFFFF !important; }}
+    .stButton button:disabled, .stDownloadButton button:disabled,
+    .stFormSubmitButton button:disabled {{
+        background-color: {P["grey_100"]} !important;
+        color: var(--ink-3) !important;
+    }}
+    .stButton button:disabled p {{ color: var(--ink-3) !important; }}
+
+    /* Tabs */
+    .stTabs [data-baseweb="tab"] {{ color: var(--ink-2) !important; }}
+    .stTabs [data-baseweb="tab"][aria-selected="true"] {{
+        color: var(--brand) !important;
+    }}
+    .stTabs [data-baseweb="tab-highlight"] {{
+        background-color: var(--brand) !important;
+    }}
+    .stTabs [data-baseweb="tab-border"] {{
+        background-color: var(--border) !important;
+    }}
+
+    /* Expanders + bordered containers */
+    [data-testid="stExpander"] {{
+        background-color: var(--card) !important;
+        border: 1px solid var(--border) !important;
+        border-radius: var(--r-md) !important;
+    }}
+    [data-testid="stExpander"] summary,
+    [data-testid="stExpander"] summary p {{
+        color: var(--ink) !important;
+    }}
+    [data-testid="stExpander"] summary svg {{ fill: var(--ink-2) !important; }}
+    [data-testid="stVerticalBlockBorderWrapper"] {{
+        border-color: var(--border) !important;
+        background-color: var(--card) !important;
+    }}
+
+    /* Alerts (st.info/success/warning/error): light tinted surfaces always */
+    [data-testid="stAlert"] {{
+        background-color: var(--card) !important;
+        border: 1px solid var(--border) !important;
+        border-radius: 8px !important;
+    }}
+    [data-testid="stAlert"]:has([data-testid="stAlertContentSuccess"]) {{
+        background-color: {P["success_lt"]} !important;
+    }}
+    [data-testid="stAlert"]:has([data-testid="stAlertContentInfo"]) {{
+        background-color: {P["info_lt"]} !important;
+    }}
+    [data-testid="stAlert"]:has([data-testid="stAlertContentWarning"]) {{
+        background-color: {P["warning_lt"]} !important;
+    }}
+    [data-testid="stAlert"]:has([data-testid="stAlertContentError"]) {{
+        background-color: {P["danger_lt"]} !important;
+    }}
+    [data-testid="stAlert"] p {{ color: var(--ink) !important; }}
+
+    /* Metrics, tooltips, checkbox/toggle text */
+    [data-testid="stMetricValue"], [data-testid="stMetricLabel"],
+    [data-testid="stMetricLabel"] p {{
+        color: var(--ink) !important;
+    }}
+    [data-baseweb="tooltip"] {{
+        background-color: {P["grey_900"]} !important;
+        color: #FFFFFF !important;
+    }}
+    .stCheckbox p, .stRadio p {{ color: var(--ink) !important; }}
+
+    /* Dataframe wrapper (the grid itself is themed via .streamlit/config.toml) */
+    [data-testid="stDataFrame"] {{
+        background-color: var(--card) !important;
+        border-radius: var(--r-sm);
+    }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -998,6 +1159,7 @@ def render_status_timeline(history_rows):
         st.markdown(f'<span style="font-size:0.82rem;color:{P["grey_700"]}">No history yet.</span>',
                     unsafe_allow_html=True)
         return
+    import html as _htmlmod
     html = '<div class="timeline">'
     for h in history_rows:
         status = h.get("NEW_STATUS", "?")
@@ -1008,11 +1170,13 @@ def render_status_timeline(history_rows):
         if hasattr(at, "strftime"):
             at = at.strftime("%d %b %Y %H:%M")
         comment = h.get("COMMENT", "")
+        # User-sourced text is HTML-escaped: an unclosed tag in a comment or
+        # reason would otherwise corrupt the page for every viewer.
         html += (
             f'<div class="tl-item">'
-            f'<div class="tl-status" style="color:{color}">{svg} {status}</div>'
-            f'<div class="tl-meta">by {by} · {at}</div>'
-            + (f'<div class="tl-comment">"{comment}"</div>' if comment else "")
+            f'<div class="tl-status" style="color:{color}">{svg} {_htmlmod.escape(str(status))}</div>'
+            f'<div class="tl-meta">by {_htmlmod.escape(str(by))} · {at}</div>'
+            + (f'<div class="tl-comment">"{_htmlmod.escape(str(comment))}"</div>' if comment else "")
             + '</div>')
     html += '</div>'
     st.markdown(html, unsafe_allow_html=True)
@@ -1316,6 +1480,80 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
     else:
         rows = list(getattr(sel, "rows", []) or [])
     return resolve_selected_adjustment(df_source, rows)
+
+
+def render_df_table(df, max_rows=200, height=None, highlight=None, formats=None):
+    """Theme-proof READ-ONLY table: renders a DataFrame as styled HTML so it
+    never depends on the viewer's Streamlit theme (st.dataframe draws on a
+    canvas that CSS cannot reach and follows browser/Snowsight dark mode).
+    Use render_activity_grid where row SELECTION is needed.
+
+    highlight: optional callable(row_dict) -> bool; True tints the row red.
+    formats:   optional {column: format_string}, e.g. {"DIFF": "{:,.2f}"}.
+    """
+    import html as _hm
+    import pandas as _pd
+
+    if df is None or len(df) == 0:
+        st.caption("No rows.")
+        return
+    show = df.head(int(max_rows))
+    formats = formats or {}
+    numeric = {c for c in show.columns
+               if _pd.api.types.is_numeric_dtype(show[c])}
+
+    def _fmt(col, v):
+        try:
+            if v is None or _pd.isna(v):
+                return "—"
+        except (TypeError, ValueError):
+            pass
+        if col in formats:
+            try:
+                return _hm.escape(formats[col].format(v))
+            except (ValueError, TypeError):
+                pass
+        if isinstance(v, bool):
+            return "TRUE" if v else "FALSE"
+        if isinstance(v, int):
+            return f"{v:,}"
+        if isinstance(v, float):
+            return f"{int(v):,}" if v.is_integer() else f"{v:,.4g}"
+        if hasattr(v, "strftime"):
+            return v.strftime("%d %b %Y %H:%M")
+        return _hm.escape(str(v))
+
+    th = "".join(
+        f'<th style="text-align:{"right" if c in numeric else "left"};'
+        f'padding:6px 10px;font-size:0.72rem;text-transform:uppercase;'
+        f'letter-spacing:.05em;color:{P["grey_700"]};white-space:nowrap;'
+        f'border-bottom:2px solid {P["border"]};position:sticky;top:0;'
+        f'background:{P["card"]};z-index:1">{_hm.escape(str(c))}</th>'
+        for c in show.columns)
+    trs = ""
+    for _, row in show.iterrows():
+        try:
+            hot = bool(highlight(row.to_dict())) if highlight else False
+        except Exception:
+            hot = False
+        row_bg = f'background:{P["danger_lt"]};' if hot else ""
+        tds = "".join(
+            f'<td style="{row_bg}text-align:{"right" if c in numeric else "left"};'
+            f'padding:5px 10px;font-size:0.8rem;color:{P["grey_900"]};'
+            f'border-bottom:1px solid {P["border"]};'
+            f'font-variant-numeric:tabular-nums">{_fmt(c, row[c])}</td>'
+            for c in show.columns)
+        trs += f"<tr>{tds}</tr>"
+
+    hstyle = f"max-height:{int(height)}px;" if height else ""
+    st.markdown(
+        f'<div style="{hstyle}overflow:auto;background:{P["card"]};'
+        f'border:1px solid {P["border"]};border-radius:8px">'
+        f'<table style="width:100%;border-collapse:separate;border-spacing:0">'
+        f'<thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table></div>',
+        unsafe_allow_html=True)
+    if len(df) > max_rows:
+        st.caption(f"Showing the first {int(max_rows)} of {len(df):,} rows.")
 
 
 def render_sidebar():

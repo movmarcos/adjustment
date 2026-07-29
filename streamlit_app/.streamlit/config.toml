@@ -1,0 +1,13 @@
+# Pin the app to its designed LIGHT theme regardless of the viewer's
+# browser / Snowsight dark-mode setting.
+#
+# The CSS theme-guard in utils/styles.py pins everything reachable by CSS;
+# this config covers what CSS cannot reach — most importantly st.dataframe
+# (rendered on a canvas that takes its colours from the Streamlit theme) and
+# native widget internals. Colours mirror the P palette in utils/styles.py.
+[theme]
+base = "light"
+primaryColor = "#D50032"
+backgroundColor = "#F6F7F9"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#0F172A"

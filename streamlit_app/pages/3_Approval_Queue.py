@@ -12,9 +12,11 @@ st.set_page_config(page_title="Approval Queue · MUFG", page_icon="✅", layout=
 
 from utils.styles import (
     inject_css, render_sidebar, render_filter_chips,
-    section_title, status_badge, P, SCOPE_CONFIG, STATUS_COLORS, icon,
+    section_title, status_badge, P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, icon,
 )
-from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
+from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
+                                  safe_rerun, friendly_error)
+import html as _htmlmod
 
 def _esc(val):
     """Escape single quotes for safe SQL interpolation."""
@@ -25,6 +27,16 @@ render_sidebar()
 
 user = current_user_name()
 
+# Decisions require a real identity: if resolution degraded (READ SESSION
+# grant missing → "unknown"), the server-side procs refuse anyway — surface
+# it up front instead of failing on click.
+_identity_ok = bool(user) and str(user).strip().lower() != "unknown"
+if not _identity_ok:
+    st.error(
+        "Your identity could not be resolved (the READ SESSION grant may be "
+        "missing on the app's owner role). Approvals are disabled — every "
+        "decision must be attributable to a verified user. Contact an admin.")
+
 st.markdown("## Approval Queue")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
@@ -32,6 +44,12 @@ st.markdown(
     "Approve to move them forward, or reject with a reason."
     "</span>", unsafe_allow_html=True)
 st.markdown("<br/>", unsafe_allow_html=True)
+
+# Outcome of the last approve/reject — stashed before the rerun (a message
+# rendered just before st.rerun() is destroyed by it).
+_flash = st.session_state.pop("apq_flash", None)
+if _flash:
+    (st.success if _flash[0] == "success" else st.warning)(_flash[1])
 
 # ──────────────────────────────────────────────────────────────────────────────
 # APPROVER AUTHORIZATION CHECK
@@ -101,12 +119,15 @@ st.markdown("<br/>", unsafe_allow_html=True)
 f1, f2 = st.columns(2)
 with f1:
     filter_scope = st.multiselect(
-        "Filter by Scope", list(SCOPE_CONFIG.keys()),
+        "Filter by Scope", ALL_SCOPES,
         default=[], key="aq_scope")
 with f2:
+    _aq_type_labels = {"Flatten": "Flatten", "Scale": "Scale", "Roll": "Roll",
+                       "Direct": "Direct Upload", "EROL": "Entity Roll"}
     filter_type = st.multiselect(
-        "Filter by Type", ["Flatten", "Scale", "Roll"],
-        default=[], key="aq_type")
+        "Filter by Type", list(_aq_type_labels.keys()),
+        default=[], key="aq_type",
+        format_func=lambda v: _aq_type_labels.get(v, v))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # LOAD QUEUE
@@ -153,6 +174,89 @@ if not df_queue.empty:
     except Exception:
         df_overlaps = pd.DataFrame()
 
+# ──────────────────────────────────────────────────────────────────────────────
+# BULK DECISIONS — every item still goes through SP_DECIDE_ADJUSTMENT, so the
+# 4-eyes rules (approver registration, scope, self-approval) are enforced
+# per adjustment server-side; the loop just saves the clicking.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _bulk_eligible(df):
+    """Rows the current user is allowed to decide (UX filter — the proc
+    re-checks everything)."""
+    out = []
+    if df.empty or not is_approver or not _identity_ok:
+        return out
+    for _, r in df.iterrows():
+        scope_ok = (not approver_scopes
+                    or str(r.get("PROCESS_TYPE", "")).upper() in approver_scopes)
+        own = (user and str(r.get("SUBMITTED_BY", "")).strip().upper()
+               == user.strip().upper())
+        if scope_ok and not own:
+            out.append(r)
+    return out
+
+
+_bulk_rows = _bulk_eligible(df_queue)
+if len(_bulk_rows) >= 2:
+    with st.container(border=True):
+        section_title("Bulk Decision", "layers")
+        st.caption("Select several adjustments and decide them in one go — "
+                   "each one is still individually enforced (scope, 4-eyes) "
+                   "and audited.")
+
+        def _bulk_label(i):
+            r = _bulk_rows[i]
+            return (f'#{str(r.get("ADJ_ID"))[:8]}… · {r.get("PROCESS_TYPE")} · '
+                    f'{r.get("ADJUSTMENT_TYPE")} · COB {r.get("COBID")} · '
+                    f'by {r.get("SUBMITTED_BY")}')
+
+        _sel = st.multiselect(
+            "Adjustments to decide", options=list(range(len(_bulk_rows))),
+            format_func=_bulk_label, key="apq_bulk_sel")
+        b1, b2, b3 = st.columns([1, 1, 2])
+        with b3:
+            _bulk_comment = st.text_input(
+                "Comment / rejection reason (applied to all selected)",
+                key="apq_bulk_comment", label_visibility="collapsed",
+                placeholder="Comment / rejection reason (applied to all)")
+
+        def _bulk_decide(decision):
+            import json as _json
+            done, skipped = 0, []
+            for i in _sel:
+                r = _bulk_rows[i]
+                try:
+                    res = run_query(
+                        f"CALL ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT("
+                        f"'{_esc(r.get('ADJ_ID'))}', '{decision}', "
+                        f"'{_esc(_bulk_comment or f'{decision} (bulk) by {user}')}')")
+                    out = _json.loads(str(res[0][0])) if res else {}
+                    if out.get("status") == "ok":
+                        done += 1
+                    else:
+                        skipped.append(f"#{str(r.get('ADJ_ID'))[:8]}… "
+                                       f"({out.get('message', '?')})")
+                except Exception as ex:
+                    skipped.append(f"#{str(r.get('ADJ_ID'))[:8]}… ({ex})")
+            msg = f"{done} adjustment(s) {decision.lower()}."
+            if skipped:
+                msg += " Not applied: " + "; ".join(skipped[:5])
+                if len(skipped) > 5:
+                    msg += f" (+{len(skipped) - 5} more)"
+            st.session_state["apq_flash"] = (
+                "success" if done and not skipped else "warning", msg)
+            safe_rerun()
+
+        with b1:
+            if st.button(f"Approve selected ({len(_sel)})", key="apq_bulk_ok",
+                         type="primary", use_container_width=True,
+                         disabled=not _sel):
+                _bulk_decide("Approved")
+        with b2:
+            if st.button(f"Reject selected ({len(_sel)})", key="apq_bulk_no",
+                         use_container_width=True, disabled=not _sel):
+                _bulk_decide("Rejected")
+
 section_title(f"Adjustments Awaiting Approval ({len(df_queue)})", "clipboard")
 
 if df_queue.empty:
@@ -172,7 +276,7 @@ else:
         book        = str(row.get("BOOK_CODE", "")) or "—"
         submitted_by = str(row.get("SUBMITTED_BY", ""))
         submitted_at = row.get("SUBMITTED_AT", "")
-        reason      = str(row.get("REASON", "")) or "—"
+        reason      = _htmlmod.escape(str(row.get("REASON", "")) or "—")
         scope_cfg   = SCOPE_CONFIG.get(scope, {})
 
         if hasattr(submitted_at, "strftime"):
@@ -238,7 +342,7 @@ else:
                             f'ADJ #{str(r["ADJ_ID_B"] if r["ADJ_ID_A"] == adj_id else r["ADJ_ID_A"])[:8]}…'
                             f'</td>'
                             f'<td style="padding:3px 0;font-size:0.78rem;color:{P["grey_700"]}">'
-                            f'{str(r.get("ALERT_MESSAGE","")).strip() or "Overlapping filters on same COB"}'
+                            f'{_htmlmod.escape(str(r.get("ALERT_MESSAGE","")).strip()) or "Overlapping filters on same COB"}'
                             f'</td>'
                             f'</tr>'
                             for _, r in adj_overlaps.iterrows()
@@ -303,29 +407,41 @@ else:
                         f'{icon("lock", size=13, color=P["grey_700"])} Not authorized for {scope}</div>',
                         unsafe_allow_html=True)
 
-                actions_enabled = is_approver and can_approve_scope and not is_own_adjustment
+                actions_enabled = (is_approver and can_approve_scope
+                                   and not is_own_adjustment and _identity_ok)
+
+                def _decide(new_status: str, comment: str) -> None:
+                    """Decision enforced SERVER-SIDE by SP_DECIDE_ADJUSTMENT:
+                    caller identity from CURRENT_USER(), active-approver +
+                    scope check, self-approval refusal, guarded transition and
+                    audit all happen in the database — the UI checks above are
+                    UX only and cannot be bypassed by skipping them."""
+                    import json as _json
+                    res = run_query(
+                        f"CALL ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT("
+                        f"'{_esc(adj_id)}', '{_esc(new_status)}', '{_esc(comment)}')")
+                    try:
+                        out = _json.loads(str(res[0][0])) if res else {}
+                    except (ValueError, TypeError, IndexError):
+                        out = {}
+                    if out.get("status") == "ok":
+                        st.session_state["apq_flash"] = (
+                            "success", f"ADJ {adj_short} {new_status.lower()}.")
+                    else:
+                        st.session_state["apq_flash"] = (
+                            "warning",
+                            f"ADJ {adj_short} was NOT {new_status.lower()} — "
+                            f"{out.get('message', 'the decision was not applied')}")
 
                 # Approve
                 if st.button("Approve", key=f"approve_{adj_id}",
                              use_container_width=True, type="primary",
                              disabled=not actions_enabled):
                     try:
-                        run_query(f"""
-                            UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                            SET RUN_STATUS = 'Approved'
-                            WHERE ADJ_ID = '{_esc(adj_id)}'
-                              AND RUN_STATUS = 'Pending Approval'
-                        """)
-                        run_query(f"""
-                            INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
-                                (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
-                            VALUES ('{_esc(adj_id)}', 'Pending Approval', 'Approved',
-                                    '{_esc(user)}', 'Approved by {_esc(user)}')
-                        """)
-                        st.success(f"ADJ {adj_short} approved!")
+                        _decide("Approved", f"Approved by {user}")
                         safe_rerun()
                     except Exception as ex:
-                        st.error(str(ex))
+                        st.error(f"Approval failed. {friendly_error(ex)}")
 
                 st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 
@@ -337,23 +453,111 @@ else:
                              use_container_width=True,
                              disabled=not actions_enabled):
                     try:
-                        comment = reject_reason or "Rejected"
-                        run_query(f"""
-                            UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                            SET RUN_STATUS = 'Rejected'
-                            WHERE ADJ_ID = '{_esc(adj_id)}'
-                              AND RUN_STATUS = 'Pending Approval'
-                        """)
-                        run_query(f"""
-                            INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
-                                (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
-                            VALUES ('{_esc(adj_id)}', 'Pending Approval', 'Rejected',
-                                    '{_esc(user)}', '{_esc(comment)}')
-                        """)
-                        st.success(f"ADJ {adj_short} rejected.")
+                        _decide("Rejected", reject_reason or "Rejected")
                         safe_rerun()
                     except Exception as ex:
-                        st.error(str(ex))
+                        st.error(f"Rejection failed. {friendly_error(ex)}")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# COB RE-OPEN REQUESTS (sign-off lifecycle)
+# A signed-off COB blocks new adjustments. Business users request a re-open on
+# the New Adjustment page; approvers action it here. Approving re-opens the
+# COB (submissions allowed) until it is signed off again from the app.
+# ──────────────────────────────────────────────────────────────────────────────
+
+st.markdown("<br/>", unsafe_allow_html=True)
+section_title("COB Re-open Requests", "unlock")
+
+
+def _decide_reopen(cobid, scope, entity, approve, comment):
+    """Decision enforced SERVER-SIDE by SP_DECIDE_REOPEN (caller identity,
+    active-approver + scope check, requester refusal, guarded transition +
+    sign-off history). The UI guards are UX only."""
+    import json as _json
+    decision = "Approved" if approve else "Rejected"
+    res = run_query(
+        f"CALL ADJUSTMENT_APP.SP_DECIDE_REOPEN("
+        f"{int(cobid)}, '{_esc(scope)}', '{_esc(entity or chr(42))}', "
+        f"'{decision}', '{_esc(comment)}')")
+    try:
+        out = _json.loads(str(res[0][0])) if res else {}
+    except (ValueError, TypeError, IndexError):
+        out = {}
+    if out.get("status") == "ok":
+        verb = ("re-opened" if approve
+                else "kept signed off (request rejected)")
+        st.session_state["apq_flash"] = (
+            "success", f"COB {cobid} / {scope} {verb}.")
+    else:
+        st.session_state["apq_flash"] = (
+            "warning",
+            f"COB {cobid} / {scope} was NOT changed — "
+            f"{out.get('message', 'the decision was not applied')}")
+
+
+try:
+    df_reopen = run_query_df("""
+        SELECT COBID, PROCESS_TYPE, ENTITY_CODE, SIGNOFF_SOURCE, SIGN_OFF_BY,
+               REOPEN_REQUESTED_BY, REOPEN_REQUESTED_AT, REOPEN_REASON
+        FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+        WHERE UPPER(SIGN_OFF_STATUS) = 'REOPEN_REQUESTED'
+        ORDER BY REOPEN_REQUESTED_AT
+    """)
+except Exception as _ex:
+    df_reopen = pd.DataFrame()
+    st.info(f"Sign-off table not available: {_ex}")
+
+if df_reopen.empty:
+    st.caption("No pending COB re-open requests.")
+else:
+    for _, rr in df_reopen.iterrows():
+        r_cob    = int(rr["COBID"])
+        r_scope  = str(rr["PROCESS_TYPE"])
+        r_ent    = str(rr["ENTITY_CODE"] or "*")
+        r_ent_tx = "all entities" if r_ent == "*" else r_ent
+        r_by     = str(rr["REOPEN_REQUESTED_BY"] or "—")
+        r_reason = str(rr["REOPEN_REASON"] or "—")
+        with st.container(border=True):
+            c_info, c_act = st.columns([2.4, 1])
+            with c_info:
+                st.markdown(f"**COB {r_cob} · {r_scope} · {r_ent_tx}**")
+                st.caption(f"Requested by {r_by} at "
+                           f"{rr['REOPEN_REQUESTED_AT']} — originally signed "
+                           f"off by {rr['SIGN_OFF_BY'] or '—'} "
+                           f"({rr['SIGNOFF_SOURCE'] or 'EXTERNAL'})")
+                st.markdown(f"Reason: {r_reason}")
+            with c_act:
+                _own_req = (user and r_by != "—"
+                            and user.strip().upper() == r_by.strip().upper())
+                _can_scope = is_approver and (
+                    not approver_scopes or r_scope.upper() in approver_scopes)
+                if _own_req:
+                    st.caption("You requested this re-open — another approver "
+                               "must decide it.")
+                elif not _can_scope:
+                    st.caption(f"Not authorized for {r_scope}.")
+                _enabled = _can_scope and not _own_req and _identity_ok
+                if st.button("Approve re-open", key=f"ro_ok_{r_cob}_{r_scope}_{r_ent}",
+                             type="primary", use_container_width=True,
+                             disabled=not _enabled):
+                    try:
+                        _decide_reopen(r_cob, r_scope, r_ent, True,
+                                       f"Re-open approved by {user}")
+                        safe_rerun()
+                    except Exception as ex:
+                        st.error(f"Approve failed. {friendly_error(ex)}")
+                _ro_comment = st.text_input(
+                    "Rejection reason", key=f"ro_rr_{r_cob}_{r_scope}_{r_ent}",
+                    label_visibility="collapsed",
+                    placeholder="Rejection reason")
+                if st.button("Reject", key=f"ro_no_{r_cob}_{r_scope}_{r_ent}",
+                             use_container_width=True, disabled=not _enabled):
+                    try:
+                        _decide_reopen(r_cob, r_scope, r_ent, False,
+                                       _ro_comment or "Re-open request rejected")
+                        safe_rerun()
+                    except Exception as ex:
+                        st.error(f"Reject failed. {friendly_error(ex)}")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # RECENTLY APPROVED / REJECTED
@@ -391,7 +595,7 @@ try:
                 f'{row.get("RUN_STATUS","")}</span></div>'
                 f'<div style="font-size:0.75rem;color:{P["grey_700"]};margin-top:3px">'
                 f'By {row.get("ACTIONED_BY","?")} · {at}'
-                + (f' · "{row.get("COMMENT","")}"' if row.get("COMMENT") else "")
+                + (f' · "{_htmlmod.escape(str(row.get("COMMENT","")))}"' if row.get("COMMENT") else "")
                 + f'</div></div>',
                 unsafe_allow_html=True)
     else:

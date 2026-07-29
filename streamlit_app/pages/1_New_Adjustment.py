@@ -20,10 +20,11 @@ st.set_page_config(
 
 from utils.styles import (
     inject_css, render_sidebar,
-    P, SCOPE_CONFIG, TYPE_CONFIG, CATEGORY_CONFIG,
+    P, SCOPE_CONFIG, TYPE_CONFIG, CATEGORY_CONFIG, render_df_table,
     fmt_adj_id, icon,
 )
-from utils.snowflake_conn import run_query, call_sp_df, current_user_name, safe_rerun
+from utils.snowflake_conn import (run_query, call_sp_df, current_user_name,
+                                  safe_rerun, friendly_error)
 
 inject_css()
 render_sidebar()
@@ -173,23 +174,202 @@ def _build_payload() -> dict:
 
 
 # ── Direct Adjustment: config-driven schema + JSON upload writer ──────────────
-def _direct_expected_columns(scope: str) -> list:
-    """Return the ordered expected CSV column names for a scope from DIRECT_SCOPE_SCHEMA.
-    Empty list if the scope has no config row yet."""
+def _direct_schema(scope: str) -> dict:
+    """Full DIRECT_SCOPE_SCHEMA config for a scope (cached per session)."""
+    cache_key = f"_ref_direct_schema_{scope}"
+    if cache_key in st.session_state:
+        return st.session_state[cache_key]
+    cfg = {"expected": [], "unpivot": None, "fact_mapping": [], "resolutions": []}
     try:
         rows = run_query(f"""
-            SELECT EXPECTED_COLUMNS
+            SELECT EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS
             FROM ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
             WHERE UPPER(PROCESS_TYPE) = UPPER('{scope.replace("'", "''")}')
               AND IS_ACTIVE = TRUE
         """)
-        if not rows or rows[0][0] is None:
-            return []
-        spec = rows[0][0]
-        spec = json.loads(spec) if isinstance(spec, str) else spec
-        return [c["name"] for c in spec]
+        if rows:
+            def _j(v):
+                return json.loads(v) if isinstance(v, str) else v
+            r = rows[0]
+            cfg["expected"]     = _j(r["EXPECTED_COLUMNS"]) or []
+            cfg["unpivot"]      = _j(r["UNPIVOT"])
+            cfg["fact_mapping"] = _j(r["FACT_MAPPING"]) or []
+            cfg["resolutions"]  = _j(r["RESOLUTIONS"]) or []
     except Exception:
-        return []
+        pass
+    st.session_state[cache_key] = cfg
+    return cfg
+
+
+def _direct_expected_columns(scope: str) -> list:
+    """Ordered expected CSV column names (empty if no config for the scope)."""
+    return [c.get("name") for c in _direct_schema(scope)["expected"] if c.get("name")]
+
+
+def _validate_direct_upload(df: pd.DataFrame, schema: dict) -> dict:
+    """Server-side pre-validation of a Direct CSV, BEFORE anything is written.
+
+    Checks, mirroring exactly what the processing engine will do:
+      • required columns present (hard block)
+      • every coded CSV field resolves against its dimension table — the
+        engine would otherwise map unknown codes to key -1 silently
+      • unpivot measure names resolve (config-level: a measure that does not
+        resolve loses ALL its values)
+      • ambiguous codes (one code matching several dimension keys → the
+        engine's join would duplicate those rows)
+      • numeric measure cells actually numeric (non-numeric → row skipped)
+
+    Returns a dict consumed by _render_upload_validation / _completion_checks.
+    """
+    out = {"missing_required": [], "missing_optional": [],
+           "unknown_row_codes": {},   # csv_col → {"values": [...], "rows": n}
+           "unknown_measures": [],    # unpivot measure names with no dim match
+           "ambiguous": {},           # field → [codes matching >1 key]
+           "nonnumeric": {},          # csv_col → n cells
+           "reject_df": None, "checked_fields": []}
+
+    expected = schema.get("expected") or []
+    for c in expected:
+        name = c.get("name")
+        if name and name not in df.columns:
+            (out["missing_required"] if c.get("required")
+             else out["missing_optional"]).append(name)
+
+    unpivot      = schema.get("unpivot") or {}
+    measure_map  = (unpivot.get("measure_map") or {}) if unpivot else {}
+    name_field   = unpivot.get("measure_name_field") if unpivot else None
+    fact_by_tgt  = {m.get("target_column"): m.get("payload_field")
+                    for m in (schema.get("fact_mapping") or [])}
+
+    def _dim_lookup(dim_table, match_col, key_col, values):
+        """Return (known_upper_set, ambiguous_list) for the given values."""
+        vals = sorted({str(v).strip().upper() for v in values
+                       if v is not None and str(v).strip() != ""})[:2000]
+        if not vals:
+            return set(), []
+        in_list = ", ".join("'" + v.replace("'", "''") + "'" for v in vals)
+        known = run_query(f"""
+            SELECT DISTINCT UPPER({match_col}) AS V
+            FROM {dim_table}
+            WHERE UPPER({match_col}) IN ({in_list})
+        """)
+        known_set = {str(r["V"]) for r in known} if known else set()
+        ambi = run_query(f"""
+            SELECT UPPER({match_col}) AS V
+            FROM {dim_table}
+            WHERE UPPER({match_col}) IN ({in_list})
+            GROUP BY UPPER({match_col})
+            HAVING COUNT(DISTINCT {key_col}) > 1
+        """)
+        ambi_list = sorted({str(r["V"]) for r in ambi}) if ambi else []
+        return known_set, ambi_list
+
+    reject_reasons = pd.Series("", index=df.index)
+
+    for res in (schema.get("resolutions") or []):
+        src   = res.get("source_field")
+        dim   = res.get("dimension_table")
+        match = res.get("match_column")
+        keyc  = res.get("key_column")
+        if not (src and dim and match and keyc):
+            continue
+        try:
+            if name_field and src == name_field:
+                # Config-level: the coded values are the unpivot MEASURE NAMES
+                # for the CSV columns actually present in this upload.
+                measures = {measure_map[k]: k for k in measure_map
+                            if k in df.columns}
+                known, ambi = _dim_lookup(dim, match, keyc, measures.keys())
+                out["checked_fields"].append(f"{src} (measure names)")
+                unknown = [m for m in measures
+                           if str(m).strip().upper() not in known]
+                if unknown:
+                    out["unknown_measures"] = sorted(
+                        f"{m} (column {measures[m]})" for m in unknown)
+                if ambi:
+                    out["ambiguous"][src] = ambi
+            else:
+                csv_col = fact_by_tgt.get(src)
+                if not csv_col or csv_col not in df.columns:
+                    continue
+                known, ambi = _dim_lookup(dim, match, keyc, df[csv_col].dropna())
+                out["checked_fields"].append(csv_col)
+                up = df[csv_col].astype(str).str.strip().str.upper()
+                filled = df[csv_col].notna() & (up != "") & (up != "NAN")
+                bad = filled & ~up.isin(known)
+                if bad.any():
+                    out["unknown_row_codes"][csv_col] = {
+                        "values": sorted(up[bad].unique().tolist())[:25],
+                        "rows": int(bad.sum()),
+                    }
+                    reject_reasons[bad] = (
+                        reject_reasons[bad] + f"unknown {csv_col}; ")
+                if ambi:
+                    out["ambiguous"][csv_col] = ambi
+        except Exception:
+            # A validation query failing must never block the workflow — the
+            # engine remains the authority; just note the field as unchecked.
+            out["checked_fields"].append(f"{src} (check unavailable)")
+
+    # Numeric checks: unpivot measure columns, or the flat metric field.
+    numeric_cols = ([k for k in measure_map if k in df.columns] if measure_map
+                    else [c.get("name") for c in expected
+                          if c.get("type") == "number" and c.get("name") in df.columns])
+    for col in numeric_cols:
+        raw = df[col]
+        filled = raw.notna() & (raw.astype(str).str.strip() != "")
+        bad = filled & pd.to_numeric(raw, errors="coerce").isna()
+        if bad.any():
+            out["nonnumeric"][col] = int(bad.sum())
+
+    mask = reject_reasons != ""
+    if mask.any():
+        rej = df[mask].copy()
+        rej["REJECT_REASON"] = reject_reasons[mask].str.rstrip("; ")
+        out["reject_df"] = rej
+    return out
+
+
+def _render_upload_validation(v: dict, row_count: int) -> None:
+    """Render the validation verdict + rejects download + override control."""
+    problems = bool(v["missing_required"] or v["unknown_row_codes"]
+                    or v["unknown_measures"])
+    if v["missing_required"]:
+        st.error(f"Missing REQUIRED columns: {', '.join(v['missing_required'])} "
+                 f"— submission is blocked until the file includes them.")
+    for col, info in v["unknown_row_codes"].items():
+        st.error(f"**{col}**: {info['rows']} row(s) carry codes that don't "
+                 f"exist in the reference data — e.g. "
+                 f"{', '.join(info['values'][:8])}. Unresolved codes would be "
+                 f"stored under the fallback key (-1) and lose attribution.")
+    if v["unknown_measures"]:
+        st.error("These measures don't resolve in the reference data — ALL "
+                 "their values would land under the fallback key (-1): "
+                 + ", ".join(v["unknown_measures"]))
+    for field, codes in v["ambiguous"].items():
+        st.warning(f"**{field}**: {', '.join(codes[:8])} match MORE THAN ONE "
+                   f"reference row — affected rows would be duplicated when "
+                   f"processed. Check the dimension data before submitting.")
+    for col, n in v["nonnumeric"].items():
+        st.warning(f"**{col}**: {n} non-numeric cell(s) — those values will "
+                   f"be skipped when processed.")
+    if v["reject_df"] is not None:
+        st.download_button(
+            f"⬇ Download {len(v['reject_df'])} rejected row(s) (CSV)",
+            v["reject_df"].to_csv(index=False).encode("utf-8-sig"),
+            file_name="upload_rejects.csv", mime="text/csv",
+            key=_k("rejects_dl"))
+    if problems:
+        if not v["missing_required"]:
+            wiz["_upval_override"] = st.checkbox(
+                "Submit anyway — I understand unresolved codes will be stored "
+                "under the fallback key (-1)",
+                key=_k("upval_override"), value=False)
+    else:
+        wiz["_upval_override"] = False
+        checked = ", ".join(v["checked_fields"]) if v["checked_fields"] else "columns"
+        st.success(f"Validated {row_count} row(s) — {checked} all resolve "
+                   f"against the reference data.")
 
 
 def _write_direct_json_rows(adj_id: str, df_csv: pd.DataFrame) -> int:
@@ -239,12 +419,52 @@ def _is_submit_success(result: dict) -> bool:
     return (result or {}).get("status") in _SUBMIT_SUCCESS_STATUSES
 
 
+def _submit_one(payload: dict) -> dict:
+    """One CALL to SP_SUBMIT_ADJUSTMENT; returns the parsed result dict.
+
+    Snowflake escapes a single quote by DOUBLING it (''), not with a
+    backslash. A backslash leaves the quote active → broken/injectable CALL.
+    Backslashes must be doubled FIRST: Snowflake literals interpret \\n, \\t
+    etc., so json.dumps's "\\n" would arrive as a raw newline inside the
+    JSON and json.loads in the SP fails with "Invalid control character"."""
+    json_str = json.dumps(payload).replace("\\", "\\\\").replace("'", "''")
+    rows = run_query(f"CALL ADJUSTMENT_APP.SP_SUBMIT_ADJUSTMENT('{json_str}')")
+    if not rows:
+        return {"status": "Error", "message": "No response from stored procedure"}
+    raw = rows[0][0]
+    return json.loads(str(raw)) if isinstance(raw, str) else raw
+
+
 def _do_submit() -> dict:
     """Call SP_SUBMIT_ADJUSTMENT. Returns result dict (never raises)."""
     import uuid as _uuid
     wrote_line_items_for = None
     try:
         payload = _build_payload()
+
+        # "All FRTB": FRTBALL is not a processable scope — submit one sibling
+        # adjustment per real FRTB sub-type instead. The pipeline serialises
+        # them (same data scope, same pipeline), so they apply in sequence.
+        if payload.get("process_type") == "FRTBALL":
+            created, failures, statuses = [], [], []
+            for sub in ("FRTB", "FRTBDRC", "FRTBRRAO"):
+                sub_res = _submit_one({**payload, "process_type": sub})
+                if _is_submit_success(sub_res):
+                    created.append(sub)
+                    statuses.append(sub_res.get("status"))
+                else:
+                    failures.append(f"{sub}: {sub_res.get('message', 'not accepted')}")
+            if not failures:
+                return {"status": statuses[0],
+                        "message": ("Created 3 adjustments — one per FRTB sub-type "
+                                    "(FRTB, FRTBDRC, FRTBRRAO). They are queued and "
+                                    "will be processed in sequence.")}
+            partial = (f" Already created: {', '.join(created)} — delete them from "
+                       f"the Adjustments page if they are no longer wanted."
+                       if created else "")
+            return {"status": "Error",
+                    "message": ("Not all FRTB sub-types were accepted. "
+                                + " | ".join(failures) + partial)}
 
         # For Direct Adjustment: write line items BEFORE the SP call so that
         # navigating away can't interrupt the write. Pre-generate the
@@ -258,18 +478,7 @@ def _do_submit() -> dict:
                         "message": "No rows found in CSV data"}
             wrote_line_items_for = adj_id
 
-        # Snowflake escapes a single quote by DOUBLING it (''), not with a
-        # backslash. A backslash leaves the quote active → broken/injectable CALL.
-        # Backslashes must be doubled FIRST: Snowflake literals interpret \n, \t
-        # etc., so json.dumps's "\n" would arrive as a raw newline inside the
-        # JSON and json.loads in the SP fails with "Invalid control character".
-        json_str = json.dumps(payload).replace("\\", "\\\\").replace("'", "''")
-        rows = run_query(f"CALL ADJUSTMENT_APP.SP_SUBMIT_ADJUSTMENT('{json_str}')")
-        if not rows:
-            result = {"status": "Error", "message": "No response from stored procedure"}
-        else:
-            raw = rows[0][0]
-            result = json.loads(str(raw)) if isinstance(raw, str) else raw
+        result = _submit_one(payload)
     except Exception as exc:
         result = {"status": "Error", "message": str(exc)}
 
@@ -292,7 +501,7 @@ FRTB_SUBTYPE_CONFIG = {
     "FRTB":     "Standard FRTB",
     "FRTBDRC":  "Default Risk Charge",
     "FRTBRRAO": "Residual Risk Add-On",
-    "FRTBALL":  "All FRTB (combined)",
+    "FRTBALL":  "All FRTB — submits one adjustment per sub-type",
 }
 
 # Scope-specific filter fields (tier 2)
@@ -436,10 +645,27 @@ OCC_BTN_ICONS = {
 
 
 def _int_input(label, key, value, placeholder="e.g. 20260328"):
-    """Compact YYYYMMDD text input returning int or None."""
+    """Compact YYYYMMDD date input returning int, or None when empty/invalid.
+
+    Strict validation: a transposed digit used to pass as a "valid" COB
+    (e.g. 2026328) and flow into previews and submission targeting a
+    nonexistent date — now it surfaces an inline error and blocks the ticket
+    (the completion checklist treats None as missing)."""
+    from datetime import datetime as _dt
     raw = st.text_input(label, key=_k(key), value=str(value or ""),
-                        placeholder=placeholder)
-    return int(raw.strip()) if raw.strip().isdigit() else None
+                        placeholder=placeholder).strip()
+    if not raw:
+        return None
+    if not raw.isdigit() or len(raw) != 8:
+        st.error(f"“{raw}” is not a valid COB — use exactly 8 digits, "
+                 f"YYYYMMDD (e.g. 20260328).")
+        return None
+    try:
+        _dt.strptime(raw, "%Y%m%d")
+    except ValueError:
+        st.error(f"“{raw}” is not a real calendar date — check the month/day.")
+        return None
+    return int(raw)
 
 
 def _float_input(label, key, value, min_v=-10.0, max_v=100.0,
@@ -525,6 +751,22 @@ def _fmt_money(v):
 # VALIDATION
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _upload_validation_ok() -> bool:
+    """True when the uploaded CSV passed pre-validation. Unknown codes can be
+    explicitly overridden (stored under key -1); missing REQUIRED columns
+    never can. Scopes without a schema have nothing to validate."""
+    _v = wiz.get("_upval")
+    v = _v.get("result") if _v else None
+    if v is None:
+        return True
+    if v["missing_required"]:
+        return False
+    if ((v["unknown_row_codes"] or v["unknown_measures"])
+            and not wiz.get("_upval_override")):
+        return False
+    return True
+
+
 def _completion_checks() -> list:
     """Ordered (label, done) pairs driving the ticket's completion checklist."""
     cat = wiz.get("category")
@@ -535,6 +777,8 @@ def _completion_checks() -> list:
         checks += [
             ("Data scope",          bool(wiz.get("process_type"))),
             ("CSV data",            wiz.get("uploaded_df") is not None),
+            ("CSV validated",       wiz.get("uploaded_df") is not None
+                                    and _upload_validation_ok()),
             ("COB date",            bool(wiz.get("cobid"))),
             ("Entity code",         bool((wiz.get("entity_code") or "").strip())),
             ("Reference",           bool((wiz.get("global_reference") or "").strip())),
@@ -820,37 +1064,104 @@ def render_direct_form() -> None:
     _csv_card.__enter__()
     _sec(3, f"CSV Upload — {wiz['process_type']}", "Paste exact adjustment values.")
     if expected_cols:
-        _info_banner('Paste a CSV of exact adjustment values. Expected columns: '
+        _info_banner('Provide a CSV of exact adjustment values — paste the '
+                     'content or upload the file. Expected columns: '
                      '<code>' + ', '.join(expected_cols) + '</code>.')
     else:
         _info_banner(f'No upload schema is configured for the <b>{wiz["process_type"]}</b> '
-                     'scope yet. Paste a CSV; columns will be stored as-is.')
+                     'scope yet. Provide a CSV (paste or upload); columns will '
+                     'be stored as-is.')
 
-    csv_text = st.text_area("Paste CSV Data Here", value="", height=160,
-                            key=_k("direct_csv"),
-                            help="Paste the full CSV content including the header row.")
-    if csv_text.strip():
-        try:
-            from io import StringIO
-            df = pd.read_csv(StringIO(csv_text.strip()))
-            wiz["uploaded_file_name"] = f"CSV_Pasted_{len(df)}_rows.csv"
-            wiz["uploaded_df"]        = df
+    # ── Input mode: paste the content OR upload the file ─────────────────
+    _in_mode = st.radio(
+        "How do you want to provide the data?",
+        ["Paste content", "Upload file"],
+        horizontal=True, key=_k("direct_mode"),
+        label_visibility="collapsed")
 
-            missing_cols = [c for c in expected_cols if c not in df.columns]
-            extra_cols   = [c for c in df.columns    if c not in expected_cols]
-            if missing_cols:
-                st.warning(f"Missing expected columns: {', '.join(missing_cols)}")
-            if extra_cols:
-                st.info(f"Extra columns (will be ignored): {', '.join(extra_cols)}")
+    _DELIMS = {"Auto-detect": None, "Comma ( , )": ",", "Semicolon ( ; )": ";",
+               "Tab": "\t", "Pipe ( | )": "|"}
+    delim_choice = st.selectbox(
+        "Delimiter", list(_DELIMS.keys()), index=0, key=_k("direct_delim"),
+        help="Auto-detect works for most files; pick one explicitly if the "
+             "columns come out wrong.")
 
-            st.dataframe(df.head(20), use_container_width=True, height=200)
+    def _read_csv(buf):
+        """Parse with the chosen delimiter (or sniff it) — same for both modes."""
+        sep = _DELIMS[delim_choice]
+        if sep is None:
+            return pd.read_csv(buf, sep=None, engine="python")
+        return pd.read_csv(buf, sep=sep)
 
-            if "COBId" in df.columns and len(df):
+    df, _src_token, _parse_err = None, None, None
+    if _in_mode == "Upload file":
+        up_file = st.file_uploader(
+            "Upload CSV file", type=["csv", "txt"], key=_k("direct_file"),
+            help="First row must be the header.")
+        if up_file is not None:
+            try:
+                _raw = up_file.getvalue()
+                from io import StringIO
+                try:
+                    _text = _raw.decode("utf-8-sig")
+                except UnicodeDecodeError:
+                    _text = _raw.decode("latin-1")
+                df = _read_csv(StringIO(_text))
+                wiz["uploaded_file_name"] = up_file.name
+                _src_token = f"file:{up_file.name}:{len(_raw)}:{delim_choice}"
+            except Exception as exc:
+                _parse_err = exc
+    else:
+        csv_text = st.text_area(
+            "Paste CSV Data Here", value="", height=160, key=_k("direct_csv"),
+            help="Paste the full CSV content including the header row.")
+        if csv_text.strip():
+            try:
+                from io import StringIO
+                df = _read_csv(StringIO(csv_text.strip()))
+                wiz["uploaded_file_name"] = f"CSV_Pasted_{len(df)}_rows.csv"
+                _src_token = f"paste:{hash(csv_text)}:{delim_choice}"
+            except Exception as exc:
+                _parse_err = exc
+
+    if _parse_err is not None:
+        st.error(f"Failed to read the CSV: {_parse_err}. If the columns look "
+                 f"wrong, try selecting the delimiter explicitly above.")
+    elif df is not None:
+        if len(df.columns) == 1 and expected_cols and len(expected_cols) > 1:
+            st.warning(f"Only ONE column was detected ({df.columns[0]}) but "
+                       f"{len(expected_cols)} are expected — the delimiter is "
+                       f"probably wrong. Pick it explicitly above.")
+        wiz["uploaded_df"] = df
+
+        extra_cols = [c for c in df.columns if c not in expected_cols]
+        if extra_cols:
+            st.info(f"Columns outside the expected schema (stored with the "
+                    f"upload, not processed): {', '.join(extra_cols)}")
+
+        # ── Pre-validation: catch what the engine would silently mangle ──
+        schema = _direct_schema(wiz["process_type"])
+        if schema["expected"] or schema["resolutions"]:
+            _sig = (f'{wiz["process_type"]}|{len(df)}|'
+                    f'{",".join(map(str, df.columns))}|{_src_token}')
+            if (wiz.get("_upval") or {}).get("sig") != _sig:
+                with st.spinner("Validating codes against reference data…"):
+                    wiz["_upval"] = {
+                        "sig": _sig,
+                        "result": _validate_direct_upload(df, schema)}
+            _render_upload_validation(wiz["_upval"]["result"], len(df))
+        else:
+            wiz["_upval"] = None
+
+        render_df_table(df, max_rows=20, height=200)
+
+        if "COBId" in df.columns and len(df):
+            try:
                 wiz["cobid"] = int(df["COBId"].iloc[0])
-            if "EntityCode" in df.columns and len(df):
-                wiz["entity_code"] = str(df["EntityCode"].iloc[0])
-        except Exception as exc:
-            st.error(f"Failed to read CSV: {exc}")
+            except (TypeError, ValueError):
+                pass
+        if "EntityCode" in df.columns and len(df):
+            wiz["entity_code"] = str(df["EntityCode"].iloc[0])
 
     _csv_card.__exit__(None, None, None)
 
@@ -1148,23 +1459,367 @@ def _ticket_html(missing: list) -> str:
 
 
 def _run_preview() -> None:
-    """Run the summary-mode preview SP and stash the single aggregate row."""
+    """Run the summary-mode preview SP and stash the single aggregate row.
+
+    "All FRTB" (FRTBALL) previews each real sub-type and sums the numeric
+    totals — FRTBALL itself is not a previewable/processable scope."""
     payload = _preview_payload()
+    subtypes = (["FRTB", "FRTBDRC", "FRTBRRAO"]
+                if payload.get("process_type") == "FRTBALL"
+                else [payload.get("process_type")])
     try:
-        df_sum = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
-                            json.dumps({**payload, "mode": "summary"}))
-        if df_sum.empty or "ROWS_AFFECTED" not in df_sum.columns:
-            msg_col = next((c for c in df_sum.columns if "MESSAGE" in c.upper()), None)
-            wiz["_preview_err"] = (str(df_sum.iloc[0][msg_col]) if msg_col and not df_sum.empty
-                                   else "Couldn't calculate a preview for these filters.")
-            wiz["_preview_sum"] = None
-        else:
-            wiz["_preview_sum"] = df_sum.iloc[0].to_dict()
-            wiz["_preview_err"] = None
-            wiz["_preview_for"] = json.dumps(payload, sort_keys=True, default=str)
+        agg = None
+        for sub in subtypes:
+            df_sum = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                                json.dumps({**payload, "process_type": sub,
+                                            "mode": "summary"}))
+            if df_sum.empty or "ROWS_AFFECTED" not in df_sum.columns:
+                msg_col = next((c for c in df_sum.columns if "MESSAGE" in c.upper()), None)
+                wiz["_preview_err"] = (str(df_sum.iloc[0][msg_col]) if msg_col and not df_sum.empty
+                                       else "Couldn't calculate a preview for these filters.")
+                wiz["_preview_sum"] = None
+                return
+            row = df_sum.iloc[0].to_dict()
+            if agg is None:
+                agg = row
+            else:
+                for k, v in row.items():
+                    try:
+                        agg[k] = (agg.get(k) or 0) + (v or 0)
+                    except TypeError:
+                        pass    # non-numeric column — keep the first value
+        wiz["_preview_sum"] = agg
+        wiz["_preview_err"] = None
+        wiz["_preview_for"] = json.dumps(payload, sort_keys=True, default=str)
     except Exception as exc:
         wiz["_preview_err"] = str(exc)
         wiz["_preview_sum"] = None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SIGN-OFF LIFECYCLE
+# The first sign-off for a COB/scope comes from the upstream publish system
+# (synced into ADJ_SIGNOFF_STATUS; SP_SUBMIT also checks the feed live).
+# From here users can request a re-open (goes to the Approval Queue) and,
+# once re-opened and done adjusting, sign the COB off again from the app.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _signoff_scopes() -> list:
+    pt = wiz.get("process_type")
+    if pt == "FRTBALL":
+        return ["FRTB", "FRTBDRC", "FRTBRRAO"]
+    return [pt] if pt else []
+
+
+_SIGNOFF_BLOCKED = ("SIGNED_OFF", "REOPEN_REQUESTED")
+
+
+def _signoff_feed_cfg():
+    """Cached upstream-feed config from ADJ_APP_CONFIG."""
+    if "_signoff_feed_cfg" not in st.session_state:
+        cfg = {"enabled": True, "table": "BATCH.PUBLISH_SIGNOF_STATUS"}
+        try:
+            rows = run_query("""
+                SELECT CONFIG_KEY, CONFIG_VALUE FROM ADJUSTMENT_APP.ADJ_APP_CONFIG
+                WHERE CONFIG_KEY IN ('SIGNOFF_FEED_TABLE', 'SIGNOFF_FEED_ENABLED')
+            """)
+            for r in rows or []:
+                if str(r["CONFIG_KEY"]) == "SIGNOFF_FEED_TABLE" and r["CONFIG_VALUE"]:
+                    cfg["table"] = str(r["CONFIG_VALUE"]).strip()
+                if str(r["CONFIG_KEY"]) == "SIGNOFF_FEED_ENABLED":
+                    cfg["enabled"] = (str(r["CONFIG_VALUE"] or "")
+                                      .strip().lower() == "true")
+        except Exception:
+            pass
+        st.session_state["_signoff_feed_cfg"] = cfg
+    return st.session_state["_signoff_feed_cfg"]
+
+
+def _signoff_state(scope, cobid, entity=None):
+    """Sign-off lifecycle state for (scope, cobid, entity).
+
+    Granularity is COB + ENTITY + scope; an app row with ENTITY_CODE '*'
+    covers the whole scope. Returns None when open, else a dict with the
+    governing row's status/metadata and 'entity' (None + 'blocked_entities'
+    when a BROAD adjustment is blocked by several entity-level rows).
+    App rows govern first (exact entity beats '*'); otherwise the unified
+    upstream feed is checked live (an upstream FRTB row covers FRTBDRC and
+    FRTBRRAO; SUB_TYPE NULL/'' or NonCVA counts; app REOPENED overrides)."""
+    esc_scope = str(scope).replace("'", "''").upper()
+    ent = str(entity).strip() if entity and str(entity).strip() else None
+    try:
+        rows = run_query(f"""
+            SELECT ENTITY_CODE, SIGN_OFF_STATUS, SIGNOFF_SOURCE, SIGN_OFF_BY,
+                   REOPEN_REQUESTED_BY, REOPEN_REQUESTED_AT, REOPEN_REASON,
+                   REOPEN_APPROVED_BY, REOPEN_APPROVED_AT
+            FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+            WHERE COBID = {int(cobid)} AND UPPER(PROCESS_TYPE) = '{esc_scope}'
+        """) or []
+    except Exception:
+        return None    # can't read sign-off state — submit still enforces it
+
+    def _mk(r):
+        d = {k: r[k] for k in ("SIGNOFF_SOURCE", "SIGN_OFF_BY",
+                               "REOPEN_REQUESTED_BY", "REOPEN_REQUESTED_AT",
+                               "REOPEN_REASON", "REOPEN_APPROVED_BY",
+                               "REOPEN_APPROVED_AT")}
+        d["status"] = str(r["SIGN_OFF_STATUS"]).upper()
+        d["entity"] = str(r["ENTITY_CODE"] or "*")
+        return d
+
+    app = {str(r["ENTITY_CODE"] or "*").upper(): r for r in rows}
+
+    if ent is not None:
+        gov = app.get(ent.upper())
+        if gov is None or str(gov["SIGN_OFF_STATUS"]).upper() == "OPEN":
+            gov = app.get("*")
+        if gov is not None and str(gov["SIGN_OFF_STATUS"]).upper() != "OPEN":
+            return _mk(gov)
+    else:
+        blocked = [r for r in rows
+                   if str(r["SIGN_OFF_STATUS"]).upper() in _SIGNOFF_BLOCKED]
+        if blocked:
+            wc = next((r for r in blocked
+                       if str(r["ENTITY_CODE"] or "*") == "*"), None)
+            if wc is not None:
+                return _mk(wc)
+            d = _mk(blocked[0])
+            d["entity"] = None
+            d["blocked_entities"] = sorted(str(r["ENTITY_CODE"]) for r in blocked)
+            return d
+
+    # ── Upstream unified feed (live) ─────────────────────────────────────
+    cfg = _signoff_feed_cfg()
+    if not cfg["enabled"]:
+        return None
+    try:
+        if esc_scope in ("FRTB", "FRTBDRC", "FRTBRRAO"):
+            pt_match = f"UPPER(u.PROCESS_TYPE) IN ('FRTB', '{esc_scope}')"
+        else:
+            pt_match = f"UPPER(u.PROCESS_TYPE) = '{esc_scope}'"
+        ent_pred = ("AND UPPER(u.ENTITY_CODE) = UPPER('"
+                    + ent.replace("'", "''") + "')") if ent else ""
+        up = run_query(f"""
+            SELECT DISTINCT UPPER(TRIM(u.ENTITY_CODE)) AS E
+            FROM {cfg['table']} u
+            WHERE u.COBID = {int(cobid)} AND {pt_match}
+              AND (u.SUB_TYPE IS NULL OR TRIM(u.SUB_TYPE) = ''
+                   OR UPPER(u.SUB_TYPE) = 'NONCVA')
+              AND UPPER(u.PUBLISH_STATUS) = 'SIGNEDOFF'
+              {ent_pred}
+              AND NOT EXISTS (
+                  SELECT 1 FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS a
+                  WHERE a.COBID = u.COBID
+                    AND UPPER(a.PROCESS_TYPE) = '{esc_scope}'
+                    AND UPPER(a.SIGN_OFF_STATUS) = 'REOPENED'
+                    AND (UPPER(a.ENTITY_CODE) = UPPER(TRIM(u.ENTITY_CODE))
+                         OR a.ENTITY_CODE = '*')
+              )
+            LIMIT 20
+        """)
+        if up:
+            ents = sorted({str(r["E"]) for r in up if r["E"]})
+            d = {"status": "SIGNED_OFF", "SIGNOFF_SOURCE": "EXTERNAL",
+                 "SIGN_OFF_BY": "EXTERNAL FEED",
+                 "REOPEN_REQUESTED_BY": None, "REOPEN_REQUESTED_AT": None,
+                 "REOPEN_REASON": None, "REOPEN_APPROVED_BY": None,
+                 "REOPEN_APPROVED_AT": None,
+                 "entity": ent if ent else (ents[0] if len(ents) == 1 else None)}
+            if not ent and len(ents) > 1:
+                d["blocked_entities"] = ents
+            return d
+    except Exception:
+        pass    # feed not readable from the app — submit-side check still holds
+    return None
+
+
+def _signoff_history(scope, cobid, entity, old_status, new_status, comment):
+    run_query(f"""
+        INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
+            (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
+        VALUES ({int(cobid)}, '{str(scope).replace("'", "''")}',
+                '{str(entity or '*').replace("'", "''")}',
+                {"NULL" if old_status is None else "'" + str(old_status).replace("'", "''") + "'"},
+                '{str(new_status).replace("'", "''")}',
+                '{current_user_name().replace("'", "''")}',
+                '{str(comment).replace("'", "''")}')
+    """)
+
+
+def _request_reopen(scope, cobid, entity, reason):
+    """SIGNED_OFF → REOPEN_REQUESTED for one entity ('*' = whole scope).
+    Creates the row when the sign-off only exists upstream so far."""
+    esc_scope  = str(scope).replace("'", "''")
+    esc_ent    = str(entity or "*").replace("'", "''")
+    esc_reason = str(reason).replace("'", "''")[:490]
+    usr        = current_user_name().replace("'", "''")
+    run_query(f"""
+        MERGE INTO ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS t
+        USING (SELECT {int(cobid)} AS COBID) u
+        ON t.COBID = u.COBID AND UPPER(t.PROCESS_TYPE) = '{esc_scope.upper()}'
+           AND UPPER(t.ENTITY_CODE) = UPPER('{esc_ent}')
+        WHEN MATCHED AND UPPER(t.SIGN_OFF_STATUS) = 'SIGNED_OFF' THEN UPDATE SET
+            t.SIGN_OFF_STATUS     = 'REOPEN_REQUESTED',
+            t.REOPEN_REQUESTED_BY = '{usr}',
+            t.REOPEN_REQUESTED_AT = CURRENT_TIMESTAMP(),
+            t.REOPEN_REASON       = '{esc_reason}',
+            t.REOPEN_APPROVED_BY  = NULL,
+            t.REOPEN_APPROVED_AT  = NULL,
+            t.UPDATED_DATE        = CURRENT_TIMESTAMP()
+        WHEN NOT MATCHED THEN INSERT
+            (COBID, PROCESS_TYPE, ENTITY_CODE, SIGN_OFF_STATUS, SIGN_OFF_BY,
+             SIGN_OFF_TIMESTAMP, SIGNOFF_SOURCE, REOPEN_REQUESTED_BY,
+             REOPEN_REQUESTED_AT, REOPEN_REASON)
+        VALUES
+            (u.COBID, '{esc_scope}', '{esc_ent}', 'REOPEN_REQUESTED',
+             'EXTERNAL FEED', CURRENT_TIMESTAMP(), 'EXTERNAL', '{usr}',
+             CURRENT_TIMESTAMP(), '{esc_reason}')
+    """)
+    rows = run_query(f"""
+        SELECT SIGN_OFF_STATUS, REOPEN_REQUESTED_BY
+        FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+        WHERE COBID = {int(cobid)} AND UPPER(PROCESS_TYPE) = '{esc_scope.upper()}'
+          AND UPPER(ENTITY_CODE) = UPPER('{esc_ent}')
+    """)
+    if (rows and str(rows[0]["SIGN_OFF_STATUS"]).upper() == "REOPEN_REQUESTED"
+            and str(rows[0]["REOPEN_REQUESTED_BY"] or "") == current_user_name()):
+        _signoff_history(scope, cobid, entity, "SIGNED_OFF", "REOPEN_REQUESTED",
+                         f"Re-open requested: {reason}"[:990])
+        # Best-effort: notify the scope's approvers (gated by the app's
+        # notification switch; never blocks the request).
+        try:
+            _np = json.dumps({
+                "process_type": scope,
+                "cobid":        int(cobid),
+                "requested_by": current_user_name(),
+                "reason":       f"[entity {entity or '*'}] " + str(reason)[:280],
+            }).replace("'", "''")
+            run_query(f"CALL ADJUSTMENT_APP.SP_NOTIFY('reopen_requested', '{_np}')")
+        except Exception:
+            pass
+        _ent_txt = "all entities" if (entity or "*") == "*" else entity
+        return True, (f"Re-open request for COB {cobid} / {scope} ({_ent_txt}) "
+                      f"submitted — an approver can action it on the Approval "
+                      f"Queue page.")
+    return False, ("The sign-off state changed before the request could be "
+                   "recorded — check the current status below.")
+
+
+def _resign_off(scope, cobid, entity):
+    """REOPENED → SIGNED_OFF (source APP) for one entity ('*' = whole scope)."""
+    esc_scope = str(scope).replace("'", "''")
+    esc_ent   = str(entity or "*").replace("'", "''")
+    usr       = current_user_name().replace("'", "''")
+    rows = run_query(f"""
+        UPDATE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+        SET SIGN_OFF_STATUS    = 'SIGNED_OFF',
+            SIGN_OFF_BY        = '{usr}',
+            SIGN_OFF_TIMESTAMP = CURRENT_TIMESTAMP(),
+            SIGNOFF_SOURCE     = 'APP',
+            UPDATED_DATE       = CURRENT_TIMESTAMP()
+        WHERE COBID = {int(cobid)}
+          AND UPPER(PROCESS_TYPE) = '{esc_scope.upper()}'
+          AND UPPER(ENTITY_CODE) = UPPER('{esc_ent}')
+          AND UPPER(SIGN_OFF_STATUS) = 'REOPENED'
+    """)
+    try:
+        n = int(rows[0][0]) if rows else 0
+    except (TypeError, ValueError, IndexError):
+        n = 0
+    if n == 0:
+        return False, ("Nothing changed — this entity is no longer in a "
+                       "re-opened state (someone may have signed it off already).")
+    _signoff_history(scope, cobid, entity, "REOPENED", "SIGNED_OFF",
+                     "Signed off from the app after re-open cycle")
+    _ent_txt = "all entities" if (entity or "*") == "*" else entity
+    return True, (f"COB {cobid} / {scope} ({_ent_txt}) signed off — new "
+                  f"adjustments are blocked again.")
+
+
+def _render_signoff_panel() -> bool:
+    """Sign-off banner + actions for the selected scope/COB/entity. Returns
+    True when submissions are currently blocked by sign-off."""
+    cobid = wiz.get("cobid")
+    scopes = _signoff_scopes()
+    if not cobid or not scopes:
+        return False
+    entity = (wiz.get("entity_code") or "").strip() or None
+
+    flash = st.session_state.pop("na_signoff_flash", None)
+    if flash:
+        (st.success if flash[0] == "success" else st.warning)(flash[1])
+
+    blocked = False
+    for scope in scopes:
+        state = _signoff_state(scope, cobid, entity)
+        if not state:
+            continue
+        status  = state["status"]
+        gov_ent = state.get("entity")
+        ent_txt = ("all entities" if gov_ent == "*"
+                   else gov_ent if gov_ent else "several entities")
+        label = f"COB {cobid} · {scope} · {ent_txt}"
+        if status in _SIGNOFF_BLOCKED:
+            blocked = True
+
+        if status == "SIGNED_OFF" and state.get("blocked_entities"):
+            # Broad adjustment blocked by several entity-level sign-offs —
+            # there is no single row to act on from here.
+            st.error(f"**{label} is signed off** for: "
+                     f"{', '.join(state['blocked_entities'][:10])}. This "
+                     f"adjustment has no entity filter, so it touches those "
+                     f"entities and is blocked. Set the **Entity Code** field "
+                     f"to work on one entity (and request its re-open), or "
+                     f"manage sign-offs per entity on the COB Cockpit page.")
+        elif status == "SIGNED_OFF":
+            src = ("the upstream publish system"
+                   if (state.get("SIGNOFF_SOURCE") or "EXTERNAL") == "EXTERNAL"
+                   else f"{state.get('SIGN_OFF_BY') or 'the app'}")
+            st.error(f"**{label} is signed off** (by {src}). "
+                     f"New adjustments are blocked. If the business needs to "
+                     f"adjust it, request a re-open below — it goes to the "
+                     f"Approval Queue.")
+            reason = st.text_input(
+                "Reason for re-opening", key=_k(f"reopen_reason_{scope}"),
+                placeholder="Why does this need to be re-opened?")
+            if st.button(f"Request re-open — {scope} ({ent_txt})",
+                         key=_k(f"reopen_btn_{scope}"), use_container_width=True,
+                         disabled=not reason.strip()):
+                try:
+                    ok, msg = _request_reopen(scope, cobid, gov_ent,
+                                              reason.strip())
+                    st.session_state["na_signoff_flash"] = (
+                        "success" if ok else "warning", msg)
+                except Exception as ex:
+                    st.session_state["na_signoff_flash"] = (
+                        "warning", f"Could not submit the re-open request. "
+                                   f"{friendly_error(ex)}")
+                safe_rerun()
+        elif status == "REOPEN_REQUESTED":
+            st.warning(f"**{label}: re-open requested** by "
+                       f"{state.get('REOPEN_REQUESTED_BY') or '—'} — awaiting "
+                       f"approval on the Approval Queue page. Submissions stay "
+                       f"blocked until it is approved.")
+        elif status == "REOPENED":
+            st.info(f"**{label} is re-opened** (approved by "
+                    f"{state.get('REOPEN_APPROVED_BY') or '—'}). Submit the "
+                    f"adjustments needed, then sign off again below.")
+            confirm = st.checkbox(
+                f"Confirm — all adjustments for {label} are done; sign off "
+                f"and block new submissions again",
+                key=_k(f"resign_confirm_{scope}"), value=False)
+            if st.button(f"Sign off {scope} ({ent_txt}) again",
+                         key=_k(f"resign_btn_{scope}"), use_container_width=True,
+                         disabled=not confirm):
+                try:
+                    ok, msg = _resign_off(scope, cobid, gov_ent)
+                    st.session_state["na_signoff_flash"] = (
+                        "success" if ok else "warning", msg)
+                except Exception as ex:
+                    st.session_state["na_signoff_flash"] = (
+                        "warning", f"Sign-off failed. {friendly_error(ex)}")
+                safe_rerun()
+    return blocked
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1260,6 +1915,9 @@ with right:
 
     cat = wiz.get("category")
 
+    # ── Sign-off lifecycle (blocks submission while signed off) ─────────
+    signoff_blocked = _render_signoff_panel()
+
     # ── Impact preview trigger (Scaling, narrow scope only) ─────────────
     zero_rows = False
     if cat == "Scaling Adjustment" and not missing and not _is_entity_only(wiz):
@@ -1310,7 +1968,8 @@ with right:
     # ── Submit ────────────────────────────────────────────────────────────
     if _btn("Submit Adjustment", icon_name=":material/send:", type="primary",
             use_container_width=True, key=_k("submit"),
-            disabled=bool(missing) or not dup_ok or not eroll_ok or zero_rows):
+            disabled=bool(missing) or not dup_ok or not eroll_ok or zero_rows
+                     or signoff_blocked):
         wiz["result"] = None
         with st.spinner("Submitting adjustment…"):
             result = _do_submit()
@@ -1319,6 +1978,9 @@ with right:
         safe_rerun()
     if missing:
         st.caption("Submit unlocks when the ticket is complete.")
+    elif signoff_blocked:
+        st.caption("Submit is blocked: this COB is signed off for the "
+                   "selected scope (see the sign-off panel above).")
     elif zero_rows:
         st.caption("Submit is blocked: the current filters match no data.")
 
@@ -1335,7 +1997,10 @@ with right:
 
 
 # ── Full-width preview detail (breakdown / sample) ───────────────────────────
+# (Not for "All FRTB": the summary above is an aggregate over three sub-types;
+#  per-row breakdown/sample only makes sense per sub-type.)
 if wiz.get("category") == "Scaling Adjustment" and wiz.get("_preview_sum") \
+        and wiz.get("process_type") != "FRTBALL" \
         and not missing and not _is_entity_only(wiz):
     s = wiz["_preview_sum"]
     total_rows = _safe_int(s.get("ROWS_AFFECTED"))
@@ -1356,14 +2021,13 @@ if wiz.get("category") == "Scaling Adjustment" and wiz.get("_preview_sum") \
                     df_grp = df_grp.rename(columns={"CURRENT_VALUE": "Original",
                                                     "ADJUSTMENT_DELTA": "Adjustment",
                                                     "PROJECTED_VALUE": "Projected"})
-                    st.dataframe(df_grp, use_container_width=True,
-                                 height=min(300, 38 + 35 * len(df_grp)))
+                    render_df_table(df_grp, max_rows=100, height=300)
             except Exception as exc:
                 st.warning(f"Breakdown not available: {exc}")
         with st.expander(f"Sample rows (up to 1,000 of {total_rows:,})", expanded=False):
             try:
                 df_sample = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
                                        json.dumps({**_preview_payload(), "mode": "sample"}))
-                st.dataframe(df_sample, use_container_width=True, height=300)
+                render_df_table(df_sample, max_rows=200, height=300)
             except Exception as exc:
                 st.warning(f"Sample not available: {exc}")

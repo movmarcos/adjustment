@@ -1,11 +1,17 @@
 """
 Documentation — Full Process Guide
 =====================================
-Comprehensive documentation of the Adjustment Engine with interactive
-diagrams, architecture overview, and operational guides.
+Rewritten to describe the system AS BUILT:
+  • polling pipeline (1-minute scope tasks, claim tokens — no streams)
+  • sign-off lifecycle (external feed → block → re-open approval → re-sign-off)
+  • "All FRTB" fan-out (one adjustment per real sub-type; FRTBALL retired)
+  • delete/retry semantics, the stale-run reaper, force-process
+  • PowerBI refresh hand-off and statuses
+
+Organised for two readers: analysts (Overview / Creating / Approvals &
+Sign-off / Troubleshooting) and maintainers (Processing Engine / Reference).
 """
 import streamlit as st
-import textwrap
 
 
 def _html(content: str) -> None:
@@ -18,6 +24,7 @@ def _html(content: str) -> None:
     flat = "\n".join(line.lstrip() for line in content.splitlines()).strip()
     st.markdown(flat, unsafe_allow_html=True)
 
+
 st.set_page_config(
     page_title="Documentation · MUFG",
     page_icon="📖",
@@ -25,8 +32,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from utils.styles import inject_css, render_sidebar, section_title, P, SCOPE_CONFIG, TYPE_CONFIG, STATUS_COLORS, STATUS_ICONS, icon
-import config
+from utils.styles import (
+    inject_css, render_sidebar, section_title,
+    P, SCOPE_CONFIG, STATUS_COLORS, icon,
+)
 
 inject_css()
 render_sidebar()
@@ -34,1361 +43,574 @@ render_sidebar()
 st.markdown("## Documentation")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
-    "Comprehensive guide to the Adjustment Engine — architecture, workflows, "
-    "database objects, and operational procedures.</span>",
+    "How the Adjustment Engine works — creating adjustments, approvals and "
+    "sign-off, the processing pipeline, reports, and what to do when something "
+    "goes wrong.</span>",
     unsafe_allow_html=True,
 )
 st.markdown("<br/>", unsafe_allow_html=True)
 
+
+# ── Small HTML building blocks ────────────────────────────────────────────────
+
+def _card(body: str, accent: str = None) -> str:
+    border = f"border-left:4px solid {accent};" if accent else ""
+    return (f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
+            f'{border}border-radius:8px;padding:0.9rem 1.1rem;margin-bottom:0.8rem;'
+            f'font-size:0.85rem;line-height:1.55">{body}</div>')
+
+
+def _table(headers, rows) -> str:
+    th = "".join(
+        f'<th style="text-align:left;padding:6px 10px;font-size:0.74rem;'
+        f'text-transform:uppercase;letter-spacing:.05em;color:{P["grey_700"]};'
+        f'border-bottom:2px solid {P["border"]}">{h}</th>' for h in headers)
+    trs = ""
+    for r in rows:
+        tds = "".join(
+            f'<td style="padding:6px 10px;font-size:0.82rem;'
+            f'border-bottom:1px solid {P["border"]};vertical-align:top">{c}</td>'
+            for c in r)
+        trs += f"<tr>{tds}</tr>"
+    return (f'<div style="overflow-x:auto"><table style="width:100%;'
+            f'border-collapse:collapse;background:{P["white"]}">'
+            f'<thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table></div>')
+
+
+def _flow(steps) -> str:
+    """Horizontal step flow: [(title, subtitle), ...]."""
+    cells = ""
+    for i, (title, sub) in enumerate(steps):
+        arrow = ('<div style="align-self:center;color:' + P["grey_400"]
+                 + ';font-size:1.1rem;padding:0 2px">→</div>') if i else ""
+        cells += (arrow +
+                  f'<div style="flex:1;background:{P["white"]};border:1px solid {P["border"]};'
+                  f'border-top:3px solid {P["primary"]};border-radius:8px;padding:0.6rem;'
+                  f'text-align:center;min-width:110px">'
+                  f'<div style="font-weight:700;font-size:0.8rem">{title}</div>'
+                  f'<div style="font-size:0.7rem;color:{P["grey_700"]};margin-top:2px">{sub}</div>'
+                  f'</div>')
+    return (f'<div style="display:flex;gap:6px;align-items:stretch;'
+            f'margin:0.6rem 0 1rem 0;flex-wrap:wrap">{cells}</div>')
+
+
+def _pill(text, color) -> str:
+    return (f'<span style="background:{color}18;color:{color};border:1px solid {color}55;'
+            f'border-radius:99px;padding:1px 10px;font-size:0.74rem;font-weight:700;'
+            f'white-space:nowrap">{text}</span>')
+
+
 # ══════════════════════════════════════════════════════════════════════════════
-# TOC & TABS
+# TABS
 # ══════════════════════════════════════════════════════════════════════════════
 
-tab_overview, tab_architecture, tab_workflow, tab_processing, tab_objects, tab_ops = st.tabs([
+(tab_overview, tab_create, tab_approval, tab_processing,
+ tab_reports, tab_trouble, tab_reference) = st.tabs([
     "Overview",
-    "Architecture",
-    "Workflow & Status",
+    "Creating Adjustments",
+    "Approvals & Sign-Off",
     "Processing Engine",
-    "Database Objects",
-    "Operations Guide",
+    "Reports (PowerBI)",
+    "Troubleshooting",
+    "Reference",
 ])
 
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  TAB 1 — OVERVIEW                                                         ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
+# ╔════════════════════════════════════════════════════════════════════════════╗
+# ║  TAB 1 — OVERVIEW                                                          ║
+# ╚════════════════════════════════════════════════════════════════════════════╝
 
 with tab_overview:
-
     section_title("What is the Adjustment Engine?", "target")
-    st.markdown(
-        "The Adjustment Engine is a **Streamlit-on-Snowflake application** that provides a unified, "
-        "self-service interface for creating, approving, reviewing, and processing risk-related "
-        "adjustments across multiple scopes."
-    )
-    st.markdown(
-        f'<div class="mcard" style="border-left: 4px solid {P["primary"]}">'
-        f'<strong style="color:{P["primary"]}">Key Principle:</strong> Every adjustment starts as a row in '
-        f'<code>ADJUSTMENT_APP.ADJ_HEADER</code>. The file-based interface has been removed. '
-        f'Streamlit is the <em>only</em> entry point.</div>',
-        unsafe_allow_html=True)
+    _html(_card(
+        "The Adjustment Engine lets the risk team correct or override published "
+        "risk numbers — VaR, Stress, Sensitivity and FRTB — in a controlled, "
+        "fully audited way. Instead of editing fact data directly, you submit an "
+        "<strong>adjustment ticket</strong>; the engine validates it, optionally "
+        "routes it for approval, applies it to the adjustment tables (never the "
+        "original fact data), and queues a PowerBI report refresh. Every step is "
+        "recorded: who submitted, who approved, when it processed, and when the "
+        "reports picked it up."))
 
-    st.markdown("<br/>", unsafe_allow_html=True)
+    _html(_flow([
+        ("Submit", "New Adjustment page"),
+        ("Approve", "if required / Entity Roll"),
+        ("Process", "task polls every 1 min"),
+        ("Reports", "PowerBI refresh queued"),
+    ]))
 
-    # ── Scopes ────────────────────────────────────────────────────────────
     section_title("Supported Scopes", "bar-chart")
-    scope_cols = st.columns(len(SCOPE_CONFIG))
-    for i, (key, cfg) in enumerate(SCOPE_CONFIG.items()):
-        with scope_cols[i]:
-            st.markdown(
-                f'<div class="mcard" style="text-align:center;border-top:3px solid {cfg["color"]};min-height:130px">'
-                f'<div>{icon(cfg["icon"], size=28, color=cfg["color"], valign="0")}</div>'
-                f'<div style="font-weight:700;font-size:1rem;margin:0.3rem 0;color:{cfg["color"]}">{cfg["label"]}</div>'
-                f'<div style="font-size:0.75rem;color:{P["grey_700"]}">'
-                f'Config-driven via<br/><code>ADJUSTMENTS_SETTINGS</code></div>'
-                f'</div>', unsafe_allow_html=True)
+    scope_rows = []
+    for name, cfg in SCOPE_CONFIG.items():
+        scope_rows.append([
+            f'{icon(cfg.get("icon", ""), size=13, color=cfg.get("color", "#333"))} '
+            f'<strong>{name}</strong>',
+            cfg.get("desc", "—"),
+        ])
+    _html(_table(["Scope", "Description"], scope_rows))
+    _html(_card(
+        f'{icon("info", size=13, color=P["info"])} The three FRTB sub-types '
+        f'(FRTB, FRTBDRC, FRTBRRAO) are processed by one shared FRTB pipeline. '
+        f'Choosing <strong>“All FRTB”</strong> on the New Adjustment page simply '
+        f'creates one adjustment per sub-type — three sibling tickets that '
+        f'process one after another.', P["info"]))
 
-    _html(f"""
-    <div style="background:{P['info_lt']};border:1px solid #90CAF9;border-radius:8px;padding:0.8rem 1rem;font-size:0.85rem;margin-top:0.5rem">
-    <strong>Adding a new scope</strong> requires <em>only</em> a new row in
-    <code>ADJUSTMENTS_SETTINGS</code> — no code changes to the Streamlit app or stored procedures.
-    The processing engine reads its configuration dynamically.
-    </div>
-    """)
+    section_title("Adjustment Categories", "zap")
+    cat_rows = [
+        ["<strong>Scaling Adjustment</strong>",
+         "Scale, flatten or roll fact-table data by a factor. "
+         "<em>Flatten</em> zeroes the selected scope; <em>Scale</em> multiplies "
+         "it; <em>Roll</em> carries another COB's adjusted values forward.",
+         "No (optional)"],
+        ["<strong>Direct Adjustment</strong>",
+         "Upload exact values from a CSV for a chosen scope. A re-upload with "
+         "the same COB + Reference <em>replaces</em> the previous upload.",
+         "No (optional)"],
+        ["<strong>Entity Roll</strong>",
+         "Replace an entity's entire figures at a COB with another COB's "
+         "adjusted figures. Destructive: it removes every existing adjustment "
+         "for that entity/COB first.",
+         "Always"],
+    ]
+    _html(_table(["Category", "What it does", "Approval required"], cat_rows))
 
-    # ── Adjustment Types ─────────────────────────────────────────────────
-    st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Adjustment Types", "zap")
-
-    type_rows = ""
-    for tk, tcfg in TYPE_CONFIG.items():
-        type_rows += (
-            f'<tr>'
-            f'<td style="padding:10px 14px;font-weight:600;font-size:0.9rem;white-space:nowrap">'
-            f'{icon(tcfg["icon"], size=14)} {tk}</td>'
-            f'<td style="padding:10px 14px;font-size:0.85rem;color:{P["grey_700"]}">{tcfg["desc"]}</td>'
-            f'<td style="padding:10px 14px;font-family:monospace;font-size:0.82rem;'
-            f'background:{P["grey_100"]};border-radius:4px">{tcfg["formula"]}</td>'
-            f'</tr>')
-    # Add Entity Roll, Upload, Direct manually (not in TYPE_CONFIG)
-    type_rows += (
-        f'<tr>'
-        f'<td style="padding:10px 14px;font-weight:600;font-size:0.9rem;white-space:nowrap">{icon("refresh-cw", size=13)} Entity Roll</td>'
-        f'<td style="padding:10px 14px;font-size:0.85rem;color:{P["grey_700"]}">Full entity copy from source COB — deletes target, copies source (approval required)</td>'
-        f'<td style="padding:10px 14px;font-family:monospace;font-size:0.82rem;'
-        f'background:{P["grey_100"]};border-radius:4px">flatten target + copy source (offset rows)</td>'
-        f'</tr>'
-        f'<tr>'
-        f'<td style="padding:10px 14px;font-weight:600;font-size:0.9rem;white-space:nowrap">{icon("upload", size=13)} Upload</td>'
-        f'<td style="padding:10px 14px;font-size:0.85rem;color:{P["grey_700"]}">Direct CSV upload of VaR measure values</td>'
-        f'<td style="padding:10px 14px;font-family:monospace;font-size:0.82rem;'
-        f'background:{P["grey_100"]};border-radius:4px">INSERT line items directly</td>'
-        f'</tr>')
-
-    st.markdown(
-        f'<table style="width:100%;border-collapse:collapse;border:1px solid {P["border"]};border-radius:8px;overflow:hidden">'
-        f'<thead><tr style="background:{P["accent"]};color:white">'
-        f'<th style="padding:10px 14px;text-align:left">Type</th>'
-        f'<th style="padding:10px 14px;text-align:left">Description</th>'
-        f'<th style="padding:10px 14px;text-align:left">Formula</th>'
-        f'</tr></thead><tbody>{type_rows}</tbody></table>',
-        unsafe_allow_html=True)
-
-    # ── Pages Summary ────────────────────────────────────────────────────
-    st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Application Pages", "file-text")
-
-    pages = [
-        ("home",       "Command Center",   "Dashboard with KPIs, status charts, overlap alerts, and activity feed"),
-        ("file-text",  "New Adjustment",    "2-step wizard: Category & Details → Preview & Submit"),
-        ("clipboard",  "Adjustments",       "All adjustments (tick 'Only my adjustments' for yours) with full history, actions, and status timeline"),
-        ("check-circle", "Approval Queue",  "Review and approve adjustments. Only authorized approvers can act. Self-approval is blocked"),
-        ("clock",      "Adjustment Pipeline", "Lifecycle + live processing: stage board, running/waiting items with Force-process, and PowerBI report status"),
-        ("settings",   "Admin",             "Settings management, approvers, recurring templates, schema reference"),
-        ("info",       "Documentation",     "This page — full process guide with diagrams"),
-    ]
-    for icon_name, name, desc in pages:
-        st.markdown(
-            f'<div style="display:flex;align-items:center;gap:12px;padding:0.5rem 0;'
-            f'border-bottom:1px solid {P["border"]}">'
-            f'<span style="width:32px;text-align:center">{icon(icon_name, size=18, color=P["grey_700"], valign="0")}</span>'
-            f'<div><div style="font-weight:600;font-size:0.9rem">{name}</div>'
-            f'<div style="font-size:0.8rem;color:{P["grey_700"]}">{desc}</div></div></div>',
-            unsafe_allow_html=True)
-
-
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  TAB 2 — ARCHITECTURE                                                     ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
-
-with tab_architecture:
-
-    # ── End-to-End Architecture Diagram ──────────────────────────────────
-    section_title("End-to-End Architecture", "landmark")
-
-    _html(f"""
-    <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:1rem 0;overflow-x:auto">
-    <div style="display:flex;align-items:stretch;gap:0;min-width:900px">
-
-        <div style="display:flex;flex-direction:column;align-items:center;min-width:140px">
-            <div style="background:#E3F2FD;border:2px solid {P['info']};border-radius:10px;padding:1rem;text-align:center;width:140px">
-                <div>{icon("user", size=28, color=P['grey_700'], valign="0")}</div>
-                <div style="font-weight:700;font-size:0.82rem;color:{P['info']}">User</div>
-                <div style="font-size:0.7rem;color:{P['grey_700']}">Streamlit UI</div>
-            </div>
-            <div style="font-size:0.68rem;color:{P['grey_700']};margin-top:6px;text-align:center">
-                Creates adjustment<br/>via 2-step wizard
-            </div>
-        </div>
-
-        <div style="display:flex;align-items:center;padding:0 4px;font-size:1.5rem;color:{P['grey_400']}">→</div>
-
-        <div style="display:flex;flex-direction:column;align-items:center;min-width:155px">
-            <div style="background:#FFF3E0;border:2px solid {P['warning']};border-radius:10px;padding:1rem;text-align:center;width:155px">
-                <div>{icon("zap", size=28, color=P['grey_700'], valign="0")}</div>
-                <div style="font-weight:700;font-size:0.82rem;color:{P['warning']}">SP_SUBMIT</div>
-                <div style="font-size:0.7rem;color:{P['grey_700']}">Validate &amp; Insert</div>
-            </div>
-            <div style="font-size:0.68rem;color:{P['grey_700']};margin-top:6px;text-align:center">
-                Validates input<br/>Checks sign-off<br/>Inserts ADJ_HEADER
-            </div>
-        </div>
-
-        <div style="display:flex;align-items:center;padding:0 4px;font-size:1.5rem;color:{P['grey_400']}">→</div>
-
-        <div style="display:flex;flex-direction:column;align-items:center;min-width:140px">
-            <div style="background:#E8F5E9;border:2px solid {P['success']};border-radius:10px;padding:1rem;text-align:center;width:140px">
-                <div>{icon("database", size=28, color=P['grey_700'], valign="0")}</div>
-                <div style="font-weight:700;font-size:0.82rem;color:{P['success']}">ADJ_HEADER</div>
-                <div style="font-size:0.7rem;color:{P['grey_700']}">Source of Truth</div>
-            </div>
-            <div style="font-size:0.68rem;color:{P['grey_700']};margin-top:6px;text-align:center">
-                1 row per adjustment<br/>All dimensions + status
-            </div>
-        </div>
-
-        <div style="display:flex;align-items:center;padding:0 4px;font-size:1.5rem;color:{P['grey_400']}">→</div>
-
-        <div style="display:flex;flex-direction:column;align-items:center;min-width:130px">
-            <div style="background:#E3F2FD;border:2px solid #42A5F5;border-radius:10px;padding:1rem;text-align:center;width:130px">
-                <div>{icon("table", size=28, color=P['grey_700'], valign="0")}</div>
-                <div style="font-weight:700;font-size:0.82rem;color:#1976D2">4 QUEUE VIEWS</div>
-                <div style="font-size:0.7rem;color:{P['grey_700']}">One per scope</div>
-            </div>
-            <div style="font-size:0.68rem;color:{P['grey_700']};margin-top:6px;text-align:center">
-                Eligible Pending<br/>+ unblocked rows
-            </div>
-        </div>
-
-        <div style="display:flex;align-items:center;padding:0 4px;font-size:1.5rem;color:{P['grey_400']}">→</div>
-
-        <div style="display:flex;flex-direction:column;align-items:center;min-width:150px">
-            <div style="background:{P['purple_lt']};border:2px solid {P['purple']};border-radius:10px;padding:1rem;text-align:center;width:150px">
-                <div style="font-size:2rem">⏰</div>
-                <div style="font-weight:700;font-size:0.82rem;color:{P['purple']}">4 TASKS</div>
-                <div style="font-size:0.7rem;color:{P['grey_700']}">Independent per scope</div>
-            </div>
-            <div style="font-size:0.68rem;color:{P['grey_700']};margin-top:6px;text-align:center">
-                Polls every 1 min<br/>Exits fast when idle
-            </div>
-        </div>
-
-        <div style="display:flex;align-items:center;padding:0 4px;font-size:1.5rem;color:{P['grey_400']}">→</div>
-
-        <div style="display:flex;flex-direction:column;align-items:center;min-width:155px">
-            <div style="background:#FFEBEE;border:2px solid {P['primary']};border-radius:10px;padding:1rem;text-align:center;width:155px">
-                <div>{icon("refresh-cw", size=28, color=P['grey_700'], valign="0")}</div>
-                <div style="font-weight:700;font-size:0.82rem;color:{P['primary']}">SP_PROCESS</div>
-                <div style="font-size:0.7rem;color:{P['grey_700']}">Python / Snowpark</div>
-            </div>
-            <div style="font-size:0.68rem;color:{P['grey_700']};margin-top:6px;text-align:center">
-                Scale / Direct logic<br/>Overlap resolution<br/>SCD2 key fix
-            </div>
-        </div>
-
-        <div style="display:flex;align-items:center;padding:0 4px;font-size:1.5rem;color:{P['grey_400']}">→</div>
-
-        <div style="display:flex;flex-direction:column;align-items:center;min-width:150px">
-            <div style="background:#E8F5E9;border:2px solid {P['success']};border-radius:10px;padding:1rem;text-align:center;width:150px">
-                <div>{icon("bar-chart", size=28, color=P['grey_700'], valign="0")}</div>
-                <div style="font-weight:700;font-size:0.82rem;color:{P['success']}">FACT.*_ADJ</div>
-                <div style="font-size:0.7rem;color:{P['grey_700']}">Delta Rows</div>
-            </div>
-            <div style="font-size:0.68rem;color:{P['grey_700']};margin-top:6px;text-align:center">
-                Adjustment deltas<br/>Original data untouched
-            </div>
-        </div>
-
-    </div>
-    </div>
-    """)
-
-    _html(f"""
-    <div class="mcard" style="border-left:4px solid {P['info']};margin-top:0.5rem">
-    <strong>Delta Pattern:</strong> The original <code>FACT.*_MEASURES</code> tables are
-    <em>never modified</em>. Adjustments are stored as delta rows in <code>FACT.*_ADJUSTMENT</code>.
-    Downstream reporting uses <code>SUM(fact) + SUM(adjustment)</code>.
-    </div>
-    """)
-
-    # ── Layer Diagram ────────────────────────────────────────────────────
-    st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Snowflake Object Layers", "database")
-
-    _html(f"""
-    <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0">
-
-    <div style="margin-bottom:1.2rem">
-        <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:{P['primary']};margin-bottom:0.5rem">
-        ① Entry Layer — Streamlit writes here</div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <div style="background:#FFEBEE;border:1px solid {P['primary']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("database", size=13)} ADJ_HEADER</div>
-            <div style="background:#FFEBEE;border:1px solid {P['primary']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("file-text", size=13)} ADJ_LINE_ITEM</div>
-            <div style="background:#FFEBEE;border:1px solid {P['primary']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("file-text", size=13)} ADJ_STATUS_HISTORY</div>
-        </div>
-    </div>
-
-    <div style="margin-bottom:1.2rem">
-        <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:{P['purple']};margin-bottom:0.5rem">
-        ② Config Layer — Drives behaviour</div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <div style="background:{P['purple_lt']};border:1px solid {P['purple']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("settings", size=13)} ADJUSTMENTS_SETTINGS</div>
-            <div style="background:{P['purple_lt']};border:1px solid {P['purple']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("refresh-cw", size=13)} ADJ_RECURRING_TEMPLATE</div>
-        </div>
-    </div>
-
-    <div style="margin-bottom:1.2rem">
-        <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:{P['info']};margin-bottom:0.5rem">
-        ③ Queue Views — Eligible adjustment queues (one per scope)</div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("table", size=13)} VW_QUEUE_VAR</div>
-            <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("table", size=13)} VW_QUEUE_STRESS</div>
-            <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("table", size=13)} VW_QUEUE_FRTB</div>
-            <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("table", size=13)} VW_QUEUE_SENSITIVITY</div>
-        </div>
-    </div>
-
-    <div style="margin-bottom:1.2rem">
-        <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:{P['warning']};margin-bottom:0.5rem">
-        ④ Processing Layer — Async execution (one task per scope)</div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            ⏰ TASK_PROCESS_VAR</div>
-            <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            ⏰ TASK_PROCESS_STRESS</div>
-            <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            ⏰ TASK_PROCESS_FRTB</div>
-            <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            ⏰ TASK_PROCESS_SENSITIVITY</div>
-            <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("zap", size=13)} SP_RUN_PIPELINE</div>
-            <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("zap", size=13)} SP_SUBMIT_ADJUSTMENT</div>
-            <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("zap", size=13)} SP_PREVIEW_ADJUSTMENT</div>
-            <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("zap", size=13)} SP_PROCESS_ADJUSTMENT</div>
-        </div>
-    </div>
-
-    <div style="margin-bottom:1.2rem">
-        <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:{P['success']};margin-bottom:0.5rem">
-        ⑤ Materialised Layer — Auto-refresh (1 min lag)</div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <div style="background:#E8F5E9;border:1px solid {P['success']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("bar-chart", size=13)} DT_DASHBOARD</div>
-            <div style="background:#E8F5E9;border:1px solid {P['success']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("alert-triangle", size=13)} DT_OVERLAP_ALERTS</div>
-        </div>
-    </div>
-
-    <div>
-        <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:{P['grey_700']};margin-bottom:0.5rem">
-        ⑥ Read Layer — Real-time views for Streamlit</div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <div style="background:{P['white']};border:1px solid {P['border']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("eye", size=13)} VW_DASHBOARD_KPI</div>
-            <div style="background:{P['white']};border:1px solid {P['border']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("eye", size=13)} VW_SIGNOFF_STATUS</div>
-            <div style="background:{P['white']};border:1px solid {P['border']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("eye", size=13)} VW_RECENT_ACTIVITY</div>
-            <div style="background:{P['white']};border:1px solid {P['border']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("eye", size=13)} VW_ERRORS</div>
-            <div style="background:{P['white']};border:1px solid {P['border']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("eye", size=13)} VW_MY_WORK</div>
-            <div style="background:{P['white']};border:1px solid {P['border']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("eye", size=13)} VW_ADJUSTMENT_TRACK</div>
-            <div style="background:{P['white']};border:1px solid {P['border']};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.8rem;font-weight:600">
-            {icon("eye", size=13)} VW_APPROVAL_QUEUE</div>
-        </div>
-    </div>
-
-    </div>
-    """)
-
-
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  TAB 3 — WORKFLOW & STATUS                                                ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
-
-with tab_workflow:
-
-    # ── User Guide ───────────────────────────────────────────────────────
-    section_title("How to Submit an Adjustment — Step-by-Step Guide", "info")
-
-    _html(f"""
-    <div class="mcard" style="border-left:4px solid {P['primary']};margin-bottom:1rem">
-    This guide walks through every step of submitting an adjustment — what each screen shows,
-    what decisions you make, and exactly what happens in the system from submission through to
-    the data being applied.
-    </div>
-    """)
-
-    with st.expander("**Step 1 — Open New Adjustment**", expanded=True):
-        _html(f"""
-        <div style="font-size:0.88rem;color:{P['grey_700']};margin-bottom:0.6rem">
-        Navigate to <strong>New Adjustment</strong> in the sidebar. You will see three adjustment categories.
-        </div>
-        <div style="display:flex;gap:12px;flex-wrap:wrap">
-            <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.75rem 1rem;min-width:200px;flex:1">
-                <div style="font-weight:700;font-size:0.88rem">{icon("bar-chart", size=13)} Scaling Adjustment</div>
-                <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:4px">
-                Multiply, flatten, or roll existing fact data. The system reads the
-                source data and writes a delta row. Most common type.
-                </div>
-            </div>
-            <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.75rem 1rem;min-width:200px;flex:1">
-                <div style="font-weight:700;font-size:0.88rem">{icon("upload", size=13)} Upload Adjustment</div>
-                <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:4px">
-                Provide exact adjustment values via CSV upload. The system writes your
-                values directly without reading the source data.
-                </div>
-            </div>
-            <div style="background:#E8F5E9;border:1px solid {P['success']};border-radius:8px;padding:0.75rem 1rem;min-width:200px;flex:1">
-                <div style="font-weight:700;font-size:0.88rem">{icon("refresh-cw", size=13)} Entity Roll</div>
-                <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:4px">
-                Replace an entity's adjusted figures at the target COB with the source
-                COB's, written as one reversible adjustment. Requires approval.
-                </div>
-            </div>
-        </div>
-        """)
-
-    with st.expander("**Step 2 — Choose Scope and COB (Scaling Adjustments)**"):
-        _html(f"""
-        <div style="font-size:0.88rem;color:{P['grey_700']};margin-bottom:0.8rem">
-        Select which risk scope this adjustment targets and the COB (Close of Business) date it applies to.
-        </div>
-        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:0.8rem">
-            <div style="background:#FFF0F3;border:1px solid {P['primary']};border-radius:8px;padding:0.7rem 0.9rem">
-                <div style="font-weight:700;font-size:0.85rem;color:{P['primary']}">{icon("bar-chart", size=13)} VaR</div>
-                <div style="font-size:0.78rem;color:{P['grey_700']}">Value at Risk adjustments on the VaR fact table</div>
-            </div>
-            <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.7rem 0.9rem">
-                <div style="font-weight:700;font-size:0.85rem;color:{P['info']}">{icon("zap", size=13)} Stress</div>
-                <div style="font-size:0.78rem;color:{P['grey_700']}">Stress testing adjustments</div>
-            </div>
-            <div style="background:#E8F5E9;border:1px solid {P['success']};border-radius:8px;padding:0.7rem 0.9rem">
-                <div style="font-weight:700;font-size:0.85rem;color:{P['success']}">{icon("landmark", size=13)} FRTB</div>
-                <div style="font-size:0.78rem;color:{P['grey_700']}">
-                Fundamental Review of the Trading Book. Has <strong>sub-types</strong> — see Step 3.
-                </div>
-            </div>
-            <div style="background:#FFF3E0;border:1px solid {P['warning']};border-radius:8px;padding:0.7rem 0.9rem">
-                <div style="font-weight:700;font-size:0.85rem;color:{P['warning']}">{icon("target", size=13)} Sensitivity</div>
-                <div style="font-size:0.78rem;color:{P['grey_700']}">Sensitivity / Greeks adjustments</div>
-            </div>
-        </div>
-        <div style="background:{P['info_lt']};border:1px solid #90CAF9;border-radius:8px;padding:0.7rem 1rem;font-size:0.82rem">
-        <strong>COB date</strong> — enter in YYYYMMDD format (e.g. 20250131).
-        This is the business date the adjustment will be applied to.
-        </div>
-        """)
-
-    with st.expander("**Step 3 — For FRTB: Choose Sub-type**"):
-        _html(f"""
-        <div style="font-size:0.88rem;color:{P['grey_700']};margin-bottom:0.8rem">
-        FRTB has four sub-types that target different FRTB measure tables.
-        All four share the same processing pipeline and blocking rules.
-        </div>
-        <table style="width:100%;border-collapse:collapse;border:1px solid {P['border']};border-radius:8px;overflow:hidden;font-size:0.83rem">
-        <thead><tr style="background:{P['accent']};color:white">
-            <th style="padding:9px 13px;text-align:left">Sub-type</th>
-            <th style="padding:9px 13px;text-align:left">Applies to</th>
-        </tr></thead>
-        <tbody>
-        <tr style="border-bottom:1px solid {P['border']}">
-            <td style="padding:9px 13px;font-weight:600">FRTB</td>
-            <td style="padding:9px 13px;color:{P['grey_700']}">Standard FRTB measures</td>
-        </tr>
-        <tr style="border-bottom:1px solid {P['border']}">
-            <td style="padding:9px 13px;font-weight:600">FRTBDRC</td>
-            <td style="padding:9px 13px;color:{P['grey_700']}">Default Risk Charge measures</td>
-        </tr>
-        <tr style="border-bottom:1px solid {P['border']}">
-            <td style="padding:9px 13px;font-weight:600">FRTBRRAO</td>
-            <td style="padding:9px 13px;color:{P['grey_700']}">Residual Risk Add-On measures</td>
-        </tr>
-        <tr>
-            <td style="padding:9px 13px;font-weight:600">FRTBALL</td>
-            <td style="padding:9px 13px;color:{P['grey_700']}">Fan-out — applies the same adjustment to FRTB, FRTBDRC, and FRTBRRAO simultaneously</td>
-        </tr>
-        </tbody></table>
-        """)
-
-    with st.expander("**Step 4 — Choose Adjustment Type**"):
-        _html(f"""
-        <div style="font-size:0.88rem;color:{P['grey_700']};margin-bottom:0.8rem">
-        Select how the adjustment modifies the data.
-        </div>
-        <div style="display:flex;flex-direction:column;gap:10px">
-            <div style="background:#E3F2FD;border:1px solid {P['info']};border-radius:8px;padding:0.75rem 1rem">
-                <div style="font-weight:700;font-size:0.88rem">{icon("bar-chart", size=13)} Scale</div>
-                <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:4px">
-                Multiply the matching rows by a scale factor. <strong>Same COB:</strong> only the incremental
-                delta is written (sf - 1). For example, a scale of 1.10× adds +10% as a delta row.
-                The original data is untouched.
-                </div>
-            </div>
-            <div style="background:#FFEBEE;border:1px solid {P['primary']};border-radius:8px;padding:0.75rem 1rem">
-                <div style="font-weight:700;font-size:0.88rem;color:{P['primary']}">{icon("minus-circle", size=13)} Flatten</div>
-                <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:4px">
-                Zero out the matching rows by writing a delta of −1×. The net result
-                (original + delta) becomes zero. Use this to remove positions from the risk figures.
-                </div>
-            </div>
-            <div style="background:#E8F5E9;border:1px solid {P['success']};border-radius:8px;padding:0.75rem 1rem">
-                <div style="font-weight:700;font-size:0.88rem;color:{P['success']}">{icon("refresh-cw", size=13)} Roll</div>
-                <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:4px">
-                Roll a prior COB (Source COB) forward to the current COB, optionally scaled.
-                The system <strong>flattens</strong> the target COB's existing original first,
-                then rolls in the source COB's <strong>adjusted state</strong> — its original
-                <em>plus</em> any existing adjustments. Net result: the target's adjusted value
-                becomes the source's adjusted value (× scale factor). Useful for carrying forward
-                positions day-over-day.
-                </div>
-            </div>
-        </div>
-        """)
-
-    with st.expander("**Step 5 — Set Dimension Filters**"):
-        _html(f"""
-        <div style="font-size:0.88rem;color:{P['grey_700']};margin-bottom:0.8rem">
-        Filters narrow which rows in the fact table are affected. <strong>All filters use AND logic</strong>
-        — a row must match every filter you set. An empty <em>optional</em> filter = wildcard = applies to
-        all values for that dimension. Some fields are <strong>required</strong> for Scaling Adjustments
-        (see below) and must be filled in before you can continue.
-        </div>
-        <div style="background:{P['warning_lt']};border:1px solid #FFB74D;border-radius:8px;padding:0.7rem 1rem;font-size:0.82rem;margin-bottom:0.8rem">
-        <strong>Required for Scaling Adjustments:</strong> Adjustment Type, COB Date,
-        <strong>Entity Code</strong>, <strong>Department Code or Book Code</strong> (at least one), and a
-        <strong>Reason / Business Justification</strong>. Recurring adjustments also require Start &amp; End COBID.
-        </div>
-        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:0.8rem">
-        """ + "".join([
-            f'<div style="background:{P["grey_100"]};border-radius:6px;padding:0.5rem 0.75rem;font-size:0.8rem">'
-            f'<strong>{dim}</strong></div>'
-            for dim in ["Entity Code (required)", "Department or Book (one required)",
-                        "Source System", "Currency", "Trade Typology", "Strategy",
-                        "Trade Code", "Instrument", "Simulation Name", "Measure Type"]
-        ]) + f"""
-        </div>
-        <div style="background:{P['warning_lt']};border:1px solid #FFB74D;border-radius:8px;padding:0.7rem 1rem;font-size:0.82rem">
-        <strong>Broad department-level adjustments</strong> can match very large row counts. The preview
-        is computed server-side (aggregated), so it stays fast at any scale. Broad adjustments are still
-        subject to scope-level blocking — the system waits for other adjustments in the scope to finish
-        before processing them.
-        </div>
-        """)
-
-    with st.expander("**Step 6 — Preview**"):
-        _html(f"""
-        <div style="font-size:0.88rem;color:{P['grey_700']};margin-bottom:0.8rem">
-        The preview calls <code>SP_PREVIEW_ADJUSTMENT</code> — a <strong>read-only</strong> stored procedure
-        that shows what the adjustment would do without making any changes.
-        </div>
-        <div style="display:flex;flex-direction:column;gap:10px">
-            <div style="border-left:4px solid {P['info']};padding:0.6rem 1rem;background:{P['info_lt']};border-radius:0 8px 8px 0">
-                <div style="font-weight:700;font-size:0.85rem">Impact Metrics (auto-loaded)</div>
-                <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:3px">
-                Shows how many rows match your filters, the total current value, and the projected
-                adjustment delta. For each type: Scale 1.1× shows +10% delta; Flatten shows −100%;
-                Roll shows <strong>current</strong> = the target COB's original total (flattened) and
-                <strong>projected</strong> = the source COB's adjusted total (original + existing
-                adjustments) rolled forward. Computed server-side, so it is fast at any scale.
-                </div>
-            </div>
-            <div style="border-left:4px solid {P['warning']};padding:0.6rem 1rem;background:{P['warning_lt']};border-radius:0 8px 8px 0">
-                <div style="font-weight:700;font-size:0.85rem">Breakdown by Dimension (on-demand)</div>
-                <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:3px">
-                Click <strong>Show Breakdown</strong> to see the aggregated impact grouped by entity
-                and book. Useful for verifying the scope of the adjustment before committing.
-                </div>
-            </div>
-            <div style="border-left:4px solid {P['success']};padding:0.6rem 1rem;background:{P['success_lt']};border-radius:0 8px 8px 0">
-                <div style="font-weight:700;font-size:0.85rem">Sample Rows (on-demand)</div>
-                <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:3px">
-                Click <strong>Show Sample Rows</strong> to see a few example rows from the fact table
-                that will be affected, with their current and projected values.
-                </div>
-            </div>
-        </div>
-        <div style="background:{P['warning_lt']};border:1px solid #FFB74D;border-radius:8px;padding:0.7rem 1rem;font-size:0.82rem;margin-top:0.6rem">
-        <strong>Cross-COB Roll:</strong> Breakdown and Sample Rows are not offered — a per-position
-        breakdown across two COBs and two tables only makes sense after the netting engine runs.
-        The impact metrics above show the net effect.
-        </div>
-        <div style="background:{P['info_lt']};border:1px solid #90CAF9;border-radius:8px;padding:0.7rem 1rem;font-size:0.82rem;margin-top:0.6rem">
-        <strong>Overlap warnings</strong> — if another adjustment in the same scope already covers
-        overlapping rows, a warning is shown. You can still submit; the system will queue your
-        adjustment and process it after the overlapping one finishes.
-        </div>
-        """)
-
-    with st.expander("**Step 7 — Submit and Data Flow**"):
-        _html(f"""
-        <div style="font-size:0.88rem;color:{P['grey_700']};margin-bottom:0.8rem">
-        Click <strong>Submit Adjustment</strong>. Here is exactly what happens, in order.
-        </div>
-
-        <div style="display:flex;flex-direction:column;gap:8px">
-
-        <div style="display:flex;align-items:flex-start;gap:12px">
-            <div style="background:{P['primary']};color:white;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.8rem;flex-shrink:0">1</div>
-            <div>
-                <div style="font-weight:700;font-size:0.86rem">Sign-off check</div>
-                <div style="font-size:0.8rem;color:{P['grey_700']}">
-                <code>SP_SUBMIT_ADJUSTMENT</code> checks <code>ADJ_SIGNOFF_STATUS</code>.
-                If the COB is already signed off for this scope, the adjustment is recorded
-                but immediately set to <strong>Rejected - SignedOff</strong> and never processed.
-                </div>
-            </div>
-        </div>
-
-        <div style="display:flex;align-items:flex-start;gap:12px">
-            <div style="background:{P['info']};color:white;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.8rem;flex-shrink:0">2</div>
-            <div>
-                <div style="font-weight:700;font-size:0.86rem">Overlap / blocking check</div>
-                <div style="font-size:0.8rem;color:{P['grey_700']}">
-                The SP checks whether any adjustment is currently <strong>Running</strong> in the same scope
-                and COB with overlapping dimension filters. If found, <code>BLOCKED_BY_ADJ_ID</code> is set
-                to that adjustment's ID — your adjustment will wait for it to finish.
-                </div>
-            </div>
-        </div>
-
-        <div style="display:flex;align-items:flex-start;gap:12px">
-            <div style="background:{P['warning']};color:white;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.8rem;flex-shrink:0">3</div>
-            <div>
-                <div style="font-weight:700;font-size:0.86rem">Row inserted into ADJ_HEADER</div>
-                <div style="font-size:0.8rem;color:{P['grey_700']}">
-                A row is written to <code>ADJUSTMENT_APP.ADJ_HEADER</code> with status
-                <strong>Pending</strong> (or <strong>Pending Approval</strong> if approval is required).
-                All your filters, the scale factor, and metadata are stored here. This is the permanent record.
-                </div>
-            </div>
-        </div>
-
-        <div style="display:flex;align-items:flex-start;gap:12px">
-            <div style="background:{P['purple']};color:white;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.8rem;flex-shrink:0">4</div>
-            <div>
-                <div style="font-weight:700;font-size:0.86rem">Scope task polls (within ≤1 minute)</div>
-                <div style="font-size:0.8rem;color:{P['grey_700']}">
-                The Snowflake task for your scope (<code>TASK_PROCESS_VAR</code>, etc.) runs every minute.
-                It calls <code>SP_RUN_PIPELINE</code>, which atomically claims all eligible
-                Pending adjustments by setting their status to <strong>Running</strong>.
-                </div>
-            </div>
-        </div>
-
-        <div style="display:flex;align-items:flex-start;gap:12px">
-            <div style="background:{P['success']};color:white;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.8rem;flex-shrink:0">5</div>
-            <div>
-                <div style="font-weight:700;font-size:0.86rem">SP_PROCESS_ADJUSTMENT writes the data</div>
-                <div style="font-size:0.8rem;color:{P['grey_700']}">
-                For <strong>Scale/Flatten</strong>: reads the source fact table, applies the
-                scale factor, and inserts delta rows into <code>FACT.*_ADJUSTMENT</code>.
-                For <strong>Roll</strong>: flattens the target original and rolls in the source COB's
-                adjusted state (original + existing adjustments). The original fact data is never modified.<br/>
-                For <strong>Upload/Direct</strong>: reads line items from <code>ADJ_LINE_ITEM</code>
-                and maps them to the fact schema columns.
-                </div>
-            </div>
-        </div>
-
-        <div style="display:flex;align-items:flex-start;gap:12px">
-            <div style="background:{P['success']};color:white;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.8rem;flex-shrink:0">6</div>
-            <div>
-                <div style="font-weight:700;font-size:0.86rem">Status → Processed</div>
-                <div style="font-size:0.8rem;color:{P['grey_700']}">
-                <code>ADJ_HEADER.RUN_STATUS</code> is set to <strong>Processed</strong>
-                and the transition is logged to <code>ADJ_STATUS_HISTORY</code>.
-                Any adjustments that were blocked waiting for this one are unblocked and
-                will be picked up on the next task poll.
-                </div>
-            </div>
-        </div>
-
-        </div>
-
-        <div style="background:{P['success_lt']};border:1px solid {P['success']};border-radius:8px;padding:0.75rem 1rem;font-size:0.82rem;margin-top:0.8rem">
-        <strong>Total time from Submit to Processed:</strong> typically <strong>1–3 minutes</strong>
-        for Scaling adjustments. Upload adjustments may take longer depending on row count.
-        Monitor progress on the <strong>⏳ Adjustment Pipeline</strong> page.
-        </div>
-        """)
-
-    st.markdown("<br/>", unsafe_allow_html=True)
-
-    # ── Status State Machine ─────────────────────────────────────────────
-    section_title("Adjustment Lifecycle — Status State Machine", "refresh-cw")
-
-    _html(f"""
-    <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0;overflow-x:auto">
-    <div style="display:flex;flex-direction:column;gap:1.2rem;min-width:700px">
-
-    <div style="display:flex;align-items:center;gap:0">
-        <div style="background:#FFF3E0;border:2px solid {STATUS_COLORS['Pending']};border-radius:10px;padding:0.8rem 1rem;text-align:center;min-width:120px">
-            <div>{icon(STATUS_ICONS['Pending'], size=20, color=STATUS_COLORS['Pending'], valign="0")}</div>
-            <div style="font-weight:700;font-size:0.82rem;color:{STATUS_COLORS['Pending']}">Pending</div>
-            <div style="font-size:0.65rem;color:{P['grey_700']}">Initial state</div>
-        </div>
-        <div style="text-align:center;padding:0 8px">
-            <div style="font-size:1.2rem;color:{P['grey_400']}">→</div>
-            <div style="font-size:0.6rem;color:{P['grey_700']}">SP_RUN_PIPELINE<br/>claims</div>
-        </div>
-        <div style="background:#E3F2FD;border:2px solid {STATUS_COLORS['Running']};border-radius:10px;padding:0.8rem 1rem;text-align:center;min-width:120px">
-            <div>{icon(STATUS_ICONS['Running'], size=20, color=STATUS_COLORS['Running'], valign="0")}</div>
-            <div style="font-weight:700;font-size:0.82rem;color:{STATUS_COLORS['Running']}">Running</div>
-            <div style="font-size:0.65rem;color:{P['grey_700']}">Processing now</div>
-        </div>
-        <div style="text-align:center;padding:0 8px">
-            <div style="font-size:1.2rem;color:{P['grey_400']}">→</div>
-            <div style="font-size:0.6rem;color:{P['grey_700']}">SP_PROCESS<br/>succeeds</div>
-        </div>
-        <div style="background:#E8F5E9;border:2px solid {STATUS_COLORS['Processed']};border-radius:10px;padding:0.8rem 1rem;text-align:center;min-width:120px">
-            <div>{icon(STATUS_ICONS['Processed'], size=20, color=STATUS_COLORS['Processed'], valign="0")}</div>
-            <div style="font-weight:700;font-size:0.82rem;color:{STATUS_COLORS['Processed']}">Processed</div>
-            <div style="font-size:0.65rem;color:{P['grey_700']}">In the data {icon("check", size=12)}</div>
-        </div>
-    </div>
-
-    <div style="display:flex;align-items:center;gap:0;padding-left:0">
-        <div style="background:#E3F2FD;border:2px solid {STATUS_COLORS['Pending Approval']};border-radius:10px;padding:0.8rem 1rem;text-align:center;min-width:120px">
-            <div>{icon(STATUS_ICONS['Pending Approval'], size=20, color=STATUS_COLORS['Pending Approval'], valign="0")}</div>
-            <div style="font-weight:700;font-size:0.78rem;color:{STATUS_COLORS['Pending Approval']}">Pending Approval</div>
-            <div style="font-size:0.65rem;color:{P['grey_700']}">Optional</div>
-        </div>
-        <div style="text-align:center;padding:0 8px">
-            <div style="font-size:1.2rem;color:{P['grey_400']}">→</div>
-            <div style="font-size:0.6rem;color:{P['grey_700']}">Authorized<br/>approver<br/>(not submitter)</div>
-        </div>
-        <div style="background:#E0F2F1;border:2px solid {STATUS_COLORS['Approved']};border-radius:10px;padding:0.8rem 1rem;text-align:center;min-width:120px">
-            <div>{icon(STATUS_ICONS['Approved'], size=20, color=STATUS_COLORS['Approved'], valign="0")}</div>
-            <div style="font-weight:700;font-size:0.82rem;color:{STATUS_COLORS['Approved']}">Approved</div>
-            <div style="font-size:0.65rem;color:{P['grey_700']}">Ready to process</div>
-        </div>
-        <div style="text-align:center;padding:0 8px">
-            <div style="font-size:1.2rem;color:{P['grey_400']}">→</div>
-            <div style="font-size:0.6rem;color:{P['grey_700']}">SP_RUN_PIPELINE<br/>claims</div>
-        </div>
-        <div style="font-size:0.82rem;font-weight:700;color:{STATUS_COLORS['Running']}">{icon("zap", size=13)} Running → {icon("check", size=12)} Processed</div>
-    </div>
-
-    <div style="display:flex;gap:2rem;flex-wrap:wrap;padding-left:2rem">
-
-        <div style="display:flex;align-items:center;gap:8px">
-            <div style="font-size:0.72rem;color:{P['grey_700']}">Submit (COB signed off)</div>
-            <div style="font-size:1rem;color:{P['grey_400']}">→</div>
-            <div style="background:{P['purple_lt']};border:2px solid {STATUS_COLORS['Rejected - SignedOff']};border-radius:10px;padding:0.5rem 0.8rem;text-align:center">
-                <div style="font-weight:700;font-size:0.78rem;color:{STATUS_COLORS['Rejected - SignedOff']}">{icon("lock", size=13)} Rejected - SignedOff</div>
-            </div>
-        </div>
-
-        <div style="display:flex;align-items:center;gap:8px">
-            <div style="font-size:0.72rem;color:{P['grey_700']}">SP_PROCESS fails</div>
-            <div style="font-size:1rem;color:{P['grey_400']}">→</div>
-            <div style="background:#FFEBEE;border:2px solid {STATUS_COLORS.get('Failed', '#D32F2F')};border-radius:10px;padding:0.5rem 0.8rem;text-align:center">
-                <div style="font-weight:700;font-size:0.78rem;color:{STATUS_COLORS.get('Failed', '#D32F2F')}">{icon("x-circle", size=13)} Failed</div>
-            </div>
-        </div>
-
-    </div>
-
-    </div>
-    </div>
-    """)
-
-    # ── Status Reference Table ───────────────────────────────────────────
-    st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Status Reference", "clipboard")
-
-    status_data = [
-        ("Pending",              "Initial state after submission or after retry",
-         "Process immediately (ad-hoc) or wait for task (recurring)"),
-        ("Pending Approval",     "Submitted with requires_approval flag — awaiting approver action. Only users in ADJ_APPROVERS can act. Self-approval is blocked.",
-         "Approve → Approved, Reject → Rejected, Recall → Pending"),
-        ("Approved",             "Approved by an authorized user (listed in ADJ_APPROVERS, not the submitter) — ready for processing",
-         "Task picks up and processes → Processed"),
-        ("Processed",            "Successfully applied to the FACT.*_ADJUSTMENT table",
-         "Terminal state (adjustments are in the data)"),
-        ("Running",              "Currently being processed by SP_RUN_PIPELINE",
-         "On success → Processed; on error → Failed"),
-        ("Failed",               "SP_PROCESS_ADJUSTMENT encountered an error",
-         "Terminal state — check ERRORMESSAGE for details"),
-        ("Rejected",             "Rejected by the system or an operator",
-         "Terminal state"),
-        ("Rejected - SignedOff", "COB was already signed off at submission time",
-         "Terminal state (adjustment recorded for audit but not processed)"),
-    ]
-
-    for status, desc, transitions in status_data:
-        color = STATUS_COLORS.get(status, "#9E9E9E")
-        status_svg = icon(STATUS_ICONS.get(status, ""), size=13, color=color)
-        st.markdown(
-            f'<div style="border-left:4px solid {color};padding:0.6rem 1rem;margin-bottom:0.5rem;'
-            f'background:{color}11;border-radius:0 6px 6px 0">'
-            f'<span style="font-weight:700;color:{color}">{status_svg} {status}</span>'
-            f'<br/><span style="font-size:0.82rem;color:{P["grey_700"]}">{desc}</span>'
-            f'<br/><span style="font-size:0.78rem;color:{P["grey_700"]}"><strong>Transitions:</strong> {transitions}</span>'
-            f'</div>', unsafe_allow_html=True)
-
-    # ── Workflow Diagrams ────────────────────────────────────────────────
-    st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Workflow Scenarios", "file-text")
-
-    with st.expander("**Scenario 1: Ad-hoc Scale**", expanded=True):
-        _html(f"""
-        <div style="background:{P['grey_100']};border-radius:10px;padding:1rem;margin:0.5rem 0">
-        <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:0.82rem">
-            <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">{icon("user", size=13)} User opens wizard</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-weight:600">Selects scope + Scale type</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-weight:600">Sets filters + scale factor</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">Previews impact (SP_PREVIEW)</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['primary']}">Clicks Submit</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-weight:600">SP_SUBMIT validates + inserts</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:{P['purple_lt']};border-radius:6px;padding:4px 10px;font-weight:600;color:{P['purple']}">⏰ Task polls (≤1 min)</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['primary']}">SP_RUN_PIPELINE</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#E8F5E9;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['success']}">{icon("check", size=12)} Processed</div>
-        </div>
-        </div>
-        <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:0.4rem">
-        <strong>Key:</strong> SP_SUBMIT inserts the ADJ_HEADER row as Pending (checking for overlapping
-        Running adjustments and setting BLOCKED_BY_ADJ_ID if needed). The scope pipeline task picks it
-        up within ≤1 minute on its next scheduled poll.
-        </div>
-        """)
-
-    with st.expander("**Scenario 2: Recurring Adjustment**"):
-        _html(f"""
-        <div style="background:{P['grey_100']};border-radius:10px;padding:1rem;margin:0.5rem 0">
-        <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:0.82rem">
-            <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">{icon("settings", size=13)} Admin creates template</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:{P['purple_lt']};border-radius:6px;padding:4px 10px;font-weight:600;color:{P['purple']}">⏰ External scheduler instantiates</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-weight:600">Inserts ADJ_HEADER (Pending)</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:{P['purple_lt']};border-radius:6px;padding:4px 10px;font-weight:600;color:{P['purple']}">⏰ Task polls (≤1 min)</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['primary']}">SP_RUN_PIPELINE</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#E8F5E9;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['success']}">{icon("check", size=12)} Processed</div>
-        </div>
-        </div>
-        <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:0.4rem">
-        <strong>Key:</strong> An <strong>external scheduler</strong> reads
-        <code>ADJ_RECURRING_TEMPLATE</code> and creates ADJ_HEADER rows when each template's
-        dependencies are met. The scope pipeline task then picks them up within ≤1 minute.
-        </div>
-        """)
-
-    with st.expander("**Scenario 3: Signed-Off COB Rejection**"):
-        _html(f"""
-        <div style="background:{P['grey_100']};border-radius:10px;padding:1rem;margin:0.5rem 0">
-        <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:0.82rem">
-            <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">{icon("user", size=13)} User submits</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-weight:600">SP_SUBMIT checks VW_SIGNOFF_STATUS</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['danger']}">COB = SIGNED_OFF {icon("x-circle", size=13)}</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:{P['purple_lt']};border-radius:6px;padding:4px 10px;font-weight:600;color:{P['purple']}">{icon("lock", size=13)} Rejected - SignedOff</div>
-        </div>
-        </div>
-        <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:0.4rem">
-        <strong>Key:</strong> The adjustment is still inserted into ADJ_HEADER for audit, but
-        immediately set to "Rejected - SignedOff". It is never processed.
-        </div>
-        """)
-
-    with st.expander("**Scenario 4: Entity Roll (Full Copy)**"):
-        _html(f"""
-        <div style="background:{P['grey_100']};border-radius:10px;padding:1rem;margin:0.5rem 0">
-        <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:0.82rem">
-            <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-weight:600">{icon("user", size=13)} User selects Entity Roll</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-weight:600">Sets scope + COBs + Entity</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:#E65100">{icon("alert-triangle", size=13)} Pending Approval (mandatory)</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-weight:600">Approver reviews & approves</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-weight:600;color:{P['danger']}">DELETE target COB+Entity</div>
-            <span style="color:{P['grey_400']}">→</span>
-            <div style="background:#E8F5E9;border-radius:6px;padding:4px 10px;font-weight:600;color:#2E7D32">offset + copy rows written {icon("check", size=12)}</div>
-        </div>
-        </div>
-        <div style="font-size:0.8rem;color:{P['grey_700']};margin-top:0.4rem">
-        <strong>Key:</strong> Entity Roll replaces the entity's adjusted view with the source COB's (as reversible offset rows — nothing is physically deleted) and <strong>always requires approval</strong>.
-        It deletes all data for the target COB + Entity in both FACT and FACT ADJUSTED tables, then copies
-        all data from the source COB + Entity (replacing COBID). All source adjustment records are consolidated
-        under a single new Adjustment ID. No delta calculation is performed.
-        </div>
-        """)
-
-
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  TAB 4 — PROCESSING ENGINE                                                ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
+    _html(_table(["Page", "What you do there"], [
+        ["<strong>Home</strong>", "Dashboard: KPIs, recent activity, overlap alerts."],
+        ["<strong>New Adjustment</strong>",
+         "Create and submit adjustments; request a COB re-open; sign a "
+         "re-opened COB off again."],
+        ["<strong>Adjustments</strong>",
+         "Browse everything, view history, and act: Retry failed, Delete, "
+         "Submit for approval, Recall."],
+        ["<strong>Approval Queue</strong>",
+         "Approvers approve/reject adjustments and COB re-open requests "
+         "(4-eyes: never your own)."],
+        ["<strong>Adjustment Pipeline</strong>",
+         "Live processing view: what needs attention, what is in flight, "
+         "per-adjustment deep dive, force-process."],
+        ["<strong>Admin</strong>",
+         "Restricted: scope config, sign-off override, approvers, page "
+         "administrators."],
+        ["<strong>Logs</strong>", "Processing runs, activity feed, and errors."],
+    ]))
+
+# ╔════════════════════════════════════════════════════════════════════════════╗
+# ║  TAB 2 — CREATING ADJUSTMENTS                                              ║
+# ╚════════════════════════════════════════════════════════════════════════════╝
+
+with tab_create:
+    section_title("The New Adjustment Page", "info")
+    _html(_card(
+        "One dense screen: pick the <strong>Category</strong> (Scaling / Direct "
+        "/ Entity Roll), pick the <strong>Scope</strong>, fill the fields, and "
+        "the live <strong>Ticket</strong> panel on the right tracks completeness "
+        "and unlocks Submit when everything required is present. Every "
+        "adjustment needs an <strong>Adjustment Category</strong> (the managed "
+        "business-reason list) and a <strong>Reason</strong>."))
+
+    section_title("Scaling Adjustment", "scale")
+    _html(_table(["Type", "Effect", "Factor applied by the engine"], [
+        ["<strong>Flatten</strong>", "Zeroes the selected scope at the COB "
+         "(combined value becomes 0).", "−1"],
+        ["<strong>Scale</strong>", "Multiplies the selected scope. Factor 1.10 "
+         "means +10%.", "factor − 1 (incremental delta)"],
+        ["<strong>Roll</strong>", "Carries the source COB's <em>adjusted</em> "
+         "values (original + its adjustments) forward to the target COB, "
+         "flattening what was there.", "full factor on the source leg"],
+    ]))
+    _html(_card(
+        f'{icon("eye", size=13, color=P["info"])} <strong>Impact preview:</strong> '
+        f'for narrow scopes (book/department level) run the preview before '
+        f'submitting — it shows rows affected and the value delta. A preview '
+        f'matching <strong>0 rows</strong> blocks Submit: one of your filter '
+        f'codes probably does not exist at that COB.', P["info"]))
+    _html(_card(
+        f'{icon("layers", size=13, color="#7E22CE")} <strong>All FRTB:</strong> '
+        f'selecting “All FRTB” submits three sibling adjustments — one each for '
+        f'FRTB, FRTBDRC and FRTBRRAO. They overlap by design, so the pipeline '
+        f'runs them in sequence; the preview shown is the sum across the three.',
+        "#7E22CE"))
+
+    section_title("Direct Adjustment (CSV upload)", "upload")
+    _html(_card(
+        "Upload a CSV in the scope's expected format (the expected columns are "
+        "shown on the page). Values are stored exactly as uploaded and written "
+        "to the scope's adjustment table when processed.<br/><br/>"
+        "<strong>Reference &amp; replacement:</strong> the Reference field "
+        "identifies the upload. Submitting a new Direct adjustment with the "
+        "same <strong>COB + Reference</strong> replaces the previous one — the "
+        "old ticket is marked <em>Replaced</em> and its rows are removed from "
+        "the adjustment tables in the same transaction. The page warns you and "
+        "asks for explicit confirmation before a replacement. A replacement is "
+        "refused while the previous upload is mid-processing."))
+
+    section_title("Entity Roll", "refresh-cw")
+    _html(_card(
+        f'{icon("alert-triangle", size=13, color=P["danger"])} '
+        f'<strong>Destructive and always approval-gated.</strong> An Entity '
+        f'Roll makes the entity\'s adjusted view at the target COB mirror the '
+        f'source COB. To do that it first <em>permanently removes every '
+        f'existing adjustment</em> for that entity at the target COB — '
+        f'including data loaded by other systems. The page shows a '
+        f'reconciliation count of what will be removed and requires a ticked '
+        f'confirmation; the whole wipe + roll is applied atomically (all or '
+        f'nothing). Large entities (e.g. MUSI on VaR) move hundreds of '
+        f'millions of rows and can take ~20 minutes to process.', P["danger"]))
+
+    section_title("What happens at Submit", "send")
+    _html(_table(["Check", "Outcome"], [
+        ["Scope active", "Inactive/unknown scope → submission refused."],
+        ["Sign-off", "COB signed off (in-app or by the upstream publish feed) "
+         "→ ticket stored as <em>Rejected - SignedOff</em>; request a re-open "
+         "instead (see Approvals &amp; Sign-Off)."],
+        ["Approval", "Entity Roll, or the “Requires Approval” tick → status "
+         "<em>Pending Approval</em> (Approval Queue). Otherwise → "
+         "<em>Pending</em>, picked up by the next 1-minute poll."],
+        ["Overlap", "If a Pending/Running adjustment touches the same data "
+         "(same COB, overlapping filters), the new one is queued behind it and "
+         "the ticket says which adjustment it is waiting for. It starts "
+         "automatically when the blocker finishes."],
+    ]))
+    _html(_card(
+        f'{icon("clock", size=13, color=P["grey_700"])} <strong>Recurring '
+        f'adjustments are not live yet</strong> — the option stores the range '
+        f'but automatic daily instantiation is planned for a future release. '
+        f'Submit each COB\'s adjustment manually for now.'))
+
+# ╔════════════════════════════════════════════════════════════════════════════╗
+# ║  TAB 3 — APPROVALS & SIGN-OFF                                              ║
+# ╚════════════════════════════════════════════════════════════════════════════╝
+
+with tab_approval:
+    section_title("Adjustment Approval (4-eyes)", "check-circle")
+    _html(_card(
+        "Adjustments submitted with <em>Requires Approval</em> (and every "
+        "Entity Roll) wait in the <strong>Approval Queue</strong>. Only users "
+        "registered as approvers — optionally per scope — can decide, and "
+        "<strong>never their own submissions</strong>. Approving moves the "
+        "adjustment to <em>Approved</em> and the pipeline processes it within "
+        "a minute; rejecting records the reason. If two approvers race, only "
+        "the first decision counts — the second sees that the request already "
+        "moved on, and no misleading audit entry is written."))
+
+    section_title("COB Sign-Off Lifecycle", "lock")
+    _html(_card(
+        "Sign-off is owned by the upstream publish system shared across many "
+        "consumers — the first sign-off always comes from there (a unified "
+        "file feed the engine syncs every 30 minutes, and also checks live at "
+        "submit time). Sign-off granularity is <strong>COB + entity + "
+        "scope</strong> (one FRTB entry covers FRTBDRC and FRTBRRAO). Once "
+        "signed off, <strong>no new adjustments can be submitted</strong> for "
+        "that entity — an adjustment with no entity filter is blocked by any "
+        "signed-off entity it would touch."))
+    _html(_flow([
+        ("Signed off", "upstream feed"),
+        ("Re-open requested", "New Adjustment page"),
+        ("Approved", "Approval Queue, 4-eyes"),
+        ("Re-opened", "adjustments allowed"),
+        ("Signed off again", "from the app"),
+    ]))
+    _html(_table(["Status", "Meaning", "Can submit?"], [
+        [_pill("OPEN / no entry", P["success"]), "COB never signed off for the scope.", "Yes"],
+        [_pill("SIGNED_OFF", P["danger"]),
+         "Signed off (upstream feed, app re-sign-off, or admin).", "No"],
+        [_pill("REOPEN_REQUESTED", "#B45309"),
+         "A re-open request is awaiting approval.", "No"],
+        [_pill("REOPENED", P["info"]),
+         "Re-open approved — adjust, then sign off again from the app.", "Yes"],
+    ]))
+    _html(_card(
+        "<strong>How to re-open:</strong> on the New Adjustment page, select "
+        "the scope and COB — the sign-off panel appears with a "
+        "<em>Request re-open</em> button (reason required). An approver (not "
+        "the requester) actions it in the Approval Queue's <em>COB Re-open "
+        "Requests</em> section. Once re-opened, submit the adjustments needed, "
+        "then use <em>Sign off again</em> on the same panel — this second "
+        "sign-off is allowed from the app because the upstream one already "
+        "happened. Every transition is recorded in the sign-off history."))
+
+    section_title("Who can do what", "user")
+    _html(_table(["Action", "Who"], [
+        ["Submit adjustments, request COB re-open, re-sign-off a re-opened COB",
+         "Any app user"],
+        ["Approve/reject adjustments and re-open requests",
+         "Registered approvers (per scope), never for their own requests"],
+        ["Manage approvers, scope config, sign-off overrides, page admins",
+         "Page administrators (Admin page; access controlled by the "
+         "administrators list, with a warning-flagged open ‘bootstrap’ mode "
+         "until the first admin is registered)"],
+    ]))
+
+# ╔════════════════════════════════════════════════════════════════════════════╗
+# ║  TAB 4 — PROCESSING ENGINE                                                 ║
+# ╚════════════════════════════════════════════════════════════════════════════╝
 
 with tab_processing:
+    section_title("Polling Pipeline (no streams)", "settings")
+    _html(_card(
+        "Four scope tasks (VaR, Stress, FRTB, Sensitivity) run every minute on "
+        "serverless compute and call <code>SP_RUN_PIPELINE</code>, which "
+        "<strong>polls</strong> the queue — it reads eligible rows straight "
+        "from <code>ADJ_HEADER</code>, so nothing can be stranded by event "
+        "plumbing. An idle poll exits in milliseconds. VaR and Sensitivity run "
+        "on LARGE compute (Entity Rolls move ~900M rows per leg); the tasks "
+        "have an explicit 3-hour timeout so a long roll finishes rather than "
+        "being killed."))
+    _html(_flow([
+        ("Reap", "auto-fail dead runs"),
+        ("Serialise", "block overlapping rows"),
+        ("Claim", "token-stamp eligible rows"),
+        ("Process", "one call per scope/action/COB"),
+        ("Release", "unblock waiting rows"),
+    ]))
+    _html(_table(["Step", "What it does"], [
+        ["<strong>Reap</strong>",
+         "Any row stuck in <em>Running</em> for over 4 hours is reset to "
+         "<em>Failed</em> with a clear message (the run that claimed it died — "
+         "e.g. a kill or crash). This releases everything queued behind it; "
+         "the user just clicks Retry."],
+        ["<strong>Serialise</strong>",
+         "Adjustments touching the same data (same COB + overlapping filters) "
+         "must not run at once. The oldest proceeds; newer ones are marked "
+         "blocked-by and start automatically when the blocker finishes. Direct "
+         "uploads don't overlap (their duplicate control is the Reference)."],
+        ["<strong>Claim</strong>",
+         "Eligible Pending/Approved rows are atomically promoted to "
+         "<em>Running</em> and stamped with the run's unique claim token. Each "
+         "processing call only ever touches rows carrying its own token — two "
+         "concurrent runs can never double-apply or fail each other's work."],
+        ["<strong>Process</strong>",
+         "<code>SP_PROCESS_ADJUSTMENT</code> runs once per (scope, action, "
+         "COB) combo — combos run in parallel. It registers the dimension "
+         "row, applies the Scale / Direct / Entity Roll logic, updates "
+         "statuses and history, closes the run log, and queues the PowerBI "
+         "refresh."],
+        ["<strong>Release</strong>",
+         "Rows whose blocker just finished have their block cleared; the next "
+         "1-minute poll picks them up."],
+    ]))
 
-    section_title("Pipeline Architecture — 4 Independent Scope Pipelines", "settings")
+    section_title("How each action is applied", "zap")
+    _html(_table(["Action", "Mechanics (plain language)"], [
+        ["<strong>Scale / Flatten</strong>",
+         "The engine reads the matching fact rows, multiplies by the "
+         "effective factor (−1 for flatten, factor−1 for same-COB scale), nets "
+         "the result to one delta row per position, and writes it to the "
+         "scope's adjustment table. Where a new adjustment covers the same "
+         "positions as an older one, the newest wins — the older adjustment's "
+         "overlapping rows are superseded, never double-counted."],
+        ["<strong>Roll (cross-COB)</strong>",
+         "Two legs: flatten the target COB's current values, then carry the "
+         "source COB's <em>adjusted</em> values forward (× factor). Combined "
+         "result at the target = the source COB's adjusted numbers."],
+        ["<strong>Direct</strong>",
+         "The uploaded rows are transformed via the scope's configured mapping "
+         "(dimension codes resolved to keys) and inserted with the "
+         "adjustment's report ID. A retry after a failure first removes "
+         "anything the failed run wrote — retries never double-count."],
+        ["<strong>Entity Roll</strong>",
+         "Atomic destructive replace: remove every adjustment for the entity "
+         "at the target COB, then insert a flatten of the entity's base values "
+         "plus a copy of the source COB's adjusted values. Processes "
+         "<strong>one roll per run</strong> — a second approved roll re-queues "
+         "for the next minute. All-or-nothing: a failure rolls the whole "
+         "operation back."],
+    ]))
 
-    _html(f"""
-    <div class="mcard" style="border-left:4px solid {P['info']};margin-bottom:0.8rem">
-    Adjustments are processed by <strong>four independent pipelines</strong> — one per scope (VaR, Stress, FRTB, Sensitivity).
-    A long-running FRTB job has <em>zero impact</em> on VaR, Stress, or Sensitivity.
-    Each pipeline has its own queue view, a dedicated task, and calls <code>SP_RUN_PIPELINE</code>.
-    </div>
-    <div class="mcard" style="border-left:4px solid {P['warning']};margin-bottom:0.8rem">
-    <strong>FRTBALL fan-out:</strong> An adjustment submitted with <code>PROCESS_TYPE = 'FRTBALL'</code> is applied
-    once for each real FRTB sub-type (<code>FRTB</code>, <code>FRTBDRC</code>, <code>FRTBRRAO</code>).
-    It lives in the FRTB pipeline queue alongside the other sub-types.
-    </div>
-    <div class="mcard" style="border-left:4px solid {P['success']};margin-bottom:0.8rem">
-    <strong>Blocking:</strong> When a Running adjustment overlaps with a Pending one (same COB + scope +
-    overlapping dimension filters), the Pending adjustment is blocked via <code>BLOCKED_BY_ADJ_ID</code>
-    and will not be picked up until the Running one finishes.
-    </div>
-    """)
+    section_title("Deleting an adjustment", "trash")
+    _html(_card(
+        "Delete (Adjustments page, confirmation required) soft-deletes the "
+        "ticket <em>and removes the adjustment's rows from the adjustment and "
+        "summary tables</em> in one transaction — reports stop including it "
+        "after the next refresh. If any part fails, nothing is removed and "
+        "the page says so. The audit history always survives."))
 
-    section_title("SP_PROCESS_ADJUSTMENT — Core Engine", "settings")
+    section_title("Timing & compute", "clock")
+    _html(_table(["Setting", "Value", "Why"], [
+        ["Scope task schedule", "1 minute", "Fast pickup with millisecond idle polls."],
+        ["VaR / Sensitivity compute", "LARGE (serverless)",
+         "Entity Rolls move ~900M rows per leg — MEDIUM overran the timeout."],
+        ["Task timeout", "3 hours", "A long roll must finish, not be killed."],
+        ["Stale-run reaper", "4 hours",
+         "Above the task ceiling so a live run is never reaped; dead runs "
+         "auto-reset to Failed."],
+        ["Sign-off feed sync", "30 minutes",
+         "Materialises upstream sign-offs; the submit gate also checks the "
+         "feed live, so the block holds between syncs."],
+    ]))
 
-    _html(f"""
-    The processing engine is a **Python/Snowpark stored procedure** that reads Running adjustments
-    from `ADJ_HEADER` and writes delta rows to the appropriate `FACT.*_ADJUSTMENT` table.
-    It supports two paths: **Direct** (Upload) and **Scale** (Scale/Flatten/Roll).
-    """)
+# ╔════════════════════════════════════════════════════════════════════════════╗
+# ║  TAB 5 — REPORTS (POWERBI)                                                 ║
+# ╚════════════════════════════════════════════════════════════════════════════╝
 
-    # ── Scale Processing Flow ────────────────────────────────────────────
-    st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Scale Path — 4-Way UNION ALL", "bar-chart")
+with tab_reports:
+    section_title("From Processed to Reports Ready", "line-chart")
+    _html(_card(
+        "When a VaR, Stress or Sensitivity adjustment finishes processing, the "
+        "engine records the run and queues a report refresh: a row is written "
+        "to the PowerBI action queue (<code>METADATA.POWERBI_ACTION</code>) "
+        "whose empty start time marks it as <em>pending</em>. The downstream "
+        "refresh scheduler picks pending actions up (~every 5 minutes), stamps "
+        "start and completion times, and the refreshed reports include the "
+        "adjustment. FRTB scopes are not published to PowerBI."))
+    _html(_flow([
+        ("Processed", "engine run complete"),
+        ("Queued", "action row created"),
+        ("Refreshing", "start time stamped"),
+        ("Reports Ready", "completion stamped"),
+    ]))
+    _html(_table(["Report status", "Meaning"], [
+        [_pill("Awaiting", P["grey_700"]),
+         "Processed, refresh not yet queued/matched. During BST the status "
+         "display can lag up to an hour (timezone alignment); the refresh "
+         "itself is unaffected."],
+        [_pill("Queued", P["warning"]), "Refresh action created, waiting for the scheduler."],
+        [_pill("Refreshing", P["info"]), "PowerBI dataset refresh in progress."],
+        [_pill("Reports Ready", P["success"]), "Refresh complete — reports include the adjustment."],
+    ]))
+    _html(_card(
+        f'{icon("alert-triangle", size=13, color="#B45309")} If queueing the '
+        f'refresh fails, the adjustment stays <em>Processed</em> (its numbers '
+        f'ARE applied) but the failure is stamped on the ticket\'s error field '
+        f'and shown on the Adjustments / Pipeline pages — reports may show '
+        f'stale data until the next scheduled refresh. Refresh actions are '
+        f'only queued for recent COBs (~3 business days); older back-dated '
+        f'adjustments rely on the next scheduled full refresh.', "#B45309"))
 
-    _html(f"""
-    <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0;overflow-x:auto">
-    <div style="display:flex;flex-direction:column;gap:1rem;min-width:600px">
+# ╔════════════════════════════════════════════════════════════════════════════╗
+# ║  TAB 6 — TROUBLESHOOTING                                                   ║
+# ╚════════════════════════════════════════════════════════════════════════════╝
 
-    <div style="display:flex;align-items:center;gap:12px">
-        <div style="background:{P['purple_lt']};border:2px solid {P['purple']};border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;color:{P['purple']};flex-shrink:0">1</div>
-        <div style="flex:1">
-            <div style="font-weight:700;font-size:0.88rem">Read Config</div>
-            <div style="font-size:0.78rem;color:{P['grey_700']}">
-                Query <code>ADJUSTMENTS_SETTINGS</code> for this scope → get fact table name,
-                PK columns, metric columns, summary table
-            </div>
-        </div>
-    </div>
+with tab_trouble:
+    section_title("Something looks wrong — what do I do?", "help-circle")
+    _html(_table(["Symptom", "Why it happens", "What to do"], [
+        ["Adjustment sits in <strong>Pending</strong> for minutes",
+         "Usually it is <em>blocked</em> behind another adjustment touching "
+         "the same data, or awaiting approval.",
+         "Pipeline page → the item shows who it is waiting for. Blocked rows "
+         "start automatically. If it is genuinely stranded, use "
+         "<em>Force process</em>."],
+        ["Adjustment shows <strong>Failed</strong>",
+         "The processing run hit an error (message shown on the ticket).",
+         "Adjustments page → select it → <strong>Retry</strong>. Retries are "
+         "safe: anything a failed run wrote is cleaned up first. If it keeps "
+         "failing, the error text says why — contact support with the ADJ id."],
+        ["Adjustment stuck in <strong>Running</strong> for hours",
+         "The run that claimed it died (timeout, kill). Big Entity Rolls "
+         "legitimately run ~20 min — hours means dead.",
+         "Nothing required: the pipeline auto-resets it to Failed after 4 "
+         "hours and frees anything queued behind it; then Retry. Past the "
+         "4-hour mark you can also Force process it immediately."],
+        ["Submission returns <strong>Rejected - SignedOff</strong>",
+         "The COB is signed off for that scope (upstream publish sign-off or "
+         "in-app).",
+         "New Adjustment page → the sign-off panel → <em>Request re-open</em> "
+         "with a reason; an approver actions it in the Approval Queue. After "
+         "adjusting, sign the COB off again from the same panel."],
+        ["My approval/reject seemed to do nothing",
+         "Someone else decided it first, or the submitter recalled it.",
+         "The page tells you the request already moved on — no false audit "
+         "entry is written. Refresh and check its current state."],
+        ["Direct upload replaced the wrong thing / warning about replacement",
+         "A Direct adjustment with the same COB + Reference already existed.",
+         "The replacement needs an explicit confirmation tick. Use a new "
+         "Reference if it is genuinely a different adjustment."],
+        ["Reports don't show my processed adjustment",
+         "Refresh still queued/running, or refresh queueing failed (error "
+         "shown on the ticket), or the COB is older than the ~3-business-day "
+         "refresh window.",
+         "Pipeline page → deep dive → PowerBI Refresh section shows queued / "
+         "started / completed times."],
+    ]))
 
-    <div style="display:flex;align-items:center;gap:12px">
-        <div style="background:{P['info_lt']};border:2px solid {P['info']};border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;color:{P['info']};flex-shrink:0">2</div>
-        <div style="flex:1">
-            <div style="font-weight:700;font-size:0.88rem">Read Running Adjustments</div>
-            <div style="font-size:0.78rem;color:{P['grey_700']}">
-                Filter <code>ADJ_HEADER</code> where <code>RUN_STATUS = 'Running'</code>,
-                <code>COBID = target</code>, <code>PROCESS_TYPE = scope</code>
-            </div>
-        </div>
-    </div>
+    section_title("Escalation data to include", "clipboard")
+    _html(_card(
+        "When raising an issue, include: the <strong>ADJ report ID</strong> "
+        "(e.g. #1234, shown across the app), the COB, the scope, the status, "
+        "and the error text from the ticket. The Logs page has the matching "
+        "run-log entries; Entity Roll runs additionally log every step live "
+        "with durations and row counts."))
 
-    <div style="display:flex;align-items:center;gap:12px">
-        <div style="background:#FFEBEE;border:2px solid {P['primary']};border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;color:{P['primary']};flex-shrink:0">3</div>
-        <div style="flex:1">
-            <div style="font-weight:700;font-size:0.88rem">4-Way UNION ALL</div>
-            <div style="font-size:0.78rem;color:{P['grey_700']}">
-                Build a CTE with four branches joined via dimension columns, netted (SUM) per position:
-            </div>
-            <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
-                <div style="background:#E3F2FD;border-radius:6px;padding:4px 10px;font-size:0.75rem;font-weight:600">
-                    ① Same-COB Scale<br/>
-                    <span style="font-weight:400;color:{P['grey_700']}">FACT × sf_adjusted</span>
-                </div>
-                <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-size:0.75rem;font-weight:600">
-                    ② Roll — source original<br/>
-                    <span style="font-weight:400;color:{P['grey_700']}">FACT @ source × sf</span>
-                </div>
-                <div style="background:#FFF3E0;border-radius:6px;padding:4px 10px;font-size:0.75rem;font-weight:600">
-                    ②b Roll — source existing adj<br/>
-                    <span style="font-weight:400;color:{P['grey_700']}">FACT_ADJUSTED @ source × sf</span>
-                </div>
-                <div style="background:#FFEBEE;border-radius:6px;padding:4px 10px;font-size:0.75rem;font-weight:600">
-                    ③ Flatten target COB<br/>
-                    <span style="font-weight:400;color:{P['grey_700']}">FACT × -1 (removes existing)</span>
-                </div>
-            </div>
-            <div style="font-size:0.72rem;color:{P['grey_700']};margin-top:6px">
-                Branches ② + ②b roll the source COB's <strong>adjusted state</strong>
-                (original + existing adjustments) forward; ③ flattens the target original.
-                Net per position: <code>sf × (original(src) + adj(src))</code>.
-            </div>
-        </div>
-    </div>
+# ╔════════════════════════════════════════════════════════════════════════════╗
+# ║  TAB 7 — REFERENCE                                                         ║
+# ╚════════════════════════════════════════════════════════════════════════════╝
 
-    <div style="display:flex;align-items:center;gap:12px">
-        <div style="background:#FFF3E0;border:2px solid {P['warning']};border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;color:{P['warning']};flex-shrink:0">4</div>
-        <div style="flex:1">
-            <div style="font-weight:700;font-size:0.88rem">Overlap Resolution (DENSE_RANK)</div>
-            <div style="font-size:0.78rem;color:{P['grey_700']}">
-                Partition by surrogate key, order by <code>ADJUSTMENT_CREATED_TIMESTAMP DESC</code>.
-                Keep only <code>ROW_NUM = 1</code> → most recent adjustment wins.
-            </div>
-        </div>
-    </div>
-
-    <div style="display:flex;align-items:center;gap:12px">
-        <div style="background:{P['purple_lt']};border:2px solid {P['purple']};border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;color:{P['purple']};flex-shrink:0">5</div>
-        <div style="flex:1">
-            <div style="font-weight:700;font-size:0.88rem">SCD2 Key Fix (Cross-COB only)</div>
-            <div style="font-size:0.78rem;color:{P['grey_700']}">
-                For Roll adjustments: <code>TRADE_KEY</code>, <code>COMMON_INSTRUMENT_KEY</code>,
-                <code>COMMON_INSTRUMENT_FCD_KEY</code> may have changed between source and target COB.
-                Re-map them using dimension tables with effective dates.
-            </div>
-        </div>
-    </div>
-
-    <div style="display:flex;align-items:center;gap:12px">
-        <div style="background:#E8F5E9;border:2px solid {P['success']};border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.85rem;color:{P['success']};flex-shrink:0">6</div>
-        <div style="flex:1">
-            <div style="font-weight:700;font-size:0.88rem">Insert, Update Status, Rebuild Summary</div>
-            <div style="font-size:0.78rem;color:{P['grey_700']}">
-                Delete old adjustments for this COBID+ADJ_ID → insert new rows from temp table →
-                rebuild summary → update <code>ADJ_HEADER.RUN_STATUS = 'Processed'</code> →
-                log to <code>ADJ_STATUS_HISTORY</code>
-            </div>
-        </div>
-    </div>
-
-    </div>
-    </div>
-    """)
-
-    # ── Direct Processing Flow ───────────────────────────────────────────
-    st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Direct Path — Upload / Line Items", "upload")
-
-    _html(f"""
-    <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0">
-    <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:0.82rem">
-        <div style="background:#E3F2FD;border-radius:6px;padding:6px 12px;font-weight:600">User uploads CSV</div>
-        <span style="color:{P['grey_400']}">→</span>
-        <div style="background:#FFF3E0;border-radius:6px;padding:6px 12px;font-weight:600">Streamlit parses + UNPIVOTs</div>
-        <span style="color:{P['grey_400']}">→</span>
-        <div style="background:#E3F2FD;border-radius:6px;padding:6px 12px;font-weight:600">Writes to ADJ_LINE_ITEM</div>
-        <span style="color:{P['grey_400']}">→</span>
-        <div style="background:#FFF3E0;border-radius:6px;padding:6px 12px;font-weight:600">SP_PROCESS reads line items</div>
-        <span style="color:{P['grey_400']}">→</span>
-        <div style="background:#FFEBEE;border-radius:6px;padding:6px 12px;font-weight:600">check_columns() maps to fact schema</div>
-        <span style="color:{P['grey_400']}">→</span>
-        <div style="background:#E8F5E9;border-radius:6px;padding:6px 12px;font-weight:600;color:{P['success']}">Inserts to FACT.*_ADJ</div>
-    </div>
-    </div>
-
-    <div class="mcard" style="border-left:4px solid {P['info']};margin-top:0.5rem">
-    <strong>Direct vs Scale:</strong><br/>
-    • <strong>Scale:</strong> SP reads the original fact table, multiplies by <code>scale_factor_adjusted</code>, and writes the delta.<br/>
-    • <strong>Direct:</strong> SP reads <code>ADJ_LINE_ITEM</code> (user-provided values) and maps them to the fact schema columns.
-    </div>
-    """)
-
-    # ── PowerBI Report Refresh ───────────────────────────────────────────
-    section_title("PowerBI Report Refresh", "line-chart")
-    st.markdown(f"""
-    After processing completes, the system automatically queues a **PowerBI dataset refresh**
-    by calling `FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS`. This writes to `METADATA.POWERBI_ACTION`,
-    which is monitored by a **ControlM job running every ~5 minutes**.
-
-    **Report Status indicators** (visible in Adjustments and the Adjustment Pipeline):
-
-    | Status | Meaning |
-    |--------|---------|
-    | **Reports Ready** | PowerBI refresh completed — reports reflect your adjustment |
-    | **Refreshing** | PowerBI refresh is currently running |
-    | **Queued** | Refresh queued, ControlM will pick it up within ~5 min |
-    | **Next Cycle** | A refresh is running but started before your adjustment — the next cycle will include it |
-    | **Awaiting** | Refresh not yet queued |
-
-    **Important:** If a PowerBI refresh is already running when your adjustment completes,
-    that running refresh will **not** include your data (it started reading before your data was written).
-    The system detects this and shows "Next Cycle" — your data will be included in the next
-    refresh (~5 minutes).
-    """, unsafe_allow_html=True)
-
-    # ── Scale Factor Computation ─────────────────────────────────────────
-    st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Scale Factor Computation", "sliders")
-
-    _html(f"""
-    <table style="width:100%;border-collapse:collapse;border:1px solid {P['border']};border-radius:8px;overflow:hidden;font-size:0.85rem">
-    <thead><tr style="background:{P['accent']};color:white">
-        <th style="padding:10px 14px;text-align:left">Type</th>
-        <th style="padding:10px 14px;text-align:left">User Input (sf)</th>
-        <th style="padding:10px 14px;text-align:left">scale_factor_adjusted</th>
-        <th style="padding:10px 14px;text-align:left">Effect</th>
-    </tr></thead>
-    <tbody>
-    <tr style="border-bottom:1px solid {P['border']}">
-        <td style="padding:10px 14px;font-weight:600">Flatten</td>
-        <td style="padding:10px 14px">Any (ignored)</td>
-        <td style="padding:10px 14px;font-family:monospace;font-weight:700;color:{P['primary']}">-1</td>
-        <td style="padding:10px 14px;color:{P['grey_700']}">fact × (-1) = negate everything → net zero</td>
-    </tr>
-    <tr style="border-bottom:1px solid {P['border']}">
-        <td style="padding:10px 14px;font-weight:600">Scale (same COB)</td>
-        <td style="padding:10px 14px">1.05</td>
-        <td style="padding:10px 14px;font-family:monospace;font-weight:700;color:{P['primary']}">sf - 1 = 0.05</td>
-        <td style="padding:10px 14px;color:{P['grey_700']}">fact × 0.05 = adds +5% as delta</td>
-    </tr>
-    <tr style="border-bottom:1px solid {P['border']}">
-        <td style="padding:10px 14px;font-weight:600">Roll (cross COB)</td>
-        <td style="padding:10px 14px">1.0</td>
-        <td style="padding:10px 14px;font-family:monospace;font-weight:700;color:{P['primary']}">sf = 1.0</td>
-        <td style="padding:10px 14px;color:{P['grey_700']}">Roll source COB's adjusted state (original + existing adj) → target COB (+ flatten target original)</td>
-    </tr>
-    <tr>
-        <td style="padding:10px 14px;font-weight:600">Upload / Direct</td>
-        <td style="padding:10px 14px">N/A</td>
-        <td style="padding:10px 14px;font-family:monospace;font-weight:700;color:{P['primary']}">0 (not used)</td>
-        <td style="padding:10px 14px;color:{P['grey_700']}">User-provided values written directly</td>
-    </tr>
-    </tbody></table>
-    """)
-
-    _html(f"""
-    <div class="mcard" style="border-left:4px solid {P['warning']};margin-top:0.5rem">
-    <strong>Why sf - 1 for same-COB?</strong><br/>
-    Because the original fact data already exists. To scale by 1.05×, we only need
-    to add the <em>incremental</em> 0.05× as a delta:
-    <code>original + (original × 0.05) = original × 1.05</code>.
-    <br/><br/>
-    For cross-COB (Roll), we flatten the target original first (branch ③) and then roll in
-    the source COB's full adjusted state — its original (branch ②) plus its existing
-    adjustments (branch ②b) — so the target ends up matching the source's adjusted value.
-    </div>
-    """)
-
-
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  TAB 5 — DATABASE OBJECTS                                                 ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
-
-with tab_objects:
-
-    section_title("Complete Object Inventory", "database")
-
-    _html(f"""
-    All objects live in database <code>{config.DATABASE}</code>, schema <code>{config.SCHEMA}</code>
-    (except target FACT.* and DIMENSION.* tables which are in existing schemas).
-    """)
-
-    objects = [
-        # (Name, Type, Script, Description)
-        ("ADJ_HEADER",              "TABLE",           "01_tables.sql",   "Single entry point for all adjustments. One row per adjustment with all dimension filters, status, and metadata. Autoincrement starts at 200000."),
-        ("ADJ_LINE_ITEM",           "TABLE",           "01_tables.sql",   "Detail rows for Direct/Upload adjustments. Each row = one dimension combination with its adjustment value."),
-        ("ADJ_STATUS_HISTORY",      "TABLE",           "01_tables.sql",   "Complete audit trail of every status transition. Append-only."),
-        ("ADJUSTMENTS_SETTINGS",    "TABLE",           "01_tables.sql",   "Config: maps each scope to its fact/adjustment tables, metrics, and PKs. Adding a new scope = new row."),
-        ("ADJ_RECURRING_TEMPLATE",  "TABLE",           "01_tables.sql",   "Templates for recurring adjustments. An external scheduler creates ADJ_HEADER rows from these when dependencies are met."),
-        ("VW_QUEUE_VAR",            "VIEW",            "02_streams.sql",  "Eligible VaR adjustments: Pending + unblocked. Used by TASK_PROCESS_VAR as its poll target."),
-        ("VW_QUEUE_STRESS",         "VIEW",            "02_streams.sql",  "Eligible Stress adjustments: Pending + unblocked."),
-        ("VW_QUEUE_FRTB",           "VIEW",            "02_streams.sql",  "Eligible FRTB-pipeline adjustments (all sub-types): Pending + unblocked."),
-        ("VW_QUEUE_SENSITIVITY",    "VIEW",            "02_streams.sql",  "Eligible Sensitivity adjustments: Pending + unblocked."),
-        ("SP_SUBMIT_ADJUSTMENT",    "PROCEDURE",       "03_sp_submit_adjustment.sql","Entry point from Streamlit. Validates JSON, checks sign-off, inserts ADJ_HEADER, sets BLOCKED_BY_ADJ_ID if overlapping."),
-        ("SP_PREVIEW_ADJUSTMENT",   "PROCEDURE",       "04_sp_preview_adjustment.sql","Read-only preview. Server-side summary (counts/sums) + on-demand breakdown/sample modes. Roll-aware. RETURNS TABLE."),
-        ("SP_PROCESS_ADJUSTMENT",   "PROCEDURE",       "05_sp_process_adjustment.sql","Core engine. Scale path: 4-way UNION ALL (incl. Roll source adj) + DENSE_RANK overlap + SCD2 fix. Direct path: maps line items to fact schema."),
-        ("TASK_PROCESS_VAR",        "TASK",            "06_tasks.sql",    "Polls every 1 min. Calls SP_RUN_PIPELINE for VaR scope. Exits fast when nothing is eligible."),
-        ("TASK_PROCESS_STRESS",     "TASK",            "06_tasks.sql",    "Polls every 1 min. Calls SP_RUN_PIPELINE for Stress scope."),
-        ("TASK_PROCESS_FRTB",       "TASK",            "06_tasks.sql",    "Polls every 1 min. Calls SP_RUN_PIPELINE for FRTB pipeline (FRTB, FRTBDRC, FRTBRRAO, FRTBALL)."),
-        ("TASK_PROCESS_SENSITIVITY","TASK",            "06_tasks.sql",    "Polls every 1 min. Calls SP_RUN_PIPELINE for Sensitivity scope."),
-        ("SP_RUN_PIPELINE",         "PROCEDURE",       "05b_sp_run_pipeline.sql", "Pipeline orchestrator. Claims Pending→Running atomically, blocks overlapping adjustments, calls SP_PROCESS_ADJUSTMENT, unblocks resolved adjustments."),
-        ("DT_DASHBOARD",            "DYNAMIC TABLE",   "07_dynamic.sql",  "Pre-aggregated metrics by scope/status/entity/user. 1-min refresh."),
-        ("DT_OVERLAP_ALERTS",       "DYNAMIC TABLE",   "07_dynamic.sql",  "Self-join overlap detection with wildcard matching. 1-min refresh."),
-        ("ADJ_APPROVERS",           "TABLE",           "01_tables.sql",   "Authorized approvers with optional scope restriction. Managed via Admin → Approvers tab."),
-        ("ADJ_SIGNOFF_STATUS",      "TABLE",           "01_tables.sql",   "COB sign-off status per scope. Managed via Admin page."),
-        ("VW_SIGNOFF_STATUS",       "VIEW",            "08_views.sql",    "Reads ADJ_SIGNOFF_STATUS for sign-off checks."),
-        ("VW_DASHBOARD_KPI",        "VIEW",            "08_views.sql",    "Aggregated KPIs per COB: counts by status, total value, avg processing time, overlap alerts."),
-        ("VW_RECENT_ACTIVITY",      "VIEW",            "08_views.sql",    "UNION of submissions + status transitions for the dashboard timeline."),
-        ("VW_ERRORS",               "VIEW",            "08_views.sql",    "Adjustments currently in Error status."),
-        ("VW_MY_WORK",              "VIEW",            "08_views.sql",    "All adjustments — Streamlit filters by CURRENT_USER()."),
-        ("VW_ADJUSTMENT_TRACK",     "VIEW",            "08_views.sql",    "Full lifecycle per adjustment — drives the Adjustment Pipeline page."),
-        ("VW_APPROVAL_QUEUE",       "VIEW",            "08_views.sql",    "Adjustments awaiting approval. Filtered by RUN_STATUS = Pending Approval."),
-        ("VW_REPORT_REFRESH_STATUS", "VIEW",             "08_views.sql", "Per-adjustment PowerBI refresh status. Joins ADJ_HEADER with POWERBI_ACTION."),
-        ("METADATA.POWERBI_ACTION",  "TABLE (external)", "—",            "PowerBI refresh action queue. Written by UPDATE_POWERBI_FOR_ADJUSTMENTS, read by ControlM."),
-    ]
-
-    type_colors = {
-        "TABLE": P["primary"], "STREAM": "#42A5F5", "PROCEDURE": P["warning"],
-        "TASK": P["purple"], "DYNAMIC TABLE": P["success"], "VIEW": P["grey_700"],
+with tab_reference:
+    section_title("Adjustment Status Reference", "clipboard")
+    status_desc = {
+        "Pending":              "Queued — the next 1-minute poll picks it up.",
+        "Pending Approval":     "Waiting in the Approval Queue.",
+        "Approved":             "Approved — queued for the next poll.",
+        "Running":              "Processing right now (claimed by a pipeline run).",
+        "Processed":            "Applied to the adjustment tables; report refresh queued.",
+        "Failed":               "Processing errored — see the ticket's error text; Retry re-queues.",
+        "Rejected":             "An approver rejected it (reason recorded).",
+        "Rejected - SignedOff": "Refused at submission because the COB is signed off.",
+        "Replaced":             "Superseded by a newer Direct upload with the same COB + Reference.",
+        "Superseded":           "Removed by an Entity Roll that rebuilt the entity at that COB.",
+        "Deleted":              "Deleted by a user; its rows were removed from the adjustment tables.",
     }
+    srows = []
+    for name, desc in status_desc.items():
+        color = STATUS_COLORS.get(name, P["grey_700"])
+        srows.append([_pill(name, color), desc])
+    _html(_table(["Status", "Meaning"], srows))
 
-    for name, obj_type, script, desc in objects:
-        tc = type_colors.get(obj_type, P["grey_700"])
-        st.markdown(
-            f'<div style="border-left:4px solid {tc};padding:0.5rem 1rem;margin-bottom:0.4rem;'
-            f'background:{tc}08;border-radius:0 6px 6px 0">'
-            f'<div style="display:flex;justify-content:space-between;align-items:center">'
-            f'<span style="font-weight:700;font-size:0.88rem;color:{tc}">{name}</span>'
-            f'<span style="font-size:0.7rem;font-weight:600;background:{tc}22;color:{tc};'
-            f'padding:2px 8px;border-radius:10px">{obj_type}</span>'
-            f'</div>'
-            f'<div style="font-size:0.78rem;color:{P["grey_700"]};margin-top:2px">{desc}</div>'
-            f'<div style="font-size:0.68rem;color:{P["grey_400"]};margin-top:2px">Source: {script}</div>'
-            f'</div>', unsafe_allow_html=True)
+    section_title("Key Database Objects", "database")
+    _html(_table(["Object", "Role"], [
+        ["<code>ADJ_HEADER</code>",
+         "Single entry point for every adjustment — one row per ticket, with "
+         "status, claim token, and blocking info."],
+        ["<code>ADJ_LINE_ITEM_JSON</code>", "Direct-upload rows (verbatim CSV payload per row)."],
+        ["<code>ADJ_STATUS_HISTORY</code>", "Append-only audit of every status transition."],
+        ["<code>ADJUSTMENTS_SETTINGS</code>",
+         "Per-scope config: fact/adjustment/summary tables, metric columns, "
+         "surrogate key definition, active flag."],
+        ["<code>ADJ_SIGNOFF_STATUS</code> / <code>ADJ_SIGNOFF_HISTORY</code>",
+         "Sign-off lifecycle per COB + entity + scope ('*' = whole scope) + its audit trail."],
+        ["<code>ADJ_APPROVERS</code> / <code>ADJ_ADMINS</code> / <code>ADJ_CATEGORY</code>",
+         "Approver registry (per scope), Admin-page access list, managed "
+         "business-category list."],
+        ["<code>SP_SUBMIT_ADJUSTMENT</code>",
+         "Validates, checks sign-off (app + upstream feed), handles Direct "
+         "replacement transactionally, inserts the ticket."],
+        ["<code>SP_RUN_PIPELINE</code> + 4 scope tasks",
+         "1-minute polling orchestrator: reap → serialise → claim (token) → "
+         "process → release."],
+        ["<code>SP_PROCESS_ADJUSTMENT</code>",
+         "Core engine: Scale / Direct / Entity Roll application, netting and "
+         "supersede, run log, PowerBI hand-off."],
+        ["<code>SP_FORCE_PROCESS_ADJUSTMENT</code>",
+         "Manual escape hatch — pushes one stuck adjustment through now "
+         "(refuses to bypass a live blocker)."],
+        ["<code>SP_SYNC_SIGNOFF_STATUS</code> + <code>TASK_SYNC_SIGNOFF</code>",
+         "30-minute sync of upstream publish sign-offs into the app."],
+        ["<code>SP_PREVIEW_ADJUSTMENT</code>", "Read-only impact preview for the New Adjustment page."],
+        ["<code>VW_ADJUSTMENT_TRACK</code> and friends",
+         "Reporting views: full lifecycle per adjustment (incl. PowerBI "
+         "refresh status and blocking), queues, KPIs, errors."],
+        ["<code>DT_DASHBOARD</code> / <code>DT_OVERLAP_ALERTS</code>",
+         "Dynamic tables (1-minute lag) backing the Home dashboard."],
+        ["<code>EROL_PROCESS_LOG</code>",
+         "Live per-step diagnostics for Entity Roll runs (duration, rows, "
+         "query id — visible while a step is still running)."],
+    ]))
 
-    # ── Key relationships ────────────────────────────────────────────────
-    st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Object Relationships", "layers")
-
-    _html(f"""
-    <div style="background:{P['grey_100']};border-radius:12px;padding:1.5rem;margin:0.5rem 0;overflow-x:auto">
-    <div style="font-family:monospace;font-size:0.78rem;line-height:2;color:{P['grey_900']};min-width:600px">
-
-    <div style="font-weight:700;color:{P['primary']}">ADJ_HEADER (PK: ADJ_ID)</div>
-    <div style="padding-left:20px">├── <span style="color:{P['info']}">ADJ_LINE_ITEM</span>.ADJ_ID → ADJ_HEADER.ADJ_ID <span style="color:{P['grey_700']}"> (Upload detail rows)</span></div>
-    <div style="padding-left:20px">├── <span style="color:{P['info']}">ADJ_STATUS_HISTORY</span>.ADJ_ID → ADJ_HEADER.ADJ_ID <span style="color:{P['grey_700']}"> (audit trail)</span></div>
-    <div style="padding-left:20px">├── <span style="color:#42A5F5">VW_QUEUE_*</span> → filter ADJ_HEADER <span style="color:{P['grey_700']}"> (eligible adjustment queues per scope)</span></div>
-    <div style="padding-left:20px">├── <span style="color:{P['success']}">DT_DASHBOARD</span> ← reads ADJ_HEADER <span style="color:{P['grey_700']}"> (1-min materialisation)</span></div>
-    <div style="padding-left:20px">├── <span style="color:{P['success']}">DT_OVERLAP_ALERTS</span> ← self-join on ADJ_HEADER <span style="color:{P['grey_700']}"> (overlap detection)</span></div>
-    <div style="padding-left:20px">├── <span style="color:{P['grey_700']}">VW_*</span> ← various views reading ADJ_HEADER <span style="color:{P['grey_700']}"> (real-time queries)</span></div>
-    <div style="padding-left:20px">└── <span style="color:{P['warning']}">SP_PROCESS_ADJUSTMENT</span> → writes to FACT.*_ADJUSTMENT <span style="color:{P['grey_700']}"> (delta rows)</span></div>
-
-    <div style="margin-top:1rem;font-weight:700;color:{P['purple']}">ADJUSTMENTS_SETTINGS (PK: PROCESS_TYPE)</div>
-    <div style="padding-left:20px">├── <span style="color:{P['warning']}">SP_SUBMIT_ADJUSTMENT</span> → validates scope is active</div>
-    <div style="padding-left:20px">└── <span style="color:{P['warning']}">SP_PROCESS_ADJUSTMENT</span> → reads fact table name, PKs, metrics</div>
-
-    </div>
-    </div>
-    """)
-
-
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  TAB 6 — OPERATIONS GUIDE                                                 ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
-
-with tab_ops:
-
-    section_title("Common Operations", "settings")
-
-    with st.expander("**How to: Retry a failed adjustment**", expanded=True):
-        st.markdown("""
-        1. Go to **Adjustments** → **Errors / Rejected** tab
-        2. Find the failed adjustment and expand it
-        3. Review the error message in the red box
-        4. Fix the underlying issue (e.g., missing data, dimension misconfig)
-        5. Click **Retry** — this resets the status to `Pending`
-        6. The processing task will pick it up within 60 seconds
-        """)
-        st.markdown(
-            f'<div class="mcard" style="border-left:4px solid {P["info"]};margin-top:0.5rem;font-size:0.85rem">'
-            f'<strong>SQL equivalent:</strong><br/>'
-            f'<code>UPDATE ADJUSTMENT_APP.ADJ_HEADER SET RUN_STATUS = \'Pending\', ERRORMESSAGE = NULL WHERE ADJ_ID = &lt;id&gt;;</code>'
-            f'</div>',
-            unsafe_allow_html=True)
-
-    with st.expander("**How to: Add a new scope**"):
-        st.markdown(f"""
-        1. Ensure the fact table exists (e.g., `FACT.NEWSCOPE_MEASURES`)
-        2. Create the adjustment table (e.g., `FACT.NEWSCOPE_MEASURES_ADJUSTMENT`)
-        3. Insert a new row into `ADJUSTMENTS_SETTINGS`:
-
-        ```sql
-        INSERT INTO ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
-            (PROCESS_TYPE, FACT_TABLE, FACT_ADJUSTED_TABLE, FACT_TABLE_PK,
-             ADJUSTMENTS_TABLE, ADJUSTMENTS_SUMMARY_TABLE,
-             METRIC_NAME, METRIC_USD_NAME, IS_ACTIVE)
-        VALUES
-            ('NewScope',
-             'FACT.NEWSCOPE_MEASURES',
-             'FACT.NEWSCOPE_MEASURES_ADJUSTMENT',
-             'ENTITY_KEY;BOOK_KEY;TRADE_KEY',
-             'FACT.NEWSCOPE_MEASURES_ADJUSTMENT',
-             NULL,
-             'MEASURE_VALUE',
-             'MEASURE_VALUE_IN_USD',
-             TRUE);
-        ```
-
-        4. The Streamlit app will automatically show the new scope — **no code changes needed**.
-        """)
-
-    with st.expander("**How to: Create a recurring template**"):
-        st.markdown(f"""
-        1. Go to **Admin** → **Recurring Templates** tab
-        2. Fill in the template form with the scope, type, and filter dimensions
-        3. An **external scheduler** reads `ADJ_RECURRING_TEMPLATE` and creates `ADJ_HEADER`
-           rows when each template's dependencies are met
-        4. Once created, the per-scope processing task (`TASK_PROCESS_VAR`, etc.) processes them
-
-        **Or via SQL:**
-        ```sql
-        INSERT INTO ADJUSTMENT_APP.ADJ_RECURRING_TEMPLATE
-            (TEMPLATE_NAME, PROCESS_TYPE, ADJUSTMENT_TYPE, ADJUSTMENT_ACTION,
-             SCALE_FACTOR, ENTITY_CODE, REASON, IS_ACTIVE, CREATED_BY)
-        VALUES
-            ('Daily VaR MUSE Flatten', 'VaR', 'Flatten', 'Scale',
-             1, 'MUSE', 'Daily flatten for MUSE entity', TRUE, CURRENT_USER());
-        ```
-        """)
-
-    with st.expander("**How to: Enable/disable tasks**"):
-        st.markdown("""
-        Tasks are deployed in a **SUSPENDED** state. There is one processing task per scope.
-        To enable:
-
-        ```sql
-        ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_VAR         RESUME;
-        ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS      RESUME;
-        ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB        RESUME;
-        ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY RESUME;
-        ```
-
-        To suspend (e.g., for maintenance):
-        ```sql
-        ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_VAR         SUSPEND;
-        ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS      SUSPEND;
-        ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB        SUSPEND;
-        ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY SUSPEND;
-        ```
-
-        **Check task history:**
-        ```sql
-        SELECT * FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
-            TASK_NAME => 'TASK_PROCESS_VAR',
-            SCHEDULED_TIME_RANGE_START => DATEADD('HOUR', -24, CURRENT_TIMESTAMP())
-        )) ORDER BY SCHEDULED_TIME DESC;
-        ```
-        """)
-
-    with st.expander("**How to: Investigate an overlap**"):
-        st.markdown(f"""
-        1. Go to **Command Center** → Overlap Alerts panel
-        2. Note the two ADJ_IDs that overlap
-        3. In Snowflake, query the details:
-
-        ```sql
-        SELECT * FROM ADJUSTMENT_APP.DT_OVERLAP_ALERTS
-        WHERE ADJ_ID_A = <id1> OR ADJ_ID_B = <id1>;
-        ```
-
-        4. The **most recent** adjustment (by `ADJUSTMENT_CREATED_TIMESTAMP`) always wins
-           due to `DENSE_RANK` in the processing engine
-        5. If the older adjustment should win, delete the newer one from **Adjustments**
-        """)
-
-    with st.expander("**How to: Understand the audit trail**"):
-        st.markdown(f"""
-        Every status change is logged in `ADJ_STATUS_HISTORY`:
-
-        ```sql
-        SELECT h.*, a.PROCESS_TYPE, a.ADJUSTMENT_TYPE, a.ENTITY_CODE
-        FROM ADJUSTMENT_APP.ADJ_STATUS_HISTORY h
-        JOIN ADJUSTMENT_APP.ADJ_HEADER a ON a.ADJ_ID = h.ADJ_ID
-        WHERE h.ADJ_ID = <id>
-        ORDER BY h.CHANGED_AT;
-        ```
-
-        You can also see the full timeline in the **Adjustments** page by expanding
-        any adjustment card → **Status History** section.
-        """)
-
-    # ── Design Principles ────────────────────────────────────────────────
-    st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Design Principles", "info")
-
-    principles = [
-        ("Delta Pattern",       "Original FACT tables are never modified. Adjustments store only the offset. Reporting uses SUM(fact) + SUM(adjustment)."),
-        ("Config-Driven",       "ADJUSTMENTS_SETTINGS maps scopes to tables. Adding a new scope = one INSERT, zero code changes."),
-        ("Streamlit-First",     "ADJ_HEADER is the single entry point. No file shares, no staging tables, no CSV drops."),
-        ("Async Processing",    "Snowflake Tasks process adjustments asynchronously. Users are never blocked waiting for large operations."),
-        ("Full Audit Trail",    "Every status transition is logged in ADJ_STATUS_HISTORY. Adjustments are soft-deleted, never hard-deleted."),
-        ("Overlap Resolution",  "When two adjustments target the same data, DENSE_RANK ensures the most recent one wins automatically."),
-        ("Sign-Off Guard",      "SP_SUBMIT checks ADJ_SIGNOFF_STATUS. If COB is signed off, the adjustment is recorded but rejected. Managed via Admin page."),
-        ("Optional Approval",   "When requires_approval is set, adjustments go through Pending Approval → Approved before processing. Approval is optional — unchecked adjustments skip straight to Pending → Processed."),
-        ("Approver Control",    "Only users registered in ADJ_APPROVERS (Admin → Approvers tab) can approve or reject. Approvers can be scoped to specific process types. A user can never approve their own adjustment."),
-    ]
-
-    for title, desc in principles:
-        st.markdown(
-            f'<div style="display:flex;gap:12px;align-items:flex-start;padding:0.5rem 0;'
-            f'border-bottom:1px solid {P["border"]}">'
-            f'<div style="background:{P["primary"]};color:white;border-radius:50%;width:8px;height:8px;'
-            f'margin-top:7px;flex-shrink:0"></div>'
-            f'<div><span style="font-weight:700;font-size:0.88rem">{title}</span>'
-            f'<br/><span style="font-size:0.82rem;color:{P["grey_700"]}">{desc}</span></div>'
-            f'</div>', unsafe_allow_html=True)
+    _html(_table(["Principle", "In practice"], [
+        ["Fail loud, never silently wrong",
+         "Errors surface on the ticket and in history; partial writes roll "
+         "back; a stale click never fakes success or writes false audit rows."],
+        ["Base data is never modified",
+         "All adjustments live in separate adjustment tables; reports combine "
+         "them with the untouched fact data."],
+        ["Newest wins, exactly once",
+         "Overlapping adjustments are serialised, netted per position, and "
+         "superseded — never double-counted; retries clean up first."],
+        ["Everything audited",
+         "Status history, sign-off history, approver identity, run logs, and "
+         "per-step Entity Roll diagnostics."],
+        ["Config-driven scopes",
+         "Adding/altering a scope is settings data (tables, metrics, keys), "
+         "not code."],
+    ]))

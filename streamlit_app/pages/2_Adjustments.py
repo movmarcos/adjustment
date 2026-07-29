@@ -13,10 +13,11 @@ st.set_page_config(page_title="Adjustments · MUFG", page_icon="📋", layout="w
 from utils.styles import (
     inject_css, render_sidebar, render_filter_chips, render_status_timeline,
     render_lifecycle_bar,
-    status_badge, section_title, P, SCOPE_CONFIG, STATUS_COLORS, STATUS_ICONS,
+    status_badge, section_title, P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, STATUS_ICONS,
     fmt_adj_id, icon, render_activity_grid, SELECTION_UNSUPPORTED,
 )
-from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
+from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
+                                  safe_rerun, friendly_error)
 
 inject_css()
 render_sidebar()
@@ -63,13 +64,13 @@ with f1:
         default=[], key="mw_status")
 with f2:
     filter_scope = st.multiselect(
-        "Scope", list(SCOPE_CONFIG.keys()),
+        "Scope", ALL_SCOPES,
         default=[], key="mw_scope")
 with f3:
     # Option values are the raw ADJUSTMENT_TYPE codes (used directly in the SQL
     # filter); the label maps the cryptic "EROL" code to "Entity Roll".
     _type_labels = {"Flatten": "Flatten", "Scale": "Scale", "Roll": "Roll",
-                    "EROL": "Entity Roll"}
+                    "Direct": "Direct Upload", "EROL": "Entity Roll"}
     filter_type = st.multiselect(
         "Type", list(_type_labels.keys()),
         default=[], key="mw_type",
@@ -154,6 +155,135 @@ except Exception:
 df_report_status = df_track
 
 
+# ── Clone to another COB ──────────────────────────────────────────────────────
+
+_CLONE_FIELDS = {
+    "ENTITY_CODE": "entity_code", "SOURCE_SYSTEM_CODE": "source_system_code",
+    "DEPARTMENT_CODE": "department_code", "BOOK_CODE": "book_code",
+    "CURRENCY_CODE": "currency_code", "TRADE_TYPOLOGY": "trade_typology",
+    "TRADE_CODE": "trade_code", "STRATEGY": "strategy",
+    "TRADER_CODE": "trader_code", "VAR_COMPONENT_ID": "var_component_id",
+    "VAR_SUB_COMPONENT_ID": "var_sub_component_id",
+    "GUARANTEED_ENTITY": "guaranteed_entity", "REGION_KEY": "region_key",
+    "SCENARIO_DATE_ID": "scenario_date_id", "INSTRUMENT_CODE": "instrument_code",
+    "SIMULATION_NAME": "simulation_name", "SIMULATION_SOURCE": "simulation_source",
+    "TENOR_CODE": "tenor_code", "UNDERLYING_TENOR_CODE": "underlying_tenor_code",
+    "CURVE_CODE": "curve_code", "MEASURE_TYPE_CODE": "measure_type_code",
+    "DAY_TYPE": "day_type", "PRODUCT_CATEGORY_ATTRIBUTES": "product_category_attributes",
+    "BATCH_REGION_AREA": "batch_region_area", "MUREX_FAMILY": "murex_family",
+    "MUREX_GROUP": "murex_group", "ADJUSTMENT_VALUE_IN_USD": "adjustment_value_in_usd",
+    "ADJUSTMENT_CATEGORY": "adjustment_category",
+    "GLOBAL_REFERENCE": "global_reference", "FILE_NAME": "file_name",
+}
+
+
+def _clone_jsonable(v):
+    """Snowpark Decimals/timestamps → JSON-friendly values."""
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    try:
+        f = float(v)
+        return int(f) if f.is_integer() else f
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _do_clone(src_adj_id, new_cob) -> None:
+    """Create a NEW adjustment at `new_cob` from an existing one's header
+    (and, for Direct uploads, a copy of its line items). Goes through
+    SP_SUBMIT_ADJUSTMENT like any submission — validation, sign-off check,
+    overlap blocking and (if requested) approval all apply normally."""
+    import json as _json
+    import uuid as _uuid
+    _sid = str(src_adj_id).replace("'", "''")
+    copied_line_items_for = None
+    try:
+        src_rows = run_query(
+            f"SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER WHERE ADJ_ID = '{_sid}'")
+        if not src_rows:
+            st.session_state["adj_action_flash"] = (
+                "warning", "Clone failed — the source adjustment was not found.")
+            safe_rerun()
+            return
+        src = dict(src_rows[0].as_dict()) if hasattr(src_rows[0], "as_dict") \
+            else dict(src_rows[0])
+
+        src_cob  = int(src["COBID"])
+        src_srcc = int(src["SOURCE_COBID"]) if src.get("SOURCE_COBID") is not None else src_cob
+        adj_type = str(src.get("ADJUSTMENT_TYPE") or "")
+        payload = {
+            "cobid":           int(new_cob),
+            "process_type":    str(src.get("PROCESS_TYPE")),
+            "adjustment_type": adj_type,
+            "username":        current_user_name(),
+            # Same-COB operations follow the new COB; a cross-COB Roll/EROL
+            # keeps its original source COB (edit the clone if that's wrong).
+            "source_cobid":    int(new_cob) if src_srcc == src_cob else src_srcc,
+            "scale_factor":    _clone_jsonable(src.get("SCALE_FACTOR")) or 1.0,
+            "adjustment_occurrence": "ADHOC",
+            "requires_approval": False,
+            "reason": (f"Cloned from ADJ "
+                       f"{fmt_adj_id(src.get('DIMENSION_ADJ_ID')) if src.get('DIMENSION_ADJ_ID') else '#' + _sid[:8]}"
+                       f" (COB {src_cob}): {src.get('REASON') or ''}")[:990],
+        }
+        for col, key in _CLONE_FIELDS.items():
+            val = _clone_jsonable(src.get(col))
+            if val is not None and str(val).strip() != "":
+                payload.setdefault(key, val)
+
+        # Direct uploads: copy the line items under a pre-generated ADJ_ID so
+        # header and payload rows share the same id (mirrors the New
+        # Adjustment page's upload flow, including rollback on rejection).
+        if str(src.get("ADJUSTMENT_ACTION")) == "Direct":
+            new_id = str(_uuid.uuid4())
+            payload["adj_id"] = new_id
+            rows = run_query(f"""
+                INSERT INTO ADJUSTMENT_APP.ADJ_LINE_ITEM_JSON (ADJ_ID, ROW_NUM, PAYLOAD)
+                SELECT '{new_id}', ROW_NUM, PAYLOAD
+                FROM ADJUSTMENT_APP.ADJ_LINE_ITEM_JSON
+                WHERE ADJ_ID = '{_sid}' AND IS_DELETED = FALSE
+            """)
+            _copied = int(rows[0][0]) if rows else 0
+            if _copied == 0:
+                st.session_state["adj_action_flash"] = (
+                    "warning", "Clone failed — the source upload has no line "
+                               "items to copy.")
+                safe_rerun()
+                return
+            copied_line_items_for = new_id
+
+        json_str = _json.dumps(payload).replace("\\", "\\\\").replace("'", "''")
+        res = run_query(f"CALL ADJUSTMENT_APP.SP_SUBMIT_ADJUSTMENT('{json_str}')")
+        raw = res[0][0] if res else None
+        out = _json.loads(str(raw)) if isinstance(raw, str) else (raw or {})
+        status = out.get("status")
+        if status in ("Pending", "Pending Approval", "Approved"):
+            st.session_state["adj_action_flash"] = (
+                "success",
+                f"Cloned to COB {new_cob} — new adjustment created with "
+                f"status '{status}'. {out.get('message', '')}")
+        else:
+            if copied_line_items_for:
+                try:
+                    run_query(f"DELETE FROM ADJUSTMENT_APP.ADJ_LINE_ITEM_JSON "
+                              f"WHERE ADJ_ID = '{copied_line_items_for}'")
+                except Exception:
+                    pass
+            st.session_state["adj_action_flash"] = (
+                "warning",
+                f"Clone was not accepted — {out.get('message', status or 'no response')}")
+    except Exception as ex:
+        if copied_line_items_for:
+            try:
+                run_query(f"DELETE FROM ADJUSTMENT_APP.ADJ_LINE_ITEM_JSON "
+                          f"WHERE ADJ_ID = '{copied_line_items_for}'")
+            except Exception:
+                pass
+        st.session_state["adj_action_flash"] = (
+            "warning", f"Clone failed. {friendly_error(ex)}")
+    safe_rerun()
+
+
 def render_adj_card(row, expanded=False):
     """Render one adjustment's detail + actions (used as the grid's detail panel)."""
     adj_id      = row.get("ADJ_ID", "?")
@@ -193,7 +323,8 @@ def render_adj_card(row, expanded=False):
             section_title("Filters Applied", "search")
             render_filter_chips(row)
 
-            reason = row.get("REASON", "")
+            import html as _htmlmod
+            reason = _htmlmod.escape(str(row.get("REASON", "") or ""))
             st.markdown(
                 f'<br/><div style="font-size:0.85rem"><strong>Business Reason:</strong><br/>'
                 f'<span style="color:{P["grey_700"]}">{reason or "—"}</span></div>',
@@ -203,7 +334,8 @@ def render_adj_card(row, expanded=False):
                 st.markdown(
                     f'<div class="overlap-box" style="margin-top:0.5rem">'
                     f'<h4>{icon("x-circle", size=13, color=P["danger"])} Error</h4>'
-                    f'<div style="font-size:0.82rem;font-family:monospace">{row["ERRORMESSAGE"]}</div>'
+                    f'<div style="font-size:0.82rem;font-family:monospace">'
+                    f'{_htmlmod.escape(str(row["ERRORMESSAGE"]))}</div>'
                     f'</div>',
                     unsafe_allow_html=True)
 
@@ -303,129 +435,221 @@ def render_adj_card(row, expanded=False):
             st.caption("This adjustment has been deleted — actions are disabled.")
         act_cols = st.columns(4)   # deleted rows have RUN_STATUS='Deleted' → no buttons render
 
-        if run_status in ("Pending", "Failed", "Processed"):
-            with act_cols[0]:
-                if st.button("Delete", key=f"del_{adj_id}", use_container_width=True):
-                    try:
-                        process_type = str(row.get("PROCESS_TYPE", ""))
-                        # Get DIMENSION_ADJ_ID — used for DIMENSION.ADJUSTMENT and FACT table deletes
-                        dim_row = run_query(f"""
-                            SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
-                            WHERE ADJ_ID = '{adj_id}' LIMIT 1
+        # Flash from the previous action — set before the rerun (a message
+        # rendered just before st.rerun() is destroyed by it).
+        _flash = st.session_state.pop("adj_action_flash", None)
+        if _flash:
+            (st.success if _flash[0] == "success" else st.warning)(_flash[1])
+
+        _aid = str(adj_id).replace("'", "''")
+        _st  = str(run_status).replace("'", "''")
+        _usr = str(user).replace("'", "''")
+
+        _STALE_MSG = ("Nothing changed — this adjustment's status moved on since "
+                      "the page loaded (another user or the pipeline acted on it). "
+                      "The page now shows its current state.")
+
+        def _updated_rows(rows) -> int:
+            """Rows actually changed by an UPDATE (guarded-update check)."""
+            try:
+                return int(rows[0][0]) if rows else 0
+            except (TypeError, ValueError, IndexError):
+                return 0
+
+        def _transition(new_status: str, extra_set: str = "", comment: str = "") -> bool:
+            """Status transition guarded on the status shown on screen. Only
+            writes history / reports success when the row actually moved —
+            an action on a stale page changes nothing and says so."""
+            n = _updated_rows(run_query(f"""
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                SET RUN_STATUS = '{new_status}'{extra_set}
+                WHERE ADJ_ID = '{_aid}'
+                  AND RUN_STATUS = '{_st}'
+                  AND IS_DELETED = FALSE
+            """))
+            if n == 0:
+                st.session_state["adj_action_flash"] = ("warning", _STALE_MSG)
+                return False
+            run_query(f"""
+                INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
+                    (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
+                VALUES ('{_aid}', '{_st}', '{new_status}', '{_usr}', '{comment}')
+            """)
+            return True
+
+        def _do_delete() -> None:
+            """Soft-delete the header + dimension row and remove the fact rows,
+            all in ONE transaction — a failure anywhere rolls everything back,
+            so the app never reports 'deleted' while numbers stay in reports."""
+            process_type = str(row.get("PROCESS_TYPE", ""))
+            txn = False
+            try:
+                dim_row = run_query(f"""
+                    SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
+                    WHERE ADJ_ID = '{_aid}' LIMIT 1
+                """)
+                dim_adj_id = (int(dim_row[0]["DIMENSION_ADJ_ID"])
+                              if dim_row and dim_row[0]["DIMENSION_ADJ_ID"] is not None
+                              else None)
+                run_query("BEGIN")
+                txn = True
+                n = _updated_rows(run_query(f"""
+                    UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                    SET IS_DELETED = TRUE,
+                        RUN_STATUS = 'Deleted',
+                        DELETED_BY = '{_usr}',
+                        DELETED_DATE = CURRENT_TIMESTAMP()
+                    WHERE ADJ_ID = '{_aid}'
+                      AND RUN_STATUS = '{_st}'
+                      AND IS_DELETED = FALSE
+                """))
+                if n == 0:
+                    run_query("ROLLBACK")
+                    txn = False
+                    st.session_state["adj_action_flash"] = ("warning", _STALE_MSG)
+                    return
+                run_query(f"""
+                    INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
+                        (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
+                    VALUES ('{_aid}', '{_st}', 'Deleted', '{_usr}', 'Adjustment deleted')
+                """)
+                # Processed adjustments have a dimension row + fact rows keyed
+                # by DIMENSION_ADJ_ID — remove them in the same transaction.
+                if dim_adj_id is not None:
+                    run_query(f"""
+                        UPDATE DIMENSION.ADJUSTMENT
+                        SET IS_DELETED = TRUE,
+                            RUN_STATUS  = 'Deleted',
+                            DELETED_BY  = '{_usr}',
+                            DELETED_DATE = CURRENT_TIMESTAMP()
+                        WHERE ADJUSTMENT_ID = {dim_adj_id}
+                    """)
+                    if process_type:
+                        settings = run_query(f"""
+                            SELECT ADJUSTMENTS_TABLE, ADJUSTMENTS_SUMMARY_TABLE
+                            FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
+                            WHERE UPPER(PROCESS_TYPE) = '{process_type.upper().replace("'", "''")}'
+                            LIMIT 1
                         """)
-                        dim_adj_id = (dim_row[0]["DIMENSION_ADJ_ID"]
-                                      if dim_row and dim_row[0]["DIMENSION_ADJ_ID"] else None)
-                        # Soft-delete header
-                        run_query(f"""
-                            UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                            SET IS_DELETED = TRUE,
-                                RUN_STATUS = 'Deleted'
-                            WHERE ADJ_ID = '{adj_id}'
-                        """)
-                        run_query(f"""
-                            INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
-                                (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
-                            VALUES ('{adj_id}', '{run_status}', 'Deleted',
-                                    '{user}', 'Adjustment deleted')
-                        """)
-                        # Soft-delete in DIMENSION.ADJUSTMENT (uses the dimension table's own ID)
-                        if dim_adj_id:
-                            try:
+                        if settings:
+                            if settings[0]["ADJUSTMENTS_TABLE"]:
                                 run_query(f"""
-                                    UPDATE DIMENSION.ADJUSTMENT
-                                    SET IS_DELETED = TRUE,
-                                        RUN_STATUS  = 'Deleted',
-                                        DELETED_BY  = '{user}',
-                                        DELETED_DATE = CURRENT_TIMESTAMP()
+                                    DELETE FROM {settings[0]["ADJUSTMENTS_TABLE"]}
                                     WHERE ADJUSTMENT_ID = {dim_adj_id}
                                 """)
-                            except Exception:
-                                pass
-                        # Remove rows from fact adjustment and summary tables
-                        if process_type and dim_adj_id:
-                            try:
-                                settings = run_query(f"""
-                                    SELECT ADJUSTMENTS_TABLE, ADJUSTMENTS_SUMMARY_TABLE
-                                    FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
-                                    WHERE UPPER(PROCESS_TYPE) = '{process_type.upper()}'
-                                    LIMIT 1
+                            if settings[0]["ADJUSTMENTS_SUMMARY_TABLE"]:
+                                run_query(f"""
+                                    DELETE FROM {settings[0]["ADJUSTMENTS_SUMMARY_TABLE"]}
+                                    WHERE ADJUSTMENT_ID = {dim_adj_id}
                                 """)
-                                if settings:
-                                    if settings[0]["ADJUSTMENTS_TABLE"]:
-                                        run_query(f"""
-                                            DELETE FROM {settings[0]["ADJUSTMENTS_TABLE"]}
-                                            WHERE ADJUSTMENT_ID = {dim_adj_id}
-                                        """)
-                                    if settings[0]["ADJUSTMENTS_SUMMARY_TABLE"]:
-                                        run_query(f"""
-                                            DELETE FROM {settings[0]["ADJUSTMENTS_SUMMARY_TABLE"]}
-                                            WHERE ADJUSTMENT_ID = {dim_adj_id}
-                                        """)
-                            except Exception:
-                                pass
-                        st.success("Adjustment deleted.")
-                        safe_rerun()
-                    except Exception as ex:
-                        st.error(str(ex))
-            with act_cols[1]:
-                if st.button("Submit for Approval", key=f"approv_{adj_id}", use_container_width=True):
+                run_query("COMMIT")
+                txn = False
+                st.session_state["adj_action_flash"] = (
+                    "success",
+                    "Adjustment deleted."
+                    + (" Its rows were removed from the adjustment tables."
+                       if dim_adj_id is not None else ""))
+            except Exception as ex:
+                if txn:
                     try:
-                        run_query(f"""
-                            UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                            SET RUN_STATUS = 'Pending Approval'
-                            WHERE ADJ_ID = '{adj_id}'
-                        """)
-                        run_query(f"""
-                            INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
-                                (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
-                            VALUES ('{adj_id}', 'Pending', 'Pending Approval',
-                                    '{user}', 'Submitted for approval')
-                        """)
-                        st.success("Submitted for approval.")
-                        safe_rerun()
-                    except Exception as ex:
-                        st.error(str(ex))
+                        run_query("ROLLBACK")
+                    except Exception:
+                        pass
+                st.error(f"Delete failed — nothing was removed. {friendly_error(ex)}")
 
-        elif run_status == "Pending Approval":
-            with act_cols[0]:
-                if st.button("Recall to Pending", key=f"recall_{adj_id}", use_container_width=True):
+        def _delete_button(container) -> None:
+            with container:
+                _extra = (" and remove its processed rows from the adjustment "
+                          "tables and reports" if run_status == "Processed" else "")
+                confirmed = st.checkbox(
+                    f"Confirm — permanently delete this adjustment{_extra}",
+                    key=f"delcf_{adj_id}", value=False)
+                if st.button("Delete", key=f"del_{adj_id}", use_container_width=True,
+                             disabled=not confirmed):
+                    _do_delete()
+                    safe_rerun()
+
+        if run_status == "Pending":
+            _delete_button(act_cols[0])
+            with act_cols[1]:
+                if st.button("Submit for Approval", key=f"approv_{adj_id}",
+                             use_container_width=True):
                     try:
-                        run_query(f"""
-                            UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                            SET RUN_STATUS = 'Pending'
-                            WHERE ADJ_ID = '{adj_id}'
-                        """)
-                        run_query(f"""
-                            INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
-                                (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
-                            VALUES ('{adj_id}', 'Pending Approval', 'Pending',
-                                    '{user}', 'Recalled by submitter')
-                        """)
-                        st.success("Recalled to Pending.")
+                        if _transition("Pending Approval", comment="Submitted for approval"):
+                            st.session_state["adj_action_flash"] = (
+                                "success", "Submitted for approval.")
                         safe_rerun()
                     except Exception as ex:
-                        st.error(str(ex))
+                        st.error(f"Submit for approval failed. {friendly_error(ex)}")
+
         elif run_status == "Failed":
             with act_cols[0]:
                 if st.button("Retry", key=f"retry_{adj_id}",
                              use_container_width=True, type="primary"):
                     try:
-                        run_query(f"""
-                            UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                            SET RUN_STATUS = 'Pending',
-                                ERRORMESSAGE = NULL
-                            WHERE ADJ_ID = '{adj_id}'
-                        """)
-                        run_query(f"""
-                            INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
-                                (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
-                            VALUES ('{adj_id}', 'Failed', 'Pending',
-                                    '{user}', 'Retrying after failure')
-                        """)
-                        st.success("Queued for retry.")
+                        if _transition("Pending",
+                                       extra_set=", ERRORMESSAGE = NULL, CLAIM_TOKEN = NULL",
+                                       comment="Retrying after failure"):
+                            st.session_state["adj_action_flash"] = (
+                                "success", "Queued for retry — the pipeline picks "
+                                           "it up within a minute.")
                         safe_rerun()
                     except Exception as ex:
-                        st.error(str(ex))
+                        st.error(f"Retry failed. {friendly_error(ex)}")
+            _delete_button(act_cols[1])
+
+        elif run_status == "Processed":
+            _delete_button(act_cols[0])
+
+        elif run_status == "Pending Approval":
+            with act_cols[0]:
+                if st.button("Recall to Pending", key=f"recall_{adj_id}",
+                             use_container_width=True):
+                    try:
+                        if _transition("Pending", comment="Recalled by submitter"):
+                            st.session_state["adj_action_flash"] = (
+                                "success", "Recalled to Pending.")
+                        safe_rerun()
+                    except Exception as ex:
+                        st.error(f"Recall failed. {friendly_error(ex)}")
+
+        # ── Clone to another COB (any non-deleted adjustment) ────────────────
+        if not bool(row.get("IS_DELETED")):
+            st.markdown("---")
+            section_title("Clone to another COB", "layers")
+            st.caption(
+                "Creates a NEW adjustment with the same scope, filters and "
+                "values, targeting a different COB — the daily shortcut for "
+                "repeating adjustments. It follows the normal flow "
+                "(sign-off check, overlap blocking, approval if requested). "
+                "Cross-COB Rolls keep their original source COB.")
+            cc1, cc2, cc3 = st.columns([1.2, 1.6, 1])
+            with cc1:
+                _clone_raw = st.text_input(
+                    "Target COB (YYYYMMDD)", key=f"clone_cob_{adj_id}",
+                    placeholder="e.g. 20260729").strip()
+            _clone_cob = None
+            if _clone_raw:
+                from datetime import datetime as _dt
+                if _clone_raw.isdigit() and len(_clone_raw) == 8:
+                    try:
+                        _dt.strptime(_clone_raw, "%Y%m%d")
+                        _clone_cob = int(_clone_raw)
+                    except ValueError:
+                        pass
+                if _clone_cob is None:
+                    with cc2:
+                        st.error("Not a valid YYYYMMDD date.")
+                elif _clone_cob == int(row.get("COBID") or 0):
+                    with cc2:
+                        st.error("Target COB is the same as the source.")
+                    _clone_cob = None
+            with cc3:
+                st.markdown("<br/>", unsafe_allow_html=True)
+                if st.button("Clone", key=f"clone_btn_{adj_id}",
+                             use_container_width=True,
+                             disabled=_clone_cob is None):
+                    _do_clone(adj_id, _clone_cob)
 
 
 # ── Browse + act ───────────────────────────────────────────────────────────────
@@ -438,7 +662,13 @@ if df_adjs.empty:
     view_df = df_adjs
 else:
     is_del = df_adjs["IS_DELETED"].fillna(False).astype(bool)
-    view_df = df_adjs if show_deleted else df_adjs[~is_del]
+    # Selecting a soft-deleted status (Deleted / Replaced / Superseded) in the
+    # Status filter is an explicit request to see those rows — honour it even
+    # when "Include deleted" is unticked, otherwise the filter would load the
+    # rows and then silently mask them out again (showing 0 results).
+    _deletedish = {"Deleted", "Replaced", "Superseded"}
+    _wants_deleted = bool(set(filter_status or []) & _deletedish)
+    view_df = df_adjs if (show_deleted or _wants_deleted) else df_adjs[~is_del]
 
 view_df = view_df.reset_index(drop=True)
 
@@ -449,6 +679,14 @@ st.markdown(
     f"Showing {shown} of {total} adjustments. Select one to view its details and actions."
     f"</span>",
     unsafe_allow_html=True)
+
+_exp1, _exp2 = st.columns([5, 1])
+with _exp2:
+    st.download_button(
+        "⬇ Export CSV", view_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="adjustments_export.csv", mime="text/csv",
+        use_container_width=True,
+        help="Download the filtered list for Excel.")
 
 selected = render_activity_grid(
     view_df, selectable=True, key="adj_grid",
@@ -468,6 +706,64 @@ if selected is SELECTION_UNSUPPORTED:
         "Open an adjustment", options=[None] + list(range(len(view_df))),
         format_func=_opt_label, key="adj_pick", label_visibility="collapsed")
     selected = view_df.iloc[choice].to_dict() if choice is not None else None
+
+# ── Bulk retry — all FAILED rows in the current filtered view ────────────────
+_bulk_flash = st.session_state.pop("adj_bulk_flash", None)
+if _bulk_flash:
+    (st.success if _bulk_flash[0] == "success" else st.warning)(_bulk_flash[1])
+
+_failed_view = (view_df[view_df["RUN_STATUS"] == "Failed"]
+                if "RUN_STATUS" in view_df.columns else view_df.iloc[0:0])
+if len(_failed_view) >= 2:
+    with st.container(border=True):
+        section_title(f"Bulk Retry — {len(_failed_view)} failed in this view",
+                      "refresh-cw")
+        st.caption("Re-queues every FAILED adjustment currently shown by the "
+                   "filters above. Retries are safe: anything a failed run "
+                   "wrote is cleaned up before re-processing.")
+        br1, br2 = st.columns([3, 1])
+        with br1:
+            _br_confirm = st.checkbox(
+                f"Confirm — retry all {len(_failed_view)} failed adjustment(s)",
+                key="bulk_retry_confirm", value=False)
+        with br2:
+            if st.button("Retry all failed", key="bulk_retry_btn",
+                         type="primary", use_container_width=True,
+                         disabled=not _br_confirm):
+                _ok, _skipped = 0, 0
+                for _, _fr in _failed_view.iterrows():
+                    try:
+                        _fid = str(_fr.get("ADJ_ID")).replace("'", "''")
+                        rows = run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                            SET RUN_STATUS = 'Pending',
+                                ERRORMESSAGE = NULL, CLAIM_TOKEN = NULL
+                            WHERE ADJ_ID = '{_fid}'
+                              AND RUN_STATUS = 'Failed'
+                              AND IS_DELETED = FALSE
+                        """)
+                        _nn = int(rows[0][0]) if rows else 0
+                        if _nn:
+                            run_query(f"""
+                                INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
+                                    (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
+                                VALUES ('{_fid}', 'Failed', 'Pending',
+                                        '{str(user).replace(chr(39), chr(39)*2)}',
+                                        'Bulk retry after failure')
+                            """)
+                            _ok += 1
+                        else:
+                            _skipped += 1
+                    except Exception:
+                        _skipped += 1
+                msg = (f"{_ok} adjustment(s) re-queued — the pipeline picks "
+                       f"them up within a minute.")
+                if _skipped:
+                    msg += (f" {_skipped} skipped (status changed or the "
+                            f"update failed).")
+                st.session_state["adj_bulk_flash"] = (
+                    "success" if _ok and not _skipped else "warning", msg)
+                safe_rerun()
 
 if selected is not None:
     st.markdown("---")

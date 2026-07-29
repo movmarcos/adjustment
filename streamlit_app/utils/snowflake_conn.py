@@ -97,6 +97,34 @@ def call_sp_df(proc_name: str, *args):
         return pd.DataFrame([list(r) for r in rows], columns=fields)
 
 
+def friendly_error(exc) -> str:
+    """Translate common Snowflake error patterns into plain language for
+    non-technical users, keeping a short technical tail for support tickets."""
+    raw = " ".join(str(exc).split())
+    low = raw.lower()
+    hints = [
+        ("does not exist or not authorized",
+         "A database object is missing or access has not been granted — this "
+         "is a deployment/permissions issue, not something you did wrong."),
+        ("insufficient privileges",
+         "Your role does not have permission for this action."),
+        ("statement reached its statement or warehouse timeout",
+         "The operation hit the warehouse time limit and was stopped."),
+        ("timeout", "The operation took too long and was stopped."),
+        ("is not recognized",
+         "A value has the wrong format for its field (for example text where "
+         "a number or date is expected)."),
+        ("duplicate key", "This record already exists."),
+        ("json", "The data sent to the database was malformed."),
+    ]
+    for pat, msg in hints:
+        if pat in low:
+            return f"{msg} (Technical detail: {raw[:180]}…)" if len(raw) > 180 \
+                   else f"{msg} (Technical detail: {raw})"
+    return (f"The database reported an unexpected error — if it persists, "
+            f"contact support with this detail: {raw[:220]}")
+
+
 def current_user_name() -> str:
     """Get the logged-in user identity.
 
