@@ -12,7 +12,7 @@ st.set_page_config(page_title="Approval Queue · MUFG", page_icon="✅", layout=
 
 from utils.styles import (
     inject_css, render_sidebar, render_filter_chips,
-    section_title, status_badge, P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, icon,
+    section_title, status_badge, P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, icon, bordered_container,
 )
 from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
                                   safe_rerun, friendly_error)
@@ -198,7 +198,7 @@ def _bulk_eligible(df):
 
 _bulk_rows = _bulk_eligible(df_queue)
 if len(_bulk_rows) >= 2:
-    with st.container(border=True):
+    with bordered_container():
         section_title("Bulk Decision", "layers")
         st.caption("Select several adjustments and decide them in one go — "
                    "each one is still individually enforced (scope, 4-eyes) "
@@ -517,7 +517,7 @@ else:
         r_ent_tx = "all entities" if r_ent == "*" else r_ent
         r_by     = str(rr["REOPEN_REQUESTED_BY"] or "—")
         r_reason = str(rr["REOPEN_REASON"] or "—")
-        with st.container(border=True):
+        with bordered_container():
             c_info, c_act = st.columns([2.4, 1])
             with c_info:
                 st.markdown(f"**COB {r_cob} · {r_scope} · {r_ent_tx}**")

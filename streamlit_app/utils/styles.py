@@ -1537,6 +1537,16 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
     return resolve_selected_adjustment(df_source, rows)
 
 
+def bordered_container():
+    """Version-safe st.container(border=True): the border kwarg needs
+    Streamlit ≥ 1.29, but SiS runs 1.26 (the minimum that supports
+    st.file_uploader). Falls back to a plain container on older runtimes."""
+    try:
+        return st.container(border=True)
+    except TypeError:
+        return st.container()
+
+
 def render_df_table(df, max_rows=200, height=None, highlight=None, formats=None):
     """Theme-proof READ-ONLY table: renders a DataFrame as styled HTML so it
     never depends on the viewer's Streamlit theme (st.dataframe draws on a

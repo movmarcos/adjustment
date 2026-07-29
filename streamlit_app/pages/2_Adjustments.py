@@ -14,7 +14,7 @@ from utils.styles import (
     inject_css, render_sidebar, render_filter_chips, render_status_timeline,
     render_lifecycle_bar,
     status_badge, section_title, P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, STATUS_ICONS,
-    fmt_adj_id, icon, render_activity_grid, SELECTION_UNSUPPORTED,
+    fmt_adj_id, icon, render_activity_grid, SELECTION_UNSUPPORTED, bordered_container,
 )
 from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
                                   safe_rerun, friendly_error)
@@ -715,7 +715,7 @@ if _bulk_flash:
 _failed_view = (view_df[view_df["RUN_STATUS"] == "Failed"]
                 if "RUN_STATUS" in view_df.columns else view_df.iloc[0:0])
 if len(_failed_view) >= 2:
-    with st.container(border=True):
+    with bordered_container():
         section_title(f"Bulk Retry — {len(_failed_view)} failed in this view",
                       "refresh-cw")
         st.caption("Re-queues every FAILED adjustment currently shown by the "

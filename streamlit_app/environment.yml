@@ -2,4 +2,8 @@ name: adjustment-engine
 channels:
   - snowflake
 dependencies:
+  # 1.26.0 is the minimum SiS version that supports st.file_uploader
+  # (Direct upload). Keep any future bump in sync with the API guards in
+  # the app (bordered_container, safe_rerun, grid-selection fallback).
+  - streamlit=1.26.0
   - plotly

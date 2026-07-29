@@ -26,7 +26,7 @@ st.set_page_config(
 
 from utils.styles import (
     inject_css, render_sidebar, section_title, fmt_adj_id,
-    P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, icon,
+    P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, icon, bordered_container,
 )
 from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
                                   safe_rerun, friendly_error)
@@ -301,7 +301,7 @@ for scope in ALL_SCOPES:
             "#B45309" if _blocked_so else P["success"])
 
     scfg = SCOPE_CONFIG.get(scope, {})
-    with st.container(border=True):
+    with bordered_container():
         h1, h2 = st.columns([2.6, 1.4])
         with h1:
             st.markdown(

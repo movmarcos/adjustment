@@ -25,7 +25,7 @@ st.set_page_config(
 from utils.styles import (
     inject_css, render_sidebar, render_lifecycle_bar, render_pipeline_diagram,
     section_title, render_status_timeline, fmt_adj_id,
-    P, SCOPE_CONFIG, ALL_SCOPES, STAGE_CONFIG, icon, render_df_table,
+    P, SCOPE_CONFIG, ALL_SCOPES, STAGE_CONFIG, icon, render_df_table, bordered_container,
 )
 from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
 
@@ -251,7 +251,7 @@ if not attention_df.empty:
 
     for _, row in attention_df.iterrows():
         adj_id = row["ADJ_ID"]
-        with st.container(border=True):
+        with bordered_container():
             if bool(is_failed.get(row.name, False)):
                 _item_header(row, "Failed", P["danger"], "x-circle")
                 err = str(row.get("ERRORMESSAGE") or "").strip()
@@ -317,7 +317,7 @@ else:
         adj_id     = qi["ADJ_ID"]
         run_status = str(qi.get("RUN_STATUS", ""))
 
-        with st.container(border=True):
+        with bordered_container():
             if run_status == "Running":
                 _item_header(qi, "Running", P["info"], "zap")
                 rmin = _int_or_none(qi.get("RUNNING_MIN"))
