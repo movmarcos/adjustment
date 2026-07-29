@@ -1025,6 +1025,61 @@ def inject_css():
         background-color: var(--card) !important;
         border-radius: var(--r-sm);
     }}
+
+    /* ── Theme guard, round 2 ────────────────────────────────────────────
+       Pin ink on the Streamlit-owned CONTAINERS (never on div/span, which
+       the app colours inline): text that sets no explicit colour — e.g. the
+       info banners, whose text sits directly in a <div> — then INHERITS ink
+       instead of the dark theme's near-white body colour. Inline-styled
+       elements keep winning because inheritance never overrides them. */
+    [data-testid="stMainBlockContainer"],
+    [data-testid="stMainBlockContainer"] [data-testid="stMarkdownContainer"] {{
+        color: var(--ink) !important;
+    }}
+
+    /* Widget labels (selectbox/multiselect/input/radio headers): the older
+       rule above lacked !important and lost to the dark theme's own CSS. */
+    [data-testid="stWidgetLabel"],
+    [data-testid="stWidgetLabel"] p,
+    [data-testid="stWidgetLabel"] [data-testid="stMarkdownContainer"] {{
+        color: var(--ink) !important;
+    }}
+    .stRadio label, .stRadio label p {{ color: var(--ink) !important; }}
+
+    /* Dropdown menu items beyond [role=option] (group headers etc.) */
+    [data-baseweb="popover"] li, [data-baseweb="menu"] li {{
+        color: var(--ink) !important;
+    }}
+
+    /* File uploader (Direct upload mode) — fully theme-owned, pin it */
+    [data-testid="stFileUploaderDropzone"] {{
+        background-color: var(--card) !important;
+        border: 1px dashed var(--border) !important;
+    }}
+    [data-testid="stFileUploaderDropzone"] div,
+    [data-testid="stFileUploaderDropzone"] span,
+    [data-testid="stFileUploaderDropzone"] small {{
+        color: var(--ink-2) !important;
+    }}
+    [data-testid="stFileUploaderDropzone"] svg {{ fill: var(--ink-3) !important; }}
+    [data-testid="stFileUploaderDropzone"] button {{
+        background-color: var(--card) !important;
+        color: var(--ink) !important;
+        border: 1px solid var(--border) !important;
+    }}
+    [data-testid="stFileUploaderFile"],
+    [data-testid="stFileUploaderFile"] div,
+    [data-testid="stFileUploaderFile"] span,
+    [data-testid="stFileUploaderFile"] small {{
+        color: var(--ink) !important;
+    }}
+    [data-testid="stFileUploaderFile"] svg {{ fill: var(--ink-2) !important; }}
+
+    /* st.form containers follow the theme — pin to the light surface */
+    [data-testid="stForm"] {{
+        background-color: var(--card) !important;
+        border: 1px solid var(--border) !important;
+    }}
     </style>
     """, unsafe_allow_html=True)
 
