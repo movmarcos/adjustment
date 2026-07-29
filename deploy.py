@@ -239,6 +239,13 @@ def deploy_streamlit_app(session):
     if cfg_path.exists():
         files_to_upload.append((cfg_path, ''))
 
+    # .streamlit/ directory (theme config — pins the light theme so the app
+    # stays readable when the viewer's browser/Snowsight is in dark mode)
+    st_cfg_dir = app_dir / '.streamlit'
+    if st_cfg_dir.exists():
+        for fpath in st_cfg_dir.glob('*.toml'):
+            files_to_upload.append((fpath, '.streamlit'))
+
     # utils/ directory
     utils_dir = app_dir / 'utils'
     if utils_dir.exists():
@@ -371,6 +378,7 @@ def resume_pipeline_tasks(session):
         'ADJUSTMENT_APP.TASK_PROCESS_STRESS',
         'ADJUSTMENT_APP.TASK_PROCESS_FRTB',
         'ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY',
+        'ADJUSTMENT_APP.TASK_SYNC_SIGNOFF',
     ]
     for task in tasks:
         try:

@@ -14,6 +14,9 @@
 --                   e.g. '["FRTB","FRTBDRC","FRTBRRAO","FRTBALL"]'
 --
 -- FLOW (block first, then claim):
+--   0b. Reap stale 'Running' rows (claimed long ago by a run that died) →
+--       Failed with a clear error, so they stop blocking their overlap group
+--       and the user can Retry them from the Adjustments page.
 --   1a. Block overlapping Pending rows against any currently-Running adjustment.
 --   1b. Block overlapping Pending rows against EACH OTHER (oldest proceeds,
 --       newer ones wait). Overlap is purely data scope (COBID + dimensions),
@@ -21,17 +24,22 @@
 --       entity/book/COB overlap and must serialise.
 --   2. Enumerate the eligible set: Pending/Approved, unblocked, not deleted, in
 --      this pipeline. Read straight from ADJ_HEADER into a TEMP table.
---   3. Claim: promote those rows to RUN_STATUS='Running' (+ START_DATE),
---      re-checking eligibility in the WHERE so the claim is atomic per row.
+--   3. Claim: promote those rows to RUN_STATUS='Running' (+ START_DATE) and
+--      stamp this run's CLAIM_TOKEN, re-checking eligibility in the WHERE so
+--      the claim is atomic per row. Rows another run claimed first fail the
+--      WHERE and are simply not ours.
 --   4. Process each distinct (PROCESS_TYPE, ADJUSTMENT_ACTION, COBID) combo in
---      parallel via Snowpark async (collect_nowait); each call processes all
---      Running rows for its combo in one batched operation.
+--      parallel via Snowpark async (collect_nowait). Combos are derived from
+--      the rows THIS run actually claimed (CLAIM_TOKEN match), and the token is
+--      passed to SP_PROCESS_ADJUSTMENT so it only touches this run's claims —
+--      a concurrent manual invocation can never double-process the same rows.
 --   5. Unblock resolved — clear BLOCKED_BY_ADJ_ID for any Pending row whose
 --      blocker just finished; the next 1-minute poll picks it up.
 --
--- FRTBALL note: FRTBALL has no settings row. It is applied as a fan-out during
--- FRTB / FRTBDRC / FRTBRRAO processing, so it is skipped as a standalone call
--- target — SP_PROCESS_ADJUSTMENT picks it up when processing any real FRTB type.
+-- FRTBALL note: FRTBALL is retired as a submittable/processable type — the app
+-- fans an "All FRTB" request out into three sibling adjustments (FRTB, FRTBDRC,
+-- FRTBRRAO) at submit time. Any FRTBALL value still present in pipeline_types
+-- is ignored for claiming/dispatch.
 -- =============================================================================
 
 USE SCHEMA ADJUSTMENT_APP;
@@ -50,10 +58,20 @@ EXECUTE AS CALLER
 AS
 $$
 import json
+import uuid
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
+
+# A Running row older than this is considered abandoned (the run that claimed
+# it died — task timeout, warehouse kill, session loss) and is reaped to
+# Failed. MUST stay ABOVE the tasks' USER_TASK_TIMEOUT_MS (3h in 06_tasks.sql):
+# a run the task is still legitimately executing must never be reaped — the
+# completing run would find its rows already flipped to Failed after having
+# committed its fact writes. 240 min = task ceiling + 1h of slack; it also
+# covers long manual (worksheet) runs.
+STALE_RUNNING_MINUTES = 240
 
 # Dimensions used for overlap detection (NULL = wildcard = matches any value)
 OVERLAP_DIMS = [
@@ -75,7 +93,8 @@ _OVERLAP_SELECT_COLS = ', '.join(['ADJ_ID', 'COBID', 'PROCESS_TYPE', 'ADJUSTMENT
 # COBID + GLOBAL_REFERENCE, which is handled at submission time.
 _OVERLAP_ACTION_FILTER = "AND ADJUSTMENT_ACTION NOT IN ('Direct')"
 
-# FRTBALL is a fan-out tag — applied within real FRTB* SP calls, not on its own.
+# FRTBALL is retired (the app submits one adjustment per real FRTB sub-type);
+# tolerated in pipeline_types for backward compatibility but never claimed.
 FRTBALL_SKIP = {'FRTBALL'}
 
 # Scopes a task can drive (matches the per-scope tasks in 06_tasks.sql).
@@ -127,6 +146,74 @@ def main(session, scope, pipeline_types):
     if not has_work:
         return json.dumps({"scope": scope, "message": "Idle — no pending/approved/running rows"})
 
+    # This run's claim token — stamped on every row we promote to Running and
+    # passed to SP_PROCESS_ADJUSTMENT so it only touches OUR claims.
+    claim_token = str(uuid.uuid4())
+
+    # ── 0b. REAP STALE RUNNING ROWS ──────────────────────────────────────────
+    #    A row can only leave 'Running' via SP_PROCESS_ADJUSTMENT or a failure
+    #    handler in the run that claimed it. If that run died, the row would sit
+    #    Running forever — blocking its whole overlap group. Reap it to Failed
+    #    (visible + retryable) with a clear message. Best-effort: never lets a
+    #    reaper problem stop the pipeline.
+    try:
+        stale = session.sql(f"""
+            SELECT ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
+            WHERE PROCESS_TYPE IN ({pipeline_in})
+              AND RUN_STATUS = 'Running'
+              AND IS_DELETED = FALSE
+              AND START_DATE < DATEADD(minute, -{STALE_RUNNING_MINUTES},
+                    CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9))
+        """).collect()
+        if stale:
+            stale_ids = ", ".join(
+                "'" + str(r["ADJ_ID"]).replace("'", "''") + "'" for r in stale)
+            session.sql(f"""
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                SET RUN_STATUS = 'Failed',
+                    CLAIM_TOKEN = NULL,
+                    PROCESS_DATE = CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9),
+                    ERRORMESSAGE = 'Stuck in Running for over {STALE_RUNNING_MINUTES} minutes — '
+                                   || 'the run that claimed it likely died. Reset to Failed by the '
+                                   || 'pipeline; use Retry to re-queue.'
+                WHERE ADJ_ID IN ({stale_ids})
+                  AND RUN_STATUS = 'Running'
+            """).collect()
+            session.sql(f"""
+                INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
+                    (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
+                SELECT ADJ_ID, 'Running', 'Failed', 'SYSTEM',
+                       'Stale Running row reaped by SP_RUN_PIPELINE'
+                FROM ADJUSTMENT_APP.ADJ_HEADER
+                WHERE ADJ_ID IN ({stale_ids}) AND RUN_STATUS = 'Failed'
+            """).collect()
+            # A dead run (typically an Entity Roll killed by a timeout) may
+            # have registered its DIMENSION.ADJUSTMENT row before dying — the
+            # fact writes rolled back with the transaction, but that dimension
+            # row would sit 'Running' forever. Fail it too.
+            session.sql(f"""
+                UPDATE DIMENSION.ADJUSTMENT d
+                SET d.RUN_STATUS = 'Failed'
+                WHERE d.RUN_STATUS = 'Running'
+                  AND d.ADJUSTMENT_ID IN (
+                      SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
+                      WHERE ADJ_ID IN ({stale_ids})
+                        AND DIMENSION_ADJ_ID IS NOT NULL)
+            """).collect()
+            # Best-effort: tell the submitters their run died and was reset.
+            try:
+                _np = json.dumps({"adj_ids": [str(r["ADJ_ID"]) for r in stale],
+                                  "status": "Failed"}).replace("'", "''")
+                session.sql(
+                    f"CALL ADJUSTMENT_APP.SP_NOTIFY('adjustment_outcome', '{_np}')"
+                ).collect()
+            except Exception as nerr:
+                print(f"Reaper notification skipped (non-fatal): {nerr}")
+            results.append({"step": "stale_reaper", "reaped": len(stale)})
+    except Exception as reap_err:
+        results.append({"step": "stale_reaper", "status": "failed",
+                        "error": str(reap_err)[:500]})
+
     # ── 1. OVERLAP BLOCKING ─────────────────────────────────────────────────
     #    Wrapped in try/except: overlap blocking is best-effort. If it fails,
     #    we still proceed to enumerate and process adjustments. The worst case
@@ -168,11 +255,13 @@ def main(session, scope, pipeline_types):
         )
     """).collect()
 
+    # Only real process types are claimable — FRTBALL (retired fan-out tag) is
+    # never claimed, so it can never be stranded in Running with no dispatcher.
     session.sql(f"""
         INSERT INTO TEMP_QUEUE (ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_ACTION)
         SELECT ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_ACTION
         FROM ADJUSTMENT_APP.ADJ_HEADER
-        WHERE PROCESS_TYPE IN ({pipeline_in})
+        WHERE PROCESS_TYPE IN ({real_in})
           AND RUN_STATUS IN ('Pending', 'Approved')
           AND BLOCKED_BY_ADJ_ID IS NULL
           AND IS_DELETED = FALSE
@@ -190,10 +279,13 @@ def main(session, scope, pipeline_types):
 
     # ── 3. CLAIM: PROMOTE ELIGIBLE ROWS TO Running ───────────────────────────
     #    Re-check eligibility in the WHERE so the claim is atomic per row — only
-    #    rows still Pending/Approved + unblocked are promoted.
-    session.sql("""
+    #    rows still Pending/Approved + unblocked are promoted, and each promoted
+    #    row is stamped with THIS run's claim token. A row a concurrent run
+    #    claimed a moment earlier fails the WHERE and keeps that run's token.
+    session.sql(f"""
         UPDATE ADJUSTMENT_APP.ADJ_HEADER h
         SET RUN_STATUS = 'Running',
+            CLAIM_TOKEN = '{claim_token}',
             START_DATE = CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9)
         WHERE h.ADJ_ID IN (SELECT ADJ_ID FROM TEMP_QUEUE)
           AND h.RUN_STATUS IN ('Pending', 'Approved')
@@ -218,10 +310,16 @@ def main(session, scope, pipeline_types):
     #      • (VaR, Scale,   20260326)  ─┐
     #      • (VaR, Flatten, 20260326)  ─┼─→ all 3 run concurrently
     #      • (VaR, Scale,   20260325)  ─┘
+    #
+    #    Combos come from the rows THIS run actually claimed (CLAIM_TOKEN
+    #    match), not from the pre-claim TEMP_QUEUE snapshot — rows a concurrent
+    #    run won are simply not ours to dispatch.
     to_process = session.sql(f"""
         SELECT DISTINCT PROCESS_TYPE, ADJUSTMENT_ACTION, COBID
-        FROM TEMP_QUEUE
-        WHERE PROCESS_TYPE IN ({real_in})
+        FROM ADJUSTMENT_APP.ADJ_HEADER
+        WHERE CLAIM_TOKEN = '{claim_token}'
+          AND RUN_STATUS = 'Running'
+          AND IS_DELETED = FALSE
         ORDER BY PROCESS_TYPE, ADJUSTMENT_ACTION, COBID
     """).collect()
 
@@ -232,7 +330,7 @@ def main(session, scope, pipeline_types):
         act = row["ADJUSTMENT_ACTION"]
         cob = row["COBID"]
         job = session.sql(f"""
-            CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT('{pt}', '{act}', {cob})
+            CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT('{pt}', '{act}', {cob}, '{claim_token}')
         """).collect_nowait()
         async_jobs.append((pt, act, cob, job))
 
@@ -247,11 +345,15 @@ def main(session, scope, pipeline_types):
             results.append({"process_type": pt, "cobid": cob, "status": "ok"})
         except Exception as e:
             err = str(e)[:990].replace("'", "''")
-            # Mark the Running adjustments for this specific combo as Failed
+            # Mark OUR still-Running claims for this specific combo as Failed.
+            # Scoped by CLAIM_TOKEN so a concurrent run's in-flight work is
+            # never collateral damage.
             session.sql(f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                SET RUN_STATUS = 'Failed', ERRORMESSAGE = '{err}'
-                WHERE PROCESS_TYPE IN ('{pt}', 'FRTBALL')
+                SET RUN_STATUS = 'Failed', ERRORMESSAGE = '{err}',
+                    PROCESS_DATE = CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9)
+                WHERE CLAIM_TOKEN = '{claim_token}'
+                  AND PROCESS_TYPE = '{pt}'
                   AND ADJUSTMENT_ACTION = '{act}'
                   AND COBID = {cob}
                   AND RUN_STATUS = 'Running'

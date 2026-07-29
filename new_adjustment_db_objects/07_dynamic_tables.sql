@@ -71,7 +71,8 @@ GROUP BY
 CREATE OR ALTER DYNAMIC TABLE ADJUSTMENT_APP.DT_OVERLAP_ALERTS
     TARGET_LAG = '1 MINUTE'
     WAREHOUSE  = {{DT_WH}}
-    COMMENT    = 'Detects overlapping adjustments. Streamlit queries this to warn users before submission.'
+    REFRESH_MODE = FULL
+    COMMENT    = 'Detects overlapping adjustments (bounded to recent COBs). Streamlit queries this to warn users before submission.'
 AS
 WITH active_adjustments AS (
     SELECT
@@ -110,6 +111,12 @@ WITH active_adjustments AS (
     FROM ADJUSTMENT_APP.ADJ_HEADER
     WHERE IS_DELETED = FALSE
       AND RUN_STATUS IN ('Pending', 'Pending Approval', 'Approved', 'Running', 'Processed')
+      -- Bound the pair-join: unbounded, the N² self-join grew with ALL
+      -- Processed history and would eventually outrun its 1-minute lag. The
+      -- UI only warns about current work, so ~35 days of COBs is plenty.
+      -- (CURRENT_DATE forces FULL refresh — declared explicitly above; the
+      -- bounded input keeps the full recompute small.)
+      AND COBID >= TO_NUMBER(TO_CHAR(DATEADD(day, -35, CURRENT_DATE()), 'YYYYMMDD'))
 ),
 overlaps AS (
     SELECT

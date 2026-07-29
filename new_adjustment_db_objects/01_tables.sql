@@ -102,8 +102,14 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER (
     FILE_NAME                   VARCHAR(500) COLLATE 'en-ci',    -- For CSV uploads via Streamlit
     APPROVAL_ID                 NUMBER(38,0),                     -- Optional: set when requires_approval = true
     BLOCKED_BY_ADJ_ID           VARCHAR(36)  DEFAULT NULL,        -- FK to ADJ_HEADER.ADJ_ID; NULL = eligible to run
-    
+
     ADJUSTMENT_CATEGORY         VARCHAR(100)  COLLATE 'en-ci',   -- from ADJ_CATEGORY; required in UI
+
+    -- Concurrency: set by the run (SP_RUN_PIPELINE / SP_FORCE_PROCESS) that
+    -- claimed this row to Running. SP_PROCESS_ADJUSTMENT only touches rows
+    -- carrying its caller's token, so two concurrent runs can never process
+    -- (or fail) each other's claims.
+    CLAIM_TOKEN                 VARCHAR(36)  DEFAULT NULL,
 
     CONSTRAINT PK_ADJ_HEADER PRIMARY KEY (ADJ_ID)
 )
@@ -434,26 +440,77 @@ VALUES
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- 7. ADJ_SIGNOFF_STATUS — Self-contained COB sign-off tracking
+-- 7. ADJ_SIGNOFF_STATUS — COB sign-off lifecycle per scope
 --
--- Tracks whether a COB/scope is signed off (no more adjustments allowed).
--- Managed via the Admin page in Streamlit.
--- VW_SIGNOFF_STATUS reads from this table.
--- SP_SUBMIT_ADJUSTMENT checks this before allowing submissions.
+-- The FIRST sign-off for a COB/scope arrives from the upstream publish system
+-- (file feed → BATCH.PUBLISH_VAR_SIGNOFF_STATUS / PUBLISH_SIGNOFF_STATUS_
+-- EXCEPTION) and is synced into this table by SP_SYNC_SIGNOFF_STATUS
+-- (10_sp_signoff_sync.sql). Re-opening and re-signing-off then happen in the
+-- app:
+--
+--   SIGN_OFF_STATUS lifecycle:
+--     (no row / OPEN)   → open: adjustments allowed
+--     SIGNED_OFF        → blocked (source EXTERNAL feed, APP re-sign-off, or
+--                         ADMIN manual)
+--     REOPEN_REQUESTED  → still blocked; a re-open request awaits approval on
+--                         the Approval Queue page (4-eyes: approver ≠ requester)
+--     REOPENED          → open again; users add adjustments, then sign off
+--                         from the app → back to SIGNED_OFF (source APP)
+--
+-- SP_SUBMIT_ADJUSTMENT blocks on SIGNED_OFF / REOPEN_REQUESTED, and also
+-- checks the upstream BATCH tables live so the gate holds even before the
+-- sync task has run. Every transition is logged to ADJ_SIGNOFF_HISTORY.
 -- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS (
     COBID                       NUMBER(38,0) NOT NULL,
     PROCESS_TYPE                VARCHAR(30)  NOT NULL,
-    SIGN_OFF_STATUS             VARCHAR(30)  NOT NULL DEFAULT 'OPEN',   -- OPEN or SIGNED_OFF
+    -- Sign-off granularity is COBID + ENTITY + scope (matching the upstream
+    -- publish feed). '*' = the whole scope at that COB (admin overrides and
+    -- pre-migration rows).
+    ENTITY_CODE                 VARCHAR(50)  NOT NULL DEFAULT '*',
+    SIGN_OFF_STATUS             VARCHAR(30)  NOT NULL DEFAULT 'OPEN',   -- OPEN | SIGNED_OFF | REOPEN_REQUESTED | REOPENED
     SIGN_OFF_BY                 VARCHAR(50),
     SIGN_OFF_TIMESTAMP          TIMESTAMP_NTZ(9),
     CREATED_DATE                TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
     UPDATED_DATE                TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
 
-    CONSTRAINT PK_ADJ_SIGNOFF_STATUS PRIMARY KEY (COBID, PROCESS_TYPE)
+    -- Lifecycle metadata
+    SIGNOFF_SOURCE              VARCHAR(20),                 -- EXTERNAL | APP | ADMIN
+    REOPEN_REQUESTED_BY         VARCHAR(50),
+    REOPEN_REQUESTED_AT         TIMESTAMP_NTZ(9),
+    REOPEN_REASON               VARCHAR(500) COLLATE 'en-ci',
+    REOPEN_APPROVED_BY          VARCHAR(50),
+    REOPEN_APPROVED_AT          TIMESTAMP_NTZ(9),
+
+    CONSTRAINT PK_ADJ_SIGNOFF_STATUS PRIMARY KEY (COBID, PROCESS_TYPE, ENTITY_CODE)
 )
-COMMENT = 'COB sign-off status per scope. SIGN_OFF_STATUS = SIGNED_OFF means no new adjustments allowed. Managed via Admin page.';
+COMMENT = 'Sign-off lifecycle per COB + scope + entity (ENTITY_CODE = ''*'' means the whole scope). SIGNED_OFF / REOPEN_REQUESTED block new adjustments for that entity; REOPENED allows them again until the app re-sign-off. First sign-off synced from the upstream publish feed.';
+
+-- Migration for already-deployed tables where CREATE OR ALTER cannot swap the
+-- primary key: the column addition (DEFAULT '*') is handled above; the PK is
+-- informational in Snowflake (not enforced), so a leftover 2-column PK is
+-- harmless — the MERGE/UPDATE logic keys on all three columns regardless.
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 7a. ADJ_SIGNOFF_HISTORY — append-only audit of sign-off transitions
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY (
+    SIGNOFF_HISTORY_ID          NUMBER(38,0) NOT NULL AUTOINCREMENT,
+    COBID                       NUMBER(38,0) NOT NULL,
+    PROCESS_TYPE                VARCHAR(30)  NOT NULL,
+    ENTITY_CODE                 VARCHAR(50)  DEFAULT '*',
+    OLD_STATUS                  VARCHAR(30),
+    NEW_STATUS                  VARCHAR(30)  NOT NULL,
+    ACTION_BY                   VARCHAR(50),
+    ACTION_AT                   TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
+    COMMENT                     VARCHAR(1000) COLLATE 'en-ci',
+
+    CONSTRAINT PK_ADJ_SIGNOFF_HISTORY PRIMARY KEY (SIGNOFF_HISTORY_ID)
+)
+COMMENT = 'Append-only audit trail of every sign-off status transition (external sync, re-open request/approval/rejection, app re-sign-off, admin overrides).';
 
 
 
@@ -476,6 +533,104 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_APPROVERS (
     CONSTRAINT PK_ADJ_APPROVERS PRIMARY KEY (APPROVER_ID)
 )
 COMMENT = 'Authorized approvers for the Approval Queue. NULL PROCESS_TYPE means the user can approve any scope. Self-approval is always blocked.';
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 7b. ADJ_ADMINS — Users allowed to use the Admin page
+--
+-- The Admin page manages approvers, sign-off, and scope config — the controls
+-- the 4-eyes workflow depends on — so access to it must itself be controlled.
+-- While this table is EMPTY the app runs in bootstrap mode (page open to all,
+-- with a prominent warning) so the first admin can be registered.
+-- Deliberately NOT seeded and never wiped on redeploy: membership is
+-- operational data owned by the admins themselves.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_ADMINS (
+    ADMIN_ID                    NUMBER(38,0) NOT NULL AUTOINCREMENT,
+    USERNAME                    VARCHAR(50)  NOT NULL,
+    IS_ACTIVE                   BOOLEAN      DEFAULT TRUE,
+    ADDED_BY                    VARCHAR(50),
+    ADDED_DATE                  TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+
+    CONSTRAINT PK_ADJ_ADMINS PRIMARY KEY (ADMIN_ID)
+)
+COMMENT = 'Users authorized to use the Admin page. Empty table = bootstrap mode (open access with warning) until the first admin is added. Not seeded; survives redeploys.';
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 7c. NOTIFICATIONS — config switch, per-user preferences, send log
+--
+-- Email notifications are sent via a Snowflake email notification integration
+-- (created by the DBA team — see docs/TICKET_email_notification_integration.md)
+-- through SP_NOTIFY (11_sp_notify.sql). The whole feature is gated by the
+-- NOTIFICATIONS_ENABLED switch below, so this can be deployed BEFORE the
+-- integration exists and enabled from the Admin page once it does.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- App-level key/value config. Seeded ONLY for missing keys — values are
+-- admin-managed operational state and must survive redeploys.
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_APP_CONFIG (
+    CONFIG_KEY                  VARCHAR(100) NOT NULL,
+    CONFIG_VALUE                VARCHAR(500),
+    DESCRIPTION                 VARCHAR(500),
+    UPDATED_BY                  VARCHAR(50),
+    UPDATED_AT                  TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
+
+    CONSTRAINT PK_ADJ_APP_CONFIG PRIMARY KEY (CONFIG_KEY)
+)
+COMMENT = 'App-level configuration switches, managed on the Admin page. Seed inserts missing keys only — never overwrites values on redeploy.';
+
+MERGE INTO ADJUSTMENT_APP.ADJ_APP_CONFIG t
+USING (
+    SELECT 'NOTIFICATIONS_ENABLED' AS CONFIG_KEY, 'false' AS CONFIG_VALUE,
+           'Master switch for email notifications. Set to true once the DBA-created email notification integration exists.' AS DESCRIPTION
+    UNION ALL
+    SELECT 'EMAIL_INTEGRATION', 'ADJ_EMAIL_INT',
+           'Name of the Snowflake email notification integration SP_NOTIFY sends through.'
+    UNION ALL
+    SELECT 'SIGNOFF_FEED_TABLE', 'BATCH.PUBLISH_SIGNOF_STATUS',
+           'Unified upstream sign-off feed (COBID, ENTITY_CODE, PROCESS_TYPE, SUB_TYPE, PUBLISH_STATUS, SIGNOFF_UPDATE_TIME). Adjust here if the migration lands under a different name.'
+    UNION ALL
+    SELECT 'SIGNOFF_FEED_ENABLED', 'true',
+           'When true, SP_SUBMIT_ADJUSTMENT and SP_SYNC_SIGNOFF_STATUS consult the upstream feed table live. Set to false only while the unified feed table does not exist yet.'
+) s
+ON t.CONFIG_KEY = s.CONFIG_KEY
+WHEN NOT MATCHED THEN INSERT (CONFIG_KEY, CONFIG_VALUE, DESCRIPTION)
+VALUES (s.CONFIG_KEY, s.CONFIG_VALUE, s.DESCRIPTION);
+
+
+-- Who receives what. Recipients must be Snowflake users of this account with
+-- a VERIFIED profile email — Snowflake refuses delivery otherwise.
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_NOTIFICATION_PREFS (
+    PREF_ID                     NUMBER(38,0) NOT NULL AUTOINCREMENT,
+    USERNAME                    VARCHAR(50)  NOT NULL,   -- Snowflake username (as in ADJ_HEADER.USERNAME)
+    EMAIL                       VARCHAR(320) NOT NULL,   -- verified account-user email
+    NOTIFY_MY_OUTCOMES          BOOLEAN      DEFAULT TRUE,   -- my adjustments Processed / Failed
+    NOTIFY_APPROVALS            BOOLEAN      DEFAULT FALSE,  -- approver events: pending approvals, COB re-open requests
+    IS_ACTIVE                   BOOLEAN      DEFAULT TRUE,
+    ADDED_BY                    VARCHAR(50),
+    ADDED_DATE                  TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
+
+    CONSTRAINT PK_ADJ_NOTIFICATION_PREFS PRIMARY KEY (PREF_ID)
+)
+COMMENT = 'Per-user notification opt-ins, managed on the Admin page. Not seeded; survives redeploys.';
+
+
+-- Every send attempt (including skips while the feature is disabled) — the
+-- audit/debug trail for notifications.
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_NOTIFICATION_LOG (
+    NOTIFICATION_ID             NUMBER(38,0) NOT NULL AUTOINCREMENT,
+    EVENT_TYPE                  VARCHAR(50),
+    RECIPIENTS                  VARCHAR(2000),
+    SUBJECT                     VARCHAR(500),
+    STATUS                      VARCHAR(30),             -- SENT | FAILED | SKIPPED_DISABLED | NO_RECIPIENTS
+    ERROR                       VARCHAR(1000),
+    CREATED_AT                  TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
+
+    CONSTRAINT PK_ADJ_NOTIFICATION_LOG PRIMARY KEY (NOTIFICATION_ID)
+)
+COMMENT = 'Append-only log of every notification attempt from SP_NOTIFY.';
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -567,5 +722,10 @@ UNION ALL SELECT 'ADJ_STATUS_HISTORY', COUNT(*) FROM ADJUSTMENT_APP.ADJ_STATUS_H
 UNION ALL SELECT 'ADJUSTMENTS_SETTINGS', COUNT(*) FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
 UNION ALL SELECT 'ADJ_RECURRING_TEMPLATE', COUNT(*) FROM ADJUSTMENT_APP.ADJ_RECURRING_TEMPLATE
 UNION ALL SELECT 'ADJ_SIGNOFF_STATUS', COUNT(*) FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+UNION ALL SELECT 'ADJ_SIGNOFF_HISTORY', COUNT(*) FROM ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
 UNION ALL SELECT 'ADJ_APPROVERS', COUNT(*) FROM ADJUSTMENT_APP.ADJ_APPROVERS
+UNION ALL SELECT 'ADJ_ADMINS', COUNT(*) FROM ADJUSTMENT_APP.ADJ_ADMINS
+UNION ALL SELECT 'ADJ_APP_CONFIG', COUNT(*) FROM ADJUSTMENT_APP.ADJ_APP_CONFIG
+UNION ALL SELECT 'ADJ_NOTIFICATION_PREFS', COUNT(*) FROM ADJUSTMENT_APP.ADJ_NOTIFICATION_PREFS
+UNION ALL SELECT 'ADJ_NOTIFICATION_LOG', COUNT(*) FROM ADJUSTMENT_APP.ADJ_NOTIFICATION_LOG
 UNION ALL SELECT 'ADJ_CATEGORY', COUNT(*) FROM ADJUSTMENT_APP.ADJ_CATEGORY;

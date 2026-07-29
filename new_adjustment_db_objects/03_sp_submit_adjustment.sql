@@ -47,15 +47,15 @@ ACTION_MAP = {
     "direct":       "Direct",
 }
 
-# Pipeline groupings — used for blocking checks at submit time
+# Pipeline groupings — used for blocking checks at submit time.
+# (FRTBALL is retired: the app submits one adjustment per real FRTB sub-type.)
 PIPELINE_TYPES = {
     'VAR':         ['VaR'],
     'STRESS':      ['Stress'],
     'SENSITIVITY': ['Sensitivity'],
-    'FRTB':        ['FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL'],
-    'FRTBDRC':     ['FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL'],
-    'FRTBRRAO':    ['FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL'],
-    'FRTBALL':     ['FRTB', 'FRTBDRC', 'FRTBRRAO', 'FRTBALL'],
+    'FRTB':        ['FRTB', 'FRTBDRC', 'FRTBRRAO'],
+    'FRTBDRC':     ['FRTB', 'FRTBDRC', 'FRTBRRAO'],
+    'FRTBRRAO':    ['FRTB', 'FRTBDRC', 'FRTBRRAO'],
 }
 
 OVERLAP_DIMS_SUBMIT = [
@@ -130,17 +130,97 @@ def compute_scale_factor_adjusted(adj_type, scale_factor, cobid, source_cobid):
     else:
         return 0.0                               # Direct / Upload: not used
 
-def check_signoff(session, process_type, cobid):
-    """Return TRUE if the COB is signed off for this scope (no new adjustments allowed)."""
-    sql = f"""
-        SELECT COUNT(*) AS cnt
-        FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-        WHERE COBID  = {int(cobid)}
-          AND UPPER(PROCESS_TYPE) = '{_esc(process_type).upper()}'
-          AND UPPER(SIGN_OFF_STATUS) = 'SIGNED_OFF'
+def _app_cfg(session, key, default=""):
+    rows = session.sql(f"""
+        SELECT CONFIG_VALUE FROM ADJUSTMENT_APP.ADJ_APP_CONFIG
+        WHERE CONFIG_KEY = '{_esc(key)}'
+    """).collect()
+    v = rows[0]["CONFIG_VALUE"] if rows else None
+    return str(v) if v is not None else default
+
+
+def check_signoff(session, process_type, cobid, entity_code=None):
+    """Return TRUE if the COB is signed off for this scope+entity (blocked).
+
+    Sign-off granularity is COBID + ENTITY + scope, matching the upstream
+    publish feed. ENTITY_CODE '*' in the app table = the whole scope.
+
+    App lifecycle rules (ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS), exact-entity row
+    taking precedence over the '*' row:
+      REOPENED          → open — an approved in-app re-open overrides the
+                          upstream feed until the entity is signed off again
+      SIGNED_OFF        → blocked
+      REOPEN_REQUESTED  → blocked (re-open request awaiting approval)
+      OPEN / no row     → fall through to the upstream feed
+
+    A BROAD adjustment (no entity filter) touches every entity, so ANY
+    blocked row — entity-level or '*' — blocks it.
+
+    Upstream: the unified publish feed (ADJ_APP_CONFIG.SIGNOFF_FEED_TABLE,
+    default BATCH.PUBLISH_SIGNOF_STATUS) keyed by COBID + ENTITY_CODE +
+    PROCESS_TYPE. An upstream 'FRTB' row covers FRTB, FRTBDRC and FRTBRRAO
+    (no separate entries exist for DRC/RRAO). SUB_TYPE NULL/'' (VaR-style
+    rows) and 'NonCVA' count; 'CVA' rows do not. An upstream sign-off is
+    overridden by an app REOPENED row for the same entity (or '*').
+    The live feed check can be paused during the feed migration via
+    ADJ_APP_CONFIG.SIGNOFF_FEED_ENABLED = 'false' (the synced app rows keep
+    governing). A failing feed query RAISES — fail closed, never silently
+    wave a control gate through.
     """
-    result = session.sql(sql).collect()
-    return result[0]["CNT"] > 0 if result else False
+    pt_esc = _esc(process_type).upper()
+    ent = str(entity_code).strip() if entity_code and str(entity_code).strip() else None
+    BLOCKED = ("SIGNED_OFF", "REOPEN_REQUESTED")
+
+    app_rows = session.sql(f"""
+        SELECT UPPER(COALESCE(ENTITY_CODE, '*')) AS E, UPPER(SIGN_OFF_STATUS) AS S
+        FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+        WHERE COBID = {int(cobid)} AND UPPER(PROCESS_TYPE) = '{pt_esc}'
+    """).collect()
+    app = {str(r["E"]): str(r["S"]) for r in app_rows}
+
+    if ent is not None:
+        s = app.get(ent.upper())
+        if s in (None, "OPEN"):          # no entity-level statement → wildcard
+            s = app.get("*")
+        if s == "REOPENED":
+            return False
+        if s in BLOCKED:
+            return True
+    else:
+        if any(s in BLOCKED for s in app.values()):
+            return True
+
+    # ── Upstream unified feed (live) ─────────────────────────────────────
+    if _app_cfg(session, "SIGNOFF_FEED_ENABLED", "true").strip().lower() != "true":
+        return False
+    feed = _app_cfg(session, "SIGNOFF_FEED_TABLE",
+                    "BATCH.PUBLISH_SIGNOF_STATUS").strip()
+    if pt_esc in ("FRTB", "FRTBDRC", "FRTBRRAO"):
+        pt_match = f"UPPER(u.PROCESS_TYPE) IN ('FRTB', '{pt_esc}')"
+    else:
+        pt_match = f"UPPER(u.PROCESS_TYPE) = '{pt_esc}'"
+    ent_pred = (f"AND UPPER(u.ENTITY_CODE) = UPPER('{_esc(ent)}')"
+                if ent else "")
+    upstream = session.sql(f"""
+        SELECT 1
+        FROM {feed} u
+        WHERE u.COBID = {int(cobid)}
+          AND {pt_match}
+          AND (u.SUB_TYPE IS NULL OR TRIM(u.SUB_TYPE) = ''
+               OR UPPER(u.SUB_TYPE) = 'NONCVA')
+          AND UPPER(u.PUBLISH_STATUS) = 'SIGNEDOFF'
+          {ent_pred}
+          AND NOT EXISTS (
+              SELECT 1 FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS a
+              WHERE a.COBID = u.COBID
+                AND UPPER(a.PROCESS_TYPE) = '{pt_esc}'
+                AND UPPER(a.SIGN_OFF_STATUS) = 'REOPENED'
+                AND (UPPER(a.ENTITY_CODE) = UPPER(u.ENTITY_CODE)
+                     OR a.ENTITY_CODE = '*')
+          )
+        LIMIT 1
+    """).collect()
+    return bool(upstream)
 
 
 def main(session, p_adjustment):
@@ -190,6 +270,7 @@ def main(session, p_adjustment):
     Returns VARIANT:
       { "adj_id": "a1b2c3d4-...", "status": "Pending", "message": "..." }
     """
+    txn_open = False
     try:
         adj = json.loads(p_adjustment) if isinstance(p_adjustment, str) else p_adjustment
 
@@ -231,8 +312,8 @@ def main(session, p_adjustment):
             return {"adj_id": None, "status": "Error",
                     "message": f"Scope '{process_type}' is not active or not configured."}
 
-        # ── Check sign-off ───────────────────────────────────────────────
-        if check_signoff(session, process_type, cobid):
+        # ── Check sign-off (COB + entity + scope granularity) ────────────
+        if check_signoff(session, process_type, cobid, adj.get("entity_code")):
             # Still insert the header (for audit) but mark as rejected
             initial_status = STATUS_REJECTED_SO
         else:
@@ -284,29 +365,50 @@ def main(session, p_adjustment):
         # ── Duplicate reference cleanup ──────────────────────────────
         # If GLOBAL_REFERENCE is provided, soft-delete any existing adjustments
         # with the same COBID + GLOBAL_REFERENCE and remove their FACT data.
+        #
+        # DIMENSION.ADJUSTMENT and the FACT adjustment tables are keyed by the
+        # numeric DIMENSION_ADJ_ID assigned at processing time — never by the
+        # ADJ_HEADER UUID. A duplicate that was never processed has no
+        # dimension/fact rows, so only the header is soft-deleted.
+        #
+        # Skipped entirely when the submission is rejected by sign-off: a
+        # rejected submission must not destroy the adjustment it would have
+        # replaced. The whole cleanup + new-header insert runs in ONE explicit
+        # transaction so a failure anywhere rolls the replacement back.
         global_ref = adj.get("global_reference")
         replaced_adj_ids = []
-        if str(adjustment_type).lower() == 'direct' and global_ref and str(global_ref).strip():
+        dup_rows = []
+        if (str(adjustment_type).lower() == 'direct'
+                and global_ref and str(global_ref).strip()
+                and initial_status != STATUS_REJECTED_SO):
             dup_rows = session.sql(f"""
-                SELECT ADJ_ID, PROCESS_TYPE
+                SELECT ADJ_ID, PROCESS_TYPE, RUN_STATUS, DIMENSION_ADJ_ID
                 FROM ADJUSTMENT_APP.ADJ_HEADER
-                WHERE COBID = {cobid}
+                WHERE COBID = {int(cobid)}
                   AND UPPER(GLOBAL_REFERENCE) = UPPER('{_esc(global_ref)}')
                   AND UPPER(ADJUSTMENT_TYPE) = 'DIRECT'
                   AND IS_DELETED = FALSE
             """).collect()
 
+            # Never replace an adjustment that is mid-processing: the delete
+            # would race the pipeline's fact writes.
+            running = [str(d["ADJ_ID"]) for d in dup_rows
+                       if str(d["RUN_STATUS"]) == "Running"]
+            if running:
+                return {"adj_id": None, "status": "Error",
+                        "message": (f"An adjustment with reference "
+                                    f"'{global_ref}' is currently processing. "
+                                    f"Wait for it to finish before replacing it.")}
+
+        session.sql("BEGIN").collect()
+        txn_open = True
+        try:
             for dup in dup_rows:
                 dup_adj_id = str(dup["ADJ_ID"])
                 dup_pt     = str(dup["PROCESS_TYPE"])
+                old_status = str(dup["RUN_STATUS"]) if dup["RUN_STATUS"] else "Unknown"
+                dup_dim_id = dup["DIMENSION_ADJ_ID"]     # NULL if never processed
                 replaced_adj_ids.append(dup_adj_id)
-
-                # Capture old status for audit trail
-                old_status_rows = session.sql(f"""
-                    SELECT RUN_STATUS FROM ADJUSTMENT_APP.ADJ_HEADER
-                    WHERE ADJ_ID = '{_esc(dup_adj_id)}'
-                """).collect()
-                old_status = old_status_rows[0]["RUN_STATUS"] if old_status_rows else "Unknown"
 
                 # Soft-delete in ADJ_HEADER
                 session.sql(f"""
@@ -317,35 +419,39 @@ def main(session, p_adjustment):
                     WHERE ADJ_ID = '{_esc(dup_adj_id)}'
                 """).collect()
 
-                # Soft-delete in DIMENSION.ADJUSTMENT
-                session.sql(f"""
-                    UPDATE DIMENSION.ADJUSTMENT
-                    SET IS_DELETED = TRUE
-                    WHERE ADJUSTMENT_ID = '{_esc(dup_adj_id)}'
-                """).collect()
+                if dup_dim_id is not None:
+                    # Soft-delete in DIMENSION.ADJUSTMENT (numeric key)
+                    session.sql(f"""
+                        UPDATE DIMENSION.ADJUSTMENT
+                        SET IS_DELETED = TRUE
+                        WHERE ADJUSTMENT_ID = {int(dup_dim_id)}
+                    """).collect()
 
-                # Delete from FACT adjustment tables (lookup from settings)
-                try:
-                    settings = session.sql(f"""
+                    # Delete from FACT adjustment tables (lookup from settings).
+                    # No IS_ACTIVE filter: a deactivated scope's fact rows must
+                    # still be cleaned. Failures here raise → transaction rolls
+                    # back → nothing is destroyed (no silent partial replace).
+                    settings_dup = session.sql(f"""
                         SELECT ADJUSTMENTS_TABLE, ADJUSTMENTS_SUMMARY_TABLE
                         FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
                         WHERE UPPER(PROCESS_TYPE) = UPPER('{_esc(dup_pt)}')
-                          AND IS_ACTIVE = TRUE
                     """).collect()
-                    if settings:
-                        adj_tbl = settings[0]["ADJUSTMENTS_TABLE"]
-                        adj_sum = settings[0]["ADJUSTMENTS_SUMMARY_TABLE"]
+                    if not settings_dup:
+                        raise Exception(
+                            f"Cannot replace ADJ {dup_adj_id}: no "
+                            f"ADJUSTMENTS_SETTINGS row for scope '{dup_pt}' "
+                            f"to locate its fact adjustment tables.")
+                    adj_tbl = settings_dup[0]["ADJUSTMENTS_TABLE"]
+                    adj_sum = settings_dup[0]["ADJUSTMENTS_SUMMARY_TABLE"]
+                    session.sql(f"""
+                        DELETE FROM {adj_tbl}
+                        WHERE ADJUSTMENT_ID = {int(dup_dim_id)}
+                    """).collect()
+                    if adj_sum:
                         session.sql(f"""
-                            DELETE FROM {adj_tbl}
-                            WHERE ADJUSTMENT_ID = '{_esc(dup_adj_id)}'
+                            DELETE FROM {adj_sum}
+                            WHERE ADJUSTMENT_ID = {int(dup_dim_id)}
                         """).collect()
-                        if adj_sum:
-                            session.sql(f"""
-                                DELETE FROM {adj_sum}
-                                WHERE ADJUSTMENT_ID = '{_esc(dup_adj_id)}'
-                            """).collect()
-                except Exception as cleanup_err:
-                    pass  # Non-fatal — data may not exist yet if never processed
 
                 # Audit trail
                 session.sql(f"""
@@ -356,6 +462,10 @@ def main(session, p_adjustment):
                          '{_esc(username)}',
                          'Replaced by new upload ADJ_ID={_esc(adj_id)}')
                 """).collect()
+        except Exception:
+            session.sql("ROLLBACK").collect()
+            txn_open = False
+            raise
 
         col_map = {
             "ADJ_ID":                      adj_id,
@@ -432,6 +542,27 @@ def main(session, p_adjustment):
                  'Submitted via Streamlit — {_esc(adjustment_type)} / {_esc(process_type)}')
         """).collect()
 
+        # Replacement cleanup + new header + audit all committed together —
+        # a failure anywhere above rolled everything back.
+        session.sql("COMMIT").collect()
+        txn_open = False
+
+        # ── Best-effort notification (never fails the submission) ────────
+        # New Pending Approval item → tell the scope's approvers.
+        if initial_status == STATUS_PENDING_APPROV:
+            try:
+                _np = json.dumps({
+                    "process_type":    process_type,
+                    "cobid":           cobid,
+                    "adjustment_type": adjustment_type,
+                    "submitted_by":    username,
+                }).replace("'", "''")
+                session.sql(
+                    f"CALL ADJUSTMENT_APP.SP_NOTIFY('approval_pending', '{_np}')"
+                ).collect()
+            except Exception as notify_err:
+                print(f"Approval notification skipped (non-fatal): {notify_err}")
+
         # Refer to the blocking adjustment by its report number (DIMENSION_ADJ_ID)
         # — the integer users recognise — and only fall back to the internal hash
         # when the blocker hasn't been processed yet (no report number assigned).
@@ -458,9 +589,19 @@ def main(session, p_adjustment):
         }
 
     except KeyError as ke:
+        if txn_open:
+            try:
+                session.sql("ROLLBACK").collect()
+            except Exception:
+                pass
         return {"adj_id": None, "status": "Error",
                 "message": f"Missing required field: {ke}"}
     except Exception as e:
+        if txn_open:
+            try:
+                session.sql("ROLLBACK").collect()
+            except Exception:
+                pass
         return {"adj_id": None, "status": "Error",
                 "message": f"Submission failed: {str(e)}"}
 $$;

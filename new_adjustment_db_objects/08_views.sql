@@ -19,18 +19,26 @@ USE SCHEMA ADJUSTMENT_APP;
 -- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_SIGNOFF_STATUS
-    COMMENT = 'Unified sign-off status. IS_SIGNED_OFF = TRUE means no new adjustments allowed for that COB/scope. Reads from ADJ_SIGNOFF_STATUS.'
+    COMMENT = 'Sign-off lifecycle per COB + scope + entity (''*'' = whole scope). IS_SIGNED_OFF = TRUE (SIGNED_OFF or REOPEN_REQUESTED) blocks new adjustments for that entity. Reads from ADJ_SIGNOFF_STATUS.'
 AS
 SELECT
     s.COBID,
     s.PROCESS_TYPE,
+    s.ENTITY_CODE,
     s.SIGN_OFF_STATUS,
     CASE
-        WHEN UPPER(s.SIGN_OFF_STATUS) = 'SIGNED_OFF' THEN TRUE
+        WHEN UPPER(s.SIGN_OFF_STATUS) IN ('SIGNED_OFF', 'REOPEN_REQUESTED') THEN TRUE
         ELSE FALSE
     END AS IS_SIGNED_OFF,
     s.SIGN_OFF_BY,
-    s.SIGN_OFF_TIMESTAMP
+    s.SIGN_OFF_TIMESTAMP,
+    s.SIGNOFF_SOURCE,
+    s.REOPEN_REQUESTED_BY,
+    s.REOPEN_REQUESTED_AT,
+    s.REOPEN_REASON,
+    s.REOPEN_APPROVED_BY,
+    s.REOPEN_APPROVED_AT,
+    s.UPDATED_DATE
 FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS s;
 
 
@@ -444,6 +452,11 @@ SELECT
 
     -- Error info
     h.ERRORMESSAGE,
+
+    -- Blocking (overlap serialisation): who this row is waiting for
+    h.BLOCKED_BY_ADJ_ID,
+    (SELECT b.DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER b
+      WHERE b.ADJ_ID = h.BLOCKED_BY_ADJ_ID)                  AS BLOCKED_BY_DIM_ID,
 
     -- Computed: current lifecycle stage
     CASE

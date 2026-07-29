@@ -17,10 +17,15 @@
 
 USE SCHEMA ADJUSTMENT_APP;
 
+-- The claim-token argument changed the signature; drop the old 3-arg overload
+-- so stale callers fail loudly instead of running the pre-token code.
+DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT(STRING, STRING, INT);
+
 CREATE OR ALTER PROCEDURE ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT(
     process_type STRING,
     adjustment_action STRING,
-    cobid INT
+    cobid INT,
+    claim_token STRING DEFAULT NULL
 )
 RETURNS VARCHAR(16777216)
 LANGUAGE PYTHON
@@ -164,33 +169,57 @@ def log_status_history(session, adj_ids, old_status, new_status, changed_by="SYS
 # ── PowerBI refresh config (per scope) ───────────────────────────────────
 # FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS:
 #   • arg1 (P_DATA_GROUP_NAME) must equal BATCH.RUN_LOG.proc_parameters — which
-#     we log as `process_type` — so its run-log lookup finds this run.
+#     we log via pbi_data_group() below — so its run-log lookup finds this run.
 #   • arg3 (P_INSERT_SOURCE) drives the inserts into POWERBI_PUBLISH_DETAIL /
 #     POWERBI_ACTION via METADATA.POWERBI_INSERT_SOURCES + the action view, which
 #     only recognise the var / stress / sensitivity data groups.
 # Only those three scopes are wired to PowerBI today; others are skipped (logged)
 # rather than calling the proc with an unsupported source.
+#
+# Data-group CASING matters and mirrors the legacy callers exactly:
+#   • FACT.PROCESS_ADJUSTMENTS called with 'VAR' / 'STRESS' (uppercase);
+#   • the legacy Sensitivity loader logged proc_parameters = 'sensitivity' and
+#     called UPDATE_POWERBI_FOR_ADJUSTMENTS('sensitivity', ...) — LOWERCASE.
+#     UPDATE_POWERBI_FOR_ADJUSTMENTS compares `data_group_name = 'sensitivity'`
+#     (exact) to add the extra 'sensitivity_detail' POWERBI_PUBLISH_INFO row,
+#     and the MERGE keys on data_group_name — an uppercase 'SENSITIVITY' would
+#     silently skip the detail row and write rows the reports don't read.
 PBI_INSERT_SOURCE = {
     'VAR':         'LOAD_VAR_ADJUSTMENT',
     'STRESS':      'LOAD_STRESS_ADJUSTMENT',
     'SENSITIVITY': 'LOAD_SENSITIVITY_ADJUSTMENT',
 }
+PBI_DATA_GROUP = {
+    'VAR':         'VAR',
+    'STRESS':      'STRESS',
+    'SENSITIVITY': 'sensitivity',
+}
 
-def trigger_powerbi_refresh(session, process_type, run_log_id):
-    """Queue a PowerBI refresh for VaR / Stress / Sensitivity.
 
-    Mirrors the original FACT.PROCESS_ADJUSTMENTS call: P_DATA_GROUP_NAME is the
-    UPPERCASE scope (e.g. 'VAR'), which must equal BATCH.RUN_LOG.proc_parameters
-    (also logged uppercase below), and P_INSERT_SOURCE = LOAD_<SCOPE>_ADJUSTMENT.
+def pbi_data_group(process_type):
+    """Data-group name for BATCH.RUN_LOG.proc_parameters and the PowerBI call —
+    exact legacy casing per scope; unpublished scopes fall back to uppercase."""
+    return PBI_DATA_GROUP.get(process_type.upper(), process_type.upper())
+
+
+def trigger_powerbi_refresh(session, process_type, run_log_id, adj_ids_str=None):
+    """Queue a PowerBI refresh for VaR / Stress / Sensitivity, mirroring the
+    legacy FACT.PROCESS_ADJUSTMENTS hand-off. Returns a status string that the
+    caller stores in its result JSON.
+
+    The refresh record in METADATA.POWERBI_ACTION is what tells the reporting
+    side something is pending — so a failure to queue it must NOT be silent:
+    the adjustment stays Processed (its numbers ARE applied) but the failure is
+    stamped on ADJ_HEADER.ERRORMESSAGE so the pipeline pages surface it.
     """
-    data_group = process_type.upper()
-    insert_source = PBI_INSERT_SOURCE.get(data_group)
+    data_group = pbi_data_group(process_type)
+    insert_source = PBI_INSERT_SOURCE.get(process_type.upper())
     if not insert_source:
         print(f"PowerBI refresh skipped — '{process_type}' is not a published "
               f"data group (only VaR / Stress / Sensitivity).")
-        return
+        return "skipped (scope not published to PowerBI)"
     try:
-        session.sql(f"""
+        res = session.sql(f"""
             CALL FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS(
                 '{data_group}',
                 'RaptorReporting',
@@ -199,10 +228,46 @@ def trigger_powerbi_refresh(session, process_type, run_log_id):
                 '0'
             )
         """).collect()
+        # The proc reports problems as a return STRING (e.g. "Error : no Run
+        # Log IDs supplied"), not as an exception — check it.
+        ret = str(res[0][0]) if res and res[0] is not None else ""
+        if ret.strip().lower() != "success":
+            raise Exception(f"UPDATE_POWERBI_FOR_ADJUSTMENTS returned: {ret}")
         print(f"PowerBI refresh queued — data_group={data_group} "
               f"source={insert_source} run_log={run_log_id}")
+        return "queued"
     except Exception as pbi_err:
-        print(f"Warning: PowerBI refresh trigger failed: {pbi_err}")
+        err_txt = str(pbi_err)
+        print(f"Warning: PowerBI refresh trigger failed: {err_txt}")
+        if adj_ids_str:
+            try:
+                warn = ("Processed, but queueing the PowerBI report refresh "
+                        "failed — reports may show stale data until the next "
+                        "refresh. Detail: " + err_txt)[:990].replace("'", "''")
+                session.sql(f"""
+                    UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                    SET ERRORMESSAGE = '{warn}'
+                    WHERE ADJ_ID IN ({adj_ids_str})
+                """).collect()
+            except Exception as stamp_err:
+                print(f"Warning: could not record PBI failure on header: {stamp_err}")
+        return f"failed: {err_txt[:300]}"
+
+
+def notify_outcome(session, adj_ids, status):
+    """Best-effort: email the submitters about their adjustments' outcome via
+    SP_NOTIFY (which is itself gated by the NOTIFICATIONS_ENABLED switch and
+    never raises). A notification problem must never affect processing."""
+    if not adj_ids:
+        return
+    try:
+        payload = json.dumps({"adj_ids": [str(a) for a in adj_ids],
+                              "status": status}).replace("'", "''")
+        session.sql(
+            f"CALL ADJUSTMENT_APP.SP_NOTIFY('adjustment_outcome', '{payload}')"
+        ).collect()
+    except Exception as ne:
+        print(f"Outcome notification skipped (non-fatal): {ne}")
 
 
 def insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str):
@@ -216,66 +281,73 @@ def insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str):
 
     Match uses COBID + PROCESS_TYPE + USERNAME + CREATED_DATE — the four columns
     that are always present and inserted verbatim from ADJ_HEADER.
-    """
-    session.sql(f"""
-        INSERT INTO DIMENSION.ADJUSTMENT (
-            COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, SOURCE_COBID,
-            ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE, BOOK_CODE,
-            TENOR_CODE, CURRENCY_CODE, CURVE_CODE, INSTRUMENT_CODE,
-            MEASURE_TYPE_CODE, ADJUSTMENT_VALUE_IN_USD,
-            CREATED_DATE, PROCESS_DATE, USERNAME, RUN_STATUS, REASON,
-            MUREX_FAMILY, MUREX_GROUP, TRADE_TYPOLOGY, TRADE_CODE,
-            SCALE_FACTOR, BATCH_REGION_AREA, SIMULATION_NAME, TRADER_CODE,
-            VAR_COMPONENT_ID, VAR_SUB_COMPONENT_ID, SCENARIO_DATE_ID,
-            GUARANTEED_ENTITY, STRATEGY, REGION_KEY,
-            UNDERLYING_TENOR_CODE, PRODUCT_CATEGORY_ATTRIBUTES,
-            ADJUSTMENT_OCCURRENCE, GLOBAL_REFERENCE, FILE_NAME,
-            SIMULATION_SOURCE, DAY_TYPE
-        )
-        SELECT
-            COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, SOURCE_COBID,
-            ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE, BOOK_CODE,
-            TENOR_CODE, CURRENCY_CODE, CURVE_CODE, INSTRUMENT_CODE,
-            MEASURE_TYPE_CODE, ADJUSTMENT_VALUE_IN_USD,
-            CREATED_DATE, CURRENT_TIMESTAMP(), USERNAME, 'Running',
-            LEFT(IFF(ADJUSTMENT_CATEGORY IS NOT NULL AND ADJUSTMENT_CATEGORY <> '',
-                     ADJUSTMENT_CATEGORY || ' | ' || REASON, REASON), 1000),
-            MUREX_FAMILY, MUREX_GROUP, TRADE_TYPOLOGY, TRADE_CODE,
-            SCALE_FACTOR, BATCH_REGION_AREA, SIMULATION_NAME, TRADER_CODE,
-            VAR_COMPONENT_ID, VAR_SUB_COMPONENT_ID, SCENARIO_DATE_ID,
-            GUARANTEED_ENTITY, STRATEGY, REGION_KEY,
-            UNDERLYING_TENOR_CODE, PRODUCT_CATEGORY_ATTRIBUTES,
-            ADJUSTMENT_OCCURRENCE, GLOBAL_REFERENCE, FILE_NAME,
-            SIMULATION_SOURCE, DAY_TYPE
-        FROM ADJUSTMENT_APP.ADJ_HEADER
-        WHERE ADJ_ID IN ({adj_ids_str})
-    """).collect()
 
+    One INSERT + readback PER adjustment: the readback's DESC LIMIT 1 then
+    always resolves to the row just inserted, so two headers by the same user
+    at the same timestamp still map to two distinct dimension IDs (a single
+    batch insert used to merge them onto the newest ID). Any failure RAISES —
+    a partial map would let fact rows be written with NULL ADJUSTMENT_ID and
+    still be marked Processed.
+    """
     dim_adj_map = {}
     for aid in adj_ids:
-        try:
-            row = session.sql(f"""
-                SELECT da.ADJUSTMENT_ID
-                FROM DIMENSION.ADJUSTMENT da
-                INNER JOIN ADJUSTMENT_APP.ADJ_HEADER ah
-                    ON  da.COBID        = ah.COBID
-                    AND da.PROCESS_TYPE = ah.PROCESS_TYPE
-                    AND da.USERNAME     = ah.USERNAME
-                    AND da.CREATED_DATE = ah.CREATED_DATE
-                WHERE ah.ADJ_ID = '{aid}'
-                ORDER BY da.ADJUSTMENT_ID DESC
-                LIMIT 1
-            """).collect()
-            if row:
-                dim_adj_id = row[0]['ADJUSTMENT_ID']
-                dim_adj_map[aid] = dim_adj_id
-                session.sql(f"""
-                    UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                    SET DIMENSION_ADJ_ID = {dim_adj_id}
-                    WHERE ADJ_ID = '{aid}'
-                """).collect()
-        except Exception as e:
-            print(f"Warning: could not retrieve DIMENSION_ADJ_ID for {aid}: {e}")
+        session.sql(f"""
+            INSERT INTO DIMENSION.ADJUSTMENT (
+                COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, SOURCE_COBID,
+                ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE, BOOK_CODE,
+                TENOR_CODE, CURRENCY_CODE, CURVE_CODE, INSTRUMENT_CODE,
+                MEASURE_TYPE_CODE, ADJUSTMENT_VALUE_IN_USD,
+                CREATED_DATE, PROCESS_DATE, USERNAME, RUN_STATUS, REASON,
+                MUREX_FAMILY, MUREX_GROUP, TRADE_TYPOLOGY, TRADE_CODE,
+                SCALE_FACTOR, BATCH_REGION_AREA, SIMULATION_NAME, TRADER_CODE,
+                VAR_COMPONENT_ID, VAR_SUB_COMPONENT_ID, SCENARIO_DATE_ID,
+                GUARANTEED_ENTITY, STRATEGY, REGION_KEY,
+                UNDERLYING_TENOR_CODE, PRODUCT_CATEGORY_ATTRIBUTES,
+                ADJUSTMENT_OCCURRENCE, GLOBAL_REFERENCE, FILE_NAME,
+                SIMULATION_SOURCE, DAY_TYPE
+            )
+            SELECT
+                COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, SOURCE_COBID,
+                ENTITY_CODE, SOURCE_SYSTEM_CODE, DEPARTMENT_CODE, BOOK_CODE,
+                TENOR_CODE, CURRENCY_CODE, CURVE_CODE, INSTRUMENT_CODE,
+                MEASURE_TYPE_CODE, ADJUSTMENT_VALUE_IN_USD,
+                CREATED_DATE, CURRENT_TIMESTAMP(), USERNAME, 'Running',
+                LEFT(IFF(ADJUSTMENT_CATEGORY IS NOT NULL AND ADJUSTMENT_CATEGORY <> '',
+                         ADJUSTMENT_CATEGORY || ' | ' || REASON, REASON), 1000),
+                MUREX_FAMILY, MUREX_GROUP, TRADE_TYPOLOGY, TRADE_CODE,
+                SCALE_FACTOR, BATCH_REGION_AREA, SIMULATION_NAME, TRADER_CODE,
+                VAR_COMPONENT_ID, VAR_SUB_COMPONENT_ID, SCENARIO_DATE_ID,
+                GUARANTEED_ENTITY, STRATEGY, REGION_KEY,
+                UNDERLYING_TENOR_CODE, PRODUCT_CATEGORY_ATTRIBUTES,
+                ADJUSTMENT_OCCURRENCE, GLOBAL_REFERENCE, FILE_NAME,
+                SIMULATION_SOURCE, DAY_TYPE
+            FROM ADJUSTMENT_APP.ADJ_HEADER
+            WHERE ADJ_ID = '{aid}'
+        """).collect()
+
+        row = session.sql(f"""
+            SELECT da.ADJUSTMENT_ID
+            FROM DIMENSION.ADJUSTMENT da
+            INNER JOIN ADJUSTMENT_APP.ADJ_HEADER ah
+                ON  da.COBID        = ah.COBID
+                AND da.PROCESS_TYPE = ah.PROCESS_TYPE
+                AND da.USERNAME     = ah.USERNAME
+                AND da.CREATED_DATE = ah.CREATED_DATE
+            WHERE ah.ADJ_ID = '{aid}'
+            ORDER BY da.ADJUSTMENT_ID DESC
+            LIMIT 1
+        """).collect()
+        if not row:
+            raise Exception(
+                f"DIMENSION.ADJUSTMENT readback found no row for ADJ {aid} — "
+                f"aborting the batch before any fact write.")
+        dim_adj_id = row[0]['ADJUSTMENT_ID']
+        dim_adj_map[aid] = dim_adj_id
+        session.sql(f"""
+            UPDATE ADJUSTMENT_APP.ADJ_HEADER
+            SET DIMENSION_ADJ_ID = {dim_adj_id}
+            WHERE ADJ_ID = '{aid}'
+        """).collect()
     return dim_adj_map
 
 
@@ -380,9 +452,15 @@ def _erol_mark_failed(session, ctx):
         pass
 
 
-def main(session, process_type, adjustment_action, cobid):
+def main(session, process_type, adjustment_action, cobid, claim_token=None):
     """
     Process Running adjustments (already claimed by SP_RUN_PIPELINE).
+
+    claim_token: when provided (the pipeline/force-process always provide it),
+    only rows carrying that token are processed — a concurrent run's claims are
+    invisible to this call, so two runs can never double-apply or fail each
+    other's work. A NULL token (direct manual CALL) processes any Running row
+    for the combo, matching the old behaviour.
 
     Flow:
       1. Read config from ADJUSTMENTS_SETTINGS
@@ -438,27 +516,33 @@ def main(session, process_type, adjustment_action, cobid):
         run_log_id = session.sql("SELECT BATCH.SEQ_RUN_LOG.NEXTVAL AS X").collect()[0]["X"]
         result["run_log_id"] = run_log_id
 
-        # proc_parameters is logged UPPERCASE so it matches the P_DATA_GROUP_NAME
-        # (also uppercase) that trigger_powerbi_refresh passes to
-        # FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS — the proc keys its run-log lookup
-        # on this column.
+        # proc_parameters must equal the P_DATA_GROUP_NAME that
+        # trigger_powerbi_refresh passes to FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS
+        # — the proc keys its run-log lookup on this column. pbi_data_group()
+        # reproduces the legacy casing per scope ('VAR'/'STRESS' uppercase,
+        # 'sensitivity' LOWERCASE).
         session.sql(f"""
             CALL BATCH.LOAD_RUN_LOG(
                 {run_log_id},
                 {cobid},
                 'FACT.SP_PROCESS_ADJUSTMENT',
-                '{process_type.upper()}',
+                '{pbi_data_group(process_type)}',
                 0, 0, 'false', ''
             )
         """).collect()
 
-        # ── 2. READ PENDING ADJUSTMENTS ──────────────────────────────────
+        # ── 2. READ CLAIMED ADJUSTMENTS ──────────────────────────────────
+        # Exactly this call's combo: process type, action, COB — and, when a
+        # claim token was passed, only rows claimed by that run. (FRTBALL
+        # fan-out is retired: the app submits three real FRTB adjustments.)
         df_adj = session.table(adj_base_tbl_name).filter(
             (col('COBID') == cobid) &
-            ((upper(col('PROCESS_TYPE')) == process_type.upper()) |
-             (upper(col('PROCESS_TYPE')) == 'FRTBALL')) &
+            (upper(col('PROCESS_TYPE')) == process_type.upper()) &
+            (upper(col('ADJUSTMENT_ACTION')) == adjustment_action.upper()) &
             (col('RUN_STATUS') == 'Running')
         )
+        if claim_token:
+            df_adj = df_adj.filter(col('CLAIM_TOKEN') == claim_token)
 
         # Column lists for joining
         adj_columns  = df_adj.columns
@@ -490,6 +574,30 @@ def main(session, process_type, adjustment_action, cobid):
             session.sql(f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER SET RUN_LOG_ID = {run_log_id}
                 WHERE ADJ_ID IN ({adj_ids_str})
+            """).collect()
+
+            # ── Prior-run cleanup (retry scenario) ───────────────────────
+            # A previous run of any of these adjustments may have written fact
+            # rows before failing, keyed by the DIMENSION_ADJ_ID stored on the
+            # header at that time. Remove them (and retire the old dimension
+            # rows) BEFORE new dimension IDs are generated — otherwise a retry
+            # double-counts the upload. Must precede insert_to_dimension_and_
+            # get_ids, which overwrites ADJ_HEADER.DIMENSION_ADJ_ID.
+            session.sql(f"""
+                DELETE FROM {fact_adj_tbl_name}
+                WHERE COBID = {cobid}
+                  AND ADJUSTMENT_ID IN (
+                      SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
+                      WHERE ADJ_ID IN ({adj_ids_str})
+                        AND DIMENSION_ADJ_ID IS NOT NULL)
+            """).collect()
+            session.sql(f"""
+                UPDATE DIMENSION.ADJUSTMENT
+                SET IS_DELETED = TRUE
+                WHERE ADJUSTMENT_ID IN (
+                      SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
+                      WHERE ADJ_ID IN ({adj_ids_str})
+                        AND DIMENSION_ADJ_ID IS NOT NULL)
             """).collect()
 
             # Insert DIMENSION.ADJUSTMENT first to obtain the NUMBER ADJUSTMENT_ID
@@ -578,12 +686,9 @@ def main(session, process_type, adjustment_action, cobid):
                     if c.split('_')[-1].upper() in ('KEY', 'ID'):
                         target_cols.append(c); select_exprs.append(f"-1 AS {c}")
 
-                # Remove any existing rows for this batch's adjustments, then insert
-                session.sql(f"""
-                    DELETE FROM {fact_adj_tbl_name}
-                    WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
-                """).collect()
-
+                # Prior-run rows were already removed above (keyed by the
+                # PREVIOUS DIMENSION_ADJ_ID); the freshly generated IDs cannot
+                # have fact rows yet, so no delete is needed here.
                 insert_sql = f"""
                     INSERT INTO {fact_adj_tbl_name} ({', '.join(target_cols)})
                     WITH x AS (
@@ -602,15 +707,36 @@ def main(session, process_type, adjustment_action, cobid):
                 """).collect()[0]["CNT"]
 
             # ── Common post-processing ───────────────────────────────────
+            # Per-ADJUSTMENT counts (zero-init then grouped update) — a batch
+            # total stamped on every header made multi-adjustment batches lie.
             session.sql(f"""
-                UPDATE ADJUSTMENT_APP.ADJ_HEADER SET RECORD_COUNT = {rows_count}
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER SET RECORD_COUNT = 0
                 WHERE ADJ_ID IN ({adj_ids_str})
+            """).collect()
+            session.sql(f"""
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER h
+                SET RECORD_COUNT = src.CNT
+                FROM (SELECT ADJUSTMENT_ID, COUNT(*) AS CNT
+                      FROM {fact_adj_tbl_name}
+                      WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
+                      GROUP BY ADJUSTMENT_ID) src
+                WHERE src.ADJUSTMENT_ID = h.DIMENSION_ADJ_ID
+                  AND h.ADJ_ID IN ({adj_ids_str})
             """).collect()
             if dim_adj_map:
                 session.sql(f"""
                     UPDATE DIMENSION.ADJUSTMENT
-                    SET RECORD_COUNT = {rows_count}, RUN_STATUS = 'Processed'
+                    SET RECORD_COUNT = 0, RUN_STATUS = 'Processed'
                     WHERE ADJUSTMENT_ID IN ({dim_ids_str})
+                """).collect()
+                session.sql(f"""
+                    UPDATE DIMENSION.ADJUSTMENT d
+                    SET RECORD_COUNT = src.CNT
+                    FROM (SELECT ADJUSTMENT_ID, COUNT(*) AS CNT
+                          FROM {fact_adj_tbl_name}
+                          WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
+                          GROUP BY ADJUSTMENT_ID) src
+                    WHERE src.ADJUSTMENT_ID = d.ADJUSTMENT_ID
                 """).collect()
             update_header_status(session, df_adj_direct, cobid, "Processed")
             log_status_history(session, adj_ids, "Running", "Processed")
@@ -622,7 +748,9 @@ def main(session, process_type, adjustment_action, cobid):
                 """).collect()
             except Exception as rl_err:
                 print(f"Warning: Run log close failed: {rl_err}")
-            trigger_powerbi_refresh(session, process_type, run_log_id)
+            result["powerbi_refresh"] = trigger_powerbi_refresh(
+                session, process_type, run_log_id, adj_ids_str)
+            notify_outcome(session, adj_ids, "Processed")
 
         # ═════════════════════════════════════════════════════════════════
         # SCALE (Scale / Flatten / Roll) PATH
@@ -655,6 +783,29 @@ def main(session, process_type, adjustment_action, cobid):
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER
                 SET RUN_LOG_ID = {run_log_id}
                 WHERE ADJ_ID IN ({adj_ids_str})
+            """).collect()
+
+            # ── Prior-run cleanup (retry scenario) ───────────────────────
+            # A previous failed run may have left fact rows keyed by the
+            # DIMENSION_ADJ_ID stored on these headers. Remove them BEFORE the
+            # temp-table build below — the netting/supersede reads existing
+            # adjustment data and must not see a dead run's rows — and before
+            # insert_to_dimension_and_get_ids overwrites the stored ID.
+            session.sql(f"""
+                DELETE FROM {fact_adj_tbl_name}
+                WHERE COBID = {cobid}
+                  AND ADJUSTMENT_ID IN (
+                      SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
+                      WHERE ADJ_ID IN ({adj_ids_str})
+                        AND DIMENSION_ADJ_ID IS NOT NULL)
+            """).collect()
+            session.sql(f"""
+                UPDATE DIMENSION.ADJUSTMENT
+                SET IS_DELETED = TRUE
+                WHERE ADJUSTMENT_ID IN (
+                      SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
+                      WHERE ADJ_ID IN ({adj_ids_str})
+                        AND DIMENSION_ADJ_ID IS NOT NULL)
             """).collect()
 
             # ── Insert into DIMENSION.ADJUSTMENT first ───────────────────
@@ -724,13 +875,17 @@ def main(session, process_type, adjustment_action, cobid):
             perm_col_list = ', '.join(_perm)
 
             # ── Base FROM/WHERE ──────────────────────────────────────────
+            # Scoped to THIS batch's ADJ_IDs — the exact rows claimed and
+            # collected into adj_ids above. Filtering on RUN_STATUS/PROCESS_TYPE
+            # alone would also pick up rows a concurrent run claimed (double
+            # processing) or concurrent Direct rows for the same scope.
             from_where = f"""
                 FROM {fact_tbl_name} fact
                 INNER JOIN {adj_base_tbl_name} adjust
                 WHERE adjust.COBID = {cobid}
+                  AND adjust.ADJ_ID IN ({adj_ids_str})
                   AND adjust.IS_DELETED = FALSE
                   AND adjust.RUN_STATUS = 'Running'
-                  AND (adjust.PROCESS_TYPE = '{process_type}' OR adjust.PROCESS_TYPE = 'FRTBALL')
                   AND {metric_usd_name} IS NOT NULL
             """
 
@@ -925,6 +1080,19 @@ def main(session, process_type, adjustment_action, cobid):
             # position → adjusted(target) = factor × adjusted(source) − original(target),
             # carrying every source position forward (source-only nets to Σsource).
             roll_leg = ""
+            if has_cross_cob and (not fact_adjusted_tbl_name
+                                  or fact_adjusted_tbl_name == fact_tbl_name):
+                # Without a distinct combined/adjusted view the roll leg cannot
+                # be built — processing would silently degrade to leg ③ alone
+                # and WIPE the target COB instead of rolling the source
+                # forward. Fail loudly instead (mirrors the EntityRoll guard).
+                raise Exception(
+                    f"Cross-COB Roll for {process_type} requires "
+                    f"FACT_ADJUSTED_TABLE to be configured in "
+                    f"ADJUSTMENTS_SETTINGS (distinct from FACT_TABLE). "
+                    f"Refusing to process — without the adjusted view the "
+                    f"roll would flatten the target COB instead of carrying "
+                    f"the source COB forward.")
             if has_cross_cob and fact_adjusted_tbl_name and fact_adjusted_tbl_name != fact_tbl_name:
                 # The combined view may not expose every column the _ADJUSTMENT
                 # table expects. Select the columns it HAS and default the rest to
@@ -958,8 +1126,14 @@ def main(session, process_type, adjustment_action, cobid):
             select_with_keys = "*" if key_name == pk_expr else f"{pk_expr}, *"
             exclude_keys = "*" if key_name == pk_expr else f"* EXCLUDE ({key_name})"
 
+            # Unique per run (RUN_LOG_ID) and session-TEMPORARY: with the old
+            # fixed permanent name, two concurrent combos of the same scope
+            # (e.g. VaR Scale for two COBs, dispatched in parallel by
+            # SP_RUN_PIPELINE) overwrote each other's staging table between
+            # build and insert — silently mixing batches.
+            _scale_temp = f"{fact_adj_tbl_name}_TEMP_{int(run_log_id)}"
             insert_sql = f"""
-            CREATE OR REPLACE TABLE {fact_adj_tbl_name}_TEMP
+            CREATE OR REPLACE TEMPORARY TABLE {_scale_temp}
             (
                 COBID, ADJUSTMENT_ID, ADJUSTMENT_CREATED_TIMESTAMP,
                 {insert_non_metric}, {metric_col_list},
@@ -1023,29 +1197,23 @@ def main(session, process_type, adjustment_action, cobid):
 
             session.sql(insert_sql).collect()
 
-            # ── Delete current batch's own previous rows (re-run scenario) ─
-            session.sql(f"""
-                DELETE FROM {fact_adj_tbl_name}
-                WHERE COBID = {cobid}
-                  AND ADJUSTMENT_ID IN ({dim_ids_str})
-            """).collect()
+            # (Prior-run rows were removed before the temp build, keyed by the
+            #  previous DIMENSION_ADJ_ID — the fresh IDs have no rows yet.)
 
-            # Delete from summary table
-            if fact_adj_summary_name:
-                fact_adj_summary_tbl.delete(
-                    fact_adj_summary_tbl["COBID"] == df_adj_scale["COBID"],
-                    df_adj_scale
-                )
+            # NOTE: the whole-COB summary delete used to happen HERE — minutes
+            # before the rebuild at the end, leaving the summary empty for the
+            # entire detail phase (and permanently, on a mid-batch failure).
+            # It now runs right next to the rebuild, inside one transaction.
 
             # ── Insert from temp table ───────────────────────────────────
             perm_insert = f"""
             INSERT INTO {fact_adj_tbl_name}
             ({perm_col_list})
             SELECT {perm_col_list}
-            FROM {fact_adj_tbl_name}_TEMP
+            FROM {_scale_temp}
             """
             session.sql(perm_insert).collect()
-            session.sql(f"DROP TABLE IF EXISTS {fact_adj_tbl_name}_TEMP").collect()
+            session.sql(f"DROP TABLE IF EXISTS {_scale_temp}").collect()
 
             # ── SCD2 key fix for cross-COB (Roll) adjustments ────────────
             scd2_update = f"""
@@ -1096,7 +1264,12 @@ def main(session, process_type, adjustment_action, cobid):
               AND tgt.COMMON_INSTRUMENT_KEY = src.COMMON_INSTRUMENT_KEY
               AND tgt.COMMON_INSTRUMENT_FCD_KEY = src.COMMON_INSTRUMENT_FCD_KEY
               AND tgt.COBID = src.COBID
+              AND tgt.ADJUSTMENT_ID IN ({dim_ids_str})
             """
+            # ^ Scoped to THIS batch's rows: without the ADJUSTMENT_ID filter
+            #   the UPDATE also rewrote earlier same-COB adjustments' rows that
+            #   happen to share the trade/instrument keys, stranding them with
+            #   source-COB SCD2 versions that later supersedes can't match.
             # Only cross-COB Rolls rewrite SCD2 keys. For same-COB Scale/Flatten
             # batches (the common case) the inner adj_cte is empty (ad.COBID =
             # ad.SOURCE_COBID), so this UPDATE is a no-op — but Snowflake still
@@ -1124,14 +1297,19 @@ def main(session, process_type, adjustment_action, cobid):
             # adjustments are untouched (they are not in this batch's row set).
             _supersede_dims = [k for k in pk_parts if k.upper() != 'COBID']
             if _supersede_dims:
-                # dim_ids_str holds DIMENSION.ADJUSTMENT NUMBERs — no quoting needed
+                # dim_ids_str holds DIMENSION.ADJUSTMENT NUMBERs — no quoting needed.
+                # EQUAL_NULL: NULL-safe equality. Netting COALESCEs NULL key
+                # parts into the surrogate key, so the supersede must treat
+                # NULL = NULL as a match too — plain `=` never matches NULLs
+                # and left older NULL-keyed rows alive next to the new ones
+                # (double counting).
                 _pos_join = " AND ".join(
-                    [f"fa.{k} = cur.{k}" for k in _supersede_dims]
+                    [f"EQUAL_NULL(fa.{k}, cur.{k})" for k in _supersede_dims]
                 )
                 session.sql(f"""
                     DELETE FROM {fact_adj_tbl_name} fa
                     WHERE fa.COBID = {cobid}
-                      AND fa.ADJUSTMENT_ID NOT IN ({dim_ids_str})
+                      AND COALESCE(fa.ADJUSTMENT_ID, -1) NOT IN ({dim_ids_str})
                       AND EXISTS (
                           SELECT 1 FROM {fact_adj_tbl_name} cur
                           WHERE cur.COBID = {cobid}
@@ -1140,7 +1318,10 @@ def main(session, process_type, adjustment_action, cobid):
                       )
                 """).collect()
 
-            # ── Rebuild summary ──────────────────────────────────────────
+            # ── Rebuild summary (atomic delete + insert) ─────────────────
+            # One transaction: readers never see the COB's summary empty, and
+            # a failure between the two statements rolls the delete back
+            # instead of leaving the summary permanently missing.
             if fact_adj_summary_name:
                 summary_non_metric = ', '.join([
                     c for c in fact_adj_summary_cols
@@ -1155,7 +1336,17 @@ def main(session, process_type, adjustment_action, cobid):
                 WHERE COBID = {cobid}
                 GROUP BY ALL
                 """
-                session.sql(summary_insert).collect()
+                session.sql("BEGIN").collect()
+                try:
+                    session.sql(f"""
+                        DELETE FROM {fact_adj_summary_name}
+                        WHERE COBID = {cobid}
+                    """).collect()
+                    session.sql(summary_insert).collect()
+                    session.sql("COMMIT").collect()
+                except Exception:
+                    session.sql("ROLLBACK").collect()
+                    raise
 
             # ── Count rows inserted and update RECORD_COUNT ──────────────
             rows_count_row = session.sql(f"""
@@ -1165,18 +1356,37 @@ def main(session, process_type, adjustment_action, cobid):
                   AND ADJUSTMENT_ID IN ({dim_ids_str})
             """).collect()
             rows_count = rows_count_row[0]["CNT"] if rows_count_row else 0
+            # Per-ADJUSTMENT counts (zero-init then grouped update) — a batch
+            # total stamped on every header made multi-adjustment batches lie.
             session.sql(f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                SET RECORD_COUNT = {rows_count}
+                SET RECORD_COUNT = 0
                 WHERE ADJ_ID IN ({adj_ids_str})
             """).collect()
-            # Update RECORD_COUNT + RUN_STATUS in DIMENSION.ADJUSTMENT
+            session.sql(f"""
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER h
+                SET RECORD_COUNT = src.CNT
+                FROM (SELECT ADJUSTMENT_ID, COUNT(*) AS CNT
+                      FROM {fact_adj_tbl_name}
+                      WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
+                      GROUP BY ADJUSTMENT_ID) src
+                WHERE src.ADJUSTMENT_ID = h.DIMENSION_ADJ_ID
+                  AND h.ADJ_ID IN ({adj_ids_str})
+            """).collect()
             if dim_adj_map:
                 session.sql(f"""
                     UPDATE DIMENSION.ADJUSTMENT
-                    SET RECORD_COUNT = {rows_count},
-                        RUN_STATUS   = 'Processed'
+                    SET RECORD_COUNT = 0, RUN_STATUS = 'Processed'
                     WHERE ADJUSTMENT_ID IN ({dim_ids_str})
+                """).collect()
+                session.sql(f"""
+                    UPDATE DIMENSION.ADJUSTMENT d
+                    SET RECORD_COUNT = src.CNT
+                    FROM (SELECT ADJUSTMENT_ID, COUNT(*) AS CNT
+                          FROM {fact_adj_tbl_name}
+                          WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
+                          GROUP BY ADJUSTMENT_ID) src
+                    WHERE src.ADJUSTMENT_ID = d.ADJUSTMENT_ID
                 """).collect()
             result["rows_inserted"] = rows_count
 
@@ -1193,7 +1403,9 @@ def main(session, process_type, adjustment_action, cobid):
                 """).collect()
             except Exception as rl_err:
                 print(f"Warning: Run log close failed: {rl_err}")
-            trigger_powerbi_refresh(session, process_type, run_log_id)
+            result["powerbi_refresh"] = trigger_powerbi_refresh(
+                session, process_type, run_log_id, adj_ids_str)
+            notify_outcome(session, adj_ids, "Processed")
 
         # ═════════════════════════════════════════════════════════════════
         # ENTITY ROLL PATH (EROL) — destructive replace
@@ -1225,8 +1437,34 @@ def main(session, process_type, adjustment_action, cobid):
                 result["message"] = 'No Running EntityRoll adjustments found'
                 return json.dumps(result)
 
-            adj_ids = [row["ADJ_ID"] for row in df_adj_er.select("ADJ_ID").collect()]
-            adj_ids_str = ", ".join(f"'{a}'" for a in adj_ids)
+            # EntityRoll processes ONE adjustment per call (entity-level,
+            # destructive). Deterministically select the OLDEST claimed roll;
+            # every other claimed roll is returned to 'Approved' with its claim
+            # released, so the next 1-minute poll re-claims and processes it —
+            # nothing is silently skipped or falsely marked Processed.
+            er_rows = df_adj_er.sort(col('CREATED_DATE').asc(),
+                                     col('ADJ_ID').asc()).collect()
+            er_row      = er_rows[0]
+            adj_ids     = [str(er_row["ADJ_ID"])]
+            adj_ids_str = f"'{adj_ids[0]}'"
+
+            requeue_ids = [str(r["ADJ_ID"]) for r in er_rows[1:]]
+            if requeue_ids:
+                requeue_in = ", ".join(f"'{a}'" for a in requeue_ids)
+                session.sql(f"""
+                    UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                    SET RUN_STATUS = 'Approved', CLAIM_TOKEN = NULL, START_DATE = NULL
+                    WHERE ADJ_ID IN ({requeue_in}) AND RUN_STATUS = 'Running'
+                """).collect()
+                session.sql(f"""
+                    INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
+                        (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, CHANGED_AT, COMMENT)
+                    SELECT ADJ_ID, 'Running', 'Approved', 'SYSTEM', CURRENT_TIMESTAMP(),
+                           'Re-queued — EntityRoll processes one adjustment per run'
+                    FROM ADJUSTMENT_APP.ADJ_HEADER
+                    WHERE ADJ_ID IN ({requeue_in})
+                """).collect()
+                result["requeued"] = requeue_ids
 
             # Store RUN_LOG_ID in ADJ_HEADER for traceability
             session.sql(f"""
@@ -1235,11 +1473,8 @@ def main(session, process_type, adjustment_action, cobid):
                 WHERE ADJ_ID IN ({adj_ids_str})
             """).collect()
 
-            # EntityRoll processes one adjustment at a time (entity-level operation)
-            er_row = df_adj_er.collect()[0]
             source_cobid = er_row["SOURCE_COBID"]
             entity_code  = er_row["ENTITY_CODE"]
-            prior_dim_id = er_row["DIMENSION_ADJ_ID"]   # set if a previous run failed mid-way
 
             if not entity_code:
                 raise Exception("EntityRoll requires ENTITY_CODE")
@@ -1271,6 +1506,16 @@ def main(session, process_type, adjustment_action, cobid):
                 raise Exception(
                     f"EntityRoll: metric column {er_metric_usd} not found in "
                     f"{fact_adjusted_tbl_name}")
+            # The metric columns must exist on the ADJUSTMENTS_TABLE the legs
+            # insert into — a settings/view mismatch would otherwise surface as
+            # a confusing "invalid identifier" mid-roll.
+            for _m in {er_metric, er_metric_usd}:
+                if _m not in fact_adj_cols:
+                    raise Exception(
+                        f"EntityRoll: metric column {_m} (from "
+                        f"ADJUSTMENTS_SETTINGS) does not exist on "
+                        f"{fact_adj_tbl_name} — check METRIC_NAME/"
+                        f"METRIC_USD_NAME for scope {process_type}.")
             er_metrics     = [er_metric_usd] if er_metric == er_metric_usd \
                              else [er_metric, er_metric_usd]
             er_metric_cols = ', '.join(er_metrics)
@@ -1430,10 +1675,18 @@ def main(session, process_type, adjustment_action, cobid):
             WHERE fact.COBID = {int(source_cobid)} AND {er_pred}
               AND fact.{er_metric_usd} IS NOT NULL AND fact.{er_metric_usd} <> 0
             """
+            # Stage names are suffixed with this run's RUN_LOG_ID: temporary
+            # tables are SESSION-scoped, and SP_RUN_PIPELINE runs sibling
+            # combos (e.g. FRTB / FRTBDRC / FRTBRRAO Entity Rolls) CONCURRENTLY
+            # in the same session — with a fixed name, one combo's stage
+            # replaced another's between its CTAS and its INSERT, producing
+            # column-count mismatches (112 columns vs a 94-column table).
+            _roll_stage = f"EROL_ROLL_STAGE_{int(run_log_id)}"
+            _flat_stage = f"EROL_FLAT_STAGE_{int(run_log_id)}"
             _erlog(session, _erctx, "stage_roll (combined view @ source)",
-                   f"CREATE OR REPLACE TEMPORARY TABLE EROL_ROLL_STAGE AS {er_roll_select}")
+                   f"CREATE OR REPLACE TEMPORARY TABLE {_roll_stage} AS {er_roll_select}")
             er_roll_insert = (f"INSERT INTO {fact_adj_tbl_name} ({ins_cols}) "
-                              f"SELECT * FROM EROL_ROLL_STAGE")
+                              f"SELECT * FROM {_roll_stage}")
 
             er_flatten_insert = None
             if do_flatten:
@@ -1458,9 +1711,9 @@ def main(session, process_type, adjustment_action, cobid):
                     # Fallback: flatten reads the combined/adjusted view, so it must
                     # be staged outside the transaction to prune (same as the roll).
                     _erlog(session, _erctx, "stage_flatten (adjusted view @ target)",
-                           f"CREATE OR REPLACE TEMPORARY TABLE EROL_FLAT_STAGE AS {er_flat_select}")
+                           f"CREATE OR REPLACE TEMPORARY TABLE {_flat_stage} AS {er_flat_select}")
                     er_flatten_insert = (f"INSERT INTO {fact_adj_tbl_name} ({ins_cols}) "
-                                         f"SELECT * FROM EROL_FLAT_STAGE")
+                                         f"SELECT * FROM {_flat_stage}")
 
             # ── Atomic wipe + insert (fast: temp-table inserts only) ──────
             session.sql("BEGIN").collect()
@@ -1503,6 +1756,14 @@ def main(session, process_type, adjustment_action, cobid):
             except Exception:
                 session.sql("ROLLBACK").collect()
                 raise
+            finally:
+                # Session-scoped temps would otherwise linger for the session's
+                # lifetime; drop them so long-lived sessions stay clean.
+                for _stage in (_roll_stage, _flat_stage):
+                    try:
+                        session.sql(f"DROP TABLE IF EXISTS {_stage}").collect()
+                    except Exception:
+                        pass
 
             result["reconcile"] = {"rows_wiped": rows_wiped, "flattened": do_flatten}
             print(f"EntityRoll: wiped {rows_wiped} row(s) for entity "
@@ -1608,7 +1869,9 @@ def main(session, process_type, adjustment_action, cobid):
                 """).collect()
             except Exception as rl_err:
                 print(f"Warning: Run log close failed: {rl_err}")
-            trigger_powerbi_refresh(session, process_type, run_log_id)
+            result["powerbi_refresh"] = trigger_powerbi_refresh(
+                session, process_type, run_log_id, adj_ids_str)
+            notify_outcome(session, adj_ids, "Processed")
 
         else:
             result["message"] = f"Invalid adjustment_action: {adjustment_action}"
@@ -1623,14 +1886,18 @@ def main(session, process_type, adjustment_action, cobid):
         if adjustment_action.lower() == 'entityroll' and '_erctx' in dir():
             _erol_mark_failed(session, _erctx)
 
-        # Try to mark as Failed
+        # Try to mark as Failed — scoped exactly like the claim read (combo +
+        # claim token), so a concurrent run's Running rows are untouched.
         try:
             if 'adj_base_tbl_name' in dir():
                 df_adj_err = session.table(adj_base_tbl_name).filter(
                     (col('COBID') == cobid) &
                     (upper(col('PROCESS_TYPE')) == process_type.upper()) &
+                    (upper(col('ADJUSTMENT_ACTION')) == adjustment_action.upper()) &
                     (col('RUN_STATUS') == 'Running')
                 )
+                if claim_token:
+                    df_adj_err = df_adj_err.filter(col('CLAIM_TOKEN') == claim_token)
                 update_header_status(session, df_adj_err, cobid, "Failed", error_msg)
             if adj_ids:
                 log_status_history(session, adj_ids, "Running", "Failed")
@@ -1643,6 +1910,8 @@ def main(session, process_type, adjustment_action, cobid):
                 """).collect()
         except Exception as cleanup_err:
             print(f"Cleanup failed: {cleanup_err}")
+
+        notify_outcome(session, adj_ids, "Failed")
 
         # Close run log with failure status (do NOT trigger PowerBI refresh)
         try:
