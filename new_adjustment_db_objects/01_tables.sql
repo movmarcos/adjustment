@@ -465,10 +465,6 @@ VALUES
 CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS (
     COBID                       NUMBER(38,0) NOT NULL,
     PROCESS_TYPE                VARCHAR(30)  NOT NULL,
-    -- Sign-off granularity is COBID + ENTITY + scope (matching the upstream
-    -- publish feed). '*' = the whole scope at that COB (admin overrides and
-    -- pre-migration rows).
-    ENTITY_CODE                 VARCHAR(50)  NOT NULL DEFAULT '*',
     SIGN_OFF_STATUS             VARCHAR(30)  NOT NULL DEFAULT 'OPEN',   -- OPEN | SIGNED_OFF | REOPEN_REQUESTED | REOPENED
     SIGN_OFF_BY                 VARCHAR(50),
     SIGN_OFF_TIMESTAMP          TIMESTAMP_NTZ(9),
@@ -483,14 +479,19 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS (
     REOPEN_APPROVED_BY          VARCHAR(50),
     REOPEN_APPROVED_AT          TIMESTAMP_NTZ(9),
 
-    CONSTRAINT PK_ADJ_SIGNOFF_STATUS PRIMARY KEY (COBID, PROCESS_TYPE, ENTITY_CODE)
+    -- Sign-off granularity is COBID + ENTITY + scope (matching the upstream
+    -- publish feed). '*' = the whole scope at that COB (admin overrides and
+    -- pre-migration rows). NOTE: new columns must stay at the END of this
+    -- definition — CREATE OR ALTER can only APPEND columns, never reorder.
+    ENTITY_CODE                 VARCHAR(50)  NOT NULL DEFAULT '*',
+
+    -- Renamed constraint (was PK_ADJ_SIGNOFF_STATUS on COBID+PROCESS_TYPE):
+    -- CREATE OR ALTER cannot change a constraint's columns in place, but it
+    -- CAN drop the old-named one and add a new-named one. PKs are
+    -- informational in Snowflake, so this is metadata-only.
+    CONSTRAINT PK_ADJ_SIGNOFF_STATUS_ENT PRIMARY KEY (COBID, PROCESS_TYPE, ENTITY_CODE)
 )
 COMMENT = 'Sign-off lifecycle per COB + scope + entity (ENTITY_CODE = ''*'' means the whole scope). SIGNED_OFF / REOPEN_REQUESTED block new adjustments for that entity; REOPENED allows them again until the app re-sign-off. First sign-off synced from the upstream publish feed.';
-
--- Migration for already-deployed tables where CREATE OR ALTER cannot swap the
--- primary key: the column addition (DEFAULT '*') is handled above; the PK is
--- informational in Snowflake (not enforced), so a leftover 2-column PK is
--- harmless — the MERGE/UPDATE logic keys on all three columns regardless.
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -501,12 +502,14 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY (
     SIGNOFF_HISTORY_ID          NUMBER(38,0) NOT NULL AUTOINCREMENT,
     COBID                       NUMBER(38,0) NOT NULL,
     PROCESS_TYPE                VARCHAR(30)  NOT NULL,
-    ENTITY_CODE                 VARCHAR(50)  DEFAULT '*',
     OLD_STATUS                  VARCHAR(30),
     NEW_STATUS                  VARCHAR(30)  NOT NULL,
     ACTION_BY                   VARCHAR(50),
     ACTION_AT                   TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
     COMMENT                     VARCHAR(1000) COLLATE 'en-ci',
+    -- At the END on purpose: CREATE OR ALTER can only APPEND columns, and an
+    -- earlier revision of this table may already be deployed without it.
+    ENTITY_CODE                 VARCHAR(50)  DEFAULT '*',
 
     CONSTRAINT PK_ADJ_SIGNOFF_HISTORY PRIMARY KEY (SIGNOFF_HISTORY_ID)
 )
