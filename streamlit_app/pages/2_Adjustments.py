@@ -77,6 +77,17 @@ if _status_param and st.session_state.get("_applied_status_param") != _status_pa
         st.session_state["mw_status"] = _wanted
     st.session_state["_applied_status_param"] = _status_param
 
+# Clear-filters: the button (below) sets a flag + reruns; the reset must
+# happen HERE, before the filter widgets are instantiated on this run.
+_FILTER_WIDGET_KEYS = ["mw_status", "mw_scope", "mw_type", "mw_cob",
+                       "mw_entity", "mw_dept", "mw_user"]
+if st.session_state.pop("_adj_clear_filters", False):
+    for _fk in _FILTER_WIDGET_KEYS:
+        st.session_state[_fk] = []
+    st.session_state["mw_mine"] = False
+    st.session_state["mw_deleted"] = False
+
+section_title("Filters", "search")
 f1, f2, f3, f4 = st.columns(4)
 with f1:
     filter_status = st.multiselect(
@@ -97,8 +108,11 @@ with f3:
         default=[], key="mw_type",
         format_func=lambda v: _type_labels.get(v, v))
 with f4:
-    mine_only = st.checkbox("Only my adjustments", value=False,
+    mine_only = st.checkbox("Only my adjustments", value=False, key="mw_mine",
                             help="When checked, shows only adjustments you submitted.")
+    show_deleted = st.checkbox(
+        "Show deleted", value=False, key="mw_deleted",
+        help="Include deleted adjustments. Hidden by default.")
 
 f5, f6, f7, f8 = st.columns(4)
 with f5:
@@ -111,7 +125,19 @@ with f7:
 with f8:
     filter_user = st.multiselect("User", user_opts, default=[], key="mw_user")
 
-st.markdown("<br/>", unsafe_allow_html=True)
+_applied_n = sum(bool(st.session_state.get(k)) for k in _FILTER_WIDGET_KEYS) \
+    + (1 if mine_only else 0) + (1 if show_deleted else 0)
+fc1, fc2 = st.columns([5, 1])
+with fc1:
+    st.caption(f"{_applied_n} filter(s) applied." if _applied_n else
+               "No filters applied — showing the latest 200 adjustments.")
+with fc2:
+    if st.button("Clear filters", key="adj_clear_btn", use_container_width=True,
+                 disabled=not _applied_n):
+        st.session_state["_adj_clear_filters"] = True
+        safe_rerun()
+
+st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # LOAD DATA
@@ -685,10 +711,6 @@ def render_adj_card(row, expanded=False):
 
 # ── Browse + act ───────────────────────────────────────────────────────────────
 
-show_deleted = st.checkbox(
-    "Show deleted", value=False,
-    help="Include deleted adjustments. Hidden by default.")
-
 if df_adjs.empty:
     view_df = df_adjs
 else:
@@ -705,14 +727,11 @@ view_df = view_df.reset_index(drop=True)
 
 total = len(df_adjs)
 shown = len(view_df)
-st.markdown(
-    f"<span style='color:{P['grey_700']};font-size:0.82rem'>"
-    f"Showing {shown} of {total} adjustments. Select one to view its details and actions."
-    f"</span>",
-    unsafe_allow_html=True)
-
-_exp1, _exp2 = st.columns([5, 1])
-with _exp2:
+_rh1, _rh2 = st.columns([5, 1])
+with _rh1:
+    section_title(f"Results — {shown} of {total}", "table")
+    st.caption("Select a row to view its details and actions.")
+with _rh2:
     st.download_button(
         "⬇ Export CSV", view_df.to_csv(index=False).encode("utf-8-sig"),
         file_name="adjustments_export.csv", mime="text/csv",
@@ -797,5 +816,6 @@ if len(_failed_view) >= 2:
                 safe_rerun()
 
 if selected is not None:
-    st.markdown("---")
+    st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+    section_title("Adjustment Detail", "file-text")
     render_adj_card(selected, expanded=True)
