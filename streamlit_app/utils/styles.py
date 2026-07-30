@@ -909,29 +909,55 @@ def inject_css():
         border-color: var(--border) !important;
     }}
 
-    /* Text-entry widgets */
+    /* Text-entry widgets. The visible BORDER lives on the [data-baseweb]
+       WRAPPER, not on the inner input/divs — pinning only border-color there
+       left the dark theme's near-white border sitting on the pinned-white
+       field, i.e. invisible. Pin the FULL border on the wrapper (like the
+       button rules, which never broke) and keep a brand ring on focus. */
     .stTextInput input, .stTextArea textarea,
     .stNumberInput input, .stDateInput input {{
         background-color: var(--card) !important;
         color: var(--ink) !important;
-        border-color: var(--border) !important;
         caret-color: var(--ink) !important;
     }}
     .stTextInput > div > div, .stTextArea > div > div,
     .stNumberInput > div > div, .stDateInput > div > div {{
         background-color: var(--card) !important;
-        border-color: var(--border) !important;
+    }}
+    [data-testid="stMainBlockContainer"] [data-baseweb="input"],
+    [data-testid="stMainBlockContainer"] [data-baseweb="textarea"] {{
+        border: 1px solid var(--border) !important;
+    }}
+    [data-testid="stMainBlockContainer"] [data-baseweb="input"]:focus-within,
+    [data-testid="stMainBlockContainer"] [data-baseweb="textarea"]:focus-within {{
+        border-color: var(--brand) !important;
+    }}
+    /* Number-input +/- steppers sit inside the same wrapper — keep them light */
+    .stNumberInput button {{
+        background-color: var(--card) !important;
+        color: var(--ink) !important;
     }}
     [data-testid="stMainBlockContainer"] input::placeholder,
     [data-testid="stMainBlockContainer"] textarea::placeholder {{
         color: var(--ink-3) !important;
     }}
 
-    /* Select / multiselect surfaces + their dropdown menus */
+    /* Select / multiselect surfaces + their dropdown menus — same wrapper
+       situation as the text inputs: pin the full border, brand on focus */
     .stSelectbox [data-baseweb="select"] > div,
     .stMultiSelect [data-baseweb="select"] > div {{
         background-color: var(--card) !important;
-        border-color: var(--border) !important;
+        border: 1px solid var(--border) !important;
+    }}
+    .stSelectbox [data-baseweb="select"]:focus-within > div,
+    .stMultiSelect [data-baseweb="select"]:focus-within > div {{
+        border-color: var(--brand) !important;
+    }}
+    /* Checkbox / radio marks: border-only pin (no background — the checked
+       state fills brand-red and must keep doing so) */
+    label[data-baseweb="checkbox"] > span:first-of-type,
+    label[data-baseweb="radio"] > span:first-of-type {{
+        border: 1px solid var(--ink-3) !important;
     }}
     [data-baseweb="select"] div, [data-baseweb="select"] span,
     [data-baseweb="select"] input {{
