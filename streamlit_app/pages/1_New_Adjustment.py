@@ -919,9 +919,11 @@ def _var_sub_options(comp):
 def _sim_source_options():
     rows = _ref_rows(
         "SELECT DISTINCT SIMULATION_SOURCE FROM DIMENSION.STRESS_SIMULATION "
-        "WHERE SIMULATION_SOURCE IS NOT NULL ORDER BY SIMULATION_SOURCE",
+        "WHERE SIMULATION_SOURCE IS NOT NULL AND TRIM(SIMULATION_SOURCE) <> '' "
+        "ORDER BY SIMULATION_SOURCE",
         "_ref_sim_sources")
-    return [str(r[0]) for r in rows if r[0] is not None]
+    return sorted({str(r[0]).strip() for r in rows
+                   if r[0] is not None and str(r[0]).strip()})
 
 
 def _code_select(label, key, value, options, help=None, placeholder="— select —"):
@@ -936,6 +938,28 @@ def _code_select(label, key, value, options, help=None, placeholder="— select 
     idx = opts.index(cur) if cur in opts else 0
     return st.selectbox(label, opts, index=idx, key=key, help=help,
                         format_func=lambda x: placeholder if x == "" else x)
+
+
+_DAY_TYPE_LABELS = {"": "— both —", "1": "1 — 1-day VaR", "10": "10 — 10-day VaR"}
+
+
+def _render_day_type(slot: str) -> None:
+    """Day Type dropdown (VaR only) — shown in BOTH the main filter row and
+    More filters. Each slot has its own widget key; both are driven from and
+    write back wiz['day_type'], so they always mirror each other."""
+    k = _k(f"day_type_{slot}")
+    opts = list(_DAY_TYPE_LABELS.keys())
+    cur = str(wiz.get("day_type") or "")
+    st.session_state[k] = cur if cur in opts else ""
+
+    def _sync():
+        wiz["day_type"] = st.session_state.get(k) or None
+
+    st.selectbox("Day Type", opts, key=k,
+                 format_func=lambda v: _DAY_TYPE_LABELS.get(v, v),
+                 on_change=_sync,
+                 help="VaR horizon: 1 = 1-day VaR, 10 = 10-day VaR. "
+                      "Blank applies the adjustment to both horizons.")
 
 
 def _render_main_filters() -> None:
@@ -972,17 +996,7 @@ def _render_main_filters() -> None:
                 placeholder="— any —",
                 help="Filtered by the selected VaR Component")
         with c7:
-            _dt_labels = {"": "— both —", "1": "1 — 1-day VaR",
-                          "10": "10 — 10-day VaR"}
-            _dt_opts = list(_dt_labels.keys())
-            _dt_cur = str(wiz.get("day_type") or "")
-            wiz["day_type"] = st.selectbox(
-                "Day Type", _dt_opts,
-                index=_dt_opts.index(_dt_cur) if _dt_cur in _dt_opts else 0,
-                key=_k("day_type_dd"),
-                format_func=lambda v: _dt_labels.get(v, v),
-                help="VaR horizon: 1 = 1-day VaR, 10 = 10-day VaR. "
-                     "Blank applies the adjustment to both horizons.")
+            _render_day_type("main")
         st.caption("Blank = all values for that dimension · "
                    "† at least one of Department, Book or VaR Component")
     else:
@@ -997,8 +1011,7 @@ def _render_extra_filters() -> None:
     applied = sum(1 for k in FILTER_KEYS
                   if k not in ("entity_code", "source_system_code",
                                "department_code", "book_code",
-                               "var_component_name", "var_sub_component_name",
-                               "day_type")
+                               "var_component_name", "var_sub_component_name")
                   and (wiz.get(k) or "").strip())
     label = f"More filters ({applied} applied)" if applied else "More filters"
 
@@ -1012,15 +1025,19 @@ def _render_extra_filters() -> None:
                                     value=wiz.get(fk) or "", placeholder=ph)
 
     with st.expander(label, expanded=False):
-        if custom_fields:
+        if custom_fields or pt == "VaR":
             st.markdown(
                 f'<div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;'
                 f'letter-spacing:0.05em;color:{P["info"]};margin-bottom:0.2rem">'
                 f'{pt} filters</div>', unsafe_allow_html=True)
-            ccols = st.columns(min(len(custom_fields), 4))
+            _n_scope = len(custom_fields) + (1 if pt == "VaR" else 0)
+            ccols = st.columns(min(max(_n_scope, 1), 4))
             for i, (fk, fl, ph) in enumerate(custom_fields):
                 with ccols[i % len(ccols)]:
                     _filter_widget(fk, fl, ph)
+            if pt == "VaR":
+                with ccols[len(custom_fields) % len(ccols)]:
+                    _render_day_type("more")
         shown = {"entity_code", "source_system_code", "department_code", "book_code",
                  "var_component_name", "var_sub_component_name", "day_type"}
         shown.update(fk for fk, _, _ in custom_fields)
