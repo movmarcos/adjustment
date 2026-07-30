@@ -537,11 +537,18 @@ def inject_css():
         border-radius: var(--r-sm); overflow: hidden;
         border: 1px solid var(--border);
     }}
+    /* Expanders sit INSIDE white section cards — a faint border on a white
+       header was invisible there. Grey header bar + stronger border make the
+       control read as clickable on any surface. */
     div[data-testid="stExpander"] {{
-        border: 1px solid var(--border); border-radius: var(--r-md);
+        border: 1px solid #D3D9E1; border-radius: var(--r-md);
         overflow: hidden; background: var(--card); box-shadow: var(--sh-sm);
     }}
-    div[data-testid="stExpander"] summary {{ font-weight: 600; }}
+    div[data-testid="stExpander"] summary {{
+        font-weight: 600;
+        background: {P["grey_100"]};
+    }}
+    div[data-testid="stExpander"] summary:hover {{ background: #E8EDF3; }}
     .stTabs [data-baseweb="tab"] {{
         font-weight: 600; font-size: 0.86rem; color: var(--ink-2);
     }}
@@ -1012,12 +1019,15 @@ def inject_css():
     /* Expanders + bordered containers */
     [data-testid="stExpander"] {{
         background-color: var(--card) !important;
-        border: 1px solid var(--border) !important;
+        border: 1px solid #D3D9E1 !important;
         border-radius: var(--r-md) !important;
     }}
     [data-testid="stExpander"] summary,
     [data-testid="stExpander"] summary p {{
         color: var(--ink) !important;
+    }}
+    [data-testid="stExpander"] summary {{
+        background-color: {P["grey_100"]} !important;
     }}
     [data-testid="stExpander"] summary svg {{ fill: var(--ink-2) !important; }}
     [data-testid="stVerticalBlockBorderWrapper"] {{
