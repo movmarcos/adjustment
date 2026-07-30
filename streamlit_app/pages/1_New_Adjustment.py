@@ -60,8 +60,8 @@ _WIZ_DEFAULTS: dict = {
     "simulation_source":      None,
     "measure_type_code":      None,
     "trader_code":            None,
-    "var_component_id":       None,
-    "var_sub_component_id":   None,
+    "var_component_name":     None,
+    "var_sub_component_name": None,
     "guaranteed_entity":      None,
     "region_key":              None,
     "scenario_date_id":       None,
@@ -162,7 +162,7 @@ def _build_payload() -> dict:
                 "book_code", "currency_code", "trade_typology",
                 "strategy", "instrument_code", "simulation_name",
                 "simulation_source", "measure_type_code", "trade_code",
-                "trader_code", "var_component_id", "var_sub_component_id",
+                "trader_code", "var_component_name", "var_sub_component_name",
                 "guaranteed_entity", "region_key", "scenario_date_id",
                 "tenor_code", "underlying_tenor_code", "curve_code",
                 "day_type", "product_category_attributes",
@@ -531,8 +531,6 @@ ALL_EXTRA_FIELDS = [
     ("simulation_source",            "Simulation Source",            ""),
     ("measure_type_code",            "Measure Type Code",            ""),
     ("trader_code",                  "Trader Code",                  ""),
-    ("var_component_id",             "VaR Component ID",             ""),
-    ("var_sub_component_id",         "VaR Sub-Component ID",         ""),
     ("guaranteed_entity",            "Guaranteed Entity",            ""),
     ("region_key",                   "Region Key",                   ""),
     ("scenario_date_id",             "Scenario Date ID",             ""),
@@ -547,7 +545,8 @@ ALL_EXTRA_FIELDS = [
 ]
 
 # Every filter key (used for the ticket's applied-filter chips)
-FILTER_KEYS = ["entity_code", "source_system_code", "department_code", "book_code"] + \
+FILTER_KEYS = ["entity_code", "source_system_code", "department_code", "book_code",
+               "var_component_name", "var_sub_component_name"] + \
               [k for k, _, _ in ALL_EXTRA_FIELDS]
 
 
@@ -706,7 +705,8 @@ def _is_entity_only(wiz: dict) -> bool:
 
     Entity+currency is treated as broad-scope because it still targets millions of
     rows and the preview times out. The pipeline blocking logic already handles it
-    correctly — only book_code and department_code narrow the scope meaningfully.
+    correctly — only book_code, department_code and (for VaR) the VaR component
+    filters narrow the scope meaningfully.
     """
     if wiz.get("category") != "Scaling Adjustment":
         return False
@@ -714,7 +714,9 @@ def _is_entity_only(wiz: dict) -> bool:
         return False
     has_book = bool((wiz.get("book_code") or "").strip())
     has_dept = bool((wiz.get("department_code") or "").strip())
-    return not (has_book or has_dept)
+    has_var  = bool((wiz.get("var_component_name") or "").strip()) \
+        or bool((wiz.get("var_sub_component_name") or "").strip())
+    return not (has_book or has_dept or has_var)
 
 
 def _preview_payload() -> dict:
@@ -808,11 +810,18 @@ def _completion_checks() -> list:
         if wiz.get("occurrence") == "RECURRING":
             checks += [("Start COBID", bool(wiz.get("recurring_start_cobid"))),
                        ("End COBID",   bool(wiz.get("recurring_end_cobid")))]
+        _has_var_comp = wiz.get("process_type") == "VaR" and (
+            bool((wiz.get("var_component_name") or "").strip())
+            or bool((wiz.get("var_sub_component_name") or "").strip()))
+        _narrow_label = ("Department, Book or VaR Component"
+                         if wiz.get("process_type") == "VaR"
+                         else "Department or Book code")
         checks += [
             ("Entity code", bool((wiz.get("entity_code") or "").strip())),
-            ("Department or Book code",
+            (_narrow_label,
              bool((wiz.get("department_code") or "").strip())
-             or bool((wiz.get("book_code") or "").strip())),
+             or bool((wiz.get("book_code") or "").strip())
+             or _has_var_comp),
             ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
             ("Reason", bool((wiz.get("reason") or "").strip())),
         ]
@@ -894,6 +903,23 @@ def _book_options(dept):
                    if r[0] is not None and (not dept or str(r[1]) == dept)})
 
 
+def _var_comp_rows():
+    return _ref_rows(
+        "SELECT DISTINCT VAR_COMPONENT_NAME, VAR_SUB_COMPONENT_NAME "
+        "FROM DIMENSION.VAR_SUB_COMPONENT "
+        "WHERE VAR_COMPONENT_NAME IS NOT NULL", "_ref_var_comps")
+
+
+def _var_comp_options():
+    return sorted({str(r[0]) for r in _var_comp_rows() if r[0] is not None})
+
+
+def _var_sub_options(comp):
+    comp = (comp or "").strip()
+    return sorted({str(r[1]) for r in _var_comp_rows()
+                   if r[1] is not None and (not comp or str(r[0]) == comp)})
+
+
 def _code_select(label, key, value, options, help=None, placeholder="— select —"):
     """Dropdown over reference codes; free-text fallback when none are available."""
     if not options:
@@ -927,7 +953,25 @@ def _render_main_filters() -> None:
             "Book Code †", _k("book_dd"), wiz.get("book_code"),
             _book_options(wiz.get("department_code")), placeholder="— any —",
             help="Filtered by the selected Department")
-    st.caption("Blank = all values for that dimension · † at least one of Department or Book")
+    if wiz.get("process_type") == "VaR":
+        c5, c6, _, _ = st.columns(4)
+        with c5:
+            wiz["var_component_name"] = _code_select(
+                "VaR Component Name †", _k("var_comp_dd"),
+                wiz.get("var_component_name"),
+                _var_comp_options(), placeholder="— any —")
+        with c6:
+            wiz["var_sub_component_name"] = _code_select(
+                "VaR Sub-Component Name", _k("var_sub_dd"),
+                wiz.get("var_sub_component_name"),
+                _var_sub_options(wiz.get("var_component_name")),
+                placeholder="— any —",
+                help="Filtered by the selected VaR Component")
+        st.caption("Blank = all values for that dimension · "
+                   "† at least one of Department, Book or VaR Component")
+    else:
+        st.caption("Blank = all values for that dimension · "
+                   "† at least one of Department or Book")
 
 
 def _render_extra_filters() -> None:
@@ -936,7 +980,8 @@ def _render_extra_filters() -> None:
     custom_fields = SCOPE_FIELDS.get(pt, [])
     applied = sum(1 for k in FILTER_KEYS
                   if k not in ("entity_code", "source_system_code",
-                               "department_code", "book_code")
+                               "department_code", "book_code",
+                               "var_component_name", "var_sub_component_name")
                   and (wiz.get(k) or "").strip())
     label = f"More filters ({applied} applied)" if applied else "More filters"
     with st.expander(label, expanded=False):
@@ -950,7 +995,8 @@ def _render_extra_filters() -> None:
                 with ccols[i % len(ccols)]:
                     wiz[fk] = st.text_input(fl, key=_k(fk),
                                             value=wiz.get(fk) or "", placeholder=ph)
-        shown = {"entity_code", "source_system_code", "department_code", "book_code"}
+        shown = {"entity_code", "source_system_code", "department_code", "book_code",
+                 "var_component_name", "var_sub_component_name"}
         shown.update(fk for fk, _, _ in custom_fields)
         extra = [(k, l, p) for k, l, p in ALL_EXTRA_FIELDS if k not in shown]
         ecols = st.columns(3)
@@ -1400,7 +1446,9 @@ def _ticket_html(missing: list) -> str:
     # Applied-filter chips (Scaling only) — mirrors the form selections
     if cat == "Scaling Adjustment":
         label_map = {"entity_code": "Entity", "source_system_code": "Source",
-                     "department_code": "Dept", "book_code": "Book"}
+                     "department_code": "Dept", "book_code": "Book",
+                     "var_component_name": "VaR Comp",
+                     "var_sub_component_name": "VaR Sub"}
         label_map.update({k: l for k, l, _ in ALL_EXTRA_FIELDS})
         chips = "".join(
             f'<span class="filter-chip">{label_map.get(k, k)}: {v}</span>'

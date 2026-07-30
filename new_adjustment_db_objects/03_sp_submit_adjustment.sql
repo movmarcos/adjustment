@@ -244,8 +244,10 @@ def main(session, p_adjustment):
       trade_code                     str
       strategy                       str
       trader_code                    str
-      var_component_id               int
-      var_sub_component_id           int
+      var_component_id               int     Legacy — prefer var_component_name
+      var_sub_component_id           int     Legacy — prefer var_sub_component_name
+      var_component_name             str     VaR component (matched by name)
+      var_sub_component_name         str     VaR sub-component (matched by name)
       guaranteed_entity              str
       region_key                     int
       scenario_date_id               int
@@ -487,6 +489,8 @@ def main(session, p_adjustment):
             "TRADER_CODE":                 adj.get("trader_code"),
             "VAR_COMPONENT_ID":            adj.get("var_component_id"),
             "VAR_SUB_COMPONENT_ID":        adj.get("var_sub_component_id"),
+            "VAR_COMPONENT_NAME":          adj.get("var_component_name"),
+            "VAR_SUB_COMPONENT_NAME":      adj.get("var_sub_component_name"),
             "GUARANTEED_ENTITY":           adj.get("guaranteed_entity"),
             "REGION_KEY":                  adj.get("region_key"),
             "SCENARIO_DATE_ID":            adj.get("scenario_date_id"),

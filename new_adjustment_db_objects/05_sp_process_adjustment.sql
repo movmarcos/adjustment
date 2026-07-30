@@ -965,6 +965,7 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 'ENTITY_CODE', 'INSTRUMENT_CODE',
                 'SIMULATION_NAME', 'SIMULATION_SOURCE',
                 'VAR_COMPONENT_ID', 'VAR_SUB_COMPONENT_ID', 'DAY_TYPE',
+                'VAR_COMPONENT_NAME', 'VAR_SUB_COMPONENT_NAME',
                 'MEASURE_TYPE_CODE', 'TENOR_CODE', 'CURVE_CODE',
                 'UNDERLYING_TENOR_CODE', 'PRODUCT_CATEGORY_ATTRIBUTES',
             ]
@@ -1038,14 +1039,21 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                     "AND (ss.SIMULATION_SOURCE = adjust.SIMULATION_SOURCE OR adjust.SIMULATION_SOURCE IS NULL))"
                 )
 
-            # 6. VAR_SUBCOMPONENT_ID → VAR_COMPONENT_ID, VAR_SUB_COMPONENT_ID, DAY_TYPE
+            # 6. VAR_SUBCOMPONENT_ID → VAR_COMPONENT_(ID|NAME),
+            #    VAR_SUB_COMPONENT_(ID|NAME), DAY_TYPE.
+            #    Users now filter by NAME (the form captures the names); the
+            #    legacy *_ID columns are still matched for pre-existing rows.
             if ("VAR_SUBCOMPONENT_ID" in fact_cols
-                    and _any_has('VAR_COMPONENT_ID', 'VAR_SUB_COMPONENT_ID', 'DAY_TYPE')):
+                    and _any_has('VAR_COMPONENT_ID', 'VAR_SUB_COMPONENT_ID',
+                                 'VAR_COMPONENT_NAME', 'VAR_SUB_COMPONENT_NAME',
+                                 'DAY_TYPE')):
                 from_where += (
                     "\n AND EXISTS (SELECT 1 FROM DIMENSION.VAR_SUB_COMPONENT vsc "
                     "WHERE vsc.VAR_SUB_COMPONENT_ID = COALESCE(fact.VAR_SUBCOMPONENT_ID, -1) "
                     "AND (vsc.VAR_COMPONENT_ID = adjust.VAR_COMPONENT_ID OR adjust.VAR_COMPONENT_ID IS NULL) "
                     "AND (vsc.VAR_SUB_COMPONENT_ID = adjust.VAR_SUB_COMPONENT_ID OR adjust.VAR_SUB_COMPONENT_ID IS NULL) "
+                    "AND (vsc.VAR_COMPONENT_NAME = adjust.VAR_COMPONENT_NAME OR adjust.VAR_COMPONENT_NAME IS NULL) "
+                    "AND (vsc.VAR_SUB_COMPONENT_NAME = adjust.VAR_SUB_COMPONENT_NAME OR adjust.VAR_SUB_COMPONENT_NAME IS NULL) "
                     "AND (vsc.VAR_SUB_COMPONENT_DAY_TYPE = adjust.DAY_TYPE OR adjust.DAY_TYPE IS NULL))"
                 )
 

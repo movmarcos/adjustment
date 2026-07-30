@@ -186,6 +186,8 @@ _CLONE_FIELDS = {
     "TRADE_CODE": "trade_code", "STRATEGY": "strategy",
     "TRADER_CODE": "trader_code", "VAR_COMPONENT_ID": "var_component_id",
     "VAR_SUB_COMPONENT_ID": "var_sub_component_id",
+    "VAR_COMPONENT_NAME": "var_component_name",
+    "VAR_SUB_COMPONENT_NAME": "var_sub_component_name",
     "GUARANTEED_ENTITY": "guaranteed_entity", "REGION_KEY": "region_key",
     "SCENARIO_DATE_ID": "scenario_date_id", "INSTRUMENT_CODE": "instrument_code",
     "SIMULATION_NAME": "simulation_name", "SIMULATION_SOURCE": "simulation_source",

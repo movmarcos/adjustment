@@ -111,6 +111,14 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER (
     -- (or fail) each other's claims.
     CLAIM_TOKEN                 VARCHAR(36)  DEFAULT NULL,
 
+    -- VaR component filters by NAME (what users know; the engine matches
+    -- DIMENSION.VAR_SUB_COMPONENT on the names, the fact table still joins by
+    -- VAR_SUBCOMPONENT_ID). The legacy VAR_COMPONENT_ID / VAR_SUB_COMPONENT_ID
+    -- columns above remain for pre-existing rows and are still honoured.
+    -- NOTE: new columns must stay at the END (CREATE OR ALTER append-only).
+    VAR_COMPONENT_NAME          VARCHAR(200) COLLATE 'en-ci',
+    VAR_SUB_COMPONENT_NAME      VARCHAR(200) COLLATE 'en-ci',
+
     CONSTRAINT PK_ADJ_HEADER PRIMARY KEY (ADJ_ID)
 )
 COMMENT = 'Single point of entry for ALL adjustments. Streamlit writes here via SP_SUBMIT_ADJUSTMENT. Processing reads from here.';

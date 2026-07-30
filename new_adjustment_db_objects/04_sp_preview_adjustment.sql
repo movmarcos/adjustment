@@ -285,7 +285,8 @@ def main(session, p_adjustment):
                 f"WHERE s.STRESS_SIMULATION_KEY = fact.STRESS_SIMULATION_KEY AND {' AND '.join(ss_conds)})"
             )
 
-    # VaR sub-component (VAR_SUBCOMPONENT_ID → VAR_COMPONENT_ID + VAR_SUB_COMPONENT_ID + DAY_TYPE)
+    # VaR sub-component (VAR_SUBCOMPONENT_ID → component/sub-component by ID or
+    # NAME + DAY_TYPE — the form captures names; IDs are legacy/clone rows)
     if "VAR_SUBCOMPONENT_ID" in fact_columns:
         vsc_conds = []
         for fld, dim_col in (("var_component_id", "VAR_COMPONENT_ID"),
@@ -296,6 +297,11 @@ def main(session, p_adjustment):
                     vsc_conds.append(f"v.{dim_col} = {int(adj[fld])}")
                 except (TypeError, ValueError):
                     pass
+        for fld, dim_col in (("var_component_name", "VAR_COMPONENT_NAME"),
+                             ("var_sub_component_name", "VAR_SUB_COMPONENT_NAME")):
+            val = adj.get(fld)
+            if val not in (None, ""):
+                vsc_conds.append(f"v.{dim_col} = '{_esc(str(val))}'")
         if vsc_conds:
             where_clauses.append(
                 f"EXISTS (SELECT 1 FROM DIMENSION.VAR_SUB_COMPONENT v "
