@@ -172,6 +172,9 @@ STAGE_CONFIG = {
     "Processing":       {"color": "#1D4ED8", "icon": "zap",          "bg": "#EFF6FF"},
     "PBI Queued":       {"color": "#7E22CE", "icon": "clock",        "bg": "#FAF5FF"},
     "PBI Refreshing":   {"color": "#7E22CE", "icon": "refresh-cw",   "bg": "#FAF5FF"},
+    # Sensitivity / FRTB hand-off: trigger row written → Control-M starts dbt
+    "Rebuild Pending":  {"color": "#7E22CE", "icon": "clock",        "bg": "#FAF5FF"},
+    "Rebuild Triggered":{"color": "#15803D", "icon": "check-circle", "bg": "#F0FDF4"},
     "Reports Ready":    {"color": "#15803D", "icon": "check-circle", "bg": "#F0FDF4"},
     "Failed":           {"color": "#DC2626", "icon": "x-circle",     "bg": "#FEF2F2"},
     "Rejected":         {"color": "#B91C1C", "icon": "ban",          "bg": "#FEF2F2"},

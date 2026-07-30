@@ -265,7 +265,9 @@ for scope in ALL_SCOPES:
     failed    = _n(scope, ["Failed"])
     processed = _n(scope, ["Processed"])
     total     = queued + awaiting + running + failed + processed
-    ready     = _rep_n(scope, ["Reports Ready"])
+    # "In reports": PBI refresh done (VaR/Stress) or dbt rebuild trigger
+    # written (Sensitivity/FRTB — Control-M runs the rebuild from there).
+    ready     = _rep_n(scope, ["Reports Ready", "Rebuild Triggered"])
 
     so_rows = _so_rows(scope)
     _wc = next((r for r in so_rows

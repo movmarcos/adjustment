@@ -444,37 +444,51 @@ with tab_processing:
 # ╚════════════════════════════════════════════════════════════════════════════╝
 
 with tab_reports:
-    section_title("From Processed to Reports Ready", "line-chart")
+    section_title("From Processed to Reports", "line-chart")
     _html(_card(
-        "When a VaR, Stress or Sensitivity adjustment finishes processing, the "
-        "engine records the run and queues a report refresh: a row is written "
-        "to the PowerBI action queue (<code>METADATA.POWERBI_ACTION</code>) "
-        "whose empty start time marks it as <em>pending</em>. The downstream "
-        "refresh scheduler picks pending actions up (~every 5 minutes), stamps "
-        "start and completion times, and the refreshed reports include the "
-        "adjustment. FRTB scopes are not published to PowerBI."))
+        "After an adjustment finishes processing, the engine hands the change "
+        "to reporting by one of two paths, depending on the scope:"))
+    _html(_table(["Scopes", "Hand-off", "How it works"], [
+        ["<strong>VaR, Stress</strong>", "Power BI refresh",
+         "A row is written to the PowerBI action queue "
+         "(<code>METADATA.POWERBI_ACTION</code>) whose empty start time marks "
+         "it as <em>pending</em>. The refresh scheduler picks pending actions "
+         "up (~every 5 minutes), stamps start and completion times, and the "
+         "refreshed reports include the adjustment."],
+        ["<strong>Sensitivity, FRTB / DRC / RRAO</strong>", "dbt rebuild via Control-M",
+         "A dummy dataset row (<code>DUMMY_Sensitivity_Adjustment</code> / "
+         "<code>DUMMY_FRTB_Adjustment</code>) is written to "
+         "<code>RAVEN.LOG_STAGE_ME_STATUS</code>. A Control-M job polls that "
+         "table, finds the new record and starts the dbt job that rebuilds "
+         "the reporting model. All three FRTB scopes share the FRTB trigger."],
+    ]))
     _html(_flow([
         ("Processed", "engine run complete"),
-        ("Queued", "action row created"),
-        ("Refreshing", "start time stamped"),
-        ("Reports Ready", "completion stamped"),
+        ("Queued / Triggered", "PBI action or dbt trigger written"),
+        ("Refreshing / Rebuilding", "PBI refresh or dbt job runs"),
+        ("Reports Ready", "reports include the adjustment"),
     ]))
     _html(_table(["Report status", "Meaning"], [
         [_pill("Awaiting", P["grey_700"]),
-         "Processed, refresh not yet queued/matched. During BST the status "
+         "Processed, hand-off not yet queued/matched. During BST the status "
          "display can lag up to an hour (timezone alignment); the refresh "
          "itself is unaffected."],
-        [_pill("Queued", P["warning"]), "Refresh action created, waiting for the scheduler."],
+        [_pill("Queued", P["warning"]), "PBI refresh action created, waiting for the scheduler."],
         [_pill("Refreshing", P["info"]), "PowerBI dataset refresh in progress."],
-        [_pill("Reports Ready", P["success"]), "Refresh complete — reports include the adjustment."],
+        [_pill("Reports Ready", P["success"]), "PBI refresh complete — reports include the adjustment."],
+        [_pill("Rebuild Triggered", P["success"]),
+         "dbt trigger written — Control-M detects it and runs the dbt "
+         "rebuild. Progress beyond this point is tracked in Control-M/dbt, "
+         "not in the app."],
     ]))
     _html(_card(
-        f'{icon("alert-triangle", size=13, color="#B45309")} If queueing the '
-        f'refresh fails, the adjustment stays <em>Processed</em> (its numbers '
-        f'ARE applied) but the failure is stamped on the ticket\'s error field '
-        f'and shown on the Adjustments / Pipeline pages — reports may show '
-        f'stale data until the next scheduled refresh. Refresh actions are '
-        f'only queued for recent COBs (~3 business days); older back-dated '
+        f'{icon("alert-triangle", size=13, color="#B45309")} If the hand-off '
+        f'fails (queueing the PBI refresh, or writing the dbt trigger), the '
+        f'adjustment stays <em>Processed</em> (its numbers ARE applied) but '
+        f'the failure is stamped on the ticket\'s error field and shown on '
+        f'the Adjustments / Pipeline pages — reports may show stale data '
+        f'until the next scheduled refresh. PBI refresh actions are only '
+        f'queued for recent COBs (~3 business days); older back-dated '
         f'adjustments rely on the next scheduled full refresh.', "#B45309"))
 
 # ╔════════════════════════════════════════════════════════════════════════════╗

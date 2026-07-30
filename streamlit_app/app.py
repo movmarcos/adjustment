@@ -26,7 +26,10 @@ render_sidebar()
 user = current_user_name()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Power BI Refresh Status — pending refreshes triggered by adjustments
+# Downstream report hand-off — two paths, mirroring the engine:
+#   • VaR / Stress   → PowerBI refresh action (METADATA.POWERBI_ACTION)
+#   • Sens / FRTB    → dbt rebuild trigger row (RAVEN.LOG_STAGE_ME_STATUS
+#                      DUMMY_* dataset) that a Control-M job polls to start dbt
 # ──────────────────────────────────────────────────────────────────────────────
 
 try:
@@ -36,13 +39,24 @@ try:
             COALESCE(SUM(CASE WHEN START_TIME IS NOT NULL AND COMPLETE_TIME IS NULL THEN 1 ELSE 0 END), 0) AS PBI_RUNNING,
             COALESCE(SUM(CASE WHEN COMPLETE_TIME IS NOT NULL THEN 1 ELSE 0 END), 0)                AS PBI_COMPLETED
         FROM METADATA.POWERBI_ACTION
-        WHERE INSERT_SOURCE IN ('LOAD_VAR_ADJUSTMENT','LOAD_STRESS_ADJUSTMENT',
-                                'LOAD_SENSITIVITY_ADJUSTMENT','LOAD_FRTB_ADJUSTMENT')
+        WHERE INSERT_SOURCE IN ('LOAD_VAR_ADJUSTMENT','LOAD_STRESS_ADJUSTMENT')
           AND REQUEST_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
     """)
     pbi_pending = int(df_pbi_kpi.iloc[0]["PBI_QUEUED"]) + int(df_pbi_kpi.iloc[0]["PBI_RUNNING"]) if not df_pbi_kpi.empty else 0
 except Exception:
     pbi_pending = 0
+
+try:
+    df_dbt_kpi = run_query_df("""
+        SELECT COALESCE(COUNT(*), 0) AS DBT_TRIGGERS
+        FROM RAVEN.LOG_STAGE_ME_STATUS
+        WHERE DATASET_NAME IN ('DUMMY_Sensitivity_Adjustment',
+                               'DUMMY_FRTB_Adjustment')
+          AND START_TIMESTAMP >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+    """)
+    dbt_triggers = int(df_dbt_kpi.iloc[0]["DBT_TRIGGERS"]) if not df_dbt_kpi.empty else 0
+except Exception:
+    dbt_triggers = 0
 
 # ──────────────────────────────────────────────────────────────────────────────
 # KPIs — load once, used in header + cards
@@ -205,7 +219,8 @@ kpi_items = [
     ("Queued",            queued,                               "Pending + Approved",   P["warning"], "clock"),
     ("Running",           int(kpis.get("RUNNING", 0)),          "Processing now",       P["info"],    "zap"),
     ("Processed",         int(kpis.get("PROCESSED", 0)),        "In the data",          P["success"], "check-circle"),
-    ("Power BI",          pbi_pending,                           "Pending refreshes (24h)", P["info"], "line-chart"),
+    ("Power BI",          pbi_pending,                           "VaR/Stress refreshes (24h)", P["info"], "line-chart"),
+    ("dbt Rebuild",       dbt_triggers,                          "Sens/FRTB triggers (24h)", P["purple"], "refresh-cw"),
     ("Overlaps",          int(kpis.get("OVERLAPS", 0)),         "Overlap alerts",       P["purple"],  "alert-triangle"),
 ]
 
@@ -213,10 +228,10 @@ kpi_items = [
 # inside one raw-HTML block only while the first line opens a block-level tag
 # (a leading <style> terminated the block and turned the cards into an
 # indented code block, showing raw HTML). The hover CSS lives in inject_css.
-cards_html = ('<div style="display:grid;grid-template-columns:repeat(7,1fr);'
-              'gap:10px;margin-bottom:1.4rem">')
+cards_html = ('<div style="display:grid;grid-template-columns:repeat(8,1fr);'
+              'gap:10px;margin-bottom:0.5rem">')
 for label, val, sub, color, icon_name in kpi_items:
-    alert_style = f"box-shadow:0 0 0 2px {color}44;" if (label == "Power BI" and val > 0) or (label == "Overlaps" and val > 0) else ""
+    alert_style = f"box-shadow:0 0 0 2px {color}44;" if (label in ("Power BI", "dbt Rebuild", "Overlaps") and val > 0) else ""
     val_color = color if val > 0 else P["grey_400"]
     cards_html += f"""
     <div style="position:relative;background:white;border:1px solid {P['border']};
@@ -233,6 +248,15 @@ for label, val, sub, color, icon_name in kpi_items:
       <div style="font-size:0.68rem;color:{P['grey_700']};margin-top:4px">{sub}</div>
     </div>"""
 cards_html += '</div>'
+# Plain-language explainer for the two report hand-off paths (non-technical
+# users need to know WHERE their processed numbers go next).
+cards_html += (
+    f'<div style="font-size:0.72rem;color:{P["grey_700"]};margin-bottom:1.4rem">'
+    f'{icon("info", size=12, color=P["grey_700"])} '
+    f'<strong>Reports:</strong> VaR &amp; Stress adjustments queue a '
+    f'<strong>Power BI refresh</strong> (picked up ~every 5 min). Sensitivity '
+    f'&amp; FRTB write a <strong>rebuild trigger</strong> that Control-M '
+    f'detects and runs the dbt job to rebuild the reporting model.</div>')
 st.markdown(cards_html, unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────────────────────

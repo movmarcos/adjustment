@@ -294,21 +294,22 @@ WHERE h.RUN_STATUS = 'Pending Approval'
 -- ═══════════════════════════════════════════════════════════════════════════
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- 8. VW_REPORT_REFRESH_STATUS — PowerBI refresh status per processed adjustment
+-- 8. VW_REPORT_REFRESH_STATUS — downstream refresh status per processed adjustment
 --
--- Links ADJ_HEADER to METADATA.POWERBI_ACTION for precise per-adjustment
--- matching. Joins by COBID + INSERT_SOURCE + REQUEST_TIME >= PROCESS_DATE
--- and takes the most recent matching PBI action.
---
--- Status logic:
---   1. If PBI action COMPLETE_TIME is set → Reports Ready
---   2. If PBI action START_TIME is set (no COMPLETE) → Refreshing
---   3. If PBI action REQUEST_TIME is set (no START) → Queued
---   4. Otherwise → Awaiting
+-- Two hand-off paths, matching the engine's trigger_downstream_handoff():
+--   • VaR / Stress → PowerBI refresh. Links ADJ_HEADER to
+--     METADATA.POWERBI_ACTION by COBID + INSERT_SOURCE + REQUEST_TIME >=
+--     PROCESS_DATE (most recent match).
+--       COMPLETE_TIME set → Reports Ready; START_TIME set → Refreshing;
+--       REQUEST_TIME set → Queued; else Awaiting.
+--   • Sensitivity / FRTB* → dbt rebuild via Control-M. The engine writes a
+--     DUMMY_* dataset row to RAVEN.LOG_STAGE_ME_STATUS; Control-M polls for
+--     it and starts the dbt job. The trigger row is all we can observe:
+--       dummy row found → Rebuild Triggered; else Awaiting.
 -- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_REPORT_REFRESH_STATUS
-    COMMENT = 'Per-adjustment PowerBI refresh status. Links ADJ_HEADER to METADATA.POWERBI_ACTION via COBID + INSERT_SOURCE for precise matching.'
+    COMMENT = 'Per-adjustment downstream refresh status. VaR/Stress: PowerBI action match. Sensitivity/FRTB: dbt trigger row (RAVEN.LOG_STAGE_ME_STATUS DUMMY_* dataset) picked up by Control-M.'
 AS
 WITH adj_processed AS (
     SELECT
@@ -320,13 +321,19 @@ WITH adj_processed AS (
         CASE UPPER(h.PROCESS_TYPE)
             WHEN 'VAR'         THEN 'LOAD_VAR_ADJUSTMENT'
             WHEN 'STRESS'      THEN 'LOAD_STRESS_ADJUSTMENT'
-            WHEN 'SENSITIVITY' THEN 'LOAD_SENSITIVITY_ADJUSTMENT'
-            WHEN 'FRTB'        THEN 'LOAD_FRTB_ADJUSTMENT'
-            WHEN 'FRTBDRC'     THEN 'LOAD_FRTB_ADJUSTMENT'
-            WHEN 'FRTBRRAO'    THEN 'LOAD_FRTB_ADJUSTMENT'
-            WHEN 'FRTBALL'     THEN 'LOAD_FRTB_ADJUSTMENT'
-            ELSE 'LOAD_' || UPPER(h.PROCESS_TYPE) || '_ADJUSTMENT'
-        END AS EXPECTED_INSERT_SOURCE
+        END AS EXPECTED_INSERT_SOURCE,
+        CASE UPPER(h.PROCESS_TYPE)
+            WHEN 'SENSITIVITY' THEN 'DUMMY_Sensitivity_Adjustment'
+            WHEN 'FRTB'        THEN 'DUMMY_FRTB_Adjustment'
+            WHEN 'FRTBDRC'     THEN 'DUMMY_FRTB_Adjustment'
+            WHEN 'FRTBRRAO'    THEN 'DUMMY_FRTB_Adjustment'
+        END AS EXPECTED_DATASET_NAME,
+        CASE
+            WHEN UPPER(h.PROCESS_TYPE) IN ('VAR', 'STRESS') THEN 'PowerBI'
+            WHEN UPPER(h.PROCESS_TYPE) IN ('SENSITIVITY', 'FRTB',
+                                           'FRTBDRC', 'FRTBRRAO')
+                THEN 'dbt via Control-M'
+        END AS REFRESH_PATH
     FROM ADJUSTMENT_APP.ADJ_HEADER h
     WHERE h.RUN_STATUS = 'Processed'
       AND h.IS_DELETED = FALSE
@@ -350,6 +357,22 @@ pbi_match AS (
         ON pa.COBID = a.COBID
         AND pa.INSERT_SOURCE = a.EXPECTED_INSERT_SOURCE
         AND pa.REQUEST_TIME >= a.PROCESS_DATE
+    WHERE a.EXPECTED_INSERT_SOURCE IS NOT NULL
+),
+dbt_match AS (
+    SELECT
+        a.ADJ_ID,
+        ls.START_TIMESTAMP AS DBT_TRIGGER_TIME,
+        ROW_NUMBER() OVER (
+            PARTITION BY a.ADJ_ID
+            ORDER BY ls.START_TIMESTAMP DESC
+        ) AS RN
+    FROM adj_processed a
+    LEFT JOIN RAVEN.LOG_STAGE_ME_STATUS ls
+        ON ls.RAVEN_COBID = a.COBID
+        AND ls.DATASET_NAME = a.EXPECTED_DATASET_NAME
+        AND ls.START_TIMESTAMP >= a.PROCESS_DATE
+    WHERE a.EXPECTED_DATASET_NAME IS NOT NULL
 )
 SELECT
     a.ADJ_ID,
@@ -364,23 +387,34 @@ SELECT
     m.PBI_REFRESH_DURATION_SEC,
     m.PBI_QUEUE_WAIT_SEC,
     CASE
+        WHEN a.REFRESH_PATH = 'dbt via Control-M' THEN
+            CASE WHEN d.DBT_TRIGGER_TIME IS NOT NULL THEN 'Rebuild Triggered'
+                 ELSE 'Awaiting'
+            END
         WHEN m.PBI_COMPLETE_TIME IS NOT NULL THEN 'Reports Ready'
         WHEN m.PBI_START_TIME IS NOT NULL    THEN 'Refreshing'
         WHEN m.PBI_REQUEST_TIME IS NOT NULL  THEN 'Queued'
         ELSE 'Awaiting'
     END AS REPORT_STATUS,
     CASE
+        WHEN d.DBT_TRIGGER_TIME IS NOT NULL
+            THEN CONVERT_TIMEZONE('UTC', 'Europe/London', d.DBT_TRIGGER_TIME::TIMESTAMP_NTZ)
         WHEN m.PBI_COMPLETE_TIME IS NOT NULL
             THEN CONVERT_TIMEZONE('UTC', 'Europe/London', m.PBI_COMPLETE_TIME::TIMESTAMP_NTZ)
         WHEN m.PBI_START_TIME IS NOT NULL
             THEN CONVERT_TIMEZONE('UTC', 'Europe/London', m.PBI_START_TIME::TIMESTAMP_NTZ)
         WHEN m.PBI_REQUEST_TIME IS NOT NULL
             THEN CONVERT_TIMEZONE('UTC', 'Europe/London', m.PBI_REQUEST_TIME::TIMESTAMP_NTZ)
-    END AS REPORT_STATUS_TIME
+    END AS REPORT_STATUS_TIME,
+    a.REFRESH_PATH,
+    d.DBT_TRIGGER_TIME
 FROM adj_processed a
 LEFT JOIN pbi_match m
     ON m.ADJ_ID = a.ADJ_ID
-    AND m.RN = 1;
+    AND m.RN = 1
+LEFT JOIN dbt_match d
+    ON d.ADJ_ID = a.ADJ_ID
+    AND d.RN = 1;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -392,7 +426,7 @@ LEFT JOIN pbi_match m
 -- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_ADJUSTMENT_TRACK
-    COMMENT = 'Full lifecycle tracking per adjustment: submission → approval → processing → PowerBI refresh → reports ready.'
+    COMMENT = 'Full lifecycle tracking per adjustment: submission → approval → processing → downstream refresh (PowerBI for VaR/Stress; dbt rebuild via Control-M for Sensitivity/FRTB).'
 AS
 WITH status_milestones AS (
     SELECT
@@ -444,6 +478,8 @@ SELECT
     r.PBI_REFRESH_DURATION_SEC,
     r.PBI_QUEUE_WAIT_SEC,
     r.REPORT_STATUS,
+    r.REFRESH_PATH,
+    r.DBT_TRIGGER_TIME,
 
     -- Rejection info
     sm.REJECTED_AT,
@@ -462,6 +498,8 @@ SELECT
     CASE
         WHEN h.RUN_STATUS = 'Failed'                          THEN 'Failed'
         WHEN h.RUN_STATUS LIKE 'Rejected%'                    THEN 'Rejected'
+        WHEN r.REPORT_STATUS = 'Rebuild Triggered'            THEN 'Rebuild Triggered'
+        WHEN r.REFRESH_PATH = 'dbt via Control-M'             THEN 'Rebuild Pending'
         WHEN r.REPORT_STATUS = 'Reports Ready'                THEN 'Reports Ready'
         WHEN r.REPORT_STATUS = 'Refreshing'                   THEN 'PBI Refreshing'
         WHEN r.REPORT_STATUS IN ('Queued', 'Awaiting')        THEN 'PBI Queued'

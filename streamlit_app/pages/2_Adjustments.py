@@ -166,6 +166,7 @@ try:
                PROCESSING_STARTED_AT, PROCESSING_ENDED_AT,
                PBI_QUEUED_AT, PBI_STARTED_AT, PBI_COMPLETED_AT,
                PBI_REFRESH_DURATION_SEC, PBI_QUEUE_WAIT_SEC,
+               REFRESH_PATH, DBT_TRIGGER_TIME,
                RUN_STATUS
     FROM ADJUSTMENT_APP.VW_ADJUSTMENT_TRACK
     """)
@@ -393,7 +394,9 @@ def render_adj_card(row, expanded=False):
                     _pbi_completed = tr.get("PBI_COMPLETED_AT")
                     _pbi_started = tr.get("PBI_STARTED_AT")
                     _pbi_queued = tr.get("PBI_QUEUED_AT")
-                    _rs_time = _pbi_completed or _pbi_started or _pbi_queued
+                    _dbt_trigger = tr.get("DBT_TRIGGER_TIME")
+                    _rs_time = (_dbt_trigger or _pbi_completed
+                                or _pbi_started or _pbi_queued)
                     _rs_time_str = (_rs_time.strftime("%d %b %H:%M")
                                     if hasattr(_rs_time, "strftime") and str(_rs_time) != "NaT"
                                     else "")
@@ -403,18 +406,23 @@ def render_adj_card(row, expanded=False):
                         "Refreshing": "refresh-cw",
                         "Queued": "clock",
                         "Awaiting": "clock",
+                        "Rebuild Triggered": "check-circle",
                     }
                     _rs_messages = {
                         "Reports Ready": f"Reports Ready ({_rs_time_str})",
                         "Refreshing": f"Refreshing ({_rs_time_str})",
                         "Queued": "Queued — next ControlM cycle ~5 min",
                         "Awaiting": "Awaiting report refresh",
+                        "Rebuild Triggered":
+                            f"Rebuild triggered ({_rs_time_str}) — "
+                            "Control-M will run the dbt refresh",
                     }
                     _rs_colors = {
                         "Reports Ready": "#15803D",
                         "Refreshing": "#1D4ED8",
                         "Queued": "#B45309",
                         "Awaiting": "#64748B",
+                        "Rebuild Triggered": "#15803D",
                     }
                     color = _rs_colors.get(_rs_status, "#64748B")
                     _rs_icon = icon(_rs_icons.get(_rs_status, ""), size=12, color=color)

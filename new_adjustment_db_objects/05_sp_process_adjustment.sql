@@ -166,33 +166,35 @@ def log_status_history(session, adj_ids, old_status, new_status, changed_by="SYS
     """).collect()
 
 
-# ── PowerBI refresh config (per scope) ───────────────────────────────────
-# FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS:
-#   • arg1 (P_DATA_GROUP_NAME) must equal BATCH.RUN_LOG.proc_parameters — which
-#     we log via pbi_data_group() below — so its run-log lookup finds this run.
-#   • arg3 (P_INSERT_SOURCE) drives the inserts into POWERBI_PUBLISH_DETAIL /
-#     POWERBI_ACTION via METADATA.POWERBI_INSERT_SOURCES + the action view, which
-#     only recognise the var / stress / sensitivity data groups.
-# Only those three scopes are wired to PowerBI today; others are skipped (logged)
-# rather than calling the proc with an unsupported source.
+# ── Downstream hand-off config (per scope) ───────────────────────────────
+# Two hand-off paths tell reporting that adjusted numbers changed:
 #
-# Data-group CASING matters and mirrors the legacy callers exactly:
-#   • FACT.PROCESS_ADJUSTMENTS called with 'VAR' / 'STRESS' (uppercase);
-#   • the legacy Sensitivity loader logged proc_parameters = 'sensitivity' and
-#     called UPDATE_POWERBI_FOR_ADJUSTMENTS('sensitivity', ...) — LOWERCASE.
-#     UPDATE_POWERBI_FOR_ADJUSTMENTS compares `data_group_name = 'sensitivity'`
-#     (exact) to add the extra 'sensitivity_detail' POWERBI_PUBLISH_INFO row,
-#     and the MERGE keys on data_group_name — an uppercase 'SENSITIVITY' would
-#     silently skip the detail row and write rows the reports don't read.
+#   • VaR / Stress → PowerBI refresh via FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS:
+#       – arg1 (P_DATA_GROUP_NAME) must equal BATCH.RUN_LOG.proc_parameters —
+#         which we log via pbi_data_group() below — so its run-log lookup
+#         finds this run. Casing mirrors the legacy callers ('VAR'/'STRESS').
+#       – arg3 (P_INSERT_SOURCE) drives the inserts into POWERBI_PUBLISH_DETAIL
+#         / POWERBI_ACTION via METADATA.POWERBI_INSERT_SOURCES + the action view.
+#   • Sensitivity / FRTB* → dummy row in RAVEN.LOG_STAGE_ME_STATUS (mirrors the
+#     legacy LOAD_FRTB_SENSITIVITY_SCALING_ADJUSTMENT_TASK): a Control-M job
+#     polls that table for new DUMMY_* dataset rows and starts the dbt job that
+#     rebuilds the reporting model. All three FRTB scopes write the same
+#     legacy dataset name so the existing Control-M match keeps working.
+#
+# Scopes in neither map are skipped (logged) rather than guessing a hand-off.
 PBI_INSERT_SOURCE = {
     'VAR':         'LOAD_VAR_ADJUSTMENT',
     'STRESS':      'LOAD_STRESS_ADJUSTMENT',
-    'SENSITIVITY': 'LOAD_SENSITIVITY_ADJUSTMENT',
 }
 PBI_DATA_GROUP = {
     'VAR':         'VAR',
     'STRESS':      'STRESS',
-    'SENSITIVITY': 'sensitivity',
+}
+DBT_DUMMY_DATASET = {
+    'SENSITIVITY': 'DUMMY_Sensitivity_Adjustment',
+    'FRTB':        'DUMMY_FRTB_Adjustment',
+    'FRTBDRC':     'DUMMY_FRTB_Adjustment',
+    'FRTBRRAO':    'DUMMY_FRTB_Adjustment',
 }
 
 
@@ -203,8 +205,8 @@ def pbi_data_group(process_type):
 
 
 def trigger_powerbi_refresh(session, process_type, run_log_id, adj_ids_str=None):
-    """Queue a PowerBI refresh for VaR / Stress / Sensitivity, mirroring the
-    legacy FACT.PROCESS_ADJUSTMENTS hand-off. Returns a status string that the
+    """Queue a PowerBI refresh for VaR / Stress, mirroring the legacy
+    FACT.PROCESS_ADJUSTMENTS hand-off. Returns a status string that the
     caller stores in its result JSON.
 
     The refresh record in METADATA.POWERBI_ACTION is what tells the reporting
@@ -252,6 +254,65 @@ def trigger_powerbi_refresh(session, process_type, run_log_id, adj_ids_str=None)
             except Exception as stamp_err:
                 print(f"Warning: could not record PBI failure on header: {stamp_err}")
         return f"failed: {err_txt[:300]}"
+
+
+def trigger_dbt_handoff(session, process_type, cobid, adj_ids_str=None):
+    """Write the dbt refresh trigger for Sensitivity / FRTB scopes: a dummy
+    dataset row in RAVEN.LOG_STAGE_ME_STATUS, exactly as the legacy
+    LOAD_FRTB_SENSITIVITY_SCALING_ADJUSTMENT_TASK did. A Control-M job polls
+    the table for new DUMMY_* rows and starts the dbt job that rebuilds the
+    reporting model — the row IS the hand-off, so a failure to write it must
+    not be silent: the adjustment stays Processed (its numbers ARE applied)
+    but the failure is stamped on ADJ_HEADER.ERRORMESSAGE."""
+    dataset = DBT_DUMMY_DATASET[process_type.upper()]
+    try:
+        session.sql(f"""
+            INSERT INTO RAVEN.LOG_STAGE_ME_STATUS
+                (ID, RAVEN_COBID, DATASET_NAME, PROCESS_STATUS,
+                 START_TIMESTAMP, END_TIMESTAMP)
+            SELECT
+                HASH(CURRENT_TIMESTAMP(), {int(cobid)}, '{dataset}', RANDOM()),
+                {int(cobid)},
+                '{dataset}',
+                'SUCCESS',
+                CURRENT_TIMESTAMP(),
+                CURRENT_TIMESTAMP()
+        """).collect()
+        print(f"dbt refresh trigger written — dataset={dataset} cobid={cobid} "
+              f"(Control-M will pick it up and start the dbt job)")
+        return f"dbt trigger written ({dataset})"
+    except Exception as dbt_err:
+        err_txt = str(dbt_err)
+        print(f"Warning: dbt hand-off trigger failed: {err_txt}")
+        if adj_ids_str:
+            try:
+                warn = ("Processed, but writing the dbt refresh trigger failed "
+                        "— Control-M will not start the report rebuild, so "
+                        "reports may show stale data. Detail: "
+                        + err_txt)[:990].replace("'", "''")
+                session.sql(f"""
+                    UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                    SET ERRORMESSAGE = '{warn}'
+                    WHERE ADJ_ID IN ({adj_ids_str})
+                """).collect()
+            except Exception as stamp_err:
+                print(f"Warning: could not record dbt failure on header: {stamp_err}")
+        return f"failed: {err_txt[:300]}"
+
+
+def trigger_downstream_handoff(session, process_type, cobid, run_log_id,
+                               adj_ids_str=None):
+    """Route the post-processing hand-off by scope:
+    VaR / Stress → PowerBI refresh; Sensitivity / FRTB* → dbt trigger row."""
+    pt = process_type.upper()
+    if pt in PBI_INSERT_SOURCE:
+        return "powerbi: " + trigger_powerbi_refresh(
+            session, process_type, run_log_id, adj_ids_str)
+    if pt in DBT_DUMMY_DATASET:
+        return "dbt: " + trigger_dbt_handoff(
+            session, process_type, cobid, adj_ids_str)
+    print(f"Downstream hand-off skipped — no path configured for '{process_type}'.")
+    return "skipped (no downstream hand-off configured for this scope)"
 
 
 def notify_outcome(session, adj_ids, status):
@@ -516,11 +577,12 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
         run_log_id = session.sql("SELECT BATCH.SEQ_RUN_LOG.NEXTVAL AS X").collect()[0]["X"]
         result["run_log_id"] = run_log_id
 
-        # proc_parameters must equal the P_DATA_GROUP_NAME that
+        # For VaR/Stress, proc_parameters must equal the P_DATA_GROUP_NAME that
         # trigger_powerbi_refresh passes to FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS
         # — the proc keys its run-log lookup on this column. pbi_data_group()
-        # reproduces the legacy casing per scope ('VAR'/'STRESS' uppercase,
-        # 'sensitivity' LOWERCASE).
+        # reproduces the legacy casing ('VAR'/'STRESS' uppercase); other scopes
+        # just log their uppercase name (their hand-off is the dbt trigger row,
+        # which doesn't read the run log).
         session.sql(f"""
             CALL BATCH.LOAD_RUN_LOG(
                 {run_log_id},
@@ -748,8 +810,8 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 """).collect()
             except Exception as rl_err:
                 print(f"Warning: Run log close failed: {rl_err}")
-            result["powerbi_refresh"] = trigger_powerbi_refresh(
-                session, process_type, run_log_id, adj_ids_str)
+            result["downstream_handoff"] = trigger_downstream_handoff(
+                session, process_type, cobid, run_log_id, adj_ids_str)
             notify_outcome(session, adj_ids, "Processed")
 
         # ═════════════════════════════════════════════════════════════════
@@ -1408,8 +1470,8 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 """).collect()
             except Exception as rl_err:
                 print(f"Warning: Run log close failed: {rl_err}")
-            result["powerbi_refresh"] = trigger_powerbi_refresh(
-                session, process_type, run_log_id, adj_ids_str)
+            result["downstream_handoff"] = trigger_downstream_handoff(
+                session, process_type, cobid, run_log_id, adj_ids_str)
             notify_outcome(session, adj_ids, "Processed")
 
         # ═════════════════════════════════════════════════════════════════
@@ -1874,8 +1936,8 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 """).collect()
             except Exception as rl_err:
                 print(f"Warning: Run log close failed: {rl_err}")
-            result["powerbi_refresh"] = trigger_powerbi_refresh(
-                session, process_type, run_log_id, adj_ids_str)
+            result["downstream_handoff"] = trigger_downstream_handoff(
+                session, process_type, cobid, run_log_id, adj_ids_str)
             notify_outcome(session, adj_ids, "Processed")
 
         else:

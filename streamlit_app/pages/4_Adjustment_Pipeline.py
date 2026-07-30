@@ -161,7 +161,10 @@ is_running = _status == "Running"
 is_stale   = is_running & _running_min.apply(
     lambda v: _int_or_none(v) is not None and _int_or_none(v) >= RUNNING_WARN_MIN)
 is_failed  = _status == "Failed"
-is_ready   = df_track["CURRENT_STAGE"].fillna("") == "Reports Ready"
+# "Ready": PBI refresh completed (VaR/Stress) or dbt rebuild trigger written
+# (Sensitivity/FRTB — Control-M takes it from there, outside our visibility).
+is_ready   = df_track["CURRENT_STAGE"].fillna("").isin(
+    ["Reports Ready", "Rebuild Triggered"])
 
 # ──────────────────────────────────────────────────────────────────────────────
 # KPI CARDS
@@ -368,7 +371,8 @@ st.markdown(
     f'<div><strong>SP_RUN_PIPELINE</strong><br/>serialises overlaps, claims the '
     f'batch, processes it, releases waiting rows</div>'
     f'<div><strong>Dynamic Tables</strong><br/>auto-refresh (1 min lag)</div>'
-    f'<div><strong>PowerBI Refresh</strong><br/>queued per run; picked up every ~5 min</div>'
+    f'<div><strong>Report Refresh</strong><br/>VaR &amp; Stress: PowerBI (~5 min)<br/>'
+    f'Sensitivity &amp; FRTB: dbt rebuild via Control-M</div>'
     f'</div>',
     unsafe_allow_html=True)
 st.markdown("<br/>", unsafe_allow_html=True)
@@ -376,8 +380,9 @@ st.markdown("<br/>", unsafe_allow_html=True)
 section_title("Pipeline Board", "table")
 
 BOARD_STAGES = [
-    "Submitted", "Pending Approval", "Approved",
-    "Processing", "PBI Queued", "PBI Refreshing", "Reports Ready",
+    "Submitted", "Pending Approval", "Approved", "Processing",
+    "PBI Queued", "PBI Refreshing", "Reports Ready",
+    "Rebuild Pending", "Rebuild Triggered",
 ]
 board_html = '<div class="tracker-board">'
 for stg in BOARD_STAGES:
