@@ -21,7 +21,7 @@ st.set_page_config(
 from utils.styles import (
     inject_css, render_sidebar,
     P, SCOPE_CONFIG, TYPE_CONFIG, CATEGORY_CONFIG, render_df_table,
-    fmt_adj_id, icon,
+    fmt_adj_id, icon, bordered_container,
 )
 from utils.snowflake_conn import (run_query, call_sp_df, current_user_name,
                                   safe_rerun, friendly_error)
@@ -598,14 +598,11 @@ from contextlib import contextmanager
 
 @contextmanager
 def _card():
-    """Bordered container (section card) followed by a spacer, so cards never
-    hug each other (the gap is emitted in the page flow — version-proof,
-    unlike CSS on Streamlit's wrapper test-ids)."""
-    try:
-        c = st.container(border=True)
-    except Exception:   # some runtimes raise StreamlitAPIException, not TypeError
-        c = st.container()
-    with c:
+    """Section card followed by a spacer, so cards never hug each other (the
+    gap is emitted in the page flow — version-proof, unlike CSS on Streamlit's
+    wrapper test-ids). bordered_container() draws a real border on 1.29+ AND
+    on SiS 1.26 via the .sec-card-flag marker + :has() CSS."""
+    with bordered_container():
         yield
     st.markdown('<div style="height:0.7rem"></div>', unsafe_allow_html=True)
 

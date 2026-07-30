@@ -1116,6 +1116,32 @@ def inject_css():
         background-color: var(--card) !important;
         border: 1px solid var(--border) !important;
     }}
+
+    /* ═══ Marker cards — visible section cards on SiS 1.26 ═══
+       st.container(border=True) needs Streamlit 1.29; on 1.26
+       bordered_container() drops a hidden .sec-card-flag inside a plain
+       container and these :has() rules paint that container as a card.
+       Child-scoped (>) so only the container holding the marker matches —
+       ancestor blocks see the marker deeper than one element level. */
+    .sec-card-flag {{ display: none; }}
+    [data-testid="stVerticalBlock"]:has(
+        > [data-testid="element-container"] .sec-card-flag),
+    [data-testid="stVerticalBlock"]:has(
+        > [data-testid="stElementContainer"] .sec-card-flag),
+    [data-testid="stVerticalBlock"]:has(> .element-container .sec-card-flag) {{
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--r-md);
+        padding: 1rem 1.1rem 1.1rem;
+        box-shadow: var(--sh-sm);
+    }}
+    /* the marker's own element wrapper must not eat a flex-gap slot
+       (element-containers never nest, so any-depth :has() is safe here) */
+    [data-testid="element-container"]:has(.sec-card-flag),
+    [data-testid="stElementContainer"]:has(.sec-card-flag),
+    .element-container:has(.sec-card-flag) {{
+        display: none;
+    }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -1576,13 +1602,18 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
 def bordered_container():
     """Version-safe st.container(border=True): the border kwarg needs
     Streamlit ≥ 1.29, but SiS runs 1.26 (the minimum that supports
-    st.file_uploader). Falls back to a plain container on older runtimes.
+    st.file_uploader). On older runtimes the fallback container gets a hidden
+    .sec-card-flag marker; CSS `:has()` (inject_css) then paints the container
+    as a bordered card — so sections look like cards on 1.26 too. Browsers
+    without :has() (pre-Chrome 105) just see a plain container.
     Catches broadly on purpose — some runtimes surface the unknown-kwarg as
     a StreamlitAPIException rather than a TypeError."""
     try:
         return st.container(border=True)
     except Exception:
-        return st.container()
+        c = st.container()
+        c.markdown('<span class="sec-card-flag"></span>', unsafe_allow_html=True)
+        return c
 
 
 def render_df_table(df, max_rows=200, height=None, highlight=None, formats=None):

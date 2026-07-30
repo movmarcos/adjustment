@@ -87,55 +87,56 @@ if st.session_state.pop("_adj_clear_filters", False):
     st.session_state["mw_mine"] = False
     st.session_state["mw_deleted"] = False
 
-section_title("Filters", "search")
-f1, f2, f3, f4 = st.columns(4)
-with f1:
-    filter_status = st.multiselect(
-        "Status",
-        list(STATUS_COLORS.keys()),
-        default=[], key="mw_status")
-with f2:
-    filter_scope = st.multiselect(
-        "Scope", ALL_SCOPES,
-        default=[], key="mw_scope")
-with f3:
-    # Option values are the raw ADJUSTMENT_TYPE codes (used directly in the SQL
-    # filter); the label maps the cryptic "EROL" code to "Entity Roll".
-    _type_labels = {"Flatten": "Flatten", "Scale": "Scale", "Roll": "Roll",
-                    "Direct": "Direct Upload", "EROL": "Entity Roll"}
-    filter_type = st.multiselect(
-        "Type", list(_type_labels.keys()),
-        default=[], key="mw_type",
-        format_func=lambda v: _type_labels.get(v, v))
-with f4:
-    mine_only = st.checkbox("Only my adjustments", value=False, key="mw_mine",
-                            help="When checked, shows only adjustments you submitted.")
-    show_deleted = st.checkbox(
-        "Show deleted", value=False, key="mw_deleted",
-        help="Include deleted adjustments. Hidden by default.")
+with bordered_container():
+    section_title("Filters", "search")
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        filter_status = st.multiselect(
+            "Status",
+            list(STATUS_COLORS.keys()),
+            default=[], key="mw_status")
+    with f2:
+        filter_scope = st.multiselect(
+            "Scope", ALL_SCOPES,
+            default=[], key="mw_scope")
+    with f3:
+        # Option values are the raw ADJUSTMENT_TYPE codes (used directly in the SQL
+        # filter); the label maps the cryptic "EROL" code to "Entity Roll".
+        _type_labels = {"Flatten": "Flatten", "Scale": "Scale", "Roll": "Roll",
+                        "Direct": "Direct Upload", "EROL": "Entity Roll"}
+        filter_type = st.multiselect(
+            "Type", list(_type_labels.keys()),
+            default=[], key="mw_type",
+            format_func=lambda v: _type_labels.get(v, v))
+    with f4:
+        mine_only = st.checkbox("Only my adjustments", value=False, key="mw_mine",
+                                help="When checked, shows only adjustments you submitted.")
+        show_deleted = st.checkbox(
+            "Show deleted", value=False, key="mw_deleted",
+            help="Include deleted adjustments. Hidden by default.")
 
-f5, f6, f7, f8 = st.columns(4)
-with f5:
-    filter_cob = st.multiselect("COB", cob_opts, default=[], key="mw_cob",
-                                format_func=lambda v: str(v))
-with f6:
-    filter_entity = st.multiselect("Entity", entity_opts, default=[], key="mw_entity")
-with f7:
-    filter_dept = st.multiselect("Department", dept_opts, default=[], key="mw_dept")
-with f8:
-    filter_user = st.multiselect("User", user_opts, default=[], key="mw_user")
+    f5, f6, f7, f8 = st.columns(4)
+    with f5:
+        filter_cob = st.multiselect("COB", cob_opts, default=[], key="mw_cob",
+                                    format_func=lambda v: str(v))
+    with f6:
+        filter_entity = st.multiselect("Entity", entity_opts, default=[], key="mw_entity")
+    with f7:
+        filter_dept = st.multiselect("Department", dept_opts, default=[], key="mw_dept")
+    with f8:
+        filter_user = st.multiselect("User", user_opts, default=[], key="mw_user")
 
-_applied_n = sum(bool(st.session_state.get(k)) for k in _FILTER_WIDGET_KEYS) \
-    + (1 if mine_only else 0) + (1 if show_deleted else 0)
-fc1, fc2 = st.columns([5, 1])
-with fc1:
-    st.caption(f"{_applied_n} filter(s) applied." if _applied_n else
-               "No filters applied — showing the latest 200 adjustments.")
-with fc2:
-    if st.button("Clear filters", key="adj_clear_btn", use_container_width=True,
-                 disabled=not _applied_n):
-        st.session_state["_adj_clear_filters"] = True
-        safe_rerun()
+    _applied_n = sum(bool(st.session_state.get(k)) for k in _FILTER_WIDGET_KEYS) \
+        + (1 if mine_only else 0) + (1 if show_deleted else 0)
+    fc1, fc2 = st.columns([5, 1])
+    with fc1:
+        st.caption(f"{_applied_n} filter(s) applied." if _applied_n else
+                   "No filters applied — showing the latest 200 adjustments.")
+    with fc2:
+        if st.button("Clear filters", key="adj_clear_btn", use_container_width=True,
+                     disabled=not _applied_n):
+            st.session_state["_adj_clear_filters"] = True
+            safe_rerun()
 
 st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
 
@@ -727,35 +728,36 @@ view_df = view_df.reset_index(drop=True)
 
 total = len(df_adjs)
 shown = len(view_df)
-_rh1, _rh2 = st.columns([5, 1])
-with _rh1:
-    section_title(f"Results — {shown} of {total}", "table")
-    st.caption("Select a row to view its details and actions.")
-with _rh2:
-    st.download_button(
-        "⬇ Export CSV", view_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="adjustments_export.csv", mime="text/csv",
-        use_container_width=True,
-        help="Download the filtered list for Excel.")
+with bordered_container():
+    _rh1, _rh2 = st.columns([5, 1])
+    with _rh1:
+        section_title(f"Results — {shown} of {total}", "table")
+        st.caption("Select a row to view its details and actions.")
+    with _rh2:
+        st.download_button(
+            "⬇ Export CSV", view_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name="adjustments_export.csv", mime="text/csv",
+            use_container_width=True,
+            help="Download the filtered list for Excel.")
 
-selected = render_activity_grid(
-    view_df, selectable=True, key="adj_grid",
-    empty_msg="No adjustments match the current filter.")
+    selected = render_activity_grid(
+        view_df, selectable=True, key="adj_grid",
+        empty_msg="No adjustments match the current filter.")
 
-# Older Streamlit-in-Snowflake runtimes lack native row-selection; fall back to
-# a selectbox picker (same no-tabs single-grid design, just a different control).
-if selected is SELECTION_UNSUPPORTED:
-    def _opt_label(i):
-        if i is None:
-            return "— select an adjustment to view details / actions —"
-        r = view_df.iloc[i]
-        return (f'{fmt_adj_id(r.get("DIMENSION_ADJ_ID"))} · {r.get("PROCESS_TYPE")} · '
-                f'{r.get("ADJUSTMENT_TYPE")} · {r.get("RUN_STATUS")} · '
-                f'{r.get("ENTITY_CODE") or "—"}')
-    choice = st.selectbox(
-        "Open an adjustment", options=[None] + list(range(len(view_df))),
-        format_func=_opt_label, key="adj_pick", label_visibility="collapsed")
-    selected = view_df.iloc[choice].to_dict() if choice is not None else None
+    # Older Streamlit-in-Snowflake runtimes lack native row-selection; fall back to
+    # a selectbox picker (same no-tabs single-grid design, just a different control).
+    if selected is SELECTION_UNSUPPORTED:
+        def _opt_label(i):
+            if i is None:
+                return "— select an adjustment to view details / actions —"
+            r = view_df.iloc[i]
+            return (f'{fmt_adj_id(r.get("DIMENSION_ADJ_ID"))} · {r.get("PROCESS_TYPE")} · '
+                    f'{r.get("ADJUSTMENT_TYPE")} · {r.get("RUN_STATUS")} · '
+                    f'{r.get("ENTITY_CODE") or "—"}')
+        choice = st.selectbox(
+            "Open an adjustment", options=[None] + list(range(len(view_df))),
+            format_func=_opt_label, key="adj_pick", label_visibility="collapsed")
+        selected = view_df.iloc[choice].to_dict() if choice is not None else None
 
 # ── Bulk retry — all FAILED rows in the current filtered view ────────────────
 _bulk_flash = st.session_state.pop("adj_bulk_flash", None)
@@ -817,5 +819,6 @@ if len(_failed_view) >= 2:
 
 if selected is not None:
     st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
-    section_title("Adjustment Detail", "file-text")
-    render_adj_card(selected, expanded=True)
+    with bordered_container():
+        section_title("Adjustment Detail", "file-text")
+        render_adj_card(selected, expanded=True)
