@@ -205,17 +205,17 @@ kpi_items = [
     ("Overlaps",          int(kpis.get("OVERLAPS", 0)),         "Overlap alerts",       P["purple"],  "alert-triangle", "Adjustment_Pipeline"),
 ]
 
-cards_html = ('<style>.kpi-link{text-decoration:none;color:inherit;display:block}'
-              '.kpi-link:hover .kpi-card{transform:translateY(-1px);'
-              'box-shadow:0 4px 14px rgba(15,23,42,.12)}</style>'
-              '<div style="display:grid;grid-template-columns:repeat(7,1fr);'
+# NOTE: cards_html must START with the grid <div> — markdown keeps everything
+# inside one raw-HTML block only while the first line opens a block-level tag
+# (a leading <style> terminated the block and turned the cards into an
+# indented code block, showing raw HTML). The hover CSS lives in inject_css.
+cards_html = ('<div style="display:grid;grid-template-columns:repeat(7,1fr);'
               'gap:10px;margin-bottom:1.4rem">')
 for label, val, sub, color, icon_name, href in kpi_items:
     alert_style = f"box-shadow:0 0 0 2px {color}44;" if (label == "Power BI" and val > 0) or (label == "Overlaps" and val > 0) else ""
     val_color = color if val > 0 else P["grey_400"]
     cards_html += f"""
-    <a class="kpi-link" href="{href}" target="_self"
-       title="Open {label.lower()} — click to drill in">
+    <a class="kpi-link" href="{href}" target="_self" title="Open {label.lower()}">
     <div class="kpi-card" style="position:relative;background:white;border:1px solid {P['border']};
       border-radius:10px;padding:0.9rem 0.8rem 0.9rem 1rem;{alert_style}
       box-shadow:0 1px 2px rgba(15,23,42,.05);overflow:hidden;cursor:pointer;

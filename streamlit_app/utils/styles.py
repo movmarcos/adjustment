@@ -479,6 +479,13 @@ def inject_css():
     }}
     .section-title::after {{ content: ""; flex: 1; height: 1px; background: var(--border); }}
 
+    /* Home KPI cards — clickable */
+    .kpi-link {{ text-decoration: none; color: inherit; display: block; }}
+    .kpi-link:hover .kpi-card {{
+        transform: translateY(-1px);
+        box-shadow: 0 4px 14px rgba(15,23,42,.12);
+    }}
+
     /* Tags */
     .tag {{
         display: inline-block; background: {P["info_lt"]}; color: {P["info"]};
