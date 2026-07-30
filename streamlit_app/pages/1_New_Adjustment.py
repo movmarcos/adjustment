@@ -537,7 +537,6 @@ ALL_EXTRA_FIELDS = [
     ("tenor_code",                   "Tenor Code",                   ""),
     ("underlying_tenor_code",        "Underlying Tenor Code",        ""),
     ("curve_code",                   "Curve Code",                   ""),
-    ("day_type",                     "Day Type",                     ""),
     ("product_category_attributes",  "Product Category Attributes",  ""),
     ("batch_region_area",            "Batch Region Area",            ""),
     ("murex_family",                 "Murex Family",                 ""),
@@ -546,7 +545,7 @@ ALL_EXTRA_FIELDS = [
 
 # Every filter key (used for the ticket's applied-filter chips)
 FILTER_KEYS = ["entity_code", "source_system_code", "department_code", "book_code",
-               "var_component_name", "var_sub_component_name"] + \
+               "var_component_name", "var_sub_component_name", "day_type"] + \
               [k for k, _, _ in ALL_EXTRA_FIELDS]
 
 
@@ -951,7 +950,7 @@ def _render_main_filters() -> None:
             _book_options(wiz.get("department_code")), placeholder="— any —",
             help="Filtered by the selected Department")
     if wiz.get("process_type") == "VaR":
-        c5, c6, _, _ = st.columns(4)
+        c5, c6, c7, _ = st.columns(4)
         with c5:
             wiz["var_component_name"] = _code_select(
                 "VaR Component Name †", _k("var_comp_dd"),
@@ -964,6 +963,18 @@ def _render_main_filters() -> None:
                 _var_sub_options(wiz.get("var_component_name")),
                 placeholder="— any —",
                 help="Filtered by the selected VaR Component")
+        with c7:
+            _dt_labels = {"": "— both —", "1": "1 — 1-day VaR",
+                          "10": "10 — 10-day VaR"}
+            _dt_opts = list(_dt_labels.keys())
+            _dt_cur = str(wiz.get("day_type") or "")
+            wiz["day_type"] = st.selectbox(
+                "Day Type", _dt_opts,
+                index=_dt_opts.index(_dt_cur) if _dt_cur in _dt_opts else 0,
+                key=_k("day_type_dd"),
+                format_func=lambda v: _dt_labels.get(v, v),
+                help="VaR horizon: 1 = 1-day VaR, 10 = 10-day VaR. "
+                     "Blank applies the adjustment to both horizons.")
         st.caption("Blank = all values for that dimension · "
                    "† at least one of Department, Book or VaR Component")
     else:
@@ -978,7 +989,8 @@ def _render_extra_filters() -> None:
     applied = sum(1 for k in FILTER_KEYS
                   if k not in ("entity_code", "source_system_code",
                                "department_code", "book_code",
-                               "var_component_name", "var_sub_component_name")
+                               "var_component_name", "var_sub_component_name",
+                               "day_type")
                   and (wiz.get(k) or "").strip())
     label = f"More filters ({applied} applied)" if applied else "More filters"
     with st.expander(label, expanded=False):
@@ -993,7 +1005,7 @@ def _render_extra_filters() -> None:
                     wiz[fk] = st.text_input(fl, key=_k(fk),
                                             value=wiz.get(fk) or "", placeholder=ph)
         shown = {"entity_code", "source_system_code", "department_code", "book_code",
-                 "var_component_name", "var_sub_component_name"}
+                 "var_component_name", "var_sub_component_name", "day_type"}
         shown.update(fk for fk, _, _ in custom_fields)
         extra = [(k, l, p) for k, l, p in ALL_EXTRA_FIELDS if k not in shown]
         ecols = st.columns(3)
@@ -1445,7 +1457,8 @@ def _ticket_html(missing: list) -> str:
         label_map = {"entity_code": "Entity", "source_system_code": "Source",
                      "department_code": "Dept", "book_code": "Book",
                      "var_component_name": "VaR Comp",
-                     "var_sub_component_name": "VaR Sub"}
+                     "var_sub_component_name": "VaR Sub",
+                     "day_type": "Day Type"}
         label_map.update({k: l for k, l, _ in ALL_EXTRA_FIELDS})
         chips = "".join(
             f'<span class="filter-chip">{label_map.get(k, k)}: {v}</span>'
