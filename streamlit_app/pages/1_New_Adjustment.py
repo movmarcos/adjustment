@@ -916,6 +916,14 @@ def _var_sub_options(comp):
                    if r[1] is not None and (not comp or str(r[0]) == comp)})
 
 
+def _sim_source_options():
+    rows = _ref_rows(
+        "SELECT DISTINCT SIMULATION_SOURCE FROM DIMENSION.STRESS_SIMULATION "
+        "WHERE SIMULATION_SOURCE IS NOT NULL ORDER BY SIMULATION_SOURCE",
+        "_ref_sim_sources")
+    return [str(r[0]) for r in rows if r[0] is not None]
+
+
 def _code_select(label, key, value, options, help=None, placeholder="— select —"):
     """Dropdown over reference codes; free-text fallback when none are available."""
     if not options:
@@ -993,6 +1001,16 @@ def _render_extra_filters() -> None:
                                "day_type")
                   and (wiz.get(k) or "").strip())
     label = f"More filters ({applied} applied)" if applied else "More filters"
+
+    def _filter_widget(fk, fl, ph):
+        """Text input by default; reference-backed fields get a dropdown."""
+        if fk == "simulation_source":
+            wiz[fk] = _code_select(fl, _k(fk), wiz.get(fk),
+                                   _sim_source_options(), placeholder="— any —")
+        else:
+            wiz[fk] = st.text_input(fl, key=_k(fk),
+                                    value=wiz.get(fk) or "", placeholder=ph)
+
     with st.expander(label, expanded=False):
         if custom_fields:
             st.markdown(
@@ -1002,8 +1020,7 @@ def _render_extra_filters() -> None:
             ccols = st.columns(min(len(custom_fields), 4))
             for i, (fk, fl, ph) in enumerate(custom_fields):
                 with ccols[i % len(ccols)]:
-                    wiz[fk] = st.text_input(fl, key=_k(fk),
-                                            value=wiz.get(fk) or "", placeholder=ph)
+                    _filter_widget(fk, fl, ph)
         shown = {"entity_code", "source_system_code", "department_code", "book_code",
                  "var_component_name", "var_sub_component_name", "day_type"}
         shown.update(fk for fk, _, _ in custom_fields)
@@ -1011,8 +1028,7 @@ def _render_extra_filters() -> None:
         ecols = st.columns(3)
         for i, (fk, fl, ph) in enumerate(extra):
             with ecols[i % 3]:
-                wiz[fk] = st.text_input(fl, key=_k(fk),
-                                        value=wiz.get(fk) or "", placeholder=ph)
+                _filter_widget(fk, fl, ph)
 
 
 def render_scaling_form() -> None:
