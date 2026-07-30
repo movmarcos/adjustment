@@ -195,14 +195,18 @@ except Exception:
 
 queued = int(kpis.get("PENDING", 0)) + int(kpis.get("APPROVED", 0))
 
+# NOTE: cards were briefly <a> links to deep-link the Adjustments page, but
+# relative navigation renders a blank page inside the Snowsight iframe —
+# removed until a reliable navigation mechanism exists (st.switch_page needs
+# Streamlit 1.30; SiS runs 1.26). Page 2 still honours ?status=... params.
 kpi_items = [
-    ("Total",             int(kpis.get("TOTAL", 0)),           "All adjustments — open list", P["primary"], "list",           "Adjustments"),
-    ("Awaiting Approval", int(kpis.get("PENDING_APPROVAL", 0)), "Need approval",        P["info"],    "clipboard",      "Adjustments?status=Pending%20Approval"),
-    ("Queued",            queued,                               "Pending + Approved",   P["warning"], "clock",          "Adjustments?status=Pending,Approved"),
-    ("Running",           int(kpis.get("RUNNING", 0)),          "Processing now",       P["info"],    "zap",            "Adjustments?status=Running"),
-    ("Processed",         int(kpis.get("PROCESSED", 0)),        "In the data",          P["success"], "check-circle",   "Adjustments?status=Processed"),
-    ("Power BI",          pbi_pending,                           "Pending (24h) — open pipeline", P["info"], "line-chart", "Adjustment_Pipeline"),
-    ("Overlaps",          int(kpis.get("OVERLAPS", 0)),         "Overlap alerts",       P["purple"],  "alert-triangle", "Adjustment_Pipeline"),
+    ("Total",             int(kpis.get("TOTAL", 0)),           "All adjustments",      P["primary"], "list"),
+    ("Awaiting Approval", int(kpis.get("PENDING_APPROVAL", 0)), "Need approval",        P["info"],    "clipboard"),
+    ("Queued",            queued,                               "Pending + Approved",   P["warning"], "clock"),
+    ("Running",           int(kpis.get("RUNNING", 0)),          "Processing now",       P["info"],    "zap"),
+    ("Processed",         int(kpis.get("PROCESSED", 0)),        "In the data",          P["success"], "check-circle"),
+    ("Power BI",          pbi_pending,                           "Pending refreshes (24h)", P["info"], "line-chart"),
+    ("Overlaps",          int(kpis.get("OVERLAPS", 0)),         "Overlap alerts",       P["purple"],  "alert-triangle"),
 ]
 
 # NOTE: cards_html must START with the grid <div> — markdown keeps everything
@@ -211,15 +215,13 @@ kpi_items = [
 # indented code block, showing raw HTML). The hover CSS lives in inject_css.
 cards_html = ('<div style="display:grid;grid-template-columns:repeat(7,1fr);'
               'gap:10px;margin-bottom:1.4rem">')
-for label, val, sub, color, icon_name, href in kpi_items:
+for label, val, sub, color, icon_name in kpi_items:
     alert_style = f"box-shadow:0 0 0 2px {color}44;" if (label == "Power BI" and val > 0) or (label == "Overlaps" and val > 0) else ""
     val_color = color if val > 0 else P["grey_400"]
     cards_html += f"""
-    <a class="kpi-link" href="{href}" target="_self" title="Open {label.lower()}">
-    <div class="kpi-card" style="position:relative;background:white;border:1px solid {P['border']};
+    <div style="position:relative;background:white;border:1px solid {P['border']};
       border-radius:10px;padding:0.9rem 0.8rem 0.9rem 1rem;{alert_style}
-      box-shadow:0 1px 2px rgba(15,23,42,.05);overflow:hidden;cursor:pointer;
-      transition:transform .12s ease-out, box-shadow .12s ease-out">
+      box-shadow:0 1px 2px rgba(15,23,42,.05);overflow:hidden">
       <div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:{color}"></div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.3rem">
         <span style="font-size:0.62rem;font-weight:700;text-transform:uppercase;
@@ -229,7 +231,7 @@ for label, val, sub, color, icon_name, href in kpi_items:
       <div style="font-size:1.75rem;font-weight:800;color:{val_color};
         line-height:1;font-variant-numeric:tabular-nums">{val}</div>
       <div style="font-size:0.68rem;color:{P['grey_700']};margin-top:4px">{sub}</div>
-    </div></a>"""
+    </div>"""
 cards_html += '</div>'
 st.markdown(cards_html, unsafe_allow_html=True)
 
