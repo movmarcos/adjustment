@@ -1141,28 +1141,35 @@ def inject_css():
        Child-scoped (>) so only the container holding the marker matches —
        ancestor blocks see the marker deeper than one element level. */
     .sec-card-flag {{ display: none; }}
-    [data-testid="stVerticalBlock"]:has(
-        > [data-testid="element-container"] .sec-card-flag),
-    [data-testid="stVerticalBlock"]:has(
-        > [data-testid="stElementContainer"] .sec-card-flag),
-    [data-testid="stVerticalBlock"]:has(> .element-container .sec-card-flag) {{
+    [data-testid="stVerticalBlock"]:has(> :is(
+        [data-testid="element-container"],
+        [data-testid="stElementContainer"],
+        .element-container) .sec-card-flag) {{
         background: var(--card);
         border: 1px solid var(--border);
         border-radius: var(--r-md);
         padding: 1rem 1.1rem 1.1rem;
         box-shadow: var(--sh-sm);
         box-sizing: border-box;
+        overflow-x: clip;   /* guardrail: nothing may poke past the border */
     }}
-    /* Streamlit 1.26 gives widgets FIXED PIXEL widths measured before the
-       card padding exists, so full-width children (hairlines, textareas,
-       section 6 fields…) protruded past the card edge. Clamp anything
-       carrying an inline width so it fits the padded card. */
-    [data-testid="stVerticalBlock"]:has(
-        > [data-testid="element-container"] .sec-card-flag) [style*="width"],
-    [data-testid="stVerticalBlock"]:has(
-        > [data-testid="stElementContainer"] .sec-card-flag) [style*="width"],
-    [data-testid="stVerticalBlock"]:has(
-        > .element-container .sec-card-flag) [style*="width"] {{
+    /* Streamlit 1.26 gives widgets FIXED PIXEL widths (via generated CSS
+       classes, NOT inline styles) measured before the card padding exists,
+       so full-width children — section hairlines, textareas, the Business
+       Context fields — protruded past the card edge. Force every widget
+       wrapper inside a marker card back to fluid width; width:auto beats
+       both the class-based and any inline pixel width. */
+    [data-testid="stVerticalBlock"]:has(> :is(
+        [data-testid="element-container"],
+        [data-testid="stElementContainer"],
+        .element-container) .sec-card-flag) :is(
+        [data-testid="element-container"], [data-testid="stElementContainer"],
+        .element-container, [data-testid="stHorizontalBlock"],
+        .stMarkdown, .stText, .stCaptionContainer,
+        .stTextInput, .stTextArea, .stNumberInput, .stDateInput,
+        .stSelectbox, .stMultiSelect, .stCheckbox, .stRadio,
+        .stButton, .stDownloadButton, .stFileUploader, [style*="width"]) {{
+        width: auto !important;
         max-width: 100% !important;
     }}
     /* the marker's own element wrapper must not eat a flex-gap slot
