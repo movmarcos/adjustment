@@ -931,13 +931,20 @@ def inject_css():
     .stNumberInput > div > div, .stDateInput > div > div {{
         background-color: var(--card) !important;
     }}
-    [data-testid="stMainBlockContainer"] [data-baseweb="input"],
-    [data-testid="stMainBlockContainer"] [data-baseweb="textarea"] {{
-        border: 1px solid var(--border) !important;
+    /* UNSCOPED on purpose: [data-testid="stMainBlockContainer"] does not
+       exist on the SiS 1.26 runtime, so rules scoped to it never applied
+       there — which is why input borders stayed invisible. #C9D0DA is a
+       step stronger than --border so fields read clearly on white cards. */
+    [data-baseweb="input"], [data-baseweb="textarea"] {{
+        border: 1px solid #C9D0DA !important;
+        background-color: var(--card) !important;
     }}
-    [data-testid="stMainBlockContainer"] [data-baseweb="input"]:focus-within,
-    [data-testid="stMainBlockContainer"] [data-baseweb="textarea"]:focus-within {{
+    [data-baseweb="input"]:focus-within,
+    [data-baseweb="textarea"]:focus-within {{
         border-color: var(--brand) !important;
+    }}
+    input::placeholder, textarea::placeholder {{
+        color: var(--ink-3) !important;
     }}
     /* Number-input +/- steppers sit inside the same wrapper — keep them light */
     .stNumberInput button {{
@@ -954,7 +961,7 @@ def inject_css():
     .stSelectbox [data-baseweb="select"] > div,
     .stMultiSelect [data-baseweb="select"] > div {{
         background-color: var(--card) !important;
-        border: 1px solid var(--border) !important;
+        border: 1px solid #C9D0DA !important;
     }}
     .stSelectbox [data-baseweb="select"]:focus-within > div,
     .stMultiSelect [data-baseweb="select"]:focus-within > div {{
@@ -1144,6 +1151,19 @@ def inject_css():
         border-radius: var(--r-md);
         padding: 1rem 1.1rem 1.1rem;
         box-shadow: var(--sh-sm);
+        box-sizing: border-box;
+    }}
+    /* Streamlit 1.26 gives widgets FIXED PIXEL widths measured before the
+       card padding exists, so full-width children (hairlines, textareas,
+       section 6 fields…) protruded past the card edge. Clamp anything
+       carrying an inline width so it fits the padded card. */
+    [data-testid="stVerticalBlock"]:has(
+        > [data-testid="element-container"] .sec-card-flag) [style*="width"],
+    [data-testid="stVerticalBlock"]:has(
+        > [data-testid="stElementContainer"] .sec-card-flag) [style*="width"],
+    [data-testid="stVerticalBlock"]:has(
+        > .element-container .sec-card-flag) [style*="width"] {{
+        max-width: 100% !important;
     }}
     /* the marker's own element wrapper must not eat a flex-gap slot
        (element-containers never nest, so any-depth :has() is safe here) */
