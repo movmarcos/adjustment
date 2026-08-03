@@ -35,12 +35,11 @@ user = current_user_name()
 try:
     df_pbi_kpi = run_query_df("""
         SELECT
-            COALESCE(SUM(CASE WHEN START_TIME IS NULL THEN 1 ELSE 0 END), 0)                       AS PBI_QUEUED,
-            COALESCE(SUM(CASE WHEN START_TIME IS NOT NULL AND COMPLETE_TIME IS NULL THEN 1 ELSE 0 END), 0) AS PBI_RUNNING,
-            COALESCE(SUM(CASE WHEN COMPLETE_TIME IS NOT NULL THEN 1 ELSE 0 END), 0)                AS PBI_COMPLETED
+            COALESCE(SUM(CASE WHEN START_TIME IS NULL THEN 1 ELSE 0 END), 0)     AS PBI_QUEUED,
+            COALESCE(SUM(CASE WHEN START_TIME IS NOT NULL THEN 1 ELSE 0 END), 0) AS PBI_RUNNING
         FROM METADATA.POWERBI_ACTION
         WHERE INSERT_SOURCE IN ('LOAD_VAR_ADJUSTMENT','LOAD_STRESS_ADJUSTMENT')
-          AND REQUEST_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+          AND COMPLETE_TIME IS NULL
     """)
     pbi_pending = int(df_pbi_kpi.iloc[0]["PBI_QUEUED"]) + int(df_pbi_kpi.iloc[0]["PBI_RUNNING"]) if not df_pbi_kpi.empty else 0
 except Exception:
@@ -219,7 +218,7 @@ kpi_items = [
     ("Queued",            queued,                               "Pending + Approved",   P["warning"], "clock"),
     ("Running",           int(kpis.get("RUNNING", 0)),          "Processing now",       P["info"],    "zap"),
     ("Processed",         int(kpis.get("PROCESSED", 0)),        "In the data",          P["success"], "check-circle"),
-    ("Power BI",          pbi_pending,                           "VaR/Stress refreshes (24h)", P["info"], "line-chart"),
+    ("Power BI",          pbi_pending,                           "VaR/Stress refreshes pending", P["info"], "line-chart"),
     ("dbt Rebuild",       dbt_triggers,                          "Sens/FRTB triggers (24h)", P["purple"], "refresh-cw"),
     ("Overlaps",          int(kpis.get("OVERLAPS", 0)),         "Overlap alerts",       P["purple"],  "alert-triangle"),
 ]

@@ -302,8 +302,13 @@ WHERE h.RUN_STATUS = 'Pending Approval'
 --
 -- Two hand-off paths, matching the engine's trigger_downstream_handoff():
 --   • VaR / Stress → PowerBI refresh. Links ADJ_HEADER to
---     METADATA.POWERBI_ACTION by COBID + INSERT_SOURCE + REQUEST_TIME >=
---     PROCESS_DATE (most recent match).
+--     METADATA.POWERBI_ACTION by INSERT_SOURCE. The platform dedupes actions:
+--     if a 'W' (waiting) action already exists for the object, processing does
+--     NOT insert a new row — the pending action carries this run's data when
+--     it executes. So an adjustment is covered by an action that was queued by
+--     this run (REQUEST_TIME >= PROCESS_DATE), OR is still waiting
+--     (START_TIME IS NULL, any COB — the dedupe guard ignores COBID), OR
+--     started after this run's data landed (START_TIME >= PROCESS_DATE).
 --       COMPLETE_TIME set → Reports Ready; START_TIME set → Refreshing;
 --       REQUEST_TIME set → Queued; else Awaiting.
 --   • Sensitivity / FRTB* → dbt rebuild via Control-M. The engine writes a
@@ -354,13 +359,18 @@ pbi_match AS (
         DATEDIFF('second', pa.REQUEST_TIME, pa.START_TIME)  AS PBI_QUEUE_WAIT_SEC,
         ROW_NUMBER() OVER (
             PARTITION BY a.ADJ_ID
-            ORDER BY pa.REQUEST_TIME DESC
+            ORDER BY
+                -- strongest evidence first: completed > refreshing > waiting
+                IFF(pa.COMPLETE_TIME IS NOT NULL, 2,
+                    IFF(pa.START_TIME IS NOT NULL, 1, 0)) DESC,
+                pa.REQUEST_TIME DESC
         ) AS RN
     FROM adj_processed a
     LEFT JOIN METADATA.POWERBI_ACTION pa
-        ON pa.COBID = a.COBID
-        AND pa.INSERT_SOURCE = a.EXPECTED_INSERT_SOURCE
-        AND pa.REQUEST_TIME >= a.PROCESS_DATE
+        ON pa.INSERT_SOURCE = a.EXPECTED_INSERT_SOURCE
+        AND (pa.REQUEST_TIME >= a.PROCESS_DATE   -- fresh action queued by this run
+             OR pa.START_TIME IS NULL            -- pending 'W' action covers this run (platform dedupe, COB-blind)
+             OR pa.START_TIME >= a.PROCESS_DATE) -- refresh started after this run's data landed
     WHERE a.EXPECTED_INSERT_SOURCE IS NOT NULL
 ),
 dbt_match AS (
