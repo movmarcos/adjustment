@@ -1,0 +1,7 @@
+COBID	DATE	IS_WEEKEND	IS_BANK_HOLIDAY	IS_MONTH_END	IS_END_OF_WEEK	IS_CALENDAR_YEAR_END	IS_UK_BANK_HOLIDAY	IS_FINANCIAL_YEAR_END
+20,010,101	2001-01-01	false	true	false	false	false	true	false
+20,280,518	2028-05-18	false	false	false	false	false	false	false
+20,280,517	2028-05-17	false	false	false	false	false	false	false
+20,280,516	2028-05-16	false	false	false	false	false	false	false
+20,280,515	2028-05-15	false	false	false	false	false	false	false
+20,280,514	2028-05-14	true	false	false	false	false	false	false
