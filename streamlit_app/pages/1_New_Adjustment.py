@@ -885,18 +885,24 @@ def _category_options():
 
 def _book_dept_rows():
     return _ref_rows(
-        "SELECT DISTINCT BOOK_CODE, DEPARTMENT_CODE FROM DIMENSION.BOOK "
-        "WHERE BOOK_CODE IS NOT NULL", "_ref_books")
+        "SELECT DISTINCT BOOK_CODE, DEPARTMENT_CODE, ENTITY_CODE "
+        "FROM DIMENSION.BOOK WHERE BOOK_CODE IS NOT NULL", "_ref_books_v2")
 
 
-def _dept_options():
-    return sorted({str(r[1]) for r in _book_dept_rows() if r[1] is not None})
+def _dept_options(entity=None):
+    entity = (entity or "").strip()
+    return sorted({str(r[1]) for r in _book_dept_rows()
+                   if r[1] is not None
+                   and (not entity or str(r[2]) == entity)})
 
 
-def _book_options(dept):
+def _book_options(dept, entity=None):
     dept = (dept or "").strip()
+    entity = (entity or "").strip()
     return sorted({str(r[0]) for r in _book_dept_rows()
-                   if r[0] is not None and (not dept or str(r[1]) == dept)})
+                   if r[0] is not None
+                   and (not dept or str(r[1]) == dept)
+                   and (not entity or str(r[2]) == entity)})
 
 
 def _var_comp_rows():
@@ -1009,12 +1015,14 @@ def _render_main_filters() -> None:
     with c3:
         wiz["department_code"] = _code_select(
             "Department Code †", _k("dept_dd"), wiz.get("department_code"),
-            _dept_options(), placeholder="— any —")
+            _dept_options(wiz.get("entity_code")), placeholder="— any —",
+            help="Filtered by the selected Entity")
     with c4:
         wiz["book_code"] = _code_select(
             "Book Code †", _k("book_dd"), wiz.get("book_code"),
-            _book_options(wiz.get("department_code")), placeholder="— any —",
-            help="Filtered by the selected Department")
+            _book_options(wiz.get("department_code"), wiz.get("entity_code")),
+            placeholder="— any —",
+            help="Filtered by the selected Entity and Department")
     if wiz.get("process_type") == "VaR":
         c5, c6, c7, _ = st.columns(4)
         with c5:
