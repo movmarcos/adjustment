@@ -926,6 +926,40 @@ def _sim_source_options():
                    if r[0] is not None and str(r[0]).strip()})
 
 
+def _sim_name_options(source=None):
+    """Simulation names from DIMENSION.STRESS_SIMULATION, narrowed to the
+    selected Simulation Source when one is set. Free-typed names that don't
+    exist in the dimension match no fact rows and process as a silent no-op —
+    hence a dropdown."""
+    rows = _ref_rows(
+        "SELECT DISTINCT STRESS_SIMULATION_NAME, SIMULATION_SOURCE "
+        "FROM DIMENSION.STRESS_SIMULATION "
+        "WHERE STRESS_SIMULATION_NAME IS NOT NULL "
+        "AND TRIM(STRESS_SIMULATION_NAME) <> ''",
+        "_ref_sim_names")
+    src = (source or "").strip()
+    return sorted({str(r[0]).strip() for r in rows
+                   if r[0] is not None and str(r[0]).strip()
+                   and (not src or (r[1] is not None and str(r[1]).strip() == src))})
+
+
+def _measure_type_options(process_type=None):
+    """Measure type codes from DIMENSION.MEASURE_TYPE — the engine matches
+    filters against these exact codes (e.g. 'FRTBFXDelta', not 'FRTB Fx
+    Delta'). For FRTB scopes the FRTB-prefixed codes are listed first."""
+    rows = _ref_rows(
+        "SELECT DISTINCT MEASURE_TYPE_CODE FROM DIMENSION.MEASURE_TYPE "
+        "WHERE MEASURE_TYPE_CODE IS NOT NULL AND TRIM(MEASURE_TYPE_CODE) <> '' "
+        "ORDER BY MEASURE_TYPE_CODE",
+        "_ref_measure_types")
+    codes = sorted({str(r[0]).strip() for r in rows
+                    if r[0] is not None and str(r[0]).strip()})
+    if (process_type or "").upper().startswith("FRTB"):
+        codes = ([c for c in codes if c.upper().startswith("FRTB")]
+                 + [c for c in codes if not c.upper().startswith("FRTB")])
+    return codes
+
+
 def _code_select(label, key, value, options, help=None, placeholder="— select —"):
     """Dropdown over reference codes; free-text fallback when none are available."""
     if not options:
@@ -1020,6 +1054,15 @@ def _render_extra_filters() -> None:
         if fk == "simulation_source":
             wiz[fk] = _code_select(fl, _k(fk), wiz.get(fk),
                                    _sim_source_options(), placeholder="— any —")
+        elif fk == "simulation_name":
+            wiz[fk] = _code_select(fl, _k(fk), wiz.get(fk),
+                                   _sim_name_options(wiz.get("simulation_source")),
+                                   placeholder="— any —",
+                                   help="Narrowed by Simulation Source when one is selected")
+        elif fk == "measure_type_code":
+            wiz[fk] = _code_select(fl, _k(fk), wiz.get(fk),
+                                   _measure_type_options(wiz.get("process_type")),
+                                   placeholder="— any —")
         else:
             wiz[fk] = st.text_input(fl, key=_k(fk),
                                     value=wiz.get(fk) or "", placeholder=ph)

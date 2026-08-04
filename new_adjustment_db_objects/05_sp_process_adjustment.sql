@@ -1465,6 +1465,27 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 """).collect()
             result["rows_inserted"] = rows_count
 
+            # ── Zero-match warning ───────────────────────────────────────
+            # An adjustment that matched no fact rows "succeeds" without
+            # changing anything — almost always a filter value that doesn't
+            # exist in the data (simulation name, measure type, trade code).
+            # Stamp a warning so the pipeline pages surface it. A Scale with
+            # factor 1 on its own COB is a legitimate zero-delta no-op, not
+            # a filter miss — leave those unstamped.
+            session.sql(f"""
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                SET ERRORMESSAGE = 'Warning: processed but matched 0 rows — '
+                    || 'nothing was adjusted. Check the filter values '
+                    || '(simulation name, measure type, trade/instrument '
+                    || 'codes) against the reference data.'
+                WHERE ADJ_ID IN ({adj_ids_str})
+                  AND RECORD_COUNT = 0
+                  AND ERRORMESSAGE IS NULL
+                  AND NOT (UPPER(ADJUSTMENT_TYPE) = 'SCALE'
+                           AND SCALE_FACTOR = 1
+                           AND SOURCE_COBID = COBID)
+            """).collect()
+
             # ── Update status ────────────────────────────────────────────
             update_header_status(session, df_adj_scale, cobid, "Processed")
             log_status_history(session, adj_ids, "Running", "Processed")
