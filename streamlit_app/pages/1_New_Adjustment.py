@@ -1027,12 +1027,12 @@ def _render_main_filters() -> None:
         c5, c6, c7, _ = st.columns(4)
         with c5:
             wiz["var_component_name"] = _code_select(
-                "VaR Component Name †", _k("var_comp_dd"),
+                "VaR Component †", _k("var_comp_dd"),
                 wiz.get("var_component_name"),
                 _var_comp_options(), placeholder="— any —")
         with c6:
             wiz["var_sub_component_name"] = _code_select(
-                "VaR Sub-Component Name", _k("var_sub_dd"),
+                "VaR Sub-Component", _k("var_sub_dd"),
                 wiz.get("var_sub_component_name"),
                 _var_sub_options(wiz.get("var_component_name")),
                 placeholder="— any —",
