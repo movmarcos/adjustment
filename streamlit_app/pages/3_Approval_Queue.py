@@ -123,7 +123,8 @@ with f1:
         default=[], key="aq_scope")
 with f2:
     _aq_type_labels = {"Flatten": "Flatten", "Scale": "Scale", "Roll": "Roll",
-                       "Direct": "Direct Upload", "EROL": "Entity Roll"}
+                       "Direct": "Direct Adjustment", "Upload": "VaR Upload",
+                       "EROL": "Entity Roll"}
     filter_type = st.multiselect(
         "Filter by Type", list(_aq_type_labels.keys()),
         default=[], key="aq_type",

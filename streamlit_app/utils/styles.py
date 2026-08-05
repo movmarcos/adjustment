@@ -188,8 +188,12 @@ CATEGORY_CONFIG = {
         "desc": "Scale, flatten or roll fact table data (config-driven)",
     },
     "Direct Adjustment": {
+        "icon": "list", "color": "#7E22CE", "bg": "#FAF5FF",
+        "desc": "Paste or upload exact values for a chosen scope — each row is its own adjustment",
+    },
+    "VaR Upload": {
         "icon": "upload", "color": "#7E22CE", "bg": "#FAF5FF",
-        "desc": "Upload exact adjustment values for a chosen scope (CSV)",
+        "desc": "Upload one VaR file of exact adjustment values — the whole file is one adjustment (CSV)",
     },
     "Entity Roll": {
         "icon": "refresh-cw", "color": "#B45309", "bg": "#FFFBEB",

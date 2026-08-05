@@ -103,7 +103,8 @@ with bordered_container():
         # Option values are the raw ADJUSTMENT_TYPE codes (used directly in the SQL
         # filter); the label maps the cryptic "EROL" code to "Entity Roll".
         _type_labels = {"Flatten": "Flatten", "Scale": "Scale", "Roll": "Roll",
-                        "Direct": "Direct Upload", "EROL": "Entity Roll"}
+                        "Direct": "Direct Adjustment", "Upload": "VaR Upload",
+                        "EROL": "Entity Roll"}
         filter_type = st.multiselect(
             "Type", list(_type_labels.keys()),
             default=[], key="mw_type",
@@ -241,9 +242,10 @@ def _clone_jsonable(v):
 
 def _do_clone(src_adj_id, new_cob) -> None:
     """Create a NEW adjustment at `new_cob` from an existing one's header
-    (and, for Direct uploads, a copy of its line items). Goes through
-    SP_SUBMIT_ADJUSTMENT like any submission — validation, sign-off check,
-    overlap blocking and (if requested) approval all apply normally."""
+    (and, for VaR Upload / legacy Direct rows that carry line items, a copy
+    of them). Goes through SP_SUBMIT_ADJUSTMENT like any submission —
+    validation, sign-off check, overlap blocking and (if requested) approval
+    all apply normally."""
     import json as _json
     import uuid as _uuid
     _sid = str(src_adj_id).replace("'", "''")
@@ -282,12 +284,18 @@ def _do_clone(src_adj_id, new_cob) -> None:
             if val is not None and str(val).strip() != "":
                 payload.setdefault(key, val)
 
-        # Direct uploads: copy the line items under a pre-generated ADJ_ID so
-        # header and payload rows share the same id (mirrors the New
-        # Adjustment page's upload flow, including rollback on rejection).
-        if str(src.get("ADJUSTMENT_ACTION")) == "Direct":
+        # VaR Upload (whole file = one entry): copy the line items under a
+        # pre-generated ADJ_ID so header and payload rows share the same id
+        # (mirrors the New Adjustment page's upload flow, including rollback
+        # on rejection). Legacy pre-split "Direct" adjustments may also carry
+        # line items (the old combined Direct/Upload flow used them); the
+        # post-split "Direct" flow (each pasted row = its own adjustment)
+        # never does — its value lives on the header (ADJUSTMENT_VALUE_IN_USD,
+        # already copied via _CLONE_FIELDS above) — so a zero-row copy there
+        # is expected, not an error.
+        _adj_action = str(src.get("ADJUSTMENT_ACTION"))
+        if _adj_action in ("Upload", "Direct"):
             new_id = str(_uuid.uuid4())
-            payload["adj_id"] = new_id
             rows = run_query(f"""
                 INSERT INTO ADJUSTMENT_APP.ADJ_LINE_ITEM_JSON (ADJ_ID, ROW_NUM, PAYLOAD)
                 SELECT '{new_id}', ROW_NUM, PAYLOAD
@@ -295,13 +303,15 @@ def _do_clone(src_adj_id, new_cob) -> None:
                 WHERE ADJ_ID = '{_sid}' AND IS_DELETED = FALSE
             """)
             _copied = int(rows[0][0]) if rows else 0
-            if _copied == 0:
+            if _copied == 0 and _adj_action == "Upload":
                 st.session_state["adj_action_flash"] = (
                     "warning", "Clone failed — the source upload has no line "
                                "items to copy.")
                 safe_rerun()
                 return
-            copied_line_items_for = new_id
+            if _copied > 0:
+                payload["adj_id"] = new_id
+                copied_line_items_for = new_id
 
         json_str = _json.dumps(payload).replace("\\", "\\\\").replace("'", "''")
         res = run_query(f"CALL ADJUSTMENT_APP.SP_SUBMIT_ADJUSTMENT('{json_str}')")

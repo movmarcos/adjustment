@@ -162,8 +162,14 @@ with tab_overview:
          "it; <em>Roll</em> carries another COB's adjusted values forward.",
          "No (optional)"],
         ["<strong>Direct Adjustment</strong>",
-         "Upload exact values from a CSV for a chosen scope. A re-upload with "
-         "the same COB + Reference <em>replaces</em> the previous upload.",
+         "Paste or upload a CSV of exact values for Stress, Sensitivity or "
+         "FRTB. Each row is validated and submitted as its own, independent "
+         "adjustment.",
+         "No (optional)"],
+        ["<strong>VaR Upload</strong>",
+         "Upload one CSV in VaR's legacy layout — the whole file becomes a "
+         "single adjustment entry. A re-upload with the same COB + Reference "
+         "<em>replaces</em> the previous upload.",
          "No (optional)"],
         ["<strong>Entity Roll</strong>",
          "Replace an entity's entire figures at a COB with another COB's "
@@ -202,7 +208,7 @@ with tab_create:
     section_title("The New Adjustment Page", "info")
     _html(_card(
         "One dense screen: pick the <strong>Category</strong> (Scaling / Direct "
-        "/ Entity Roll), pick the <strong>Scope</strong>, fill the fields, and "
+        "/ VaR Upload / Entity Roll), pick the <strong>Scope</strong>, fill the fields, and "
         "the live <strong>Ticket</strong> panel on the right tracks completeness "
         "and unlocks Submit when everything required is present. Every "
         "adjustment needs an <strong>Adjustment Category</strong> (the managed "
@@ -231,14 +237,26 @@ with tab_create:
         f'runs them in sequence; the preview shown is the sum across the three.',
         "#7E22CE"))
 
-    section_title("Direct Adjustment (CSV upload)", "upload")
+    section_title("Direct Adjustment (paste or upload CSV)", "list")
     _html(_card(
-        "Upload a CSV in the scope's expected format (the expected columns are "
-        "shown on the page). Values are stored exactly as uploaded and written "
-        "to the scope's adjustment table when processed.<br/><br/>"
+        "Paste or upload a CSV of exact values for Stress, Sensitivity or "
+        "FRTB (the expected columns are shown on the page). Each row is "
+        "validated independently and becomes its own adjustment — a 200-row "
+        "file submits 200 separate tickets, each with its own USD value, "
+        "not one combined adjustment.<br/><br/>"
+        "There is no reference-based replacement here: to correct a row, "
+        "submit a new one or act on the existing ticket from the "
+        "<strong>Adjustments</strong> page (Retry, Delete, Recall)."))
+
+    section_title("VaR Upload (CSV file)", "upload")
+    _html(_card(
+        "Upload one CSV in VaR's legacy layout (the expected columns are "
+        "shown on the page). The whole file is stored exactly as uploaded "
+        "and written to the VaR adjustment table when processed as a "
+        "<strong>single</strong> adjustment entry.<br/><br/>"
         "<strong>Reference &amp; replacement:</strong> the Reference field "
-        "identifies the upload. Submitting a new Direct adjustment with the "
-        "same <strong>COB + Reference</strong> replaces the previous one — the "
+        "identifies the upload. Submitting a new VaR Upload with the same "
+        "<strong>COB + Reference</strong> replaces the previous one — the "
         "old ticket is marked <em>Replaced</em> and its rows are removed from "
         "the adjustment tables in the same transaction. The page warns you and "
         "asks for explicit confirmation before a replacement. A replacement is "
@@ -373,7 +391,9 @@ with tab_processing:
          "Adjustments touching the same data (same COB + overlapping filters) "
          "must not run at once. The oldest proceeds; newer ones are marked "
          "blocked-by and start automatically when the blocker finishes. Direct "
-         "uploads don't overlap (their duplicate control is the Reference)."],
+         "and VaR Upload rows don't overlap-serialise: Direct rows are "
+         "independent per-row adjustments (no dedupe needed); VaR Upload's "
+         "duplicate control is the Reference."],
         ["<strong>Claim</strong>",
          "Eligible Pending/Approved rows are atomically promoted to "
          "<em>Running</em> and stamped with the run's unique claim token. Each "
@@ -382,9 +402,9 @@ with tab_processing:
         ["<strong>Process</strong>",
          "<code>SP_PROCESS_ADJUSTMENT</code> runs once per (scope, action, "
          "COB) combo — combos run in parallel. It registers the dimension "
-         "row, applies the Scale / Direct / Entity Roll logic, updates "
-         "statuses and history, closes the run log, and queues the PowerBI "
-         "refresh."],
+         "row, applies the Scale / Direct / Upload / Entity Roll logic, "
+         "updates statuses and history, closes the run log, and queues the "
+         "PowerBI refresh."],
         ["<strong>Release</strong>",
          "Rows whose blocker just finished have their block cleared; the next "
          "1-minute poll picks them up."],
@@ -404,10 +424,16 @@ with tab_processing:
          "source COB's <em>adjusted</em> values forward (× factor). Combined "
          "result at the target = the source COB's adjusted numbers."],
         ["<strong>Direct</strong>",
-         "The uploaded rows are transformed via the scope's configured mapping "
-         "(dimension codes resolved to keys) and inserted with the "
-         "adjustment's report ID. A retry after a failure first removes "
-         "anything the failed run wrote — retries never double-count."],
+         "One header row = one fact row: the codes on the adjustment resolve "
+         "directly to dimension keys (case-insensitive, −1 when blank or "
+         "unmatched) and its USD value lands straight in the measure column "
+         "— no intermediate line items, no FX conversion."],
+        ["<strong>Upload</strong>",
+         "The uploaded file's line items are transformed via the scope's "
+         "configured mapping (dimension codes resolved to keys) and inserted "
+         "with the adjustment's report ID as one entry. A retry after a "
+         "failure first removes anything the failed run wrote — retries "
+         "never double-count."],
         ["<strong>Entity Roll</strong>",
          "Atomic destructive replace: remove every adjustment for the entity "
          "at the target COB, then insert a flatten of the entity's base values "
@@ -525,8 +551,8 @@ with tab_trouble:
          "Someone else decided it first, or the submitter recalled it.",
          "The page tells you the request already moved on — no false audit "
          "entry is written. Refresh and check its current state."],
-        ["Direct upload replaced the wrong thing / warning about replacement",
-         "A Direct adjustment with the same COB + Reference already existed.",
+        ["VaR Upload replaced the wrong thing / warning about replacement",
+         "A VaR Upload with the same COB + Reference already existed.",
          "The replacement needs an explicit confirmation tick. Use a new "
          "Reference if it is genuinely a different adjustment."],
         ["Reports don't show my processed adjustment",
@@ -560,7 +586,7 @@ with tab_reference:
         "Failed":               "Processing errored — see the ticket's error text; Retry re-queues.",
         "Rejected":             "An approver rejected it (reason recorded).",
         "Rejected - SignedOff": "Refused at submission because the COB is signed off.",
-        "Replaced":             "Superseded by a newer Direct upload with the same COB + Reference.",
+        "Replaced":             "Superseded by a newer VaR Upload with the same COB + Reference.",
         "Superseded":           "Removed by an Entity Roll that rebuilt the entity at that COB.",
         "Deleted":              "Deleted by a user; its rows were removed from the adjustment tables.",
     }
@@ -575,7 +601,7 @@ with tab_reference:
         ["<code>ADJ_HEADER</code>",
          "Single entry point for every adjustment — one row per ticket, with "
          "status, claim token, and blocking info."],
-        ["<code>ADJ_LINE_ITEM_JSON</code>", "Direct-upload rows (verbatim CSV payload per row)."],
+        ["<code>ADJ_LINE_ITEM_JSON</code>", "VaR Upload rows (verbatim CSV payload per row)."],
         ["<code>ADJ_STATUS_HISTORY</code>", "Append-only audit of every status transition."],
         ["<code>ADJUSTMENTS_SETTINGS</code>",
          "Per-scope config: fact/adjustment/summary tables, metric columns, "
@@ -586,14 +612,14 @@ with tab_reference:
          "Approver registry (per scope), Admin-page access list, managed "
          "business-category list."],
         ["<code>SP_SUBMIT_ADJUSTMENT</code>",
-         "Validates, checks sign-off (app + upstream feed), handles Direct "
-         "replacement transactionally, inserts the ticket."],
+         "Validates, checks sign-off (app + upstream feed), handles VaR "
+         "Upload replacement transactionally, inserts the ticket."],
         ["<code>SP_RUN_PIPELINE</code> + 4 scope tasks",
          "1-minute polling orchestrator: reap → serialise → claim (token) → "
          "process → release."],
         ["<code>SP_PROCESS_ADJUSTMENT</code>",
-         "Core engine: Scale / Direct / Entity Roll application, netting and "
-         "supersede, run log, PowerBI hand-off."],
+         "Core engine: Scale / Direct / Upload / Entity Roll application, "
+         "netting and supersede, run log, PowerBI hand-off."],
         ["<code>SP_FORCE_PROCESS_ADJUSTMENT</code>",
          "Manual escape hatch — pushes one stuck adjustment through now "
          "(refuses to bypass a live blocker)."],
