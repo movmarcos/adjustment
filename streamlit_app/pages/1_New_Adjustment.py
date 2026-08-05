@@ -201,7 +201,7 @@ def _direct_row_payload(row: dict) -> dict:
             ("SIMULATION_NAME", "simulation_name"), ("SIMULATION_SOURCE", "simulation_source"),
             ("MEASURE_TYPE_CODE", "measure_type_code"), ("CURRENCY_CODE", "currency_code")]:
         v = row.get(stage_col)
-        if v is not None and str(v).strip():
+        if not _direct_cell_blank(v):
             p[payload_key] = str(v).strip()
     return p
 
@@ -485,11 +485,18 @@ def _do_submit() -> dict:
                 return {"status": "Error",
                         "message": "No valid staged rows to submit — parse a CSV "
                                    "with at least one valid row first."}
+            n_total = len(valid_rows)
             created, failures, statuses = [], [], []
             for i, (_, row) in enumerate(ndf.iterrows(), start=1):
                 if i not in valid_rows:
                     continue
-                row_res = _submit_one(_direct_row_payload(row.to_dict()))
+                # Never let one row's exception abort the loop — a network hiccup
+                # on row 5 of 500 must not lose track of rows 1-4's created headers.
+                try:
+                    row_res = _submit_one(_direct_row_payload(row.to_dict()))
+                except Exception as exc:
+                    failures.append(f"row {i}: {exc}")
+                    continue
                 if _is_submit_success(row_res):
                     created.append(i)
                     statuses.append(row_res.get("status"))
@@ -502,16 +509,18 @@ def _do_submit() -> dict:
             wiz["direct_batch_id"] = None
             wiz["direct_ndf"]      = None
             wiz["direct_verdicts"] = None
-            fail_txt = ""
+            wiz["_direct_sig"]     = None
+            # Partial failure must never read as success: any failed row makes
+            # the overall result an Error, even though the successful rows'
+            # headers already exist (mirrors the FRTBALL fan-out's semantics).
             if failures:
                 shown = "; ".join(failures[:10])
-                fail_txt = (f" {len(failures)} row(s) failed: {shown}"
-                            + (" …" if len(failures) > 10 else ""))
-            if not created:
+                more  = f" (+{len(failures) - 10} more)" if len(failures) > 10 else ""
                 return {"status": "Error",
-                        "message": "No Direct adjustments were created." + fail_txt}
+                        "message": f"Created {len(created)} of {n_total} Direct "
+                                   f"adjustments. Failures: {shown}{more}"}
             return {"status": statuses[0],
-                    "message": f"Created {len(created)} Direct adjustments." + fail_txt}
+                    "message": f"Created {len(created)} Direct adjustment(s)."}
 
         payload = _build_payload()
 
@@ -1035,6 +1044,25 @@ _DIRECT_STAGE_COLS = [
     "CURRENCY_CODE", "VALUE_USD",
 ]
 
+_DIRECT_STAGE_CHUNK = 500  # rows per INSERT — keeps the generated SQL bounded
+
+
+def _direct_cell_blank(v) -> bool:
+    """True when a staged/normalized Direct cell carries no real value —
+    None, float NaN (pandas' empty-cell marker), or whitespace-only text.
+    Shared by _stage_direct_batch (what gets written) and _direct_row_payload
+    (what gets submitted) so a blank cell never round-trips as the string
+    "nan"."""
+    return v is None or (isinstance(v, float) and pd.isna(v)) or str(v).strip() == ""
+
+
+def _sql_str_literal(v) -> str:
+    """Snowflake string literal: backslashes doubled FIRST, then quotes —
+    see _submit_one's docstring for why the order matters (Snowflake
+    literals interpret \\n, \\t, etc., so a lone backslash before an escaped
+    quote would misparse)."""
+    return "'" + str(v).replace("\\", "\\\\").replace("'", "''") + "'"
+
 
 def _accepted_columns(scope: str):
     """{ACCEPTED_NAME (upper): STAGE_COLUMN} + set of required stage columns."""
@@ -1068,24 +1096,31 @@ def _parse_direct_df(df, scope: str):
 
 
 def _stage_direct_batch(batch_id: str, ndf) -> int:
-    """Write normalized rows to ADJ_DIRECT_STAGE. Returns row count."""
-    user = (current_user_name() or "").replace("'", "''")
+    """Write normalized rows to ADJ_DIRECT_STAGE. Returns row count.
+
+    Escaping: backslashes doubled BEFORE quotes (Snowflake convention — see
+    _sql_str_literal). Chunked into _DIRECT_STAGE_CHUNK-row INSERTs so a large
+    paste doesn't generate one unbounded VALUES list."""
+    user = _sql_str_literal(current_user_name() or "")
+    batch_lit = _sql_str_literal(batch_id)
     values = []
     for i, (_, row) in enumerate(ndf.iterrows(), start=1):
         cells = []
         for col_name in _DIRECT_STAGE_COLS:
             v = row.get(col_name)
-            if v is None or (isinstance(v, float) and pd.isna(v)) or str(v).strip() == "":
+            if _direct_cell_blank(v):
                 cells.append("NULL")
             else:
-                cells.append("'" + str(v).strip().replace("'", "''") + "'")
-        values.append(f"('{batch_id}', {i}, {', '.join(cells)}, '{user}')")
+                cells.append(_sql_str_literal(str(v).strip()))
+        values.append(f"({batch_lit}, {i}, {', '.join(cells)}, {user})")
     if not values:
         return 0
-    run_query(
-        f"INSERT INTO ADJUSTMENT_APP.ADJ_DIRECT_STAGE "
-        f"(BATCH_ID, ROW_NUM, {', '.join(_DIRECT_STAGE_COLS)}, USERNAME) "
-        f"VALUES {', '.join(values)}")
+    cols_sql = f"(BATCH_ID, ROW_NUM, {', '.join(_DIRECT_STAGE_COLS)}, USERNAME)"
+    for start in range(0, len(values), _DIRECT_STAGE_CHUNK):
+        chunk = values[start:start + _DIRECT_STAGE_CHUNK]
+        run_query(
+            f"INSERT INTO ADJUSTMENT_APP.ADJ_DIRECT_STAGE {cols_sql} "
+            f"VALUES {', '.join(chunk)}")
     return len(values)
 
 
@@ -1448,11 +1483,13 @@ def render_direct_form() -> None:
                  "columns come out wrong.")
 
         def _read_csv(buf):
-            """Parse with the chosen delimiter (or sniff it) — same for both modes."""
+            """Parse with the chosen delimiter (or sniff it) — dtype=str so
+            numeric-looking codes (e.g. trade/instrument codes) don't get
+            silently coerced to float ('12345' → '12345.0')."""
             sep = _DELIMS[delim_choice]
             if sep is None:
-                return pd.read_csv(buf, sep=None, engine="python")
-            return pd.read_csv(buf, sep=sep)
+                return pd.read_csv(buf, sep=None, engine="python", dtype=str)
+            return pd.read_csv(buf, sep=sep, dtype=str)
 
         df, _src_token, _parse_err = None, None, None
         if _in_mode == "Upload file":

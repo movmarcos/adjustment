@@ -29,9 +29,9 @@ LATERAL (
                 WHERE c.PROCESS_TYPE = 'Stress' AND c.IS_ACTIVE AND c.IS_REQUIRED
                   AND c.STAGE_COLUMN = 'VALUE_USD'),
             'VALUE_USD is required', NULL),
-        IFF(s.VALUE_USD IS NOT NULL AND TRY_TO_NUMBER(s.VALUE_USD) IS NULL,
+        IFF(s.VALUE_USD IS NOT NULL AND TRY_TO_NUMBER(s.VALUE_USD, 38, 6) IS NULL,
             'VALUE_USD is not numeric: ' || s.VALUE_USD, NULL),
-        IFF(TRY_TO_NUMBER(s.VALUE_USD) = 0, 'VALUE_USD must not be zero', NULL),
+        IFF(TRY_TO_NUMBER(s.VALUE_USD, 38, 6) = 0, 'VALUE_USD must not be zero', NULL),
         IFF(s.ENTITY_CODE IS NOT NULL AND NOT EXISTS (
                 SELECT 1 FROM DIMENSION.ENTITY e
                 WHERE UPPER(e.ENTITY_CODE) = UPPER(s.ENTITY_CODE)),
@@ -90,9 +90,9 @@ LATERAL (
                 WHERE c.PROCESS_TYPE = 'Sensitivity' AND c.IS_ACTIVE AND c.IS_REQUIRED
                   AND c.STAGE_COLUMN = 'VALUE_USD'),
             'VALUE_USD is required', NULL),
-        IFF(s.VALUE_USD IS NOT NULL AND TRY_TO_NUMBER(s.VALUE_USD) IS NULL,
+        IFF(s.VALUE_USD IS NOT NULL AND TRY_TO_NUMBER(s.VALUE_USD, 38, 6) IS NULL,
             'VALUE_USD is not numeric: ' || s.VALUE_USD, NULL),
-        IFF(TRY_TO_NUMBER(s.VALUE_USD) = 0, 'VALUE_USD must not be zero', NULL),
+        IFF(TRY_TO_NUMBER(s.VALUE_USD, 38, 6) = 0, 'VALUE_USD must not be zero', NULL),
         IFF(s.ENTITY_CODE IS NOT NULL AND NOT EXISTS (
                 SELECT 1 FROM DIMENSION.ENTITY e
                 WHERE UPPER(e.ENTITY_CODE) = UPPER(s.ENTITY_CODE)),
@@ -147,9 +147,9 @@ LATERAL (
                 WHERE c.PROCESS_TYPE = 'FRTB' AND c.IS_ACTIVE AND c.IS_REQUIRED
                   AND c.STAGE_COLUMN = 'VALUE_USD'),
             'VALUE_USD is required', NULL),
-        IFF(s.VALUE_USD IS NOT NULL AND TRY_TO_NUMBER(s.VALUE_USD) IS NULL,
+        IFF(s.VALUE_USD IS NOT NULL AND TRY_TO_NUMBER(s.VALUE_USD, 38, 6) IS NULL,
             'VALUE_USD is not numeric: ' || s.VALUE_USD, NULL),
-        IFF(TRY_TO_NUMBER(s.VALUE_USD) = 0, 'VALUE_USD must not be zero', NULL),
+        IFF(TRY_TO_NUMBER(s.VALUE_USD, 38, 6) = 0, 'VALUE_USD must not be zero', NULL),
         IFF(s.ENTITY_CODE IS NOT NULL AND NOT EXISTS (
                 SELECT 1 FROM DIMENSION.ENTITY e
                 WHERE UPPER(e.ENTITY_CODE) = UPPER(s.ENTITY_CODE)),
@@ -205,9 +205,9 @@ LATERAL (
                 WHERE c.PROCESS_TYPE = 'FRTBDRC' AND c.IS_ACTIVE AND c.IS_REQUIRED
                   AND c.STAGE_COLUMN = 'VALUE_USD'),
             'VALUE_USD is required', NULL),
-        IFF(s.VALUE_USD IS NOT NULL AND TRY_TO_NUMBER(s.VALUE_USD) IS NULL,
+        IFF(s.VALUE_USD IS NOT NULL AND TRY_TO_NUMBER(s.VALUE_USD, 38, 6) IS NULL,
             'VALUE_USD is not numeric: ' || s.VALUE_USD, NULL),
-        IFF(TRY_TO_NUMBER(s.VALUE_USD) = 0, 'VALUE_USD must not be zero', NULL),
+        IFF(TRY_TO_NUMBER(s.VALUE_USD, 38, 6) = 0, 'VALUE_USD must not be zero', NULL),
         IFF(s.ENTITY_CODE IS NOT NULL AND NOT EXISTS (
                 SELECT 1 FROM DIMENSION.ENTITY e
                 WHERE UPPER(e.ENTITY_CODE) = UPPER(s.ENTITY_CODE)),
@@ -263,9 +263,9 @@ LATERAL (
                 WHERE c.PROCESS_TYPE = 'FRTBRRAO' AND c.IS_ACTIVE AND c.IS_REQUIRED
                   AND c.STAGE_COLUMN = 'VALUE_USD'),
             'VALUE_USD is required', NULL),
-        IFF(s.VALUE_USD IS NOT NULL AND TRY_TO_NUMBER(s.VALUE_USD) IS NULL,
+        IFF(s.VALUE_USD IS NOT NULL AND TRY_TO_NUMBER(s.VALUE_USD, 38, 6) IS NULL,
             'VALUE_USD is not numeric: ' || s.VALUE_USD, NULL),
-        IFF(TRY_TO_NUMBER(s.VALUE_USD) = 0, 'VALUE_USD must not be zero', NULL),
+        IFF(TRY_TO_NUMBER(s.VALUE_USD, 38, 6) = 0, 'VALUE_USD must not be zero', NULL),
         IFF(s.ENTITY_CODE IS NOT NULL AND NOT EXISTS (
                 SELECT 1 FROM DIMENSION.ENTITY e
                 WHERE UPPER(e.ENTITY_CODE) = UPPER(s.ENTITY_CODE)),
