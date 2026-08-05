@@ -669,14 +669,18 @@ ALTER TABLE ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
     DROP COLUMN IF EXISTS ADJUSTMENT_BASE_TABLE;
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- EROL_PROCESS_LOG — REAL-TIME per-statement diagnostics for Entity Roll runs
--- SP_PROCESS_ADJUSTMENT's EntityRoll path writes a 'RUNNING' row BEFORE each
--- heavy statement and updates it to 'DONE' after — so while a slow step runs you
--- can query this table from another session and see which step is in-flight and
--- for how long. Each row carries wall-clock duration, rows affected, and the
--- Snowflake QUERY_ID (join to QUERY_HISTORY for partitions scanned / spill).
--- The wipe/flatten/roll INSERTs run inside a transaction (visible only at COMMIT);
--- the heavy staging reads + summary rebuild are live. Append-only.
+-- EROL_PROCESS_LOG — REAL-TIME per-statement diagnostics for engine runs
+-- ALL SP_PROCESS_ADJUSTMENT paths (EntityRoll, Direct, Scale/Flatten/Roll)
+-- log every dynamically-built statement here: a 'RUNNING' row with the exact
+-- SQL_TEXT is written BEFORE each heavy statement and updated to 'DONE' after —
+-- so while a slow step runs you can query this table from another session and
+-- see which step is in-flight and for how long, and after a failure you can
+-- replay the precise command that ran. Each row carries wall-clock duration,
+-- rows affected, and the Snowflake QUERY_ID (join to QUERY_HISTORY for
+-- partitions scanned / spill). Statements inside explicit transactions become
+-- visible only at COMMIT (a failed summary rebuild is re-logged as FAILED
+-- after its rollback). Batch-level scale rows leave ENTITY_CODE /
+-- ADJUSTMENT_ID NULL. Append-only.
 --     SELECT * FROM ADJUSTMENT_APP.VW_EROL_PROCESS_LOG;   -- report view
 -- ═══════════════════════════════════════════════════════════════════════════
 CREATE OR ALTER TABLE ADJUSTMENT_APP.EROL_PROCESS_LOG (

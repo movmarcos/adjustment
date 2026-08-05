@@ -433,7 +433,13 @@ def _erl_n(v):
 
 
 def _erlog(session, ctx, step, sql_text):
-    """Run one EntityRoll statement with REAL-TIME logging to EROL_PROCESS_LOG.
+    """Run one engine statement with REAL-TIME logging to EROL_PROCESS_LOG.
+
+    Used by ALL processing paths (EntityRoll steps AND the Direct /
+    Scale-Flatten-Roll dynamic statements via the batch-level _sqlog ctx) —
+    the stored SQL_TEXT is the exact command executed, for post-mortem debug:
+      SELECT * FROM ADJUSTMENT_APP.VW_EROL_PROCESS_LOG
+      WHERE RUN_LOG_ID = <run_log_id> ORDER BY STEP_SEQ;
 
     A 'RUNNING' row is written (and committed, when outside the wipe/insert
     transaction) BEFORE the statement starts, so a slow or stuck step is visible
@@ -592,6 +598,16 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 0, 0, 'false', ''
             )
         """).collect()
+
+        # SQL debug log context — every dynamically-built statement in the
+        # Direct and Scale/Flatten/Roll paths runs through _erlog with this
+        # ctx, storing the exact SQL text + duration + rows + QUERY_ID in
+        # ADJUSTMENT_APP.EROL_PROCESS_LOG (shared with the EntityRoll path;
+        # query via VW_EROL_PROCESS_LOG WHERE RUN_LOG_ID = <id>). Batch-level:
+        # no single entity/adjustment, so those columns stay NULL.
+        _sqlog = {"seq": 0, "run_log_id": run_log_id, "pt": process_type,
+                  "cobid": cobid, "source_cobid": None, "entity": None,
+                  "adj_id": None}
 
         # ── 2. READ CLAIMED ADJUSTMENTS ──────────────────────────────────
         # Exactly this call's combo: process type, action, COB — and, when a
@@ -761,7 +777,7 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                     INNER JOIN ADJUSTMENT_APP.ADJ_HEADER h ON h.ADJ_ID = x.ADJ_ID
                     {join_sql}
                 """
-                session.sql(insert_sql).collect()
+                _erlog(session, _sqlog, "direct_insert", insert_sql)
 
                 rows_count = session.sql(f"""
                     SELECT COUNT(*) AS CNT FROM {fact_adj_tbl_name}
@@ -1265,7 +1281,7 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             WHERE ROW_NUM = 1
             """
 
-            session.sql(insert_sql).collect()
+            _erlog(session, _sqlog, "stage_build (netted temp)", insert_sql)
 
             # (Prior-run rows were removed before the temp build, keyed by the
             #  previous DIMENSION_ADJ_ID — the fresh IDs have no rows yet.)
@@ -1282,7 +1298,7 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             SELECT {perm_col_list}
             FROM {_scale_temp}
             """
-            session.sql(perm_insert).collect()
+            _erlog(session, _sqlog, "perm_insert", perm_insert)
             session.sql(f"DROP TABLE IF EXISTS {_scale_temp}").collect()
 
             # ── SCD2 key fix for cross-COB (Roll) adjustments ────────────
@@ -1347,7 +1363,7 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             # batch has no cross-COB Roll; earlier Rolls were already SCD2-fixed
             # when they were processed.
             if has_cross_cob:
-                session.sql(scd2_update).collect()
+                _erlog(session, _sqlog, "scd2_key_fix", scd2_update)
 
             # ── Supersede older adjustments at the positions this batch occupies ──
             # MUST run AFTER the SCD2 key-fix: for a cross-COB Roll the rows just
@@ -1381,7 +1397,7 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                     f"COALESCE(CAST(cur.{k} AS TEXT), '_dbt_utils_surrogate_key_null_')"
                     for k in _supersede_dims
                 )
-                session.sql(f"""
+                supersede_sql = f"""
                     DELETE FROM {fact_adj_tbl_name} fa
                     WHERE fa.COBID = {cobid}
                       AND COALESCE(fa.ADJUSTMENT_ID, -1) NOT IN ({dim_ids_str})
@@ -1391,7 +1407,8 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                             AND cur.ADJUSTMENT_ID IN ({dim_ids_str})
                             AND {_pos_join}
                       )
-                """).collect()
+                """
+                _erlog(session, _sqlog, "supersede_delete", supersede_sql)
 
             # ── Rebuild summary (atomic delete + insert) ─────────────────
             # One transaction: readers never see the COB's summary empty, and
@@ -1411,16 +1428,37 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 WHERE COBID = {cobid}
                 GROUP BY ALL
                 """
+                summary_delete = f"""
+                    DELETE FROM {fact_adj_summary_name}
+                    WHERE COBID = {cobid}
+                """
                 session.sql("BEGIN").collect()
                 try:
-                    session.sql(f"""
-                        DELETE FROM {fact_adj_summary_name}
-                        WHERE COBID = {cobid}
-                    """).collect()
-                    session.sql(summary_insert).collect()
+                    # _erlog rows written here join the transaction: they
+                    # persist at COMMIT, vanish on ROLLBACK — hence the
+                    # FAILED row re-insert after the rollback below.
+                    _erlog(session, _sqlog, "summary_delete", summary_delete)
+                    _erlog(session, _sqlog, "summary_insert", summary_insert)
                     session.sql("COMMIT").collect()
                 except Exception:
                     session.sql("ROLLBACK").collect()
+                    # The in-transaction log rows rolled back with everything
+                    # else — record the failed rebuild (with its SQL) so the
+                    # debug trail survives. Best-effort.
+                    try:
+                        _sqlog["seq"] += 1
+                        session.sql(
+                            "INSERT INTO ADJUSTMENT_APP.EROL_PROCESS_LOG "
+                            "(RUN_LOG_ID, PROCESS_TYPE, COBID, STEP_SEQ, "
+                            "STEP_NAME, STATUS, STARTED_AT, ENDED_AT, SQL_TEXT) "
+                            f"SELECT {_erl_n(run_log_id)}, {_erl_s(process_type)}, "
+                            f"{_erl_n(cobid)}, {_sqlog['seq']}, "
+                            f"'summary_rebuild (rolled back)', 'FAILED', "
+                            f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), "
+                            f"{_erl_s(summary_insert)}"
+                        ).collect()
+                    except Exception as _le:
+                        print(f"summary failure log write failed (non-fatal): {_le}")
                     raise
 
             # ── Count rows inserted and update RECORD_COUNT ──────────────
@@ -1978,9 +2016,11 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
         result["message"] = f"Error: {error_msg}"
 
         # On failure, flip the still-RUNNING step to FAILED so the log pinpoints
-        # where the roll stopped (its RUNNING row was already committed live).
+        # where the run stopped (its RUNNING row was already committed live).
         if adjustment_action.lower() == 'entityroll' and '_erctx' in dir():
             _erol_mark_failed(session, _erctx)
+        elif '_sqlog' in dir():
+            _erol_mark_failed(session, _sqlog)
 
         # Try to mark as Failed — scoped exactly like the claim read (combo +
         # claim token), so a concurrent run's Running rows are untouched.
