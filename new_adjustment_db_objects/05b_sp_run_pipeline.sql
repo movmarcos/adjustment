@@ -91,7 +91,7 @@ _OVERLAP_SELECT_COLS = ', '.join(['ADJ_ID', 'COBID', 'PROCESS_TYPE', 'ADJUSTMENT
 # Direct adjustments (Direct, Upload) don't participate in overlap checking —
 # they are explicit value insertions and their only "overlap" is same
 # COBID + GLOBAL_REFERENCE, which is handled at submission time.
-_OVERLAP_ACTION_FILTER = "AND ADJUSTMENT_ACTION NOT IN ('Direct')"
+_OVERLAP_ACTION_FILTER = "AND ADJUSTMENT_ACTION NOT IN ('Direct', 'Upload')"
 
 # FRTBALL is retired (the app submits one adjustment per real FRTB sub-type);
 # tolerated in pipeline_types for backward compatibility but never claimed.
@@ -481,7 +481,7 @@ def _block_overlapping(session, running_row, pipeline_in):
           AND p.BLOCKED_BY_ADJ_ID IS NULL
           AND p.IS_DELETED = FALSE
           AND p.ADJ_ID != '{adj_id}'
-          AND p.ADJUSTMENT_ACTION NOT IN ('Direct')
+          AND p.ADJUSTMENT_ACTION NOT IN ('Direct', 'Upload')
           AND {where_dims}
     """).collect()
 
