@@ -44,6 +44,7 @@ WITH adj AS (
         h.SIMULATION_SOURCE,
         h.MEASURE_TYPE_CODE,
         h.SCALE_FACTOR,
+        h.ADJUSTMENT_VALUE_IN_USD,
         h.RECORD_COUNT,
         h.REASON
     FROM ADJUSTMENT_APP.ADJ_HEADER h
@@ -52,6 +53,7 @@ WITH adj AS (
       AND h.DIMENSION_ADJ_ID IS NOT NULL
       AND DAYNAME(TO_DATE(h.SOURCE_COBID::STRING, 'yyyyMMdd')) NOT IN ('Sat','Sun')
       AND h.ADJUSTMENT_TYPE <> 'EROL'
+      AND h.ADJUSTMENT_TYPE <> 'Upload'
 ),
 
 -- ── What the engine actually wrote, per adjustment id ────────────────────
@@ -587,6 +589,7 @@ SELECT
     tc.TARGET_COMBINED_VALUE,
     -- Expected DELTA the engine should have written
     CASE
+        WHEN a.ADJUSTMENT_TYPE = 'Direct' THEN a.ADJUSTMENT_VALUE_IN_USD
         WHEN a.ADJUSTMENT_TYPE = 'Flatten' THEN -o.ORIGINAL_VALUE
         WHEN a.ADJUSTMENT_TYPE = 'Scale' AND a.SOURCE_COBID = a.COBID
              THEN o.ORIGINAL_VALUE * (a.SCALE_FACTOR - 1)
@@ -596,6 +599,8 @@ SELECT
              THEN s.SOURCE_VALUE - (tc.TARGET_COMBINED_VALUE - av.ADJUSTMENT_VALUE)
     END AS EXPECTED_ADJ_VALUE,
     CASE
+        WHEN a.ADJUSTMENT_TYPE = 'Direct'
+             THEN av.ADJUSTMENT_VALUE - a.ADJUSTMENT_VALUE_IN_USD
         WHEN a.ADJUSTMENT_TYPE = 'Roll'
              THEN tc.TARGET_COMBINED_VALUE - s.SOURCE_VALUE    -- invariant: combined(target)=adjusted(source)
         WHEN a.ADJUSTMENT_TYPE = 'Flatten'
@@ -606,6 +611,13 @@ SELECT
              THEN av.ADJUSTMENT_VALUE - s.SOURCE_VALUE * a.SCALE_FACTOR
     END AS RECON_DIFFERENCE,
     CASE
+        WHEN a.ADJUSTMENT_TYPE = 'Direct' THEN
+            CASE
+                WHEN av.ADJUSTMENT_VALUE IS NULL THEN 'MISSING ADJUSTMENT'
+                WHEN ABS(av.ADJUSTMENT_VALUE - a.ADJUSTMENT_VALUE_IN_USD) < 0.01
+                     THEN 'RECONCILED'
+                ELSE 'BREAK'
+            END
         WHEN a.ADJUSTMENT_TYPE = 'Roll' THEN
             CASE
                 WHEN s.SOURCE_VALUE IS NULL AND av.ADJUSTMENT_VALUE IS NULL
