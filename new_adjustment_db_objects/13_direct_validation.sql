@@ -1,0 +1,302 @@
+-- =============================================================================
+-- 13_DIRECT_VALIDATION.SQL — per-scope validation views for Direct Adjustment
+-- One view per scope over ADJ_DIRECT_STAGE. Generic rules v1:
+--   • required fields present (config-driven via DIRECT_ACCEPTED_COLUMNS)
+--   • VALUE_USD numeric and <> 0
+--   • every supplied code exists in its dimension (case-insensitive)
+-- FRTB cross-field rules will be added to the three FRTB views ONLY, when the
+-- requirements arrive — that is why each scope has its own view.
+-- =============================================================================
+USE SCHEMA ADJUSTMENT_APP;
+
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_DIRECT_VALIDATE_STRESS
+    COMMENT = 'Row validation for Stress Direct Adjustment staging rows.'
+AS
+SELECT
+    s.BATCH_ID, s.ROW_NUM,
+    ARRAY_SIZE(v.ERRS) = 0 AS IS_VALID,
+    v.ERRS               AS VALIDATION_ERRORS
+FROM ADJUSTMENT_APP.ADJ_DIRECT_STAGE s,
+LATERAL (
+    SELECT ARRAY_COMPACT(ARRAY_CONSTRUCT(
+        IFF(s.ENTITY_CODE IS NULL AND EXISTS (
+                SELECT 1 FROM ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS c
+                WHERE c.PROCESS_TYPE = 'Stress' AND c.IS_ACTIVE AND c.IS_REQUIRED
+                  AND c.STAGE_COLUMN = 'ENTITY_CODE'),
+            'ENTITY_CODE is required', NULL),
+        IFF(s.VALUE_USD IS NULL AND EXISTS (
+                SELECT 1 FROM ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS c
+                WHERE c.PROCESS_TYPE = 'Stress' AND c.IS_ACTIVE AND c.IS_REQUIRED
+                  AND c.STAGE_COLUMN = 'VALUE_USD'),
+            'VALUE_USD is required', NULL),
+        IFF(s.VALUE_USD IS NOT NULL AND TRY_TO_NUMBER(s.VALUE_USD) IS NULL,
+            'VALUE_USD is not numeric: ' || s.VALUE_USD, NULL),
+        IFF(TRY_TO_NUMBER(s.VALUE_USD) = 0, 'VALUE_USD must not be zero', NULL),
+        IFF(s.ENTITY_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.ENTITY e
+                WHERE UPPER(e.ENTITY_CODE) = UPPER(s.ENTITY_CODE)),
+            'Unknown ENTITY_CODE: ' || s.ENTITY_CODE, NULL),
+        IFF(s.BOOK_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.BOOK b
+                WHERE UPPER(b.BOOK_CODE) = UPPER(s.BOOK_CODE)
+                  AND b.IS_CURRENT_ROW = TRUE
+                  AND (s.ENTITY_CODE IS NULL OR UPPER(b.ENTITY_CODE) = UPPER(s.ENTITY_CODE))
+                  AND (s.DEPARTMENT_CODE IS NULL OR UPPER(b.DEPARTMENT_CODE) = UPPER(s.DEPARTMENT_CODE))),
+            'Unknown BOOK_CODE (for entity/department): ' || s.BOOK_CODE, NULL),
+        IFF(s.DEPARTMENT_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.BOOK b
+                WHERE UPPER(b.DEPARTMENT_CODE) = UPPER(s.DEPARTMENT_CODE)
+                  AND b.IS_CURRENT_ROW = TRUE
+                  AND (s.ENTITY_CODE IS NULL OR UPPER(b.ENTITY_CODE) = UPPER(s.ENTITY_CODE))),
+            'Unknown DEPARTMENT_CODE (for entity): ' || s.DEPARTMENT_CODE, NULL),
+        IFF(s.TRADE_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.TRADE t
+                WHERE UPPER(t.TRADE_CODE) = UPPER(s.TRADE_CODE)
+                  AND t.IS_CURRENT_ROW = TRUE),
+            'Unknown TRADE_CODE: ' || s.TRADE_CODE, NULL),
+        IFF(s.INSTRUMENT_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.COMMON_INSTRUMENT ci
+                WHERE UPPER(ci.INSTRUMENT_CODE) = UPPER(s.INSTRUMENT_CODE)
+                  AND ci.IS_CURRENT_ROW = TRUE),
+            'Unknown INSTRUMENT_CODE: ' || s.INSTRUMENT_CODE, NULL),
+        IFF(s.SIMULATION_NAME IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.STRESS_SIMULATION ss
+                WHERE UPPER(ss.STRESS_SIMULATION_NAME) = UPPER(s.SIMULATION_NAME)),
+            'Unknown SIMULATION_NAME: ' || s.SIMULATION_NAME, NULL),
+        IFF(s.SIMULATION_SOURCE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.STRESS_SIMULATION ss
+                WHERE UPPER(ss.SIMULATION_SOURCE) = UPPER(s.SIMULATION_SOURCE)),
+            'Unknown SIMULATION_SOURCE: ' || s.SIMULATION_SOURCE, NULL)
+    )) AS ERRS
+) v;
+
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_DIRECT_VALIDATE_SENSITIVITY
+    COMMENT = 'Row validation for Sensitivity Direct Adjustment staging rows.'
+AS
+SELECT
+    s.BATCH_ID, s.ROW_NUM,
+    ARRAY_SIZE(v.ERRS) = 0 AS IS_VALID,
+    v.ERRS               AS VALIDATION_ERRORS
+FROM ADJUSTMENT_APP.ADJ_DIRECT_STAGE s,
+LATERAL (
+    SELECT ARRAY_COMPACT(ARRAY_CONSTRUCT(
+        IFF(s.ENTITY_CODE IS NULL AND EXISTS (
+                SELECT 1 FROM ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS c
+                WHERE c.PROCESS_TYPE = 'Sensitivity' AND c.IS_ACTIVE AND c.IS_REQUIRED
+                  AND c.STAGE_COLUMN = 'ENTITY_CODE'),
+            'ENTITY_CODE is required', NULL),
+        IFF(s.VALUE_USD IS NULL AND EXISTS (
+                SELECT 1 FROM ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS c
+                WHERE c.PROCESS_TYPE = 'Sensitivity' AND c.IS_ACTIVE AND c.IS_REQUIRED
+                  AND c.STAGE_COLUMN = 'VALUE_USD'),
+            'VALUE_USD is required', NULL),
+        IFF(s.VALUE_USD IS NOT NULL AND TRY_TO_NUMBER(s.VALUE_USD) IS NULL,
+            'VALUE_USD is not numeric: ' || s.VALUE_USD, NULL),
+        IFF(TRY_TO_NUMBER(s.VALUE_USD) = 0, 'VALUE_USD must not be zero', NULL),
+        IFF(s.ENTITY_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.ENTITY e
+                WHERE UPPER(e.ENTITY_CODE) = UPPER(s.ENTITY_CODE)),
+            'Unknown ENTITY_CODE: ' || s.ENTITY_CODE, NULL),
+        IFF(s.BOOK_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.BOOK b
+                WHERE UPPER(b.BOOK_CODE) = UPPER(s.BOOK_CODE)
+                  AND b.IS_CURRENT_ROW = TRUE
+                  AND (s.ENTITY_CODE IS NULL OR UPPER(b.ENTITY_CODE) = UPPER(s.ENTITY_CODE))
+                  AND (s.DEPARTMENT_CODE IS NULL OR UPPER(b.DEPARTMENT_CODE) = UPPER(s.DEPARTMENT_CODE))),
+            'Unknown BOOK_CODE (for entity/department): ' || s.BOOK_CODE, NULL),
+        IFF(s.DEPARTMENT_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.BOOK b
+                WHERE UPPER(b.DEPARTMENT_CODE) = UPPER(s.DEPARTMENT_CODE)
+                  AND b.IS_CURRENT_ROW = TRUE
+                  AND (s.ENTITY_CODE IS NULL OR UPPER(b.ENTITY_CODE) = UPPER(s.ENTITY_CODE))),
+            'Unknown DEPARTMENT_CODE (for entity): ' || s.DEPARTMENT_CODE, NULL),
+        IFF(s.TRADE_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.TRADE t
+                WHERE UPPER(t.TRADE_CODE) = UPPER(s.TRADE_CODE)
+                  AND t.IS_CURRENT_ROW = TRUE),
+            'Unknown TRADE_CODE: ' || s.TRADE_CODE, NULL),
+        IFF(s.INSTRUMENT_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.COMMON_INSTRUMENT ci
+                WHERE UPPER(ci.INSTRUMENT_CODE) = UPPER(s.INSTRUMENT_CODE)
+                  AND ci.IS_CURRENT_ROW = TRUE),
+            'Unknown INSTRUMENT_CODE: ' || s.INSTRUMENT_CODE, NULL),
+        IFF(s.MEASURE_TYPE_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.MEASURE_TYPE mt
+                WHERE UPPER(mt.MEASURE_TYPE_CODE) = UPPER(s.MEASURE_TYPE_CODE)),
+            'Unknown MEASURE_TYPE_CODE: ' || s.MEASURE_TYPE_CODE, NULL)
+    )) AS ERRS
+) v;
+
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_DIRECT_VALIDATE_FRTB
+    COMMENT = 'Row validation for FRTB Direct Adjustment staging rows.'
+AS
+SELECT
+    s.BATCH_ID, s.ROW_NUM,
+    ARRAY_SIZE(v.ERRS) = 0 AS IS_VALID,
+    v.ERRS               AS VALIDATION_ERRORS
+FROM ADJUSTMENT_APP.ADJ_DIRECT_STAGE s,
+LATERAL (
+    SELECT ARRAY_COMPACT(ARRAY_CONSTRUCT(
+        IFF(s.ENTITY_CODE IS NULL AND EXISTS (
+                SELECT 1 FROM ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS c
+                WHERE c.PROCESS_TYPE = 'FRTB' AND c.IS_ACTIVE AND c.IS_REQUIRED
+                  AND c.STAGE_COLUMN = 'ENTITY_CODE'),
+            'ENTITY_CODE is required', NULL),
+        IFF(s.VALUE_USD IS NULL AND EXISTS (
+                SELECT 1 FROM ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS c
+                WHERE c.PROCESS_TYPE = 'FRTB' AND c.IS_ACTIVE AND c.IS_REQUIRED
+                  AND c.STAGE_COLUMN = 'VALUE_USD'),
+            'VALUE_USD is required', NULL),
+        IFF(s.VALUE_USD IS NOT NULL AND TRY_TO_NUMBER(s.VALUE_USD) IS NULL,
+            'VALUE_USD is not numeric: ' || s.VALUE_USD, NULL),
+        IFF(TRY_TO_NUMBER(s.VALUE_USD) = 0, 'VALUE_USD must not be zero', NULL),
+        IFF(s.ENTITY_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.ENTITY e
+                WHERE UPPER(e.ENTITY_CODE) = UPPER(s.ENTITY_CODE)),
+            'Unknown ENTITY_CODE: ' || s.ENTITY_CODE, NULL),
+        IFF(s.BOOK_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.BOOK b
+                WHERE UPPER(b.BOOK_CODE) = UPPER(s.BOOK_CODE)
+                  AND b.IS_CURRENT_ROW = TRUE
+                  AND (s.ENTITY_CODE IS NULL OR UPPER(b.ENTITY_CODE) = UPPER(s.ENTITY_CODE))
+                  AND (s.DEPARTMENT_CODE IS NULL OR UPPER(b.DEPARTMENT_CODE) = UPPER(s.DEPARTMENT_CODE))),
+            'Unknown BOOK_CODE (for entity/department): ' || s.BOOK_CODE, NULL),
+        IFF(s.DEPARTMENT_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.BOOK b
+                WHERE UPPER(b.DEPARTMENT_CODE) = UPPER(s.DEPARTMENT_CODE)
+                  AND b.IS_CURRENT_ROW = TRUE
+                  AND (s.ENTITY_CODE IS NULL OR UPPER(b.ENTITY_CODE) = UPPER(s.ENTITY_CODE))),
+            'Unknown DEPARTMENT_CODE (for entity): ' || s.DEPARTMENT_CODE, NULL),
+        IFF(s.TRADE_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.TRADE t
+                WHERE UPPER(t.TRADE_CODE) = UPPER(s.TRADE_CODE)
+                  AND t.IS_CURRENT_ROW = TRUE),
+            'Unknown TRADE_CODE: ' || s.TRADE_CODE, NULL),
+        IFF(s.INSTRUMENT_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.COMMON_INSTRUMENT ci
+                WHERE UPPER(ci.INSTRUMENT_CODE) = UPPER(s.INSTRUMENT_CODE)
+                  AND ci.IS_CURRENT_ROW = TRUE),
+            'Unknown INSTRUMENT_CODE: ' || s.INSTRUMENT_CODE, NULL),
+        IFF(s.MEASURE_TYPE_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.MEASURE_TYPE mt
+                WHERE UPPER(mt.MEASURE_TYPE_CODE) = UPPER(s.MEASURE_TYPE_CODE)),
+            'Unknown MEASURE_TYPE_CODE: ' || s.MEASURE_TYPE_CODE, NULL)
+        -- FRTB cross-field validation rules land HERE (requirements pending)
+    )) AS ERRS
+) v;
+
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_DIRECT_VALIDATE_FRTBDRC
+    COMMENT = 'Row validation for FRTBDRC Direct Adjustment staging rows.'
+AS
+SELECT
+    s.BATCH_ID, s.ROW_NUM,
+    ARRAY_SIZE(v.ERRS) = 0 AS IS_VALID,
+    v.ERRS               AS VALIDATION_ERRORS
+FROM ADJUSTMENT_APP.ADJ_DIRECT_STAGE s,
+LATERAL (
+    SELECT ARRAY_COMPACT(ARRAY_CONSTRUCT(
+        IFF(s.ENTITY_CODE IS NULL AND EXISTS (
+                SELECT 1 FROM ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS c
+                WHERE c.PROCESS_TYPE = 'FRTBDRC' AND c.IS_ACTIVE AND c.IS_REQUIRED
+                  AND c.STAGE_COLUMN = 'ENTITY_CODE'),
+            'ENTITY_CODE is required', NULL),
+        IFF(s.VALUE_USD IS NULL AND EXISTS (
+                SELECT 1 FROM ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS c
+                WHERE c.PROCESS_TYPE = 'FRTBDRC' AND c.IS_ACTIVE AND c.IS_REQUIRED
+                  AND c.STAGE_COLUMN = 'VALUE_USD'),
+            'VALUE_USD is required', NULL),
+        IFF(s.VALUE_USD IS NOT NULL AND TRY_TO_NUMBER(s.VALUE_USD) IS NULL,
+            'VALUE_USD is not numeric: ' || s.VALUE_USD, NULL),
+        IFF(TRY_TO_NUMBER(s.VALUE_USD) = 0, 'VALUE_USD must not be zero', NULL),
+        IFF(s.ENTITY_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.ENTITY e
+                WHERE UPPER(e.ENTITY_CODE) = UPPER(s.ENTITY_CODE)),
+            'Unknown ENTITY_CODE: ' || s.ENTITY_CODE, NULL),
+        IFF(s.BOOK_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.BOOK b
+                WHERE UPPER(b.BOOK_CODE) = UPPER(s.BOOK_CODE)
+                  AND b.IS_CURRENT_ROW = TRUE
+                  AND (s.ENTITY_CODE IS NULL OR UPPER(b.ENTITY_CODE) = UPPER(s.ENTITY_CODE))
+                  AND (s.DEPARTMENT_CODE IS NULL OR UPPER(b.DEPARTMENT_CODE) = UPPER(s.DEPARTMENT_CODE))),
+            'Unknown BOOK_CODE (for entity/department): ' || s.BOOK_CODE, NULL),
+        IFF(s.DEPARTMENT_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.BOOK b
+                WHERE UPPER(b.DEPARTMENT_CODE) = UPPER(s.DEPARTMENT_CODE)
+                  AND b.IS_CURRENT_ROW = TRUE
+                  AND (s.ENTITY_CODE IS NULL OR UPPER(b.ENTITY_CODE) = UPPER(s.ENTITY_CODE))),
+            'Unknown DEPARTMENT_CODE (for entity): ' || s.DEPARTMENT_CODE, NULL),
+        IFF(s.TRADE_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.TRADE t
+                WHERE UPPER(t.TRADE_CODE) = UPPER(s.TRADE_CODE)
+                  AND t.IS_CURRENT_ROW = TRUE),
+            'Unknown TRADE_CODE: ' || s.TRADE_CODE, NULL),
+        IFF(s.INSTRUMENT_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.COMMON_INSTRUMENT ci
+                WHERE UPPER(ci.INSTRUMENT_CODE) = UPPER(s.INSTRUMENT_CODE)
+                  AND ci.IS_CURRENT_ROW = TRUE),
+            'Unknown INSTRUMENT_CODE: ' || s.INSTRUMENT_CODE, NULL),
+        IFF(s.MEASURE_TYPE_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.MEASURE_TYPE mt
+                WHERE UPPER(mt.MEASURE_TYPE_CODE) = UPPER(s.MEASURE_TYPE_CODE)),
+            'Unknown MEASURE_TYPE_CODE: ' || s.MEASURE_TYPE_CODE, NULL)
+        -- FRTB cross-field validation rules land HERE (requirements pending)
+    )) AS ERRS
+) v;
+
+CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_DIRECT_VALIDATE_FRTBRRAO
+    COMMENT = 'Row validation for FRTBRRAO Direct Adjustment staging rows.'
+AS
+SELECT
+    s.BATCH_ID, s.ROW_NUM,
+    ARRAY_SIZE(v.ERRS) = 0 AS IS_VALID,
+    v.ERRS               AS VALIDATION_ERRORS
+FROM ADJUSTMENT_APP.ADJ_DIRECT_STAGE s,
+LATERAL (
+    SELECT ARRAY_COMPACT(ARRAY_CONSTRUCT(
+        IFF(s.ENTITY_CODE IS NULL AND EXISTS (
+                SELECT 1 FROM ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS c
+                WHERE c.PROCESS_TYPE = 'FRTBRRAO' AND c.IS_ACTIVE AND c.IS_REQUIRED
+                  AND c.STAGE_COLUMN = 'ENTITY_CODE'),
+            'ENTITY_CODE is required', NULL),
+        IFF(s.VALUE_USD IS NULL AND EXISTS (
+                SELECT 1 FROM ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS c
+                WHERE c.PROCESS_TYPE = 'FRTBRRAO' AND c.IS_ACTIVE AND c.IS_REQUIRED
+                  AND c.STAGE_COLUMN = 'VALUE_USD'),
+            'VALUE_USD is required', NULL),
+        IFF(s.VALUE_USD IS NOT NULL AND TRY_TO_NUMBER(s.VALUE_USD) IS NULL,
+            'VALUE_USD is not numeric: ' || s.VALUE_USD, NULL),
+        IFF(TRY_TO_NUMBER(s.VALUE_USD) = 0, 'VALUE_USD must not be zero', NULL),
+        IFF(s.ENTITY_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.ENTITY e
+                WHERE UPPER(e.ENTITY_CODE) = UPPER(s.ENTITY_CODE)),
+            'Unknown ENTITY_CODE: ' || s.ENTITY_CODE, NULL),
+        IFF(s.BOOK_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.BOOK b
+                WHERE UPPER(b.BOOK_CODE) = UPPER(s.BOOK_CODE)
+                  AND b.IS_CURRENT_ROW = TRUE
+                  AND (s.ENTITY_CODE IS NULL OR UPPER(b.ENTITY_CODE) = UPPER(s.ENTITY_CODE))
+                  AND (s.DEPARTMENT_CODE IS NULL OR UPPER(b.DEPARTMENT_CODE) = UPPER(s.DEPARTMENT_CODE))),
+            'Unknown BOOK_CODE (for entity/department): ' || s.BOOK_CODE, NULL),
+        IFF(s.DEPARTMENT_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.BOOK b
+                WHERE UPPER(b.DEPARTMENT_CODE) = UPPER(s.DEPARTMENT_CODE)
+                  AND b.IS_CURRENT_ROW = TRUE
+                  AND (s.ENTITY_CODE IS NULL OR UPPER(b.ENTITY_CODE) = UPPER(s.ENTITY_CODE))),
+            'Unknown DEPARTMENT_CODE (for entity): ' || s.DEPARTMENT_CODE, NULL),
+        IFF(s.TRADE_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.TRADE t
+                WHERE UPPER(t.TRADE_CODE) = UPPER(s.TRADE_CODE)
+                  AND t.IS_CURRENT_ROW = TRUE),
+            'Unknown TRADE_CODE: ' || s.TRADE_CODE, NULL),
+        IFF(s.INSTRUMENT_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.COMMON_INSTRUMENT ci
+                WHERE UPPER(ci.INSTRUMENT_CODE) = UPPER(s.INSTRUMENT_CODE)
+                  AND ci.IS_CURRENT_ROW = TRUE),
+            'Unknown INSTRUMENT_CODE: ' || s.INSTRUMENT_CODE, NULL),
+        IFF(s.MEASURE_TYPE_CODE IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM DIMENSION.MEASURE_TYPE mt
+                WHERE UPPER(mt.MEASURE_TYPE_CODE) = UPPER(s.MEASURE_TYPE_CODE)),
+            'Unknown MEASURE_TYPE_CODE: ' || s.MEASURE_TYPE_CODE, NULL)
+        -- FRTB cross-field validation rules land HERE (requirements pending)
+    )) AS ERRS
+) v;
