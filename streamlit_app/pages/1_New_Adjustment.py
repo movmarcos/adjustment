@@ -706,9 +706,10 @@ CATEGORY_BTN_ICONS = {
     "Entity Roll":        ":material/autorenew:",
 }
 
-# Category picker copy — local to this page (CATEGORY_CONFIG in utils/styles.py
-# still describes the pre-split "Direct Adjustment" concept and is not the
-# source of truth for the picker post-split; the four flows below are).
+# Category picker copy — local to this page. CATEGORY_CONFIG in utils/styles.py
+# already reflects the post-split "Direct Adjustment"/"VaR Upload" concepts;
+# this dict overrides two of its descriptions with picker-specific wording
+# while reusing CATEGORY_CONFIG's for the other two.
 CATEGORY_UI_DESCS = {
     "Scaling Adjustment": CATEGORY_CONFIG["Scaling Adjustment"]["desc"],
     "Direct Adjustment":   "Paste/upload a CSV of exact values for Stress/Sensitivity/FRTB — one adjustment per row",
@@ -1080,7 +1081,7 @@ def _parse_direct_df(df, scope: str):
     """Map pasted columns to stage columns by header name (order/case-free).
     Returns (normalized_df, unknown_cols, missing_required)."""
     alias_map, required = _accepted_columns(scope)
-    out, seen = {}, set()
+    out, seen, first_col_used = {}, set(), {}
     unknown = []
     for c in df.columns:
         key = str(c).strip().upper()
@@ -1089,7 +1090,12 @@ def _parse_direct_df(df, scope: str):
             unknown.append(str(c))
         elif tgt not in seen:
             seen.add(tgt)
+            first_col_used[tgt] = str(c)
             out[tgt] = df[c]
+        else:
+            # duplicate CSV header mapping to an already-claimed stage column —
+            # first one wins; surface the drop instead of silently discarding it.
+            unknown.append(f"{c} (duplicate of {first_col_used[tgt]})")
     ndf = pd.DataFrame(out)
     missing_required = sorted(required - seen)
     return ndf, unknown, missing_required

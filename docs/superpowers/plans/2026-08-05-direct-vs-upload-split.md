@@ -785,6 +785,7 @@ git commit -m "feat(recon): Direct rule — fact sum must equal ADJUSTMENT_VALUE
 
 **Files:** none (manual gate; deploy first: `01_tables.sql` new blocks, `13_direct_validation.sql`, SPs `03`/`05`/`05b`, app files to the Streamlit stage)
 
+- [ ] **Deploy order guard:** before deploying 05_sp_process_adjustment.sql, drain or recall any Pending/Approved headers with ADJUSTMENT_TYPE='Direct' submitted through the OLD flow (they carry line items + NULL ADJUSTMENT_VALUE_IN_USD; the new Direct branch would ignore their line items and process them as zero-row no-ops). Check: `SELECT ADJ_ID, RUN_STATUS FROM ADJUSTMENT_APP.ADJ_HEADER WHERE ADJUSTMENT_TYPE='Direct' AND RUN_STATUS NOT IN ('Processed','Failed','Deleted','Replaced') AND IS_DELETED=FALSE;`
 - [ ] **A. VaR Upload parity:** category shows "VaR Upload" only for VaR; paste a legacy-layout file → ONE header + ONE `DIMENSION.ADJUSTMENT` row (`ADJUSTMENT_TYPE='Upload'`, `ADJUSTMENT_ACTION='Upload'`), unpivoted rows in `FACT.VAR_MEASURES_ADJUSTMENT`, summary rebuilt, PowerBI action row appears.
 - [ ] **B. Direct happy path (Stress):** paste 3 rows with shuffled, mixed-case headers (`book, VALUE, Entity_Code, simulation`) → preview shows 3 verdicts from `VW_DIRECT_VALIDATE_STRESS`; all valid → 3 headers; process → exactly 3 rows in `FACT.STRESS_MEASURES_ADJUSTMENT` (one per `DIMENSION_ADJ_ID`), keys resolved, unfiltered keys = −1, values = pasted USD, summary rebuilt.
 - [ ] **C. Direct invalid row:** repeat B with one bad `BOOK_CODE` → that row flagged ✗ with `Unknown BOOK_CODE`, only 2 headers created.

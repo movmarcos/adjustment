@@ -1107,7 +1107,7 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
         elif adjustment_action.lower() == 'scale':
 
             df_adj_scale = df_adj.filter(
-                (col('ADJUSTMENT_ACTION') != 'Direct') &
+                (col('ADJUSTMENT_ACTION') == 'Scale') &
                 (col('IS_POSITIVE_ADJUSTMENT') == True)
             )
 

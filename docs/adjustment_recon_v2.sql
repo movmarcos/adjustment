@@ -613,6 +613,7 @@ SELECT
     CASE
         WHEN a.ADJUSTMENT_TYPE = 'Direct' THEN
             CASE
+                WHEN a.ADJUSTMENT_VALUE_IN_USD IS NULL THEN 'LEGACY DIRECT (pre-split) — not comparable'
                 WHEN av.ADJUSTMENT_VALUE IS NULL THEN 'MISSING ADJUSTMENT'
                 WHEN ABS(av.ADJUSTMENT_VALUE - a.ADJUSTMENT_VALUE_IN_USD) < 0.01
                      THEN 'RECONCILED'

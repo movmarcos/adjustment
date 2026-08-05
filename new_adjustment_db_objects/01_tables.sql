@@ -206,21 +206,22 @@ COMMENT = 'Direct Adjustment uploads: one row per CSV line, raw fields in PAYLOA
 -- VALID row into its own ADJ_HEADER. Rows are deleted after submit/cancel;
 -- anything older than 2 days is abandoned and may be purged.
 -- ═══════════════════════════════════════════════════════════════════════════
+-- widths mirror ADJ_HEADER so green rows cannot fail at submit with truncation errors
 CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_DIRECT_STAGE (
     BATCH_ID            VARCHAR(36)  NOT NULL,
     ROW_NUM             NUMBER(38,0) NOT NULL,
-    ENTITY_CODE         VARCHAR(50),
-    SOURCE_SYSTEM_CODE  VARCHAR(50),
-    DEPARTMENT_CODE     VARCHAR(50),
-    BOOK_CODE           VARCHAR(100),
-    TRADE_CODE          VARCHAR(200),
-    TRADE_TYPOLOGY      VARCHAR(50),
-    STRATEGY            VARCHAR(100),
-    INSTRUMENT_CODE     VARCHAR(200),
-    SIMULATION_NAME     VARCHAR(200),
-    SIMULATION_SOURCE   VARCHAR(100),
+    ENTITY_CODE         VARCHAR(10),
+    SOURCE_SYSTEM_CODE  VARCHAR(2),
+    DEPARTMENT_CODE     VARCHAR(10),
+    BOOK_CODE           VARCHAR(20),
+    TRADE_CODE          VARCHAR(100),
+    TRADE_TYPOLOGY      VARCHAR(4),
+    STRATEGY            VARCHAR(50),
+    INSTRUMENT_CODE     VARCHAR(50),
+    SIMULATION_NAME     VARCHAR(250),
+    SIMULATION_SOURCE   VARCHAR(30),
     MEASURE_TYPE_CODE   VARCHAR(30),
-    CURRENCY_CODE       VARCHAR(10),
+    CURRENCY_CODE       VARCHAR(3),
     VALUE_USD           VARCHAR(100),          -- raw text; numeric check is a validation rule
     USERNAME            VARCHAR(200),
     CREATED_DATE        TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
