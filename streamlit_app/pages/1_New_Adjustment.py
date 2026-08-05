@@ -76,10 +76,14 @@ _WIZ_DEFAULTS: dict = {
     "reason":                 "",
     "adjustment_category":    None,
     "requires_approval":      False,
-    # Direct Adjustment upload
+    # VaR Upload
     "global_reference":       None,
     "uploaded_file_name":     None,
     "uploaded_df":            None,
+    # Direct Adjustment (order-free CSV → stage → per-row submit)
+    "direct_batch_id":        None,
+    "direct_ndf":             None,
+    "direct_verdicts":        None,
     # Internal
     "result":                 None,
 }
@@ -109,11 +113,11 @@ wiz: dict = st.session_state["wiz"]
 def _build_payload() -> dict:
     cat = wiz.get("category")
 
-    if cat == "Direct Adjustment":
+    if cat == "VaR Upload":
         return {
             "cobid":                 wiz["cobid"],
             "process_type":          wiz["process_type"],
-            "adjustment_type":       "Direct",
+            "adjustment_type":       "Upload",
             "username":              current_user_name(),
             "source_cobid":          wiz["cobid"],
             "reason":                wiz.get("reason", ""),
@@ -173,7 +177,36 @@ def _build_payload() -> dict:
     return payload
 
 
-# ── Direct Adjustment: config-driven schema + JSON upload writer ──────────────
+def _direct_row_payload(row: dict) -> dict:
+    """One staged Direct Adjustment row → one SP_SUBMIT_ADJUSTMENT payload.
+    Called per row by the submit loop in _do_submit (Direct never touches
+    ADJ_LINE_ITEM_JSON — each valid row becomes its own adjustment)."""
+    p = {
+        "cobid":                 wiz["cobid"],
+        "process_type":          wiz["process_type"],
+        "adjustment_type":       "Direct",
+        "username":              current_user_name(),
+        "source_cobid":          wiz["cobid"],
+        "reason":                wiz.get("reason", ""),
+        "requires_approval":     wiz.get("requires_approval", False),
+        "adjustment_occurrence": "ADHOC",
+        "adjustment_category":   wiz.get("adjustment_category"),
+        "adjustment_value_in_usd": float(row["VALUE_USD"]),
+    }
+    for stage_col, payload_key in [
+            ("ENTITY_CODE", "entity_code"), ("SOURCE_SYSTEM_CODE", "source_system_code"),
+            ("DEPARTMENT_CODE", "department_code"), ("BOOK_CODE", "book_code"),
+            ("TRADE_CODE", "trade_code"), ("TRADE_TYPOLOGY", "trade_typology"),
+            ("STRATEGY", "strategy"), ("INSTRUMENT_CODE", "instrument_code"),
+            ("SIMULATION_NAME", "simulation_name"), ("SIMULATION_SOURCE", "simulation_source"),
+            ("MEASURE_TYPE_CODE", "measure_type_code"), ("CURRENCY_CODE", "currency_code")]:
+        v = row.get(stage_col)
+        if v is not None and str(v).strip():
+            p[payload_key] = str(v).strip()
+    return p
+
+
+# ── VaR Upload: config-driven schema + JSON upload writer ─────────────────────
 def _direct_schema(scope: str) -> dict:
     """Full DIRECT_SCOPE_SCHEMA config for a scope (cached per session)."""
     cache_key = f"_ref_direct_schema_{scope}"
@@ -440,6 +473,46 @@ def _do_submit() -> dict:
     import uuid as _uuid
     wrote_line_items_for = None
     try:
+        # Direct Adjustment: one row = one adjustment, never a JSON line item.
+        # Modelled on the FRTBALL fan-out loop below — submit N, collect
+        # ok/fail per unit, report a summary. Invalid rows are never submitted.
+        if wiz.get("category") == "Direct Adjustment":
+            batch_id = wiz.get("direct_batch_id")
+            ndf      = wiz.get("direct_ndf")
+            verdicts = wiz.get("direct_verdicts") or []
+            valid_rows = {v["ROW_NUM"] for v in verdicts if v["IS_VALID"]}
+            if not batch_id or ndf is None or ndf.empty or not valid_rows:
+                return {"status": "Error",
+                        "message": "No valid staged rows to submit — parse a CSV "
+                                   "with at least one valid row first."}
+            created, failures, statuses = [], [], []
+            for i, (_, row) in enumerate(ndf.iterrows(), start=1):
+                if i not in valid_rows:
+                    continue
+                row_res = _submit_one(_direct_row_payload(row.to_dict()))
+                if _is_submit_success(row_res):
+                    created.append(i)
+                    statuses.append(row_res.get("status"))
+                else:
+                    failures.append(f"row {i}: {row_res.get('message', 'not accepted')}")
+            try:
+                _delete_direct_batch(batch_id)
+            except Exception:
+                pass
+            wiz["direct_batch_id"] = None
+            wiz["direct_ndf"]      = None
+            wiz["direct_verdicts"] = None
+            fail_txt = ""
+            if failures:
+                shown = "; ".join(failures[:10])
+                fail_txt = (f" {len(failures)} row(s) failed: {shown}"
+                            + (" …" if len(failures) > 10 else ""))
+            if not created:
+                return {"status": "Error",
+                        "message": "No Direct adjustments were created." + fail_txt}
+            return {"status": statuses[0],
+                    "message": f"Created {len(created)} Direct adjustments." + fail_txt}
+
         payload = _build_payload()
 
         # "All FRTB": FRTBALL is not a processable scope — submit one sibling
@@ -466,10 +539,10 @@ def _do_submit() -> dict:
                     "message": ("Not all FRTB sub-types were accepted. "
                                 + " | ".join(failures) + partial)}
 
-        # For Direct Adjustment: write line items BEFORE the SP call so that
+        # For VaR Upload: write line items BEFORE the SP call so that
         # navigating away can't interrupt the write. Pre-generate the
         # ADJ_ID so both line items and header share the same ID.
-        if wiz.get("category") == "Direct Adjustment" and wiz.get("uploaded_df") is not None:
+        if wiz.get("category") == "VaR Upload" and wiz.get("uploaded_df") is not None:
             adj_id = str(_uuid.uuid4())
             payload["adj_id"] = adj_id
             n = _write_direct_json_rows(adj_id, wiz["uploaded_df"])
@@ -619,8 +692,19 @@ def _safe_int(v) -> int:
 # Material icon shortcodes for the pill buttons (ignored on older Streamlit)
 CATEGORY_BTN_ICONS = {
     "Scaling Adjustment": ":material/balance:",
-    "Direct Adjustment":  ":material/upload_file:",
+    "VaR Upload":         ":material/upload_file:",
+    "Direct Adjustment":  ":material/edit_note:",
     "Entity Roll":        ":material/autorenew:",
+}
+
+# Category picker copy — local to this page (CATEGORY_CONFIG in utils/styles.py
+# still describes the pre-split "Direct Adjustment" concept and is not the
+# source of truth for the picker post-split; the four flows below are).
+CATEGORY_UI_DESCS = {
+    "Scaling Adjustment": CATEGORY_CONFIG["Scaling Adjustment"]["desc"],
+    "Direct Adjustment":   "Paste/upload a CSV of exact values for Stress/Sensitivity/FRTB — one adjustment per row",
+    "VaR Upload":          "Upload one file of exact VaR adjustment values (CSV, whole file = one adjustment)",
+    "Entity Roll":         CATEGORY_CONFIG["Entity Roll"]["desc"],
 }
 SCOPE_BTN_ICONS = {
     "VaR":         ":material/bar_chart:",
@@ -771,7 +855,7 @@ def _completion_checks() -> list:
     checks = [("Category", bool(cat))]
     if not cat:
         return checks
-    if cat == "Direct Adjustment":
+    if cat == "VaR Upload":
         checks += [
             ("Data scope",          bool(wiz.get("process_type"))),
             ("CSV data",            wiz.get("uploaded_df") is not None),
@@ -780,6 +864,17 @@ def _completion_checks() -> list:
             ("COB date",            bool(wiz.get("cobid"))),
             ("Entity code",         bool((wiz.get("entity_code") or "").strip())),
             ("Reference",           bool((wiz.get("global_reference") or "").strip())),
+            ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
+            ("Reason",              bool((wiz.get("reason") or "").strip())),
+        ]
+    elif cat == "Direct Adjustment":
+        _n_valid = sum(1 for v in (wiz.get("direct_verdicts") or []) if v["IS_VALID"])
+        checks += [
+            ("Data scope",          bool(wiz.get("process_type"))),
+            ("CSV parsed",          wiz.get("direct_ndf") is not None
+                                    and len(wiz["direct_ndf"]) > 0),
+            ("At least 1 valid row", _n_valid > 0),
+            ("COB date",            bool(wiz.get("cobid"))),
             ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
             ("Reason",              bool((wiz.get("reason") or "").strip())),
         ]
@@ -930,6 +1025,81 @@ def _sim_source_options():
         "_ref_sim_sources")
     return sorted({str(r[0]).strip() for r in rows
                    if r[0] is not None and str(r[0]).strip()})
+
+
+# ── Direct Adjustment: order-free CSV → stage → per-scope validation view ────
+_DIRECT_STAGE_COLS = [
+    "ENTITY_CODE", "SOURCE_SYSTEM_CODE", "DEPARTMENT_CODE", "BOOK_CODE",
+    "TRADE_CODE", "TRADE_TYPOLOGY", "STRATEGY", "INSTRUMENT_CODE",
+    "SIMULATION_NAME", "SIMULATION_SOURCE", "MEASURE_TYPE_CODE",
+    "CURRENCY_CODE", "VALUE_USD",
+]
+
+
+def _accepted_columns(scope: str):
+    """{ACCEPTED_NAME (upper): STAGE_COLUMN} + set of required stage columns."""
+    rows = _ref_rows(
+        f"SELECT ACCEPTED_NAME, STAGE_COLUMN, IS_REQUIRED "
+        f"FROM ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS "
+        f"WHERE UPPER(PROCESS_TYPE) = UPPER('{scope}') AND IS_ACTIVE = TRUE",
+        f"_ref_direct_cols_{scope}")
+    alias_map = {str(r[0]).strip().upper(): str(r[1]).strip().upper() for r in rows}
+    required  = {str(r[1]).strip().upper() for r in rows if r[2]}
+    return alias_map, required
+
+
+def _parse_direct_df(df, scope: str):
+    """Map pasted columns to stage columns by header name (order/case-free).
+    Returns (normalized_df, unknown_cols, missing_required)."""
+    alias_map, required = _accepted_columns(scope)
+    out, seen = {}, set()
+    unknown = []
+    for c in df.columns:
+        key = str(c).strip().upper()
+        tgt = alias_map.get(key)
+        if tgt is None:
+            unknown.append(str(c))
+        elif tgt not in seen:
+            seen.add(tgt)
+            out[tgt] = df[c]
+    ndf = pd.DataFrame(out)
+    missing_required = sorted(required - seen)
+    return ndf, unknown, missing_required
+
+
+def _stage_direct_batch(batch_id: str, ndf) -> int:
+    """Write normalized rows to ADJ_DIRECT_STAGE. Returns row count."""
+    user = (current_user_name() or "").replace("'", "''")
+    values = []
+    for i, (_, row) in enumerate(ndf.iterrows(), start=1):
+        cells = []
+        for col_name in _DIRECT_STAGE_COLS:
+            v = row.get(col_name)
+            if v is None or (isinstance(v, float) and pd.isna(v)) or str(v).strip() == "":
+                cells.append("NULL")
+            else:
+                cells.append("'" + str(v).strip().replace("'", "''") + "'")
+        values.append(f"('{batch_id}', {i}, {', '.join(cells)}, '{user}')")
+    if not values:
+        return 0
+    run_query(
+        f"INSERT INTO ADJUSTMENT_APP.ADJ_DIRECT_STAGE "
+        f"(BATCH_ID, ROW_NUM, {', '.join(_DIRECT_STAGE_COLS)}, USERNAME) "
+        f"VALUES {', '.join(values)}")
+    return len(values)
+
+
+def _direct_validation(batch_id: str, scope: str):
+    """Per-row verdicts from the scope's validation view."""
+    view = f"ADJUSTMENT_APP.VW_DIRECT_VALIDATE_{scope.upper()}"
+    return run_query(
+        f"SELECT ROW_NUM, IS_VALID, VALIDATION_ERRORS FROM {view} "
+        f"WHERE BATCH_ID = '{batch_id}' ORDER BY ROW_NUM")
+
+
+def _delete_direct_batch(batch_id: str) -> None:
+    run_query(f"DELETE FROM ADJUSTMENT_APP.ADJ_DIRECT_STAGE "
+              f"WHERE BATCH_ID = '{batch_id}'")
 
 
 def _sim_name_options(source=None):
@@ -1190,18 +1360,224 @@ def _render_schedule_fields() -> None:
                                                         wiz.get("recurring_end_cobid"))
 
 
+DIRECT_SCOPES = ["Stress", "Sensitivity", "FRTB", "FRTBDRC", "FRTBRRAO"]
+DIRECT_SCOPE_ICONS = {
+    "Stress":      SCOPE_BTN_ICONS["Stress"],
+    "Sensitivity": SCOPE_BTN_ICONS["Sensitivity"],
+    "FRTB":        SCOPE_BTN_ICONS["FRTB"],
+    "FRTBDRC":     SCOPE_BTN_ICONS["FRTB"],
+    "FRTBRRAO":    SCOPE_BTN_ICONS["FRTB"],
+}
+
+
+def _fmt_direct_errors(raw) -> list:
+    """VALIDATION_ERRORS comes back as a Snowflake ARRAY — normalize whatever
+    shape the driver hands us (native list or a JSON-text string) to a
+    list[str], defensively (mirrors _direct_schema's _j() helper)."""
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
+    try:
+        parsed = json.loads(str(raw))
+        return [str(x) for x in parsed] if isinstance(parsed, list) else [str(parsed)]
+    except Exception:
+        return [str(raw)]
+
+
+def _purge_abandoned_direct_batches() -> None:
+    """Best-effort cleanup: stage rows nobody submitted or re-parsed within 2
+    days (e.g. a browser closed mid-paste) are abandoned and safe to drop."""
+    try:
+        run_query("DELETE FROM ADJUSTMENT_APP.ADJ_DIRECT_STAGE "
+                  "WHERE CREATED_DATE < DATEADD('day', -2, CURRENT_TIMESTAMP())")
+    except Exception:
+        pass
+
+
 def render_direct_form() -> None:
     with _card():
-        _sec(2, "Data Scope", "Select the data scope for this upload.")
-        _render_scope_pills(include_frtball=False)
+        _sec(2, "Data Scope", "Select the data scope for this Direct Adjustment.")
+        dsel = _pill_row(DIRECT_SCOPES, wiz.get("process_type"),
+                         "direct_scope", icons=DIRECT_SCOPE_ICONS)
+        if dsel and dsel != wiz.get("process_type"):
+            old_batch = wiz.get("direct_batch_id")
+            if old_batch:
+                try:
+                    _delete_direct_batch(old_batch)
+                except Exception:
+                    pass
+            wiz["process_type"]    = dsel
+            wiz["direct_batch_id"] = None
+            wiz["direct_ndf"]      = None
+            wiz["direct_verdicts"] = None
+            wiz["_direct_sig"]     = None
+            safe_rerun()
     if not wiz.get("process_type"):
         st.info("Select a data scope to continue.")
         return
 
+    scope = wiz["process_type"]
+    accepted_map, required = _accepted_columns(scope)
+    accepted_names = sorted(set(accepted_map.keys()))
+
+    with _card():
+        _sec(3, f"CSV Data — {scope}",
+             "Paste or upload rows — one row = one adjustment. Column order and case don't matter.")
+        if accepted_names:
+            _info_banner('Provide a CSV of exact adjustment values, one row per '
+                         'adjustment — paste the content or upload the file. '
+                         'REQUIRED columns: <code>' + ', '.join(sorted(required)) +
+                         '</code>. All accepted headers (any order, any case): '
+                         '<code>' + ', '.join(accepted_names) + '</code>.')
+        else:
+            _info_banner(f'No accepted-columns configuration found for the '
+                         f'<b>{scope}</b> scope yet — contact an administrator.')
+
+        _in_mode = st.radio(
+            "How do you want to provide the data?",
+            ["Paste content", "Upload file"],
+            horizontal=True, key=_k("dadj_mode"),
+            label_visibility="collapsed")
+
+        _DELIMS = {"Auto-detect": None, "Comma ( , )": ",", "Semicolon ( ; )": ";",
+                   "Tab": "\t", "Pipe ( | )": "|"}
+        delim_choice = st.selectbox(
+            "Delimiter", list(_DELIMS.keys()), index=0, key=_k("dadj_delim"),
+            help="Auto-detect works for most files; pick one explicitly if the "
+                 "columns come out wrong.")
+
+        def _read_csv(buf):
+            """Parse with the chosen delimiter (or sniff it) — same for both modes."""
+            sep = _DELIMS[delim_choice]
+            if sep is None:
+                return pd.read_csv(buf, sep=None, engine="python")
+            return pd.read_csv(buf, sep=sep)
+
+        df, _src_token, _parse_err = None, None, None
+        if _in_mode == "Upload file":
+            up_file = st.file_uploader(
+                "Upload CSV file", type=["csv", "txt"], key=_k("dadj_file"),
+                help="First row must be the header.")
+            if up_file is not None:
+                try:
+                    _raw = up_file.getvalue()
+                    from io import StringIO
+                    try:
+                        _text = _raw.decode("utf-8-sig")
+                    except UnicodeDecodeError:
+                        _text = _raw.decode("latin-1")
+                    df = _read_csv(StringIO(_text))
+                    _src_token = f"file:{up_file.name}:{len(_raw)}:{delim_choice}"
+                except Exception as exc:
+                    _parse_err = exc
+        else:
+            csv_text = st.text_area(
+                "Paste CSV Data Here", value="", height=160, key=_k("dadj_csv"),
+                help="Paste the full CSV content including the header row.")
+            if csv_text.strip():
+                try:
+                    from io import StringIO
+                    df = _read_csv(StringIO(csv_text.strip()))
+                    _src_token = f"paste:{hash(csv_text)}:{delim_choice}"
+                except Exception as exc:
+                    _parse_err = exc
+
+        if _parse_err is not None:
+            st.error(f"Failed to read the CSV: {_parse_err}. If the columns look "
+                     f"wrong, try selecting the delimiter explicitly above.")
+        elif df is not None:
+            ndf, unknown_cols, missing_required = _parse_direct_df(df, scope)
+
+            if unknown_cols:
+                st.warning("Column(s) not recognized for this scope (ignored): "
+                           + ", ".join(unknown_cols))
+            if missing_required:
+                st.error("Missing REQUIRED column(s): " + ", ".join(missing_required)
+                         + " — staging is blocked until the CSV includes them.")
+
+            if missing_required or not len(ndf):
+                # Can't stage this parse — drop any previously staged batch so a
+                # stale/valid batch is never left submittable behind a now-broken CSV.
+                if wiz.get("direct_batch_id"):
+                    try:
+                        _delete_direct_batch(wiz["direct_batch_id"])
+                    except Exception:
+                        pass
+                wiz["direct_batch_id"] = None
+                wiz["direct_ndf"]      = None
+                wiz["direct_verdicts"] = None
+                wiz["_direct_sig"]     = None
+            else:
+                _sig = f'{scope}|{len(df)}|{",".join(map(str, df.columns))}|{_src_token}'
+                if wiz.get("_direct_sig") != _sig:
+                    old_batch = wiz.get("direct_batch_id")
+                    if old_batch:
+                        try:
+                            _delete_direct_batch(old_batch)
+                        except Exception:
+                            pass
+                    _purge_abandoned_direct_batches()
+                    import uuid
+                    batch_id = str(uuid.uuid4())
+                    with st.spinner("Staging and validating rows…"):
+                        _stage_direct_batch(batch_id, ndf)
+                        verdicts = _direct_validation(batch_id, scope)
+                    wiz["direct_batch_id"] = batch_id
+                    wiz["direct_ndf"]      = ndf
+                    wiz["direct_verdicts"] = verdicts
+                    wiz["_direct_sig"]     = _sig
+
+            verdicts = wiz.get("direct_verdicts")
+            ndf_staged = wiz.get("direct_ndf")
+            if verdicts is not None and ndf_staged is not None and len(ndf_staged):
+                # Row objects don't support .get() — normalize to plain dicts.
+                v_by_row = {v["ROW_NUM"]: v.asDict() for v in verdicts}
+                preview = ndf_staged.copy()
+                preview.insert(0, "✓/✗", [
+                    "✓" if v_by_row.get(i + 1, {}).get("IS_VALID") else "✗"
+                    for i in range(len(preview))])
+                preview["Errors"] = [
+                    "; ".join(_fmt_direct_errors(v_by_row.get(i + 1, {}).get("VALIDATION_ERRORS")))
+                    for i in range(len(preview))]
+                n_valid = sum(1 for v in verdicts if v["IS_VALID"])
+                n_bad   = len(verdicts) - n_valid
+                if n_bad:
+                    st.warning(f"**{n_valid} valid row(s)**, **{n_bad} invalid row(s)** — "
+                               f"invalid rows are excluded from submission (see the "
+                               f"Errors column below).")
+                    bad_rows = preview[preview["✓/✗"] == "✗"]
+                    st.download_button(
+                        f"⬇ Download {len(bad_rows)} invalid row(s) (CSV)",
+                        bad_rows.to_csv(index=False).encode("utf-8-sig"),
+                        file_name="direct_adjustment_rejects.csv", mime="text/csv",
+                        key=_k("dadj_rejects_dl"))
+                else:
+                    st.success(f"All {n_valid} row(s) validated — ready to submit.")
+                render_df_table(preview, max_rows=20, height=220)
+
+    with _card():
+        _sec(4, "Batch Details", "COB applies to every row submitted from this CSV.")
+        wiz["cobid"] = _int_input("COB Date (YYYYMMDD) *", "dadj_cobid", wiz.get("cobid"))
+
+    with _card():
+        _sec(5, "Business Context", "Why is this adjustment needed?")
+        wiz["adjustment_category"] = _code_select(
+            "Adjustment Category *", _k("dadj_adj_category"),
+            wiz.get("adjustment_category"), _category_options()) or None
+        wiz["reason"] = st.text_area("Reason / Business Justification *",
+                                     value=wiz.get("reason", ""), height=70,
+                                     key=_k("dadj_reason"))
+
+
+def render_var_upload_form() -> None:
+    # VaR Upload is restricted to the VaR scope — no scope pills, pinned directly.
+    wiz["process_type"] = "VaR"
+
     expected_cols = _direct_expected_columns(wiz["process_type"])
     _csv_card = _card()
     _csv_card.__enter__()
-    _sec(3, f"CSV Upload — {wiz['process_type']}", "Paste exact adjustment values.")
+    _sec(2, f"CSV Upload — {wiz['process_type']}", "Paste exact adjustment values.")
     if expected_cols:
         _info_banner('Provide a CSV of exact adjustment values — paste the '
                      'content or upload the file. Expected columns: '
@@ -1305,7 +1681,7 @@ def render_direct_form() -> None:
     _csv_card.__exit__(None, None, None)
 
     with _card():
-        _sec(4, "Upload Details", "COB and entity are auto-detected from the CSV when present.")
+        _sec(3, "Upload Details", "COB and entity are auto-detected from the CSV when present.")
         g1, g2, g3 = st.columns(3)
         with g1:
             wiz["cobid"] = _int_input("COB Date (auto-detected) *", "var_cobid",
@@ -1323,7 +1699,7 @@ def render_direct_form() -> None:
             wiz["global_reference"] = rv.strip() or None
 
     with _card():
-        _sec(5, "Business Context", "Why is this adjustment needed?")
+        _sec(4, "Business Context", "Why is this adjustment needed?")
         wiz["adjustment_category"] = _code_select(
             "Adjustment Category *", _k("var_adj_category"),
             wiz.get("adjustment_category"), _category_options()) or None
@@ -1499,7 +1875,7 @@ def _ticket_html(missing: list) -> str:
         kv += _ticket_row("Roll",
                           f'{wiz.get("source_cobid")} → {wiz.get("cobid")}'
                           if roll_set else None, roll_set)
-    elif cat == "Direct Adjustment":
+    elif cat == "VaR Upload":
         df_up = wiz.get("uploaded_df")
         kv += _ticket_row("Scope",     wiz.get("process_type"))
         kv += _ticket_row("COB",       wiz.get("cobid"))
@@ -1507,6 +1883,19 @@ def _ticket_html(missing: list) -> str:
         kv += _ticket_row("CSV rows",
                           f"{len(df_up):,}" if df_up is not None else None,
                           df_up is not None)
+    elif cat == "Direct Adjustment":
+        d_ndf      = wiz.get("direct_ndf")
+        d_verdicts = wiz.get("direct_verdicts") or []
+        n_valid    = sum(1 for v in d_verdicts if v["IS_VALID"])
+        n_bad      = len(d_verdicts) - n_valid
+        kv += _ticket_row("Scope", wiz.get("process_type"))
+        kv += _ticket_row("COB",   wiz.get("cobid"))
+        kv += _ticket_row("CSV rows",
+                          f"{len(d_ndf):,}" if d_ndf is not None else None,
+                          d_ndf is not None)
+        kv += _ticket_row("Valid / Invalid",
+                          f"{n_valid:,} valid / {n_bad:,} invalid" if d_verdicts else None,
+                          bool(d_verdicts) and n_valid > 0)
     elif cat == "Scaling Adjustment":
         type_txt = wiz.get("adjustment_type")
         if type_txt and type_txt in ("Scale", "Roll"):
@@ -2032,19 +2421,28 @@ left, right = st.columns([1.85, 1], gap="large")
 with left:
     with _card():
         _sec(1, "Category", "Select the adjustment category.")
-        cat = _pill_row(list(CATEGORY_CONFIG.keys()), wiz.get("category"),
+        cat = _pill_row(list(CATEGORY_UI_DESCS.keys()), wiz.get("category"),
                         "cat", icons=CATEGORY_BTN_ICONS,
-                        descs={k: v["desc"] for k, v in CATEGORY_CONFIG.items()})
+                        descs=CATEGORY_UI_DESCS)
         if cat and cat != wiz.get("category"):
+            if wiz.get("direct_batch_id"):  # leaving Direct Adjustment — drop its stage rows
+                try:
+                    _delete_direct_batch(wiz["direct_batch_id"])
+                except Exception:
+                    pass
             wiz.update({"category": cat, "process_type": None, "adjustment_type": None,
                         "uploaded_df": None, "uploaded_file_name": None,
-                        "_preview_sum": None, "_preview_err": None})
+                        "_preview_sum": None, "_preview_err": None,
+                        "direct_batch_id": None, "direct_ndf": None,
+                        "direct_verdicts": None, "_direct_sig": None})
             safe_rerun()
 
     if not wiz.get("category"):
         st.info("Select an adjustment category to continue.")
     elif wiz["category"] == "Direct Adjustment":
         render_direct_form()
+    elif wiz["category"] == "VaR Upload":
+        render_var_upload_form()
     elif wiz["category"] == "Entity Roll":
         render_entity_roll_form()
     else:
@@ -2081,9 +2479,9 @@ with right:
                 "COB — double-check entity, book, and measure-type codes. "
                 "Submission is blocked until the preview finds matching rows.")
 
-    # ── Direct: replacement confirmation ─────────────────────────────────
+    # ── VaR Upload: replacement confirmation ──────────────────────────────
     dup_ok = True
-    if cat == "Direct Adjustment" and wiz.get("_dup_adj_ids"):
+    if cat == "VaR Upload" and wiz.get("_dup_adj_ids"):
         dup_ok = st.checkbox(
             f"Replace {len(wiz['_dup_adj_ids'])} existing adjustment(s) with this upload",
             key=_k("dup_confirm"), value=False)
