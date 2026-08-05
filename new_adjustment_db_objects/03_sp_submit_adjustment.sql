@@ -43,7 +43,7 @@ ACTION_MAP = {
     "roll":         "Scale",
     "erol":         "EntityRoll",
     "entity_roll":  "EntityRoll",   # legacy alias (pre-EROL rename)
-    "upload":       "Direct",
+    "upload":       "Upload",
     "direct":       "Direct",
 }
 
@@ -332,7 +332,7 @@ def main(session, p_adjustment):
         # Direct adjustments skip overlap checking — they are explicit value
         # insertions. Duplicate detection is handled via GLOBAL_REFERENCE.
         blocked_by_adj_id = None
-        if initial_status == STATUS_PENDING and adj_action != "Direct":
+        if initial_status == STATUS_PENDING and adj_action not in ("Direct", "Upload"):
             dim_vals = {
                 "entity_code":                 adj.get("entity_code"),
                 "source_system_code":          adj.get("source_system_code"),
@@ -380,7 +380,7 @@ def main(session, p_adjustment):
         global_ref = adj.get("global_reference")
         replaced_adj_ids = []
         dup_rows = []
-        if (str(adjustment_type).lower() == 'direct'
+        if (str(adjustment_type).lower() == 'upload'
                 and global_ref and str(global_ref).strip()
                 and initial_status != STATUS_REJECTED_SO):
             dup_rows = session.sql(f"""
@@ -388,7 +388,7 @@ def main(session, p_adjustment):
                 FROM ADJUSTMENT_APP.ADJ_HEADER
                 WHERE COBID = {int(cobid)}
                   AND UPPER(GLOBAL_REFERENCE) = UPPER('{_esc(global_ref)}')
-                  AND UPPER(ADJUSTMENT_TYPE) = 'DIRECT'
+                  AND UPPER(ADJUSTMENT_TYPE) = 'UPLOAD'
                   AND IS_DELETED = FALSE
             """).collect()
 
