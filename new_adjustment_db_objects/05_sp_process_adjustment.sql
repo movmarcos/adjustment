@@ -634,16 +634,16 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             fact_adj_summary_cols = fact_adj_summary_tbl.columns
 
         # ═════════════════════════════════════════════════════════════════
-        # DIRECT (Upload) PATH
+        # UPLOAD PATH (one file → one adjustment entry; declarative engine)
         # ═════════════════════════════════════════════════════════════════
-        if adjustment_action.lower() == 'direct':
+        if adjustment_action.lower() == 'upload':
 
             df_adj_direct = df_adj.filter(
-                (col('ADJUSTMENT_ACTION') == 'Direct') &
+                (col('ADJUSTMENT_ACTION') == 'Upload') &
                 (col('IS_POSITIVE_ADJUSTMENT') == True)
             )
             if df_adj_direct.count() == 0:
-                result["message"] = 'No Running Direct adjustments found'
+                result["message"] = 'No Running Upload adjustments found'
                 return json.dumps(result)
 
             adj_ids = [row["ADJ_ID"] for row in df_adj_direct.select("ADJ_ID").collect()]
@@ -777,12 +777,40 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                     INNER JOIN ADJUSTMENT_APP.ADJ_HEADER h ON h.ADJ_ID = x.ADJ_ID
                     {join_sql}
                 """
-                _erlog(session, _sqlog, "direct_insert", insert_sql)
+                _erlog(session, _sqlog, "upload_insert", insert_sql)
 
                 rows_count = session.sql(f"""
                     SELECT COUNT(*) AS CNT FROM {fact_adj_tbl_name}
                     WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
                 """).collect()[0]["CNT"]
+
+            # ── Rebuild summary (atomic delete + insert) ─────────────────
+            if fact_adj_summary_name:
+                summary_non_metric = ', '.join([
+                    c for c in fact_adj_summary_cols
+                    if c not in {metric_name, metric_usd_name}
+                ])
+                upload_summary_insert = f"""
+                INSERT INTO {fact_adj_summary_name}
+                ({summary_non_metric}, {metric_name}{', ' + metric_usd_name if metric_usd_name != metric_name else ''})
+                SELECT {summary_non_metric},
+                       SUM({metric_name}){', SUM(' + metric_usd_name + ')' if metric_usd_name != metric_name else ''}
+                FROM {fact_adj_tbl_name}
+                WHERE COBID = {cobid}
+                GROUP BY ALL
+                """
+                upload_summary_delete = f"""
+                    DELETE FROM {fact_adj_summary_name}
+                    WHERE COBID = {cobid}
+                """
+                session.sql("BEGIN").collect()
+                try:
+                    _erlog(session, _sqlog, "summary_delete", upload_summary_delete)
+                    _erlog(session, _sqlog, "summary_insert", upload_summary_insert)
+                    session.sql("COMMIT").collect()
+                except Exception:
+                    session.sql("ROLLBACK").collect()
+                    raise
 
             # ── Common post-processing ───────────────────────────────────
             # Per-ADJUSTMENT counts (zero-init then grouped update) — a batch
@@ -816,6 +844,203 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                           GROUP BY ADJUSTMENT_ID) src
                     WHERE src.ADJUSTMENT_ID = d.ADJUSTMENT_ID
                 """).collect()
+            update_header_status(session, df_adj_direct, cobid, "Processed")
+            log_status_history(session, adj_ids, "Running", "Processed")
+            result["rows_inserted"] = rows_count
+            result["message"] = "Upload adjustments processed successfully"
+            try:
+                session.sql(f"""
+                    CALL BATCH.LOAD_RUN_LOG_END_WITH_DETAIL({run_log_id}, '{{"status":"Processed"}}')
+                """).collect()
+            except Exception as rl_err:
+                print(f"Warning: Run log close failed: {rl_err}")
+            result["downstream_handoff"] = trigger_downstream_handoff(
+                session, process_type, cobid, run_log_id, adj_ids_str)
+            notify_outcome(session, adj_ids, "Processed")
+
+        # ═════════════════════════════════════════════════════════════════
+        # DIRECT PATH — one header = one fact row, value straight in
+        # Codes on ADJ_HEADER resolve to dimension keys (case-insensitive,
+        # -1 when blank or unmatched); ADJUSTMENT_VALUE_IN_USD lands in the
+        # USD measure column (and the native twin — no FX conversion).
+        # ═════════════════════════════════════════════════════════════════
+        elif adjustment_action.lower() == 'direct':
+
+            df_adj_direct = df_adj.filter(
+                (col('ADJUSTMENT_ACTION') == 'Direct') &
+                (col('IS_POSITIVE_ADJUSTMENT') == True)
+            )
+            if df_adj_direct.count() == 0:
+                result["message"] = 'No Running Direct adjustments found'
+                return json.dumps(result)
+
+            adj_ids = [row["ADJ_ID"] for row in df_adj_direct.select("ADJ_ID").collect()]
+            adj_ids_str = ", ".join(f"'{a}'" for a in adj_ids)
+
+            session.sql(f"""
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER SET RUN_LOG_ID = {run_log_id}
+                WHERE ADJ_ID IN ({adj_ids_str})
+            """).collect()
+
+            # Prior-run cleanup (retry): remove fact rows keyed by the
+            # PREVIOUS DIMENSION_ADJ_ID and retire the old dimension rows.
+            session.sql(f"""
+                DELETE FROM {fact_adj_tbl_name}
+                WHERE COBID = {cobid}
+                  AND ADJUSTMENT_ID IN (
+                      SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
+                      WHERE ADJ_ID IN ({adj_ids_str})
+                        AND DIMENSION_ADJ_ID IS NOT NULL)
+            """).collect()
+            session.sql(f"""
+                UPDATE DIMENSION.ADJUSTMENT
+                SET IS_DELETED = TRUE
+                WHERE ADJUSTMENT_ID IN (
+                      SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
+                      WHERE ADJ_ID IN ({adj_ids_str})
+                        AND DIMENSION_ADJ_ID IS NOT NULL)
+            """).collect()
+
+            dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str)
+            if not dim_adj_map:
+                raise Exception("DIMENSION.ADJUSTMENT insert returned no ADJUSTMENT_IDs")
+            dim_ids_str = ', '.join(str(v) for v in dim_adj_map.values())
+
+            # ── Column expression per fact-adj column (header alias: h) ──
+            def _direct_expr(c):
+                fixed = {
+                    'COBID':               str(cobid),
+                    'ADJUSTMENT_ID':       "h.DIMENSION_ADJ_ID",
+                    'ENTITY_CODE':         "COALESCE(h.ENTITY_CODE, 'N/A')",
+                    'ENTITY_KEY':          ("COALESCE((SELECT MAX(e.ENTITY_KEY) FROM DIMENSION.ENTITY e "
+                                            "WHERE UPPER(e.ENTITY_CODE) = UPPER(h.ENTITY_CODE)), -1)"),
+                    'BOOK_KEY':            ("COALESCE((SELECT MAX(bk.BOOK_KEY) FROM DIMENSION.BOOK bk "
+                                            "WHERE UPPER(bk.BOOK_CODE) = UPPER(h.BOOK_CODE) "
+                                            "AND bk.IS_CURRENT_ROW = TRUE), -1)"),
+                    'TRADE_KEY':           ("COALESCE((SELECT MAX(td.TRADE_KEY) FROM DIMENSION.TRADE td "
+                                            "WHERE UPPER(td.TRADE_CODE) = UPPER(h.TRADE_CODE) "
+                                            "AND td.IS_CURRENT_ROW = TRUE), -1)"),
+                    'COMMON_INSTRUMENT_KEY': ("COALESCE((SELECT MAX(ci.COMMON_INSTRUMENT_KEY) "
+                                            "FROM DIMENSION.COMMON_INSTRUMENT ci "
+                                            "WHERE UPPER(ci.INSTRUMENT_CODE) = UPPER(h.INSTRUMENT_CODE) "
+                                            "AND ci.IS_CURRENT_ROW = TRUE), -1)"),
+                    'STRESS_SIMULATION_KEY': ("COALESCE((SELECT MAX(ss.STRESS_SIMULATION_KEY) "
+                                            "FROM DIMENSION.STRESS_SIMULATION ss "
+                                            "WHERE UPPER(ss.STRESS_SIMULATION_NAME) = UPPER(h.SIMULATION_NAME)), -1)"),
+                    'MEASURE_TYPE_KEY':    ("COALESCE((SELECT MAX(mt.MEASURE_TYPE_KEY) "
+                                            "FROM DIMENSION.MEASURE_TYPE mt "
+                                            "WHERE UPPER(mt.MEASURE_TYPE_CODE) = UPPER(h.MEASURE_TYPE_CODE)), -1)"),
+                    'MEASURE_TYPE_CODE':   "h.MEASURE_TYPE_CODE",
+                    'INSTRUMENT_CODE':     "h.INSTRUMENT_CODE",
+                    'TRADE_CURRENCY':      "COALESCE(h.CURRENCY_CODE, 'N/A')",
+                    'CURRENCY_CODE':       "COALESCE(h.CURRENCY_CODE, 'N/A')",
+                    'SOURCE_SYSTEM_CODE':  "COALESCE(h.SOURCE_SYSTEM_CODE, 'QP')",
+                    'IS_OFFICIAL_SOURCE':  "TRUE",
+                    'RUN_LOG_ID':          str(run_log_id),
+                    'LOAD_TIMESTAMP':      "CURRENT_TIMESTAMP()",
+                }
+                if c in fixed:
+                    return fixed[c]
+                if c in (metric_name, metric_usd_name):
+                    return "h.ADJUSTMENT_VALUE_IN_USD"
+                if c.split('_')[-1].upper() in ('KEY', 'ID'):
+                    return "-1"          # legacy default for unmapped keys
+                return None              # column left out → its own default/NULL
+
+            target_cols, select_exprs = [], []
+            for c in fact_adj_tbl.columns:
+                expr = _direct_expr(c)
+                if expr is not None:
+                    target_cols.append(c)
+                    select_exprs.append(f"{expr} AS {c}")
+
+            direct_insert = f"""
+                INSERT INTO {fact_adj_tbl_name} ({', '.join(target_cols)})
+                SELECT {', '.join(select_exprs)}
+                FROM ADJUSTMENT_APP.ADJ_HEADER h
+                WHERE h.ADJ_ID IN ({adj_ids_str})
+                  AND h.ADJUSTMENT_VALUE_IN_USD IS NOT NULL
+            """
+            _erlog(session, _sqlog, "direct_row_insert", direct_insert)
+
+            rows_count = session.sql(f"""
+                SELECT COUNT(*) AS CNT FROM {fact_adj_tbl_name}
+                WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
+            """).collect()[0]["CNT"]
+
+            # ── Common post-processing ───────────────────────────────────
+            # Per-ADJUSTMENT counts (zero-init then grouped update) — a batch
+            # total stamped on every header made multi-adjustment batches lie.
+            session.sql(f"""
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER SET RECORD_COUNT = 0
+                WHERE ADJ_ID IN ({adj_ids_str})
+            """).collect()
+            session.sql(f"""
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER h
+                SET RECORD_COUNT = src.CNT
+                FROM (SELECT ADJUSTMENT_ID, COUNT(*) AS CNT
+                      FROM {fact_adj_tbl_name}
+                      WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
+                      GROUP BY ADJUSTMENT_ID) src
+                WHERE src.ADJUSTMENT_ID = h.DIMENSION_ADJ_ID
+                  AND h.ADJ_ID IN ({adj_ids_str})
+            """).collect()
+            if dim_adj_map:
+                session.sql(f"""
+                    UPDATE DIMENSION.ADJUSTMENT
+                    SET RECORD_COUNT = 0, RUN_STATUS = 'Processed'
+                    WHERE ADJUSTMENT_ID IN ({dim_ids_str})
+                """).collect()
+                session.sql(f"""
+                    UPDATE DIMENSION.ADJUSTMENT d
+                    SET RECORD_COUNT = src.CNT
+                    FROM (SELECT ADJUSTMENT_ID, COUNT(*) AS CNT
+                          FROM {fact_adj_tbl_name}
+                          WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
+                          GROUP BY ADJUSTMENT_ID) src
+                    WHERE src.ADJUSTMENT_ID = d.ADJUSTMENT_ID
+                """).collect()
+
+            # ── Rebuild summary (atomic delete + insert) ─────────────────
+            if fact_adj_summary_name:
+                summary_non_metric = ', '.join([
+                    c for c in fact_adj_summary_cols
+                    if c not in {metric_name, metric_usd_name}
+                ])
+                upload_summary_insert = f"""
+                INSERT INTO {fact_adj_summary_name}
+                ({summary_non_metric}, {metric_name}{', ' + metric_usd_name if metric_usd_name != metric_name else ''})
+                SELECT {summary_non_metric},
+                       SUM({metric_name}){', SUM(' + metric_usd_name + ')' if metric_usd_name != metric_name else ''}
+                FROM {fact_adj_tbl_name}
+                WHERE COBID = {cobid}
+                GROUP BY ALL
+                """
+                upload_summary_delete = f"""
+                    DELETE FROM {fact_adj_summary_name}
+                    WHERE COBID = {cobid}
+                """
+                session.sql("BEGIN").collect()
+                try:
+                    _erlog(session, _sqlog, "summary_delete", upload_summary_delete)
+                    _erlog(session, _sqlog, "summary_insert", upload_summary_insert)
+                    session.sql("COMMIT").collect()
+                except Exception:
+                    session.sql("ROLLBACK").collect()
+                    raise
+
+            # Zero-match warning: a Direct header whose row was not written
+            # (NULL value, or filtered) — surface it, never silently succeed.
+            session.sql(f"""
+                UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                SET ERRORMESSAGE = 'Warning: processed but no fact row was '
+                    || 'written — ADJUSTMENT_VALUE_IN_USD was empty or the row '
+                    || 'was filtered. Check the submitted values.'
+                WHERE ADJ_ID IN ({adj_ids_str})
+                  AND RECORD_COUNT = 0
+                  AND ERRORMESSAGE IS NULL
+            """).collect()
+
             update_header_status(session, df_adj_direct, cobid, "Processed")
             log_status_history(session, adj_ids, "Running", "Processed")
             result["rows_inserted"] = rows_count
