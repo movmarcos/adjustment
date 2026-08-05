@@ -200,6 +200,103 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_LINE_ITEM_JSON (
 COMMENT = 'Direct Adjustment uploads: one row per CSV line, raw fields in PAYLOAD (VARIANT).';
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- ADJ_DIRECT_STAGE — parse target for Direct Adjustment paste/upload.
+-- The app writes one row per pasted CSV line (BATCH_ID = one paste), the
+-- per-scope VW_DIRECT_VALIDATE_* views validate them, and submit turns each
+-- VALID row into its own ADJ_HEADER. Rows are deleted after submit/cancel;
+-- anything older than 2 days is abandoned and may be purged.
+-- ═══════════════════════════════════════════════════════════════════════════
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_DIRECT_STAGE (
+    BATCH_ID            VARCHAR(36)  NOT NULL,
+    ROW_NUM             NUMBER(38,0) NOT NULL,
+    ENTITY_CODE         VARCHAR(50),
+    SOURCE_SYSTEM_CODE  VARCHAR(50),
+    DEPARTMENT_CODE     VARCHAR(50),
+    BOOK_CODE           VARCHAR(100),
+    TRADE_CODE          VARCHAR(200),
+    TRADE_TYPOLOGY      VARCHAR(50),
+    STRATEGY            VARCHAR(100),
+    INSTRUMENT_CODE     VARCHAR(200),
+    SIMULATION_NAME     VARCHAR(200),
+    SIMULATION_SOURCE   VARCHAR(100),
+    MEASURE_TYPE_CODE   VARCHAR(30),
+    CURRENCY_CODE       VARCHAR(10),
+    VALUE_USD           VARCHAR(100),          -- raw text; numeric check is a validation rule
+    USERNAME            VARCHAR(200),
+    CREATED_DATE        TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
+    CONSTRAINT PK_ADJ_DIRECT_STAGE PRIMARY KEY (BATCH_ID, ROW_NUM)
+)
+COMMENT = 'Direct Adjustment staging: one row per pasted/uploaded CSV line, validated by VW_DIRECT_VALIDATE_<scope>, then submitted one header per valid row.';
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- DIRECT_ACCEPTED_COLUMNS — per-scope accepted CSV header names for Direct.
+-- Column order/case in the paste never matter: the app matches each CSV
+-- header (upper-cased, trimmed) against ACCEPTED_NAME and writes the cell to
+-- STAGE_COLUMN. IS_REQUIRED drives the validation views' required checks.
+-- ═══════════════════════════════════════════════════════════════════════════
+CREATE OR ALTER TABLE ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS (
+    PROCESS_TYPE   VARCHAR(20)  NOT NULL,
+    ACCEPTED_NAME  VARCHAR(100) NOT NULL,      -- stored upper-case
+    STAGE_COLUMN   VARCHAR(50)  NOT NULL,      -- a column of ADJ_DIRECT_STAGE
+    IS_REQUIRED    BOOLEAN      DEFAULT FALSE, -- required flags live on the canonical name row
+    IS_ACTIVE      BOOLEAN      DEFAULT TRUE,
+    CONSTRAINT PK_DIRECT_ACCEPTED_COLUMNS PRIMARY KEY (PROCESS_TYPE, ACCEPTED_NAME)
+)
+COMMENT = 'Accepted CSV header names (incl. aliases) per scope for Direct Adjustment; drives order-free parsing and required-field validation.';
+
+-- Seeds — canonical name + aliases per scope. MERGE keeps re-runs idempotent.
+MERGE INTO ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS t
+USING (
+    -- shared columns for every Direct scope
+    SELECT s.PT AS PROCESS_TYPE, c.ACCEPTED_NAME, c.STAGE_COLUMN, c.IS_REQUIRED
+    FROM (SELECT 'Stress' PT UNION ALL SELECT 'Sensitivity'
+          UNION ALL SELECT 'FRTB' UNION ALL SELECT 'FRTBDRC'
+          UNION ALL SELECT 'FRTBRRAO') s
+    CROSS JOIN (
+        SELECT 'ENTITY_CODE' ACCEPTED_NAME,'ENTITY_CODE' STAGE_COLUMN, TRUE  IS_REQUIRED UNION ALL
+        SELECT 'ENTITY',            'ENTITY_CODE',        FALSE UNION ALL
+        SELECT 'DEPARTMENT_CODE',   'DEPARTMENT_CODE',    FALSE UNION ALL
+        SELECT 'DEPARTMENT',        'DEPARTMENT_CODE',    FALSE UNION ALL
+        SELECT 'BOOK_CODE',         'BOOK_CODE',          FALSE UNION ALL
+        SELECT 'BOOK',              'BOOK_CODE',          FALSE UNION ALL
+        SELECT 'TRADE_CODE',        'TRADE_CODE',         FALSE UNION ALL
+        SELECT 'TRADE',             'TRADE_CODE',         FALSE UNION ALL
+        SELECT 'TRADE_TYPOLOGY',    'TRADE_TYPOLOGY',     FALSE UNION ALL
+        SELECT 'STRATEGY',          'STRATEGY',           FALSE UNION ALL
+        SELECT 'INSTRUMENT_CODE',   'INSTRUMENT_CODE',    FALSE UNION ALL
+        SELECT 'INSTRUMENT',        'INSTRUMENT_CODE',    FALSE UNION ALL
+        SELECT 'CURRENCY_CODE',     'CURRENCY_CODE',      FALSE UNION ALL
+        SELECT 'CURRENCY',          'CURRENCY_CODE',      FALSE UNION ALL
+        SELECT 'SOURCE_SYSTEM_CODE','SOURCE_SYSTEM_CODE', FALSE UNION ALL
+        SELECT 'VALUE_USD',         'VALUE_USD',          TRUE  UNION ALL
+        SELECT 'VALUE',             'VALUE_USD',          FALSE UNION ALL
+        SELECT 'AMOUNT',            'VALUE_USD',          FALSE UNION ALL
+        SELECT 'ADJUSTMENT_VALUE',  'VALUE_USD',          FALSE
+    ) c
+    UNION ALL
+    -- Stress-only
+    SELECT 'Stress','SIMULATION_NAME','SIMULATION_NAME', FALSE UNION ALL
+    SELECT 'Stress','SIMULATION',     'SIMULATION_NAME', FALSE UNION ALL
+    SELECT 'Stress','SIMULATION_SOURCE','SIMULATION_SOURCE', FALSE
+    UNION ALL
+    -- Sensitivity + FRTB scopes: measure type
+    SELECT s2.PT,'MEASURE_TYPE_CODE','MEASURE_TYPE_CODE', FALSE
+    FROM (SELECT 'Sensitivity' PT UNION ALL SELECT 'FRTB'
+          UNION ALL SELECT 'FRTBDRC' UNION ALL SELECT 'FRTBRRAO') s2
+    UNION ALL
+    SELECT s3.PT,'MEASURE_TYPE','MEASURE_TYPE_CODE', FALSE
+    FROM (SELECT 'Sensitivity' PT UNION ALL SELECT 'FRTB'
+          UNION ALL SELECT 'FRTBDRC' UNION ALL SELECT 'FRTBRRAO') s3
+) src
+ON  t.PROCESS_TYPE = src.PROCESS_TYPE AND t.ACCEPTED_NAME = src.ACCEPTED_NAME
+WHEN MATCHED THEN UPDATE SET
+    t.STAGE_COLUMN = src.STAGE_COLUMN, t.IS_REQUIRED = src.IS_REQUIRED,
+    t.IS_ACTIVE = TRUE
+WHEN NOT MATCHED THEN INSERT
+    (PROCESS_TYPE, ACCEPTED_NAME, STAGE_COLUMN, IS_REQUIRED, IS_ACTIVE)
+VALUES (src.PROCESS_TYPE, src.ACCEPTED_NAME, src.STAGE_COLUMN, src.IS_REQUIRED, TRUE);
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- DIRECT_SCOPE_SCHEMA — per-scope Direct Adjustment schema (dev-maintained)
 -- Declares how to extract/resolve/map a scope's JSON payload into its fact table.
 -- ═══════════════════════════════════════════════════════════════════════════
