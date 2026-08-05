@@ -248,9 +248,10 @@ COMMENT = 'Accepted CSV header names (incl. aliases) per scope for Direct Adjust
 -- Seeds — canonical name + aliases per scope. MERGE keeps re-runs idempotent.
 MERGE INTO ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS t
 USING (
-    -- shared columns for every Direct scope
+    -- shared columns for every Direct scope (VaR does Direct too — only the
+    -- legacy-layout file feed is VaR Upload)
     SELECT s.PT AS PROCESS_TYPE, c.ACCEPTED_NAME, c.STAGE_COLUMN, c.IS_REQUIRED
-    FROM (SELECT 'Stress' PT UNION ALL SELECT 'Sensitivity'
+    FROM (SELECT 'VaR' PT UNION ALL SELECT 'Stress' UNION ALL SELECT 'Sensitivity'
           UNION ALL SELECT 'FRTB' UNION ALL SELECT 'FRTBDRC'
           UNION ALL SELECT 'FRTBRRAO') s
     CROSS JOIN (

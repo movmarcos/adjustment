@@ -712,7 +712,7 @@ CATEGORY_BTN_ICONS = {
 # while reusing CATEGORY_CONFIG's for the other two.
 CATEGORY_UI_DESCS = {
     "Scaling Adjustment": CATEGORY_CONFIG["Scaling Adjustment"]["desc"],
-    "Direct Adjustment":   "Paste/upload a CSV of exact values for Stress/Sensitivity/FRTB — one adjustment per row",
+    "Direct Adjustment":   "Paste/upload a CSV of exact values — one adjustment per row (all scopes)",
     "VaR Upload":          "Upload one file of exact VaR adjustment values (CSV, whole file = one adjustment)",
     "Entity Roll":         CATEGORY_CONFIG["Entity Roll"]["desc"],
 }
@@ -1401,7 +1401,7 @@ def _render_schedule_fields() -> None:
                                                         wiz.get("recurring_end_cobid"))
 
 
-DIRECT_SCOPES = ["Stress", "Sensitivity", "FRTB", "FRTBDRC", "FRTBRRAO"]
+DIRECT_SCOPES = ["VaR", "Stress", "Sensitivity", "FRTB", "FRTBDRC", "FRTBRRAO"]
 DIRECT_SCOPE_ICONS = {
     "Stress":      SCOPE_BTN_ICONS["Stress"],
     "Sensitivity": SCOPE_BTN_ICONS["Sensitivity"],
@@ -2464,9 +2464,11 @@ left, right = st.columns([1.85, 1], gap="large")
 with left:
     with _card():
         _sec(1, "Category", "Select the adjustment category.")
+        # Descriptions are NOT shown per-button (four captions crowd the row
+        # for users who already know the categories) — only the selected
+        # category's one-liner renders below the buttons.
         cat = _pill_row(list(CATEGORY_UI_DESCS.keys()), wiz.get("category"),
-                        "cat", icons=CATEGORY_BTN_ICONS,
-                        descs=CATEGORY_UI_DESCS)
+                        "cat", icons=CATEGORY_BTN_ICONS)
         if cat and cat != wiz.get("category"):
             if wiz.get("direct_batch_id"):  # leaving Direct Adjustment — drop its stage rows
                 try:
@@ -2479,6 +2481,8 @@ with left:
                         "direct_batch_id": None, "direct_ndf": None,
                         "direct_verdicts": None, "_direct_sig": None})
             safe_rerun()
+        if wiz.get("category"):
+            st.caption(CATEGORY_UI_DESCS.get(wiz["category"], ""))
 
     if not wiz.get("category"):
         st.info("Select an adjustment category to continue.")

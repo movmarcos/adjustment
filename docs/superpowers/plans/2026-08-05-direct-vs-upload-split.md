@@ -21,7 +21,7 @@
 - DDL uses `CREATE OR ALTER` for tables (user preference), `CREATE OR REPLACE` for views/procedures.
 - Key strings (exact): Direct flow = `ADJUSTMENT_TYPE='Direct'`, `ADJUSTMENT_ACTION='Direct'`; Upload flow = `ADJUSTMENT_TYPE='Upload'`, `ADJUSTMENT_ACTION='Upload'`; app categories = `"Direct Adjustment"`, `"VaR Upload"`.
 - Legacy value defaults in fact rows: `CURRENCY_CODE/TRADE_CURRENCY → 'N/A'`, `SOURCE_SYSTEM_CODE → 'QP'`, `IS_OFFICIAL_SOURCE → TRUE`, every unresolved `*_KEY`/`*_ID` → `-1`.
-- Direct is offered for Stress, Sensitivity, FRTB, FRTBDRC, FRTBRRAO. VaR is upload-only.
+- Direct is offered for ALL scopes including VaR (amended post-implementation); VaR Upload remains VaR-only.
 - Commit after every task; end commit messages with the Claude co-author trailer used in this repo.
 
 ---

@@ -31,9 +31,10 @@ conflated when the feature was first built.
    category label "VaR Upload". One file → one adjustment entry (many fact
    rows). Keys change to `ADJUSTMENT_TYPE='Upload'`,
    `ADJUSTMENT_ACTION='Upload'` (matches legacy naming).
-3. **Scopes:** Direct is offered for Stress, Sensitivity, FRTB, FRTBDRC,
-   FRTBRRAO. VaR is upload-only (as in legacy). VaR Direct can be added later
-   if ever needed — nothing in the design precludes it.
+3. **Scopes:** Direct is offered for ALL scopes including VaR (amended
+   2026-08-05 after implementation — user decision: what makes VaR special is
+   only its Upload feed, not an exclusion from Direct). VaR Upload remains
+   VaR-only.
 4. **Column order/case never matter** for either paste/upload: columns are
    matched by header *name* through a per-scope accepted-columns config.
 5. **Per-scope validation views** own row validation for Direct
