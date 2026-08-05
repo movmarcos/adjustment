@@ -810,6 +810,23 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                     session.sql("COMMIT").collect()
                 except Exception:
                     session.sql("ROLLBACK").collect()
+                    # In-transaction log rows rolled back with everything else —
+                    # record the failed rebuild (with its SQL) so the debug
+                    # trail survives. Best-effort.
+                    try:
+                        _sqlog["seq"] += 1
+                        session.sql(
+                            "INSERT INTO ADJUSTMENT_APP.EROL_PROCESS_LOG "
+                            "(RUN_LOG_ID, PROCESS_TYPE, COBID, STEP_SEQ, "
+                            "STEP_NAME, STATUS, STARTED_AT, ENDED_AT, SQL_TEXT) "
+                            f"SELECT {_erl_n(run_log_id)}, {_erl_s(process_type)}, "
+                            f"{_erl_n(cobid)}, {_sqlog['seq']}, "
+                            f"'summary_rebuild (rolled back)', 'FAILED', "
+                            f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), "
+                            f"{_erl_s(upload_summary_insert)}"
+                        ).collect()
+                    except Exception as _le:
+                        print(f"summary failure log write failed (non-fatal): {_le}")
                     raise
 
             # ── Common post-processing ───────────────────────────────────
@@ -916,7 +933,9 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                                             "WHERE UPPER(e.ENTITY_CODE) = UPPER(h.ENTITY_CODE)), -1)"),
                     'BOOK_KEY':            ("COALESCE((SELECT MAX(bk.BOOK_KEY) FROM DIMENSION.BOOK bk "
                                             "WHERE UPPER(bk.BOOK_CODE) = UPPER(h.BOOK_CODE) "
-                                            "AND bk.IS_CURRENT_ROW = TRUE), -1)"),
+                                            "AND bk.IS_CURRENT_ROW = TRUE "
+                                            "AND (h.ENTITY_CODE IS NULL OR UPPER(bk.ENTITY_CODE) = UPPER(h.ENTITY_CODE)) "
+                                            "AND (h.DEPARTMENT_CODE IS NULL OR UPPER(bk.DEPARTMENT_CODE) = UPPER(h.DEPARTMENT_CODE))), -1)"),
                     'TRADE_KEY':           ("COALESCE((SELECT MAX(td.TRADE_KEY) FROM DIMENSION.TRADE td "
                                             "WHERE UPPER(td.TRADE_CODE) = UPPER(h.TRADE_CODE) "
                                             "AND td.IS_CURRENT_ROW = TRUE), -1)"),
@@ -926,7 +945,8 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                                             "AND ci.IS_CURRENT_ROW = TRUE), -1)"),
                     'STRESS_SIMULATION_KEY': ("COALESCE((SELECT MAX(ss.STRESS_SIMULATION_KEY) "
                                             "FROM DIMENSION.STRESS_SIMULATION ss "
-                                            "WHERE UPPER(ss.STRESS_SIMULATION_NAME) = UPPER(h.SIMULATION_NAME)), -1)"),
+                                            "WHERE UPPER(ss.STRESS_SIMULATION_NAME) = UPPER(h.SIMULATION_NAME) "
+                                            "AND (h.SIMULATION_SOURCE IS NULL OR UPPER(ss.SIMULATION_SOURCE) = UPPER(h.SIMULATION_SOURCE))), -1)"),
                     'MEASURE_TYPE_KEY':    ("COALESCE((SELECT MAX(mt.MEASURE_TYPE_KEY) "
                                             "FROM DIMENSION.MEASURE_TYPE mt "
                                             "WHERE UPPER(mt.MEASURE_TYPE_CODE) = UPPER(h.MEASURE_TYPE_CODE)), -1)"),
@@ -938,11 +958,20 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                     'IS_OFFICIAL_SOURCE':  "TRUE",
                     'RUN_LOG_ID':          str(run_log_id),
                     'LOAD_TIMESTAMP':      "CURRENT_TIMESTAMP()",
+                    'DEPARTMENT_CODE':     "h.DEPARTMENT_CODE",
+                    'BOOK_CODE':           "h.BOOK_CODE",
+                    'TRADE_CODE':          "h.TRADE_CODE",
+                    'TRADE_TYPOLOGY':      "h.TRADE_TYPOLOGY",
+                    'STRATEGY':            "h.STRATEGY",
+                    'SIMULATION_NAME':     "h.SIMULATION_NAME",
+                    'SIMULATION_SOURCE':   "h.SIMULATION_SOURCE",
                 }
                 if c in fixed:
                     return fixed[c]
                 if c in (metric_name, metric_usd_name):
                     return "h.ADJUSTMENT_VALUE_IN_USD"
+                if key_name != pk_expr and c == key_name:
+                    return None          # scope surrogate key: never stored by legacy uploads
                 if c.split('_')[-1].upper() in ('KEY', 'ID'):
                     return "-1"          # legacy default for unmapped keys
                 return None              # column left out → its own default/NULL
@@ -1027,6 +1056,23 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                     session.sql("COMMIT").collect()
                 except Exception:
                     session.sql("ROLLBACK").collect()
+                    # In-transaction log rows rolled back with everything else —
+                    # record the failed rebuild (with its SQL) so the debug
+                    # trail survives. Best-effort.
+                    try:
+                        _sqlog["seq"] += 1
+                        session.sql(
+                            "INSERT INTO ADJUSTMENT_APP.EROL_PROCESS_LOG "
+                            "(RUN_LOG_ID, PROCESS_TYPE, COBID, STEP_SEQ, "
+                            "STEP_NAME, STATUS, STARTED_AT, ENDED_AT, SQL_TEXT) "
+                            f"SELECT {_erl_n(run_log_id)}, {_erl_s(process_type)}, "
+                            f"{_erl_n(cobid)}, {_sqlog['seq']}, "
+                            f"'summary_rebuild (rolled back)', 'FAILED', "
+                            f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), "
+                            f"{_erl_s(upload_summary_insert)}"
+                        ).collect()
+                    except Exception as _le:
+                        print(f"summary failure log write failed (non-fatal): {_le}")
                     raise
 
             # Zero-match warning: a Direct header whose row was not written
