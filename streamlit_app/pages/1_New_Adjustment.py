@@ -1059,6 +1059,22 @@ _DIRECT_STAGE_COLS = [
 _DIRECT_STAGE_CHUNK = 500  # rows per INSERT — keeps the generated SQL bounded
 
 
+def _st_version():
+    try:
+        return tuple(int(p) for p in st.__version__.split(".")[:2])
+    except Exception:
+        return (0, 0)
+
+
+# SiS's 1.26 front-end crashes the data_editor component (minified React
+# errors, e.g. #186) when column_config is applied to an empty/dynamic
+# editor — the rich configs are only safe on ≥ 1.29. Below that the grid
+# renders plain (no in-cell dropdowns; the validation views still own
+# correctness). The grid mode itself needs st.data_editor to exist at all.
+_GRID_FULL_CONFIG = _st_version() >= (1, 29)
+_GRID_AVAILABLE = hasattr(st, "data_editor")
+
+
 def _direct_cell_blank(v) -> bool:
     """True when a staged/normalized Direct cell carries no real value —
     None, float NaN (pandas' empty-cell marker), or whitespace-only text.
@@ -1716,6 +1732,9 @@ def render_direct_form() -> None:
                 wiz["direct_verdicts"] = None
                 wiz["_direct_sig"]     = None
 
+        elif not _GRID_AVAILABLE:  # Enter in grid, but no data_editor in runtime
+            st.info("Grid entry needs a newer Streamlit runtime — use "
+                    "Paste CSV or Upload file (a template is available there).")
         else:  # Enter in grid
             ordered = _accepted_columns(scope)[2]     # [(stage_col, ord), ...]
             grid_cols = [c for c, _ in ordered]
@@ -1743,16 +1762,25 @@ def render_direct_form() -> None:
                     col_cfg[c] = st.column_config.TextColumn("REASON", help="Blank = use the batch reason below")
                 else:
                     col_cfg[c] = st.column_config.TextColumn(c)
-            # Explicit dtypes (not an all-object empty frame): VALUE_USD as
-            # float64 so NumberColumn renders/edits it as numeric from the
-            # first empty row, independent of SiS's exact 1.26 build behavior
-            # for an all-object empty DataFrame under a NumberColumn.
-            _empty_grid = pd.DataFrame({
-                c: pd.Series(dtype="float64" if c == "VALUE_USD" else "object")
-                for c in grid_cols})
+            # Seed ONE blank row rather than a zero-row frame: the empty
+            # dynamic editor is the combination most often behind SiS 1.26's
+            # front-end (React) crashes, and a visible starter row is also
+            # friendlier. Dtypes stay explicit: VALUE_USD float64 (NaN seed),
+            # the rest object (None seed). The all-blank seed row is dropped
+            # by the dropna(how="all") in the validate step.
+            _seed_grid = pd.DataFrame(
+                [{c: (float("nan") if c == "VALUE_USD" else None)
+                  for c in grid_cols}])
+            if not _GRID_FULL_CONFIG:
+                # Rich column_config crashes the 1.26 front-end — render a
+                # plain editor there; codes are still checked on Validate.
+                col_cfg = None
+                st.caption("This runtime shows plain cells (no in-cell "
+                           "dropdowns) — values are checked when you "
+                           "validate the rows.")
             gdf = st.data_editor(
                 wiz.get("direct_grid_df") if wiz.get("direct_grid_df") is not None
-                else _empty_grid,
+                else _seed_grid,
                 num_rows="dynamic", column_config=col_cfg,
                 use_container_width=True,
                 key=_k(f"direct_grid_{scope}_{wiz.get('direct_grid_ver', 0)}"))
