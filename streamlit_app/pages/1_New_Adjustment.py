@@ -199,10 +199,15 @@ def _direct_row_payload(row: dict) -> dict:
             ("TRADE_CODE", "trade_code"), ("TRADE_TYPOLOGY", "trade_typology"),
             ("STRATEGY", "strategy"), ("INSTRUMENT_CODE", "instrument_code"),
             ("SIMULATION_NAME", "simulation_name"), ("SIMULATION_SOURCE", "simulation_source"),
-            ("MEASURE_TYPE_CODE", "measure_type_code"), ("CURRENCY_CODE", "currency_code")]:
+            ("MEASURE_TYPE_CODE", "measure_type_code"), ("CURRENCY_CODE", "currency_code"),
+            ("TENOR_CODE", "tenor_code"), ("CURVE_CODE", "curve_code"),
+            ("PRODUCT_CATEGORY_ATTRIBUTES", "product_category_attributes")]:
         v = row.get(stage_col)
         if not _direct_cell_blank(v):
             p[payload_key] = str(v).strip()
+    row_reason = row.get("REASON")
+    if not _direct_cell_blank(row_reason):
+        p["reason"] = str(row_reason).strip()
     return p
 
 
@@ -1043,6 +1048,7 @@ _DIRECT_STAGE_COLS = [
     "TRADE_CODE", "TRADE_TYPOLOGY", "STRATEGY", "INSTRUMENT_CODE",
     "SIMULATION_NAME", "SIMULATION_SOURCE", "MEASURE_TYPE_CODE",
     "CURRENCY_CODE", "VALUE_USD",
+    "TENOR_CODE", "CURVE_CODE", "PRODUCT_CATEGORY_ATTRIBUTES", "REASON",
 ]
 
 _DIRECT_STAGE_CHUNK = 500  # rows per INSERT — keeps the generated SQL bounded
@@ -1066,21 +1072,26 @@ def _sql_str_literal(v) -> str:
 
 
 def _accepted_columns(scope: str):
-    """{ACCEPTED_NAME (upper): STAGE_COLUMN} + set of required stage columns."""
+    """{ACCEPTED_NAME (upper): STAGE_COLUMN} + set of required stage columns
+    + ordered canonical [(stage_col, display_order), ...] (DISPLAY_ORDER not
+    NULL, ascending) — the grid/template column order."""
     rows = _ref_rows(
-        f"SELECT ACCEPTED_NAME, STAGE_COLUMN, IS_REQUIRED "
+        f"SELECT ACCEPTED_NAME, STAGE_COLUMN, IS_REQUIRED, DISPLAY_ORDER "
         f"FROM ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS "
         f"WHERE UPPER(PROCESS_TYPE) = UPPER('{scope}') AND IS_ACTIVE = TRUE",
         f"_ref_direct_cols_{scope}")
     alias_map = {str(r[0]).strip().upper(): str(r[1]).strip().upper() for r in rows}
     required  = {str(r[1]).strip().upper() for r in rows if r[2]}
-    return alias_map, required
+    ordered_cols = sorted(
+        ((str(r[1]).strip().upper(), r[3]) for r in rows if r[3] is not None),
+        key=lambda t: t[1])
+    return alias_map, required, ordered_cols
 
 
 def _parse_direct_df(df, scope: str):
     """Map pasted columns to stage columns by header name (order/case-free).
     Returns (normalized_df, unknown_cols, missing_required)."""
-    alias_map, required = _accepted_columns(scope)
+    alias_map, required, _ = _accepted_columns(scope)
     out, seen, first_col_used = {}, set(), {}
     unknown = []
     for c in df.columns:
@@ -1459,7 +1470,7 @@ def render_direct_form() -> None:
         return
 
     scope = wiz["process_type"]
-    accepted_map, required = _accepted_columns(scope)
+    accepted_map, required, _ = _accepted_columns(scope)
     accepted_names = sorted(set(accepted_map.keys()))
 
     with _card():
