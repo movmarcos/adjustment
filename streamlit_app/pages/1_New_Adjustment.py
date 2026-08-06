@@ -1079,7 +1079,7 @@ def _accepted_columns(scope: str):
         f"SELECT ACCEPTED_NAME, STAGE_COLUMN, IS_REQUIRED, DISPLAY_ORDER "
         f"FROM ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS "
         f"WHERE UPPER(PROCESS_TYPE) = UPPER('{scope}') AND IS_ACTIVE = TRUE",
-        f"_ref_direct_cols_{scope}")
+        f"_ref_direct_cols_v2_{scope}")
     alias_map = {str(r[0]).strip().upper(): str(r[1]).strip().upper() for r in rows}
     required  = {str(r[1]).strip().upper() for r in rows if r[2]}
     ordered_cols = sorted(
