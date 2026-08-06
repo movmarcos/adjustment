@@ -250,14 +250,17 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS (
 )
 COMMENT = 'Accepted CSV header names (incl. aliases) per scope for Direct Adjustment; drives order-free parsing and required-field validation.';
 
--- Seeds — canonical name + aliases per scope, one block per scope (FRTB/
--- FRTBDRC/FRTBRRAO share an identical column set, so those three are a
--- single CROSS JOIN block). DISPLAY_ORDER drives the grid/template column
--- order; NULL = CSV-only (accepted on paste/upload but not shown as a grid
--- column). MERGE keeps re-runs idempotent. Every (PROCESS_TYPE,
--- ACCEPTED_NAME) pair below is written exactly once per scope block, and
--- the six PROCESS_TYPE values never overlap across blocks, so there is no
--- risk of a duplicate source row at MERGE time.
+-- Seeds — canonical name + aliases per scope, one explicit SELECT...UNION ALL
+-- block per PROCESS_TYPE (six blocks total, joined by UNION ALL). FRTB /
+-- FRTBDRC / FRTBRRAO share an identical column set, but each still gets its
+-- own fully-spelled-out block rather than a CROSS JOIN against a shared
+-- column list — one greppable line per seeded row, easy to diff/scan per
+-- scope. DISPLAY_ORDER drives the grid/template column order; NULL =
+-- CSV-only (accepted on paste/upload but not shown as a grid column). MERGE
+-- keeps re-runs idempotent. Every (PROCESS_TYPE, ACCEPTED_NAME) pair below is
+-- written exactly once per scope block, and the six PROCESS_TYPE values
+-- never overlap across blocks, so there is no risk of a duplicate source row
+-- at MERGE time.
 MERGE INTO ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS t
 USING (
     -- VaR (Direct does VaR too — only the legacy-layout file feed is VaR Upload)

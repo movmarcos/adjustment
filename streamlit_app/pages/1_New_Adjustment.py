@@ -1137,8 +1137,19 @@ def _stage_direct_batch(batch_id: str, ndf) -> int:
                 # CSV path, which reads everything with dtype=str) — str() on
                 # extreme magnitudes yields exponent notation ('1e+16',
                 # '1e-05') that Snowflake's TRY_TO_NUMBER rejects, so format
-                # as a fixed-point decimal instead.
-                cells.append(_sql_str_literal(f"{float(v):.6f}"))
+                # as a fixed-point decimal instead. Two branches: normal
+                # magnitudes (and exact zero) round to 6dp as usual; a
+                # sub-cent-of-a-cent value (0 < |v| < 1e-6) would otherwise
+                # silently become "0.000000" at 6dp, so it's staged at 15dp
+                # instead — still no exponent, and TRY_TO_NUMBER(38,6)
+                # downstream will round it to 0, which the validation view's
+                # non-zero rule then correctly flags rather than the app
+                # silently pretending it staged a real value.
+                _fv = float(v)
+                if 0 < abs(_fv) < 1e-6:
+                    cells.append(_sql_str_literal(f"{_fv:.15f}"))
+                else:
+                    cells.append(_sql_str_literal(f"{_fv:.6f}"))
             else:
                 cells.append(_sql_str_literal(str(v).strip()))
         values.append(f"({batch_lit}, {i}, {', '.join(cells)}, {user})")
@@ -1542,8 +1553,17 @@ def render_direct_form() -> None:
     accepted_names = sorted(set(accepted_map.keys()))
 
     with _card():
-        _sec(3, f"CSV Data — {scope}",
-             "Paste or upload rows — one row = one adjustment. Column order and case don't matter.")
+        # Read the radio's widget state (if any) before instantiating it so the
+        # heading/caption below can be mode-aware on the very same render —
+        # defaults to the CSV wording until the widget has a value.
+        _dadj_mode_key = _k("dadj_mode")
+        _cur_in_mode = st.session_state.get(_dadj_mode_key, "Paste content")
+        if _cur_in_mode == "Enter in grid":
+            _sec(3, f"Grid Entry — {scope}",
+                 "Add rows below — each valid row becomes its own adjustment.")
+        else:
+            _sec(3, f"CSV Data — {scope}",
+                 "Paste or upload rows — one row = one adjustment. Column order and case don't matter.")
         if accepted_names:
             _info_banner('Provide a CSV of exact adjustment values, one row per '
                          'adjustment — paste the content or upload the file. '
@@ -1557,7 +1577,7 @@ def render_direct_form() -> None:
         _in_mode = st.radio(
             "How do you want to provide the data?",
             ["Paste content", "Upload file", "Enter in grid"],
-            horizontal=True, key=_k("dadj_mode"),
+            horizontal=True, key=_dadj_mode_key,
             label_visibility="collapsed")
 
         # Switching input mode must not leave a validated batch from the
@@ -1635,6 +1655,19 @@ def render_direct_form() -> None:
                         _parse_err = exc
 
             if _parse_err is not None:
+                # A parse failure must not leave a previously validated batch
+                # submittable behind the error message (same pattern as the
+                # grid's sig-mismatch branch — see "edited since last
+                # validation" below).
+                if wiz.get("direct_batch_id"):
+                    try:
+                        _delete_direct_batch(wiz["direct_batch_id"])
+                    except Exception:
+                        pass
+                wiz["direct_batch_id"] = None
+                wiz["direct_ndf"]      = None
+                wiz["direct_verdicts"] = None
+                wiz["_direct_sig"]     = None
                 st.error(f"Failed to read the CSV: {_parse_err}. If the columns look "
                          f"wrong, try selecting the delimiter explicitly above.")
             elif df is not None:
@@ -1669,6 +1702,19 @@ def render_direct_form() -> None:
                         wiz["_direct_sig"]     = _sig
 
                 _render_direct_verdict_preview()
+            elif wiz.get("direct_batch_id"):
+                # No content currently shown (cleared paste box / removed
+                # uploaded file) but a batch from a previous validation is
+                # still on record — same invalidation as the parse-error and
+                # missing-required-columns cases above.
+                try:
+                    _delete_direct_batch(wiz["direct_batch_id"])
+                except Exception:
+                    pass
+                wiz["direct_batch_id"] = None
+                wiz["direct_ndf"]      = None
+                wiz["direct_verdicts"] = None
+                wiz["_direct_sig"]     = None
 
         else:  # Enter in grid
             ordered = _accepted_columns(scope)[2]     # [(stage_col, ord), ...]
