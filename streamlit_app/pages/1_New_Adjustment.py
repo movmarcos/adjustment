@@ -84,8 +84,7 @@ _WIZ_DEFAULTS: dict = {
     "direct_batch_id":        None,
     "direct_ndf":             None,
     "direct_verdicts":        None,
-    "direct_grid_df":         None,
-    "direct_grid_ver":        0,
+    "direct_rows":            None,
     "_direct_in_mode":        None,
     # Internal
     "result":                 None,
@@ -518,8 +517,7 @@ def _do_submit() -> dict:
             wiz["direct_ndf"]      = None
             wiz["direct_verdicts"] = None
             wiz["_direct_sig"]     = None
-            wiz["direct_grid_df"]  = None
-            wiz["direct_grid_ver"] = wiz.get("direct_grid_ver", 0) + 1
+            wiz["direct_rows"]     = None
             # Partial failure must never read as success: any failed row makes
             # the overall result an Error, even though the successful rows'
             # headers already exist (mirrors the FRTBALL fan-out's semantics).
@@ -1059,22 +1057,6 @@ _DIRECT_STAGE_COLS = [
 _DIRECT_STAGE_CHUNK = 500  # rows per INSERT — keeps the generated SQL bounded
 
 
-def _st_version():
-    try:
-        return tuple(int(p) for p in st.__version__.split(".")[:2])
-    except Exception:
-        return (0, 0)
-
-
-# SiS's 1.26 front-end crashes the data_editor component (minified React
-# errors, e.g. #186) when column_config is applied to an empty/dynamic
-# editor — the rich configs are only safe on ≥ 1.29. Below that the grid
-# renders plain (no in-cell dropdowns; the validation views still own
-# correctness). The grid mode itself needs st.data_editor to exist at all.
-_GRID_FULL_CONFIG = _st_version() >= (1, 29)
-_GRID_AVAILABLE = hasattr(st, "data_editor")
-
-
 def _direct_cell_blank(v) -> bool:
     """True when a staged/normalized Direct cell carries no real value —
     None, float NaN (pandas' empty-cell marker), or whitespace-only text.
@@ -1107,6 +1089,26 @@ def _accepted_columns(scope: str):
         ((str(r[1]).strip().upper(), r[3]) for r in rows if r[3] is not None),
         key=lambda t: t[1])
     return alias_map, required, ordered_cols
+
+
+def _render_field_chips(cols, required=None, note="* required · column order and case don't matter · common aliases accepted"):
+    """Compact chip row for a scope's reportable fields — required ones
+    filled, optional ones outlined. Replaces the old comma-soup banner."""
+    required = required or set()
+    chips = []
+    for c in cols:
+        req = c in required
+        style = (f'background:{P["primary"]};color:#fff;' if req else
+                 f'background:{P["grey_100"]};color:{P["grey_700"]};'
+                 f'border:1px solid {P["border"]};')
+        chips.append(f'<span style="display:inline-block;margin:2px 6px 2px 0;'
+                     f'padding:2px 10px;border-radius:999px;font-size:0.72rem;'
+                     f'font-weight:600;{style}">{c}{" *" if req else ""}</span>')
+    note_html = (f'<div style="font-size:0.7rem;color:{P["grey_700"]};'
+                 f'margin-top:2px">{note}</div>' if note else '')
+    st.markdown('<div style="margin:0.1rem 0 0.45rem;line-height:1.9">'
+                + ''.join(chips) + note_html + '</div>',
+                unsafe_allow_html=True)
 
 
 def _parse_direct_df(df, scope: str):
@@ -1557,8 +1559,7 @@ def render_direct_form() -> None:
             wiz["direct_ndf"]      = None
             wiz["direct_verdicts"] = None
             wiz["_direct_sig"]     = None
-            wiz["direct_grid_df"]  = None
-            wiz["direct_grid_ver"] = wiz.get("direct_grid_ver", 0) + 1
+            wiz["direct_rows"]     = None
             safe_rerun()
     if not wiz.get("process_type"):
         st.info("Select a data scope to continue.")
@@ -1566,7 +1567,6 @@ def render_direct_form() -> None:
 
     scope = wiz["process_type"]
     accepted_map, required, _ = _accepted_columns(scope)
-    accepted_names = sorted(set(accepted_map.keys()))
 
     with _card():
         # Read the radio's widget state (if any) before instantiating it so the
@@ -1574,25 +1574,23 @@ def render_direct_form() -> None:
         # defaults to the CSV wording until the widget has a value.
         _dadj_mode_key = _k("dadj_mode")
         _cur_in_mode = st.session_state.get(_dadj_mode_key, "Paste content")
-        if _cur_in_mode == "Enter in grid":
-            _sec(3, f"Grid Entry — {scope}",
-                 "Add rows below — each valid row becomes its own adjustment.")
+        if _cur_in_mode == "Enter rows":
+            _sec(3, f"Row Entry — {scope}",
+                 "Fill the fields and add each row to the batch — every valid "
+                 "row becomes its own adjustment.")
         else:
             _sec(3, f"CSV Data — {scope}",
                  "Paste or upload rows — one row = one adjustment. Column order and case don't matter.")
-        if accepted_names:
-            _info_banner('Provide a CSV of exact adjustment values, one row per '
-                         'adjustment — paste the content or upload the file. '
-                         'REQUIRED columns: <code>' + ', '.join(sorted(required)) +
-                         '</code>. All accepted headers (any order, any case): '
-                         '<code>' + ', '.join(accepted_names) + '</code>.')
+        _ordered_chip_cols = [c for c, _ in _accepted_columns(scope)[2]]
+        if _ordered_chip_cols:
+            _render_field_chips(_ordered_chip_cols, required)
         else:
             _info_banner(f'No accepted-columns configuration found for the '
                          f'<b>{scope}</b> scope yet — contact an administrator.')
 
         _in_mode = st.radio(
             "How do you want to provide the data?",
-            ["Paste content", "Upload file", "Enter in grid"],
+            ["Paste content", "Upload file", "Enter rows"],
             horizontal=True, key=_dadj_mode_key,
             label_visibility="collapsed")
 
@@ -1600,7 +1598,7 @@ def render_direct_form() -> None:
         # PREVIOUS mode submittable behind the newly-shown (unvalidated) UI —
         # e.g. a validated CSV batch must not still submit while the grid,
         # now empty, is on screen. Clear the staged batch + verdicts and
-        # force a fresh grid widget (bump direct_grid_ver) whenever the mode
+        # and drop any half-built row batch whenever the mode
         # actually changes.
         if wiz.get("_direct_in_mode") is not None and wiz["_direct_in_mode"] != _in_mode:
             old_batch = wiz.get("direct_batch_id")
@@ -1613,8 +1611,7 @@ def render_direct_form() -> None:
             wiz["direct_ndf"]      = None
             wiz["direct_verdicts"] = None
             wiz["_direct_sig"]     = None
-            wiz["direct_grid_df"]  = None
-            wiz["direct_grid_ver"] = wiz.get("direct_grid_ver", 0) + 1
+            wiz["direct_rows"]     = None
         wiz["_direct_in_mode"] = _in_mode
 
         if _in_mode in ("Paste content", "Upload file"):
@@ -1732,104 +1729,128 @@ def render_direct_form() -> None:
                 wiz["direct_verdicts"] = None
                 wiz["_direct_sig"]     = None
 
-        elif not _GRID_AVAILABLE:  # Enter in grid, but no data_editor in runtime
-            st.info("Grid entry needs a newer Streamlit runtime — use "
-                    "Paste CSV or Upload file (a template is available there).")
-        else:  # Enter in grid
+        else:  # Enter rows — builder form (no st.data_editor: the 1.26 SiS
+               # front-end crashes on it and the app's width-clamp CSS
+               # squeezes its canvas; plain widgets are the proven path).
             ordered = _accepted_columns(scope)[2]     # [(stage_col, ord), ...]
-            grid_cols = [c for c, _ in ordered]
-            col_cfg = {}
-            for c in grid_cols:
-                if c == "VALUE_USD":
-                    col_cfg[c] = st.column_config.NumberColumn("VALUE_USD (required)", format="%.6f")
-                elif c == "ENTITY_CODE":
-                    col_cfg[c] = st.column_config.SelectboxColumn("ENTITY_CODE (required)", options=_entity_options())
-                elif c == "BOOK_CODE":
-                    # Not a SelectboxColumn: the unscoped (no entity/dept
-                    # filter) options list can be huge and would happily
-                    # offer books that fail entity/department validation
-                    # anyway — the validation view is the source of truth
-                    # for correctness, this is just free text.
-                    col_cfg[c] = st.column_config.TextColumn(
-                        "BOOK_CODE", help="Validated against the entity's books")
-                elif c == "MEASURE_TYPE_CODE":
-                    col_cfg[c] = st.column_config.SelectboxColumn("MEASURE_TYPE_CODE", options=_measure_type_options(scope))
-                elif c == "SIMULATION_NAME":
-                    col_cfg[c] = st.column_config.SelectboxColumn("SIMULATION_NAME", options=_sim_name_options(None))
-                elif c == "SIMULATION_SOURCE":
-                    col_cfg[c] = st.column_config.SelectboxColumn("SIMULATION_SOURCE", options=_sim_source_options())
-                elif c == "REASON":
-                    col_cfg[c] = st.column_config.TextColumn("REASON", help="Blank = use the batch reason below")
-                else:
-                    col_cfg[c] = st.column_config.TextColumn(c)
-            # Seed ONE blank row rather than a zero-row frame: the empty
-            # dynamic editor is the combination most often behind SiS 1.26's
-            # front-end (React) crashes, and a visible starter row is also
-            # friendlier. Dtypes stay explicit: VALUE_USD float64 (NaN seed),
-            # the rest object (None seed). The all-blank seed row is dropped
-            # by the dropna(how="all") in the validate step.
-            _seed_grid = pd.DataFrame(
-                [{c: (float("nan") if c == "VALUE_USD" else None)
-                  for c in grid_cols}])
-            if not _GRID_FULL_CONFIG:
-                # Rich column_config crashes the 1.26 front-end — render a
-                # plain editor there; codes are still checked on Validate.
-                col_cfg = None
-                st.caption("This runtime shows plain cells (no in-cell "
-                           "dropdowns) — values are checked when you "
-                           "validate the rows.")
-            gdf = st.data_editor(
-                wiz.get("direct_grid_df") if wiz.get("direct_grid_df") is not None
-                else _seed_grid,
-                num_rows="dynamic", column_config=col_cfg,
-                use_container_width=True,
-                key=_k(f"direct_grid_{scope}_{wiz.get('direct_grid_ver', 0)}"))
-            wiz["direct_grid_df"] = gdf
+            row_cols = [c for c, _ in ordered]
+            if not row_cols:
+                st.info("No entry fields configured for this scope yet — "
+                        "use Paste content or Upload file.")
+            else:
+                rows = wiz.get("direct_rows") or []
 
-            _grid_sig = (f'grid|{scope}|{len(gdf)}|'
-                         f'{pd.util.hash_pandas_object(gdf).sum() if len(gdf) else 0}')
+                _LBL = {
+                    "ENTITY_CODE": "Entity Code *", "SOURCE_SYSTEM_CODE": "Source System",
+                    "DEPARTMENT_CODE": "Department Code", "BOOK_CODE": "Book Code",
+                    "TRADE_CODE": "Trade Code", "TRADE_TYPOLOGY": "Trade Typology",
+                    "STRATEGY": "Strategy", "INSTRUMENT_CODE": "Instrument Code",
+                    "TENOR_CODE": "Tenor Code", "CURRENCY_CODE": "Currency Code",
+                    "CURVE_CODE": "Curve Code", "MEASURE_TYPE_CODE": "Measure Type",
+                    "SIMULATION_NAME": "Simulation Name", "SIMULATION_SOURCE": "Simulation Source",
+                    "PRODUCT_CATEGORY_ATTRIBUTES": "Product Category Attributes",
+                    "VALUE_USD": "Value (USD) *", "REASON": "Reason (this row)",
+                }
 
-            if st.button("Validate rows", key=_k("direct_grid_validate")):
-                gndf = gdf.dropna(how="all").reset_index(drop=True)
-                if not len(gndf):
-                    if wiz.get("direct_batch_id"):
-                        try:
-                            _delete_direct_batch(wiz["direct_batch_id"])
-                        except Exception:
-                            pass
-                    wiz["direct_batch_id"] = None
-                    wiz["direct_ndf"]      = None
-                    wiz["direct_verdicts"] = None
-                    wiz["_direct_sig"]     = None
-                    st.warning("Add at least one row to the grid before validating.")
-                else:
-                    batch_id, verdicts = _stage_and_validate(gndf, scope)
-                    wiz["direct_batch_id"] = batch_id
-                    wiz["direct_ndf"]      = gndf
-                    wiz["direct_verdicts"] = verdicts
-                    wiz["_direct_sig"]     = _grid_sig
+                vals = {}
+                fcols = st.columns(3)
+                for i, c in enumerate(row_cols):
+                    with fcols[i % 3]:
+                        lbl = _LBL.get(c, c)
+                        k = _k(f"dr_{scope}_{c}")
+                        if c == "ENTITY_CODE":
+                            vals[c] = _code_select(lbl, k, None, _entity_options(),
+                                                   placeholder="— select —")
+                        elif c == "BOOK_CODE":
+                            vals[c] = _code_select(
+                                lbl, k, None,
+                                _book_options(None, vals.get("ENTITY_CODE")),
+                                placeholder="— any —",
+                                help="Filtered by the selected Entity")
+                        elif c == "MEASURE_TYPE_CODE":
+                            vals[c] = _code_select(lbl, k, None,
+                                                   _measure_type_options(scope),
+                                                   placeholder="— any —")
+                        elif c == "SIMULATION_SOURCE":
+                            vals[c] = _code_select(lbl, k, None,
+                                                   _sim_source_options(),
+                                                   placeholder="— any —")
+                        elif c == "SIMULATION_NAME":
+                            vals[c] = _code_select(lbl, k, None,
+                                                   _sim_name_options(None),
+                                                   placeholder="— any —")
+                        elif c == "VALUE_USD":
+                            vals[c] = st.text_input(
+                                lbl, key=k, placeholder="e.g. 1250000.50").strip()
+                        elif c == "REASON":
+                            vals[c] = st.text_input(
+                                lbl, key=k, placeholder="blank = batch reason").strip()
+                        else:
+                            vals[c] = st.text_input(lbl, key=k).strip()
 
-            if wiz.get("direct_verdicts") is not None:
-                if wiz.get("_direct_sig") == _grid_sig:
-                    _render_direct_verdict_preview()
+                bc1, bc2, bc3, _sp = st.columns([1.2, 1, 1, 1.4])
+                with bc1:
+                    if _btn("Add row to batch", icon_name=":material/playlist_add:",
+                            key=_k("dr_add"), type="primary",
+                            use_container_width=True):
+                        if not (vals.get("ENTITY_CODE") or "").strip() \
+                                or not vals.get("VALUE_USD"):
+                            st.warning("Entity Code and Value (USD) are "
+                                       "required for every row.")
+                        else:
+                            wiz["direct_rows"] = rows + [
+                                {c: (vals.get(c) or None) for c in row_cols}]
+                            safe_rerun()
+                with bc2:
+                    if rows and _btn("Remove last", key=_k("dr_pop"),
+                                     use_container_width=True):
+                        wiz["direct_rows"] = rows[:-1]
+                        safe_rerun()
+                with bc3:
+                    if rows and _btn("Clear batch", key=_k("dr_clear"),
+                                     use_container_width=True):
+                        wiz["direct_rows"] = []
+                        safe_rerun()
+
+                _rows_sig = (f'rows|{scope}|{len(rows)}|'
+                             f'{hash(json.dumps(rows, sort_keys=True, default=str))}')
+
+                if rows:
+                    st.caption(f"{len(rows)} row(s) in this batch:")
+                    render_df_table(pd.DataFrame(rows, columns=row_cols),
+                                    max_rows=50, height=220)
+                    if st.button("Validate rows", key=_k("direct_rows_validate")):
+                        rndf = pd.DataFrame(rows, columns=row_cols)
+                        batch_id, verdicts = _stage_and_validate(rndf, scope)
+                        wiz["direct_batch_id"] = batch_id
+                        wiz["direct_ndf"]      = rndf
+                        wiz["direct_verdicts"] = verdicts
+                        wiz["_direct_sig"]     = _rows_sig
                 else:
-                    # Grid edited since the last validation — the staged
-                    # batch/verdicts are for the PRE-EDIT snapshot and must
-                    # not remain submittable (completion checks + _do_submit
-                    # both key off direct_batch_id/direct_ndf/direct_verdicts
-                    # alone, with no signature check of their own).
-                    old_batch = wiz.get("direct_batch_id")
-                    if old_batch:
-                        try:
-                            _delete_direct_batch(old_batch)
-                        except Exception:
-                            pass
-                    wiz["direct_batch_id"] = None
-                    wiz["direct_ndf"]      = None
-                    wiz["direct_verdicts"] = None
-                    wiz["_direct_sig"]     = None
-                    st.info("The grid has changed since the last validation — "
-                            "click **Validate rows** to refresh before submitting.")
+                    st.caption("No rows in the batch yet — fill the fields "
+                               "above and click Add row to batch.")
+
+                if wiz.get("direct_verdicts") is not None:
+                    if wiz.get("_direct_sig") == _rows_sig:
+                        _render_direct_verdict_preview()
+                    else:
+                        # Batch edited since the last validation — the staged
+                        # snapshot must not remain submittable (completion
+                        # checks + _do_submit key off direct_batch_id/ndf/
+                        # verdicts alone, with no signature check of their own).
+                        old_batch = wiz.get("direct_batch_id")
+                        if old_batch:
+                            try:
+                                _delete_direct_batch(old_batch)
+                            except Exception:
+                                pass
+                        wiz["direct_batch_id"] = None
+                        wiz["direct_ndf"]      = None
+                        wiz["direct_verdicts"] = None
+                        wiz["_direct_sig"]     = None
+                        st.info("The batch has changed since the last "
+                                "validation — click **Validate rows** to "
+                                "refresh before submitting.")
 
     with _card():
         _sec(4, "Batch Details", "COB applies to every row submitted from this CSV.")
@@ -1855,8 +1876,9 @@ def render_var_upload_form() -> None:
     _sec(2, f"CSV Upload — {wiz['process_type']}", "Paste exact adjustment values.")
     if expected_cols:
         _info_banner('Provide a CSV of exact adjustment values — paste the '
-                     'content or upload the file. Expected columns: '
-                     '<code>' + ', '.join(expected_cols) + '</code>.')
+                     'content or upload the file. Expected columns:')
+        _render_field_chips(expected_cols, None,
+                            note="fixed legacy VaR layout — headers as in the file feed")
     else:
         _info_banner(f'No upload schema is configured for the <b>{wiz["process_type"]}</b> '
                      'scope yet. Provide a CSV (paste or upload); columns will '
@@ -2712,8 +2734,7 @@ with left:
                         "_preview_sum": None, "_preview_err": None,
                         "direct_batch_id": None, "direct_ndf": None,
                         "direct_verdicts": None, "_direct_sig": None,
-                        "direct_grid_df": None,
-                        "direct_grid_ver": wiz.get("direct_grid_ver", 0) + 1})
+                        "direct_rows": None})
             safe_rerun()
         if wiz.get("category"):
             st.caption(CATEGORY_UI_DESCS.get(wiz["category"], ""))
