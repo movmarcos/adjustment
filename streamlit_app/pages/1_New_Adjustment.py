@@ -85,6 +85,8 @@ _WIZ_DEFAULTS: dict = {
     "direct_ndf":             None,
     "direct_verdicts":        None,
     "direct_grid_df":         None,
+    "direct_grid_ver":        0,
+    "_direct_in_mode":        None,
     # Internal
     "result":                 None,
 }
@@ -517,6 +519,7 @@ def _do_submit() -> dict:
             wiz["direct_verdicts"] = None
             wiz["_direct_sig"]     = None
             wiz["direct_grid_df"]  = None
+            wiz["direct_grid_ver"] = wiz.get("direct_grid_ver", 0) + 1
             # Partial failure must never read as success: any failed row makes
             # the overall result an Error, even though the successful rows'
             # headers already exist (mirrors the FRTBALL fan-out's semantics).
@@ -1129,6 +1132,13 @@ def _stage_direct_batch(batch_id: str, ndf) -> int:
             v = row.get(col_name)
             if _direct_cell_blank(v):
                 cells.append("NULL")
+            elif col_name == "VALUE_USD" and not isinstance(v, str):
+                # Grid cells arrive as numpy floats/ints, not str (unlike the
+                # CSV path, which reads everything with dtype=str) — str() on
+                # extreme magnitudes yields exponent notation ('1e+16',
+                # '1e-05') that Snowflake's TRY_TO_NUMBER rejects, so format
+                # as a fixed-point decimal instead.
+                cells.append(_sql_str_literal(f"{float(v):.6f}"))
             else:
                 cells.append(_sql_str_literal(str(v).strip()))
         values.append(f"({batch_lit}, {i}, {', '.join(cells)}, {user})")
@@ -1521,6 +1531,7 @@ def render_direct_form() -> None:
             wiz["direct_verdicts"] = None
             wiz["_direct_sig"]     = None
             wiz["direct_grid_df"]  = None
+            wiz["direct_grid_ver"] = wiz.get("direct_grid_ver", 0) + 1
             safe_rerun()
     if not wiz.get("process_type"):
         st.info("Select a data scope to continue.")
@@ -1548,6 +1559,27 @@ def render_direct_form() -> None:
             ["Paste content", "Upload file", "Enter in grid"],
             horizontal=True, key=_k("dadj_mode"),
             label_visibility="collapsed")
+
+        # Switching input mode must not leave a validated batch from the
+        # PREVIOUS mode submittable behind the newly-shown (unvalidated) UI —
+        # e.g. a validated CSV batch must not still submit while the grid,
+        # now empty, is on screen. Clear the staged batch + verdicts and
+        # force a fresh grid widget (bump direct_grid_ver) whenever the mode
+        # actually changes.
+        if wiz.get("_direct_in_mode") is not None and wiz["_direct_in_mode"] != _in_mode:
+            old_batch = wiz.get("direct_batch_id")
+            if old_batch:
+                try:
+                    _delete_direct_batch(old_batch)
+                except Exception:
+                    pass
+            wiz["direct_batch_id"] = None
+            wiz["direct_ndf"]      = None
+            wiz["direct_verdicts"] = None
+            wiz["_direct_sig"]     = None
+            wiz["direct_grid_df"]  = None
+            wiz["direct_grid_ver"] = wiz.get("direct_grid_ver", 0) + 1
+        wiz["_direct_in_mode"] = _in_mode
 
         if _in_mode in ("Paste content", "Upload file"):
             _tmpl_cols = [c for c, _ in _accepted_columns(scope)[2]]
@@ -1648,7 +1680,13 @@ def render_direct_form() -> None:
                 elif c == "ENTITY_CODE":
                     col_cfg[c] = st.column_config.SelectboxColumn("ENTITY_CODE (required)", options=_entity_options())
                 elif c == "BOOK_CODE":
-                    col_cfg[c] = st.column_config.SelectboxColumn("BOOK_CODE", options=_book_options(None, None))
+                    # Not a SelectboxColumn: the unscoped (no entity/dept
+                    # filter) options list can be huge and would happily
+                    # offer books that fail entity/department validation
+                    # anyway — the validation view is the source of truth
+                    # for correctness, this is just free text.
+                    col_cfg[c] = st.column_config.TextColumn(
+                        "BOOK_CODE", help="Validated against the entity's books")
                 elif c == "MEASURE_TYPE_CODE":
                     col_cfg[c] = st.column_config.SelectboxColumn("MEASURE_TYPE_CODE", options=_measure_type_options(scope))
                 elif c == "SIMULATION_NAME":
@@ -1659,11 +1697,19 @@ def render_direct_form() -> None:
                     col_cfg[c] = st.column_config.TextColumn("REASON", help="Blank = use the batch reason below")
                 else:
                     col_cfg[c] = st.column_config.TextColumn(c)
+            # Explicit dtypes (not an all-object empty frame): VALUE_USD as
+            # float64 so NumberColumn renders/edits it as numeric from the
+            # first empty row, independent of SiS's exact 1.26 build behavior
+            # for an all-object empty DataFrame under a NumberColumn.
+            _empty_grid = pd.DataFrame({
+                c: pd.Series(dtype="float64" if c == "VALUE_USD" else "object")
+                for c in grid_cols})
             gdf = st.data_editor(
                 wiz.get("direct_grid_df") if wiz.get("direct_grid_df") is not None
-                else pd.DataFrame(columns=grid_cols),
+                else _empty_grid,
                 num_rows="dynamic", column_config=col_cfg,
-                use_container_width=True, key=_k(f"direct_grid_{scope}"))
+                use_container_width=True,
+                key=_k(f"direct_grid_{scope}_{wiz.get('direct_grid_ver', 0)}"))
             wiz["direct_grid_df"] = gdf
 
             _grid_sig = (f'grid|{scope}|{len(gdf)}|'
@@ -1693,6 +1739,21 @@ def render_direct_form() -> None:
                 if wiz.get("_direct_sig") == _grid_sig:
                     _render_direct_verdict_preview()
                 else:
+                    # Grid edited since the last validation — the staged
+                    # batch/verdicts are for the PRE-EDIT snapshot and must
+                    # not remain submittable (completion checks + _do_submit
+                    # both key off direct_batch_id/direct_ndf/direct_verdicts
+                    # alone, with no signature check of their own).
+                    old_batch = wiz.get("direct_batch_id")
+                    if old_batch:
+                        try:
+                            _delete_direct_batch(old_batch)
+                        except Exception:
+                            pass
+                    wiz["direct_batch_id"] = None
+                    wiz["direct_ndf"]      = None
+                    wiz["direct_verdicts"] = None
+                    wiz["_direct_sig"]     = None
                     st.info("The grid has changed since the last validation — "
                             "click **Validate rows** to refresh before submitting.")
 
@@ -2577,7 +2638,8 @@ with left:
                         "_preview_sum": None, "_preview_err": None,
                         "direct_batch_id": None, "direct_ndf": None,
                         "direct_verdicts": None, "_direct_sig": None,
-                        "direct_grid_df": None})
+                        "direct_grid_df": None,
+                        "direct_grid_ver": wiz.get("direct_grid_ver", 0) + 1})
             safe_rerun()
         if wiz.get("category"):
             st.caption(CATEGORY_UI_DESCS.get(wiz["category"], ""))
