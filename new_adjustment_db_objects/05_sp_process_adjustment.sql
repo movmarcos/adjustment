@@ -950,6 +950,17 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                     'MEASURE_TYPE_KEY':    ("COALESCE((SELECT MAX(mt.MEASURE_TYPE_KEY) "
                                             "FROM DIMENSION.MEASURE_TYPE mt "
                                             "WHERE UPPER(mt.MEASURE_TYPE_CODE) = UPPER(h.MEASURE_TYPE_CODE)), -1)"),
+                    'TENOR_CURRENCY_KEY': ("COALESCE((SELECT MAX(tc.TENOR_CURRENCY_KEY) "
+                                            "FROM DIMENSION.TENOR_CURRENCY tc "
+                                            "WHERE UPPER(tc.TENOR_CURRENCY_CODE) = "
+                                            "UPPER(CONCAT(h.TENOR_CODE, '_', COALESCE(h.CURRENCY_CODE, 'USD')))), -1)"),
+                    'CURVE_CURRENCY_KEY': ("COALESCE((SELECT MAX(cc.CURVE_CURRENCY_KEY) "
+                                            "FROM DIMENSION.CURVE_CURRENCY cc "
+                                            "WHERE UPPER(cc.CURVE_CODE) = UPPER(h.CURVE_CODE)), -1)"),
+                    'PRODUCT_CATEGORY_ATTRIBUTES_KEY': ("COALESCE((SELECT MAX(pca.PRODUCT_CATEGORY_ATTRIBUTES_KEY) "
+                                            "FROM DIMENSION.PRODUCT_CATEGORY_ATTRIBUTES pca "
+                                            "WHERE UPPER(REPLACE(pca.PCA_CONCAT_KEY, ' ', '')) = "
+                                            "UPPER(REPLACE(h.PRODUCT_CATEGORY_ATTRIBUTES, ' ', ''))), -1)"),
                     'MEASURE_TYPE_CODE':   "h.MEASURE_TYPE_CODE",
                     'INSTRUMENT_CODE':     "h.INSTRUMENT_CODE",
                     'TRADE_CURRENCY':      "COALESCE(h.CURRENCY_CODE, 'N/A')",
