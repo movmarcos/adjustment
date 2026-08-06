@@ -84,6 +84,7 @@ _WIZ_DEFAULTS: dict = {
     "direct_batch_id":        None,
     "direct_ndf":             None,
     "direct_verdicts":        None,
+    "direct_grid_df":         None,
     # Internal
     "result":                 None,
 }
@@ -515,6 +516,7 @@ def _do_submit() -> dict:
             wiz["direct_ndf"]      = None
             wiz["direct_verdicts"] = None
             wiz["_direct_sig"]     = None
+            wiz["direct_grid_df"]  = None
             # Partial failure must never read as success: any failed row makes
             # the overall result an Error, even though the successful rows'
             # headers already exist (mirrors the FRTBALL fan-out's semantics).
@@ -1447,6 +1449,60 @@ def _purge_abandoned_direct_batches() -> None:
         pass
 
 
+def _render_direct_verdict_preview() -> None:
+    """✓/✗ + Errors preview table (+ reject download) for whatever batch is
+    currently staged in wiz['direct_ndf']/['direct_verdicts'] — identical
+    rendering regardless of which input mode staged it, so CSV and grid look
+    the same once rows are staged."""
+    verdicts = wiz.get("direct_verdicts")
+    ndf_staged = wiz.get("direct_ndf")
+    if verdicts is not None and ndf_staged is not None and len(ndf_staged):
+        # Row objects don't support .get() — normalize to plain dicts.
+        v_by_row = {v["ROW_NUM"]: v.asDict() for v in verdicts}
+        preview = ndf_staged.copy()
+        preview.insert(0, "✓/✗", [
+            "✓" if v_by_row.get(i + 1, {}).get("IS_VALID") else "✗"
+            for i in range(len(preview))])
+        preview["Errors"] = [
+            "; ".join(_fmt_direct_errors(v_by_row.get(i + 1, {}).get("VALIDATION_ERRORS")))
+            for i in range(len(preview))]
+        n_valid = sum(1 for v in verdicts if v["IS_VALID"])
+        n_bad   = len(verdicts) - n_valid
+        if n_bad:
+            st.warning(f"**{n_valid} valid row(s)**, **{n_bad} invalid row(s)** — "
+                       f"invalid rows are excluded from submission (see the "
+                       f"Errors column below).")
+            bad_rows = preview[preview["✓/✗"] == "✗"]
+            st.download_button(
+                f"⬇ Download {len(bad_rows)} invalid row(s) (CSV)",
+                bad_rows.to_csv(index=False).encode("utf-8-sig"),
+                file_name="direct_adjustment_rejects.csv", mime="text/csv",
+                key=_k("dadj_rejects_dl"))
+        else:
+            st.success(f"All {n_valid} row(s) validated — ready to submit.")
+        render_df_table(preview, max_rows=20, height=220)
+
+
+def _stage_and_validate(ndf, scope: str):
+    """Drop any previously staged batch, stage ndf fresh, validate it. Shared
+    by the CSV path and the grid path so both feed the exact same
+    stage → validate → verdict-preview → submit chain. Returns
+    (batch_id, verdicts)."""
+    old_batch = wiz.get("direct_batch_id")
+    if old_batch:
+        try:
+            _delete_direct_batch(old_batch)
+        except Exception:
+            pass
+    _purge_abandoned_direct_batches()
+    import uuid
+    batch_id = str(uuid.uuid4())
+    with st.spinner("Staging and validating rows…"):
+        _stage_direct_batch(batch_id, ndf)
+        verdicts = _direct_validation(batch_id, scope)
+    return batch_id, verdicts
+
+
 def render_direct_form() -> None:
     with _card():
         _sec(2, "Data Scope", "Select the data scope for this Direct Adjustment.")
@@ -1464,6 +1520,7 @@ def render_direct_form() -> None:
             wiz["direct_ndf"]      = None
             wiz["direct_verdicts"] = None
             wiz["_direct_sig"]     = None
+            wiz["direct_grid_df"]  = None
             safe_rerun()
     if not wiz.get("process_type"):
         st.info("Select a data scope to continue.")
@@ -1488,127 +1545,156 @@ def render_direct_form() -> None:
 
         _in_mode = st.radio(
             "How do you want to provide the data?",
-            ["Paste content", "Upload file"],
+            ["Paste content", "Upload file", "Enter in grid"],
             horizontal=True, key=_k("dadj_mode"),
             label_visibility="collapsed")
 
-        _DELIMS = {"Auto-detect": None, "Comma ( , )": ",", "Semicolon ( ; )": ";",
-                   "Tab": "\t", "Pipe ( | )": "|"}
-        delim_choice = st.selectbox(
-            "Delimiter", list(_DELIMS.keys()), index=0, key=_k("dadj_delim"),
-            help="Auto-detect works for most files; pick one explicitly if the "
-                 "columns come out wrong.")
+        if _in_mode in ("Paste content", "Upload file"):
+            _tmpl_cols = [c for c, _ in _accepted_columns(scope)[2]]
+            if _tmpl_cols:
+                st.download_button(
+                    "Download CSV template", data=",".join(_tmpl_cols) + "\n",
+                    file_name=f"direct_{scope.lower()}_template.csv",
+                    mime="text/csv", key=_k("direct_tmpl"))
 
-        def _read_csv(buf):
-            """Parse with the chosen delimiter (or sniff it) — dtype=str so
-            numeric-looking codes (e.g. trade/instrument codes) don't get
-            silently coerced to float ('12345' → '12345.0')."""
-            sep = _DELIMS[delim_choice]
-            if sep is None:
-                return pd.read_csv(buf, sep=None, engine="python", dtype=str)
-            return pd.read_csv(buf, sep=sep, dtype=str)
+            _DELIMS = {"Auto-detect": None, "Comma ( , )": ",", "Semicolon ( ; )": ";",
+                       "Tab": "\t", "Pipe ( | )": "|"}
+            delim_choice = st.selectbox(
+                "Delimiter", list(_DELIMS.keys()), index=0, key=_k("dadj_delim"),
+                help="Auto-detect works for most files; pick one explicitly if the "
+                     "columns come out wrong.")
 
-        df, _src_token, _parse_err = None, None, None
-        if _in_mode == "Upload file":
-            up_file = st.file_uploader(
-                "Upload CSV file", type=["csv", "txt"], key=_k("dadj_file"),
-                help="First row must be the header.")
-            if up_file is not None:
-                try:
-                    _raw = up_file.getvalue()
-                    from io import StringIO
+            def _read_csv(buf):
+                """Parse with the chosen delimiter (or sniff it) — dtype=str so
+                numeric-looking codes (e.g. trade/instrument codes) don't get
+                silently coerced to float ('12345' → '12345.0')."""
+                sep = _DELIMS[delim_choice]
+                if sep is None:
+                    return pd.read_csv(buf, sep=None, engine="python", dtype=str)
+                return pd.read_csv(buf, sep=sep, dtype=str)
+
+            df, _src_token, _parse_err = None, None, None
+            if _in_mode == "Upload file":
+                up_file = st.file_uploader(
+                    "Upload CSV file", type=["csv", "txt"], key=_k("dadj_file"),
+                    help="First row must be the header.")
+                if up_file is not None:
                     try:
-                        _text = _raw.decode("utf-8-sig")
-                    except UnicodeDecodeError:
-                        _text = _raw.decode("latin-1")
-                    df = _read_csv(StringIO(_text))
-                    _src_token = f"file:{up_file.name}:{len(_raw)}:{delim_choice}"
-                except Exception as exc:
-                    _parse_err = exc
-        else:
-            csv_text = st.text_area(
-                "Paste CSV Data Here", value="", height=160, key=_k("dadj_csv"),
-                help="Paste the full CSV content including the header row.")
-            if csv_text.strip():
-                try:
-                    from io import StringIO
-                    df = _read_csv(StringIO(csv_text.strip()))
-                    _src_token = f"paste:{hash(csv_text)}:{delim_choice}"
-                except Exception as exc:
-                    _parse_err = exc
-
-        if _parse_err is not None:
-            st.error(f"Failed to read the CSV: {_parse_err}. If the columns look "
-                     f"wrong, try selecting the delimiter explicitly above.")
-        elif df is not None:
-            ndf, unknown_cols, missing_required = _parse_direct_df(df, scope)
-
-            if unknown_cols:
-                st.warning("Column(s) not recognized for this scope (ignored): "
-                           + ", ".join(unknown_cols))
-            if missing_required:
-                st.error("Missing REQUIRED column(s): " + ", ".join(missing_required)
-                         + " — staging is blocked until the CSV includes them.")
-
-            if missing_required or not len(ndf):
-                # Can't stage this parse — drop any previously staged batch so a
-                # stale/valid batch is never left submittable behind a now-broken CSV.
-                if wiz.get("direct_batch_id"):
-                    try:
-                        _delete_direct_batch(wiz["direct_batch_id"])
-                    except Exception:
-                        pass
-                wiz["direct_batch_id"] = None
-                wiz["direct_ndf"]      = None
-                wiz["direct_verdicts"] = None
-                wiz["_direct_sig"]     = None
-            else:
-                _sig = f'{scope}|{len(df)}|{",".join(map(str, df.columns))}|{_src_token}'
-                if wiz.get("_direct_sig") != _sig:
-                    old_batch = wiz.get("direct_batch_id")
-                    if old_batch:
+                        _raw = up_file.getvalue()
+                        from io import StringIO
                         try:
-                            _delete_direct_batch(old_batch)
+                            _text = _raw.decode("utf-8-sig")
+                        except UnicodeDecodeError:
+                            _text = _raw.decode("latin-1")
+                        df = _read_csv(StringIO(_text))
+                        _src_token = f"file:{up_file.name}:{len(_raw)}:{delim_choice}"
+                    except Exception as exc:
+                        _parse_err = exc
+            else:
+                csv_text = st.text_area(
+                    "Paste CSV Data Here", value="", height=160, key=_k("dadj_csv"),
+                    help="Paste the full CSV content including the header row.")
+                if csv_text.strip():
+                    try:
+                        from io import StringIO
+                        df = _read_csv(StringIO(csv_text.strip()))
+                        _src_token = f"paste:{hash(csv_text)}:{delim_choice}"
+                    except Exception as exc:
+                        _parse_err = exc
+
+            if _parse_err is not None:
+                st.error(f"Failed to read the CSV: {_parse_err}. If the columns look "
+                         f"wrong, try selecting the delimiter explicitly above.")
+            elif df is not None:
+                ndf, unknown_cols, missing_required = _parse_direct_df(df, scope)
+
+                if unknown_cols:
+                    st.warning("Column(s) not recognized for this scope (ignored): "
+                               + ", ".join(unknown_cols))
+                if missing_required:
+                    st.error("Missing REQUIRED column(s): " + ", ".join(missing_required)
+                             + " — staging is blocked until the CSV includes them.")
+
+                if missing_required or not len(ndf):
+                    # Can't stage this parse — drop any previously staged batch so a
+                    # stale/valid batch is never left submittable behind a now-broken CSV.
+                    if wiz.get("direct_batch_id"):
+                        try:
+                            _delete_direct_batch(wiz["direct_batch_id"])
                         except Exception:
                             pass
-                    _purge_abandoned_direct_batches()
-                    import uuid
-                    batch_id = str(uuid.uuid4())
-                    with st.spinner("Staging and validating rows…"):
-                        _stage_direct_batch(batch_id, ndf)
-                        verdicts = _direct_validation(batch_id, scope)
-                    wiz["direct_batch_id"] = batch_id
-                    wiz["direct_ndf"]      = ndf
-                    wiz["direct_verdicts"] = verdicts
-                    wiz["_direct_sig"]     = _sig
-
-            verdicts = wiz.get("direct_verdicts")
-            ndf_staged = wiz.get("direct_ndf")
-            if verdicts is not None and ndf_staged is not None and len(ndf_staged):
-                # Row objects don't support .get() — normalize to plain dicts.
-                v_by_row = {v["ROW_NUM"]: v.asDict() for v in verdicts}
-                preview = ndf_staged.copy()
-                preview.insert(0, "✓/✗", [
-                    "✓" if v_by_row.get(i + 1, {}).get("IS_VALID") else "✗"
-                    for i in range(len(preview))])
-                preview["Errors"] = [
-                    "; ".join(_fmt_direct_errors(v_by_row.get(i + 1, {}).get("VALIDATION_ERRORS")))
-                    for i in range(len(preview))]
-                n_valid = sum(1 for v in verdicts if v["IS_VALID"])
-                n_bad   = len(verdicts) - n_valid
-                if n_bad:
-                    st.warning(f"**{n_valid} valid row(s)**, **{n_bad} invalid row(s)** — "
-                               f"invalid rows are excluded from submission (see the "
-                               f"Errors column below).")
-                    bad_rows = preview[preview["✓/✗"] == "✗"]
-                    st.download_button(
-                        f"⬇ Download {len(bad_rows)} invalid row(s) (CSV)",
-                        bad_rows.to_csv(index=False).encode("utf-8-sig"),
-                        file_name="direct_adjustment_rejects.csv", mime="text/csv",
-                        key=_k("dadj_rejects_dl"))
+                    wiz["direct_batch_id"] = None
+                    wiz["direct_ndf"]      = None
+                    wiz["direct_verdicts"] = None
+                    wiz["_direct_sig"]     = None
                 else:
-                    st.success(f"All {n_valid} row(s) validated — ready to submit.")
-                render_df_table(preview, max_rows=20, height=220)
+                    _sig = f'{scope}|{len(df)}|{",".join(map(str, df.columns))}|{_src_token}'
+                    if wiz.get("_direct_sig") != _sig:
+                        batch_id, verdicts = _stage_and_validate(ndf, scope)
+                        wiz["direct_batch_id"] = batch_id
+                        wiz["direct_ndf"]      = ndf
+                        wiz["direct_verdicts"] = verdicts
+                        wiz["_direct_sig"]     = _sig
+
+                _render_direct_verdict_preview()
+
+        else:  # Enter in grid
+            ordered = _accepted_columns(scope)[2]     # [(stage_col, ord), ...]
+            grid_cols = [c for c, _ in ordered]
+            col_cfg = {}
+            for c in grid_cols:
+                if c == "VALUE_USD":
+                    col_cfg[c] = st.column_config.NumberColumn("VALUE_USD (required)", format="%.6f")
+                elif c == "ENTITY_CODE":
+                    col_cfg[c] = st.column_config.SelectboxColumn("ENTITY_CODE (required)", options=_entity_options())
+                elif c == "BOOK_CODE":
+                    col_cfg[c] = st.column_config.SelectboxColumn("BOOK_CODE", options=_book_options(None, None))
+                elif c == "MEASURE_TYPE_CODE":
+                    col_cfg[c] = st.column_config.SelectboxColumn("MEASURE_TYPE_CODE", options=_measure_type_options(scope))
+                elif c == "SIMULATION_NAME":
+                    col_cfg[c] = st.column_config.SelectboxColumn("SIMULATION_NAME", options=_sim_name_options(None))
+                elif c == "SIMULATION_SOURCE":
+                    col_cfg[c] = st.column_config.SelectboxColumn("SIMULATION_SOURCE", options=_sim_source_options())
+                elif c == "REASON":
+                    col_cfg[c] = st.column_config.TextColumn("REASON", help="Blank = use the batch reason below")
+                else:
+                    col_cfg[c] = st.column_config.TextColumn(c)
+            gdf = st.data_editor(
+                wiz.get("direct_grid_df") if wiz.get("direct_grid_df") is not None
+                else pd.DataFrame(columns=grid_cols),
+                num_rows="dynamic", column_config=col_cfg,
+                use_container_width=True, key=_k(f"direct_grid_{scope}"))
+            wiz["direct_grid_df"] = gdf
+
+            _grid_sig = (f'grid|{scope}|{len(gdf)}|'
+                         f'{pd.util.hash_pandas_object(gdf).sum() if len(gdf) else 0}')
+
+            if st.button("Validate rows", key=_k("direct_grid_validate")):
+                gndf = gdf.dropna(how="all").reset_index(drop=True)
+                if not len(gndf):
+                    if wiz.get("direct_batch_id"):
+                        try:
+                            _delete_direct_batch(wiz["direct_batch_id"])
+                        except Exception:
+                            pass
+                    wiz["direct_batch_id"] = None
+                    wiz["direct_ndf"]      = None
+                    wiz["direct_verdicts"] = None
+                    wiz["_direct_sig"]     = None
+                    st.warning("Add at least one row to the grid before validating.")
+                else:
+                    batch_id, verdicts = _stage_and_validate(gndf, scope)
+                    wiz["direct_batch_id"] = batch_id
+                    wiz["direct_ndf"]      = gndf
+                    wiz["direct_verdicts"] = verdicts
+                    wiz["_direct_sig"]     = _grid_sig
+
+            if wiz.get("direct_verdicts") is not None:
+                if wiz.get("_direct_sig") == _grid_sig:
+                    _render_direct_verdict_preview()
+                else:
+                    st.info("The grid has changed since the last validation — "
+                            "click **Validate rows** to refresh before submitting.")
 
     with _card():
         _sec(4, "Batch Details", "COB applies to every row submitted from this CSV.")
@@ -2490,7 +2576,8 @@ with left:
                         "uploaded_df": None, "uploaded_file_name": None,
                         "_preview_sum": None, "_preview_err": None,
                         "direct_batch_id": None, "direct_ndf": None,
-                        "direct_verdicts": None, "_direct_sig": None})
+                        "direct_verdicts": None, "_direct_sig": None,
+                        "direct_grid_df": None})
             safe_rerun()
         if wiz.get("category"):
             st.caption(CATEGORY_UI_DESCS.get(wiz["category"], ""))
