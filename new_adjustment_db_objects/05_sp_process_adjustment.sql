@@ -923,44 +923,112 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 raise Exception("DIMENSION.ADJUSTMENT insert returned no ADJUSTMENT_IDs")
             dim_ids_str = ', '.join(str(v) for v in dim_adj_map.values())
 
-            # ── Column expression per fact-adj column (header alias: h) ──
+            # ── Column expressions + key-resolution joins (header alias: h) ──
+            # Snowflake rejects correlated scalar subqueries it cannot unnest
+            # ("Unsupported subquery type cannot be evaluated") — the same
+            # limitation that forced the validation views to LEFT JOINs. Each
+            # dimension key therefore resolves via a per-header derived table:
+            # MAX(key) GROUP BY ADJ_ID → at most ONE row per header (no
+            # fanout) with the exact semantics of the old MAX() subselects.
+            # Only the joins for columns the fact table actually has are
+            # included in the INSERT.
+            _RES_JOINS = {
+                'ENTITY_KEY': ('rent', f"""
+                LEFT JOIN (
+                    SELECT h2.ADJ_ID, MAX(e.ENTITY_KEY) AS K
+                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                    JOIN DIMENSION.ENTITY e
+                      ON UPPER(e.ENTITY_CODE) = UPPER(h2.ENTITY_CODE)
+                    WHERE h2.ADJ_ID IN ({adj_ids_str})
+                    GROUP BY h2.ADJ_ID
+                ) rent ON rent.ADJ_ID = h.ADJ_ID"""),
+                'BOOK_KEY': ('rbook', f"""
+                LEFT JOIN (
+                    SELECT h2.ADJ_ID, MAX(bk.BOOK_KEY) AS K
+                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                    JOIN DIMENSION.BOOK bk
+                      ON UPPER(bk.BOOK_CODE) = UPPER(h2.BOOK_CODE)
+                     AND bk.IS_CURRENT_ROW = TRUE
+                     AND (h2.ENTITY_CODE IS NULL OR UPPER(bk.ENTITY_CODE) = UPPER(h2.ENTITY_CODE))
+                     AND (h2.DEPARTMENT_CODE IS NULL OR UPPER(bk.DEPARTMENT_CODE) = UPPER(h2.DEPARTMENT_CODE))
+                    WHERE h2.ADJ_ID IN ({adj_ids_str})
+                    GROUP BY h2.ADJ_ID
+                ) rbook ON rbook.ADJ_ID = h.ADJ_ID"""),
+                'TRADE_KEY': ('rtrade', f"""
+                LEFT JOIN (
+                    SELECT h2.ADJ_ID, MAX(td.TRADE_KEY) AS K
+                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                    JOIN DIMENSION.TRADE td
+                      ON UPPER(td.TRADE_CODE) = UPPER(h2.TRADE_CODE)
+                     AND td.IS_CURRENT_ROW = TRUE
+                    WHERE h2.ADJ_ID IN ({adj_ids_str})
+                    GROUP BY h2.ADJ_ID
+                ) rtrade ON rtrade.ADJ_ID = h.ADJ_ID"""),
+                'COMMON_INSTRUMENT_KEY': ('rinstr', f"""
+                LEFT JOIN (
+                    SELECT h2.ADJ_ID, MAX(ci.COMMON_INSTRUMENT_KEY) AS K
+                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                    JOIN DIMENSION.COMMON_INSTRUMENT ci
+                      ON UPPER(ci.INSTRUMENT_CODE) = UPPER(h2.INSTRUMENT_CODE)
+                     AND ci.IS_CURRENT_ROW = TRUE
+                    WHERE h2.ADJ_ID IN ({adj_ids_str})
+                    GROUP BY h2.ADJ_ID
+                ) rinstr ON rinstr.ADJ_ID = h.ADJ_ID"""),
+                'STRESS_SIMULATION_KEY': ('rsim', f"""
+                LEFT JOIN (
+                    SELECT h2.ADJ_ID, MAX(ss.STRESS_SIMULATION_KEY) AS K
+                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                    JOIN DIMENSION.STRESS_SIMULATION ss
+                      ON UPPER(ss.STRESS_SIMULATION_NAME) = UPPER(h2.SIMULATION_NAME)
+                     AND (h2.SIMULATION_SOURCE IS NULL OR UPPER(ss.SIMULATION_SOURCE) = UPPER(h2.SIMULATION_SOURCE))
+                    WHERE h2.ADJ_ID IN ({adj_ids_str})
+                    GROUP BY h2.ADJ_ID
+                ) rsim ON rsim.ADJ_ID = h.ADJ_ID"""),
+                'MEASURE_TYPE_KEY': ('rmt', f"""
+                LEFT JOIN (
+                    SELECT h2.ADJ_ID, MAX(mt.MEASURE_TYPE_KEY) AS K
+                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                    JOIN DIMENSION.MEASURE_TYPE mt
+                      ON UPPER(mt.MEASURE_TYPE_CODE) = UPPER(h2.MEASURE_TYPE_CODE)
+                    WHERE h2.ADJ_ID IN ({adj_ids_str})
+                    GROUP BY h2.ADJ_ID
+                ) rmt ON rmt.ADJ_ID = h.ADJ_ID"""),
+                'TENOR_CURRENCY_KEY': ('rtenor', f"""
+                LEFT JOIN (
+                    SELECT h2.ADJ_ID, MAX(tc.TENOR_CURRENCY_KEY) AS K
+                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                    JOIN DIMENSION.TENOR_CURRENCY tc
+                      ON UPPER(tc.TENOR_CURRENCY_CODE) =
+                         UPPER(CONCAT(h2.TENOR_CODE, '_', COALESCE(h2.CURRENCY_CODE, 'USD')))
+                    WHERE h2.ADJ_ID IN ({adj_ids_str})
+                    GROUP BY h2.ADJ_ID
+                ) rtenor ON rtenor.ADJ_ID = h.ADJ_ID"""),
+                'CURVE_CURRENCY_KEY': ('rcurve', f"""
+                LEFT JOIN (
+                    SELECT h2.ADJ_ID, MAX(cc.CURVE_CURRENCY_KEY) AS K
+                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                    JOIN DIMENSION.CURVE_CURRENCY cc
+                      ON UPPER(cc.CURVE_CODE) = UPPER(h2.CURVE_CODE)
+                    WHERE h2.ADJ_ID IN ({adj_ids_str})
+                    GROUP BY h2.ADJ_ID
+                ) rcurve ON rcurve.ADJ_ID = h.ADJ_ID"""),
+                'PRODUCT_CATEGORY_ATTRIBUTES_KEY': ('rpca', f"""
+                LEFT JOIN (
+                    SELECT h2.ADJ_ID, MAX(pca.PRODUCT_CATEGORY_ATTRIBUTES_KEY) AS K
+                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                    JOIN DIMENSION.PRODUCT_CATEGORY_ATTRIBUTES pca
+                      ON UPPER(REPLACE(pca.PCA_CONCAT_KEY, ' ', '')) =
+                         UPPER(REPLACE(h2.PRODUCT_CATEGORY_ATTRIBUTES, ' ', ''))
+                    WHERE h2.ADJ_ID IN ({adj_ids_str})
+                    GROUP BY h2.ADJ_ID
+                ) rpca ON rpca.ADJ_ID = h.ADJ_ID"""),
+            }
+
             def _direct_expr(c):
                 fixed = {
                     'COBID':               str(cobid),
                     'ADJUSTMENT_ID':       "h.DIMENSION_ADJ_ID",
                     'ENTITY_CODE':         "COALESCE(h.ENTITY_CODE, 'N/A')",
-                    'ENTITY_KEY':          ("COALESCE((SELECT MAX(e.ENTITY_KEY) FROM DIMENSION.ENTITY e "
-                                            "WHERE UPPER(e.ENTITY_CODE) = UPPER(h.ENTITY_CODE)), -1)"),
-                    'BOOK_KEY':            ("COALESCE((SELECT MAX(bk.BOOK_KEY) FROM DIMENSION.BOOK bk "
-                                            "WHERE UPPER(bk.BOOK_CODE) = UPPER(h.BOOK_CODE) "
-                                            "AND bk.IS_CURRENT_ROW = TRUE "
-                                            "AND (h.ENTITY_CODE IS NULL OR UPPER(bk.ENTITY_CODE) = UPPER(h.ENTITY_CODE)) "
-                                            "AND (h.DEPARTMENT_CODE IS NULL OR UPPER(bk.DEPARTMENT_CODE) = UPPER(h.DEPARTMENT_CODE))), -1)"),
-                    'TRADE_KEY':           ("COALESCE((SELECT MAX(td.TRADE_KEY) FROM DIMENSION.TRADE td "
-                                            "WHERE UPPER(td.TRADE_CODE) = UPPER(h.TRADE_CODE) "
-                                            "AND td.IS_CURRENT_ROW = TRUE), -1)"),
-                    'COMMON_INSTRUMENT_KEY': ("COALESCE((SELECT MAX(ci.COMMON_INSTRUMENT_KEY) "
-                                            "FROM DIMENSION.COMMON_INSTRUMENT ci "
-                                            "WHERE UPPER(ci.INSTRUMENT_CODE) = UPPER(h.INSTRUMENT_CODE) "
-                                            "AND ci.IS_CURRENT_ROW = TRUE), -1)"),
-                    'STRESS_SIMULATION_KEY': ("COALESCE((SELECT MAX(ss.STRESS_SIMULATION_KEY) "
-                                            "FROM DIMENSION.STRESS_SIMULATION ss "
-                                            "WHERE UPPER(ss.STRESS_SIMULATION_NAME) = UPPER(h.SIMULATION_NAME) "
-                                            "AND (h.SIMULATION_SOURCE IS NULL OR UPPER(ss.SIMULATION_SOURCE) = UPPER(h.SIMULATION_SOURCE))), -1)"),
-                    'MEASURE_TYPE_KEY':    ("COALESCE((SELECT MAX(mt.MEASURE_TYPE_KEY) "
-                                            "FROM DIMENSION.MEASURE_TYPE mt "
-                                            "WHERE UPPER(mt.MEASURE_TYPE_CODE) = UPPER(h.MEASURE_TYPE_CODE)), -1)"),
-                    'TENOR_CURRENCY_KEY': ("COALESCE((SELECT MAX(tc.TENOR_CURRENCY_KEY) "
-                                            "FROM DIMENSION.TENOR_CURRENCY tc "
-                                            "WHERE UPPER(tc.TENOR_CURRENCY_CODE) = "
-                                            "UPPER(CONCAT(h.TENOR_CODE, '_', COALESCE(h.CURRENCY_CODE, 'USD')))), -1)"),
-                    'CURVE_CURRENCY_KEY': ("COALESCE((SELECT MAX(cc.CURVE_CURRENCY_KEY) "
-                                            "FROM DIMENSION.CURVE_CURRENCY cc "
-                                            "WHERE UPPER(cc.CURVE_CODE) = UPPER(h.CURVE_CODE)), -1)"),
-                    'PRODUCT_CATEGORY_ATTRIBUTES_KEY': ("COALESCE((SELECT MAX(pca.PRODUCT_CATEGORY_ATTRIBUTES_KEY) "
-                                            "FROM DIMENSION.PRODUCT_CATEGORY_ATTRIBUTES pca "
-                                            "WHERE UPPER(REPLACE(pca.PCA_CONCAT_KEY, ' ', '')) = "
-                                            "UPPER(REPLACE(h.PRODUCT_CATEGORY_ATTRIBUTES, ' ', ''))), -1)"),
                     'MEASURE_TYPE_CODE':   "h.MEASURE_TYPE_CODE",
                     'INSTRUMENT_CODE':     "h.INSTRUMENT_CODE",
                     'TRADE_CURRENCY':      "COALESCE(h.CURRENCY_CODE, 'N/A')",
@@ -979,6 +1047,8 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 }
                 if c in fixed:
                     return fixed[c]
+                if c in _RES_JOINS:
+                    return f"COALESCE({_RES_JOINS[c][0]}.K, -1)"
                 if c in (metric_name, metric_usd_name):
                     return "h.ADJUSTMENT_VALUE_IN_USD"
                 if key_name != pk_expr and c == key_name:
@@ -994,10 +1064,15 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                     target_cols.append(c)
                     select_exprs.append(f"{expr} AS {c}")
 
+            direct_joins = '\n'.join(
+                sql for col, (alias, sql) in _RES_JOINS.items()
+                if col in target_cols)
+
             direct_insert = f"""
                 INSERT INTO {fact_adj_tbl_name} ({', '.join(target_cols)})
                 SELECT {', '.join(select_exprs)}
                 FROM ADJUSTMENT_APP.ADJ_HEADER h
+                {direct_joins}
                 WHERE h.ADJ_ID IN ({adj_ids_str})
                   AND h.ADJUSTMENT_VALUE_IN_USD IS NOT NULL
             """
