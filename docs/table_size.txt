@@ -1,0 +1,51 @@
+#	Table	 Rows 	Size
+1	Sensitivity Detail Import	 492,630,851 	6.2 GB
+2	Sensitivity Summary Import	 315,128,633 	3.7 GB
+3	Stress Measures Import	 376,305,189 	2.6 GB
+4	Sensitivity Detail Fields	 119,231,473 	1.7 GB
+5	VaR Book Import	 280,237,985 	1.4 GB
+6	VAR_SUMMARY_IMPORT_MAX	 135,989,379 	711.3 MB
+7	UnderlyingTenorGroupMapping	 58,069,602 	638.6 MB
+8	TenorGroupMapping	 58,069,602 	595.5 MB
+9	Trade	 11,068,539 	515.6 MB
+10	Tenor	 5,662,076 	208.3 MB
+11	Window Element	 32,261,448 	184.4 MB
+12	Instrument Measure	 6,667,619 	182.9 MB
+13	Book Group	 67,702,880 	182.0 MB
+14	VAR_SUMMARY_REPORT	 16,764,636 	168.7 MB
+15	Aging Inventory	 4,125,660 	125.5 MB
+16	Underlying Tenor	 5,662,076 	116.6 MB
+17	Stress Measures Adjustment Import	 7,138,179 	61.9 MB
+18	Instrument Other	 4,950,163 	60.6 MB
+19	Sensitivity Summary Adjustment Import	 3,965,198 	42.1 MB
+20	VaR Adjustment Summary Import	 6,097,811 	30.2 MB
+21	VAR_SUMMARY_IMPORT_CYCLIC	 4,057,156 	22.2 MB
+22	Stress Summary PBI Report	 1,969,511 	14.9 MB
+23	Sensitivity Summary Fields	 1,154,228 	14.8 MB
+24	Window Element Historic	 1,663,288 	14.6 MB
+25	Limit Department	 807,136 	11.4 MB
+26	Sensitivity Detail Adjustment Import	 477,739 	10.2 MB
+27	Stress Properties	 352,721 	8.2 MB
+28	Stress Measures Import Cyclic	 951,942 	7.8 MB
+29	MarketRiskMeasureDepartment	 344,792 	3.4 MB
+30	Instrument	 178,730 	3.2 MB
+31	Counterparty	 120,033 	1.9 MB
+32	Fact Percentile Calc	 652,512 	1.7 MB
+33	Book	 38,018 	855.5 KB
+34	Stress Simulation	 20,198 	568.0 KB
+35	Exchange Rate	 80,159 	336.5 KB
+36	TENOR_CURRENCY	 16,440 	255.4 KB
+37	Fact Beta Band	 19,999 	236.0 KB
+38	Base Beta Band	 19,999 	195.6 KB
+39	Currency Pair	 6,163 	127.3 KB
+40	Prod Cat Attributes Key Map	 39,036 	54.1 KB
+41	Previous Reporting Date	 1,074 	47.3 KB
+42	PnL Vector Element Ordinal	 5,055 	43.2 KB
+43	Curve	 1,174 	34.4 KB
+44	Reporting Date	 1,074 	34.3 KB
+45	ENTITY_DEPARTMENT	 1,164 	30.6 KB
+46	Historic COB List	 1,074 	22.4 KB
+47	Typology Class	 1,059 	15.1 KB
+48	Base Spread Band	 1,302 	12.5 KB
+49	Reporting Measure Type	 149 	11.2 KB
+50	Risk Types	 935 	9.4 KB
