@@ -142,6 +142,8 @@ FACT_NOTES = {
     "Adjustment": "COB-versioned adjustment reference (dimension for all stars)",
     "Tenor": "COB-versioned tenor reference (dimension for Sensitivity)",
     "TenorGroupMapping": "Tenor-group weighting map, COB-versioned",
+    "UnderlyingTenorGroupMapping": "Role-playing twin of TenorGroupMapping (underlying leg)",
+    "Underlying Tenor": "Role-playing twin of Tenor (underlying leg)",
     "Window Element": "VaR window / PnL-vector element reference",
 }
 

@@ -37365,101 +37365,330 @@
         "lineageTag": "c73e00ed-04ad-4b87-80e0-85ca2799db64",
         "columns": [
           {
-            "type": "calculatedTableColumn",
             "name": "COBID",
             "dataType": "int64",
-            "isNameInferred": true,
-            "isDataTypeInferred": true,
             "isHidden": true,
-            "sourceColumn": "[COBID]",
+            "sourceColumn": "COBID",
             "lineageTag": "413d60e1-f40b-4868-b6c5-238b330a5424",
             "summarizeBy": "none",
             "isAvailableInMdx": false
           },
           {
-            "type": "calculatedTableColumn",
             "name": "Underlying Expiry Date",
             "dataType": "dateTime",
-            "isNameInferred": true,
-            "isDataTypeInferred": true,
-            "sourceColumn": "[Underlying Expiry Date]",
+            "sourceColumn": "Underlying Expiry Date",
             "lineageTag": "48aee585-0e83-4e50-8189-0f36af788a01"
           },
           {
-            "type": "calculatedTableColumn",
             "name": "Underlying Tenor Code",
             "dataType": "string",
-            "isNameInferred": true,
-            "isDataTypeInferred": true,
-            "sourceColumn": "[Underlying Tenor Code]",
+            "sourceColumn": "Underlying Tenor Code",
             "sortByColumn": "Underlying Tenor Day",
             "lineageTag": "2a47d9da-5fa2-4a99-88ff-b9f605465cf4"
           },
           {
-            "type": "calculatedTableColumn",
             "name": "Underlying Tenor Date",
             "dataType": "dateTime",
-            "isNameInferred": true,
-            "isDataTypeInferred": true,
-            "sourceColumn": "[Underlying Tenor Date]",
+            "sourceColumn": "Underlying Tenor Date",
             "lineageTag": "4980d68f-2919-4473-a95c-033c68c7e95a"
           },
           {
-            "type": "calculatedTableColumn",
             "name": "Underlying Tenor Day",
             "dataType": "int64",
-            "isNameInferred": true,
-            "isDataTypeInferred": true,
-            "sourceColumn": "[Underlying Tenor Day]",
+            "sourceColumn": "Underlying Tenor Day",
             "lineageTag": "8ea3b705-2c29-48c9-bd94-de0976688293",
             "summarizeBy": "none"
           },
           {
-            "type": "calculatedTableColumn",
             "name": "UnderlyingTenorCurrencyKey",
             "dataType": "int64",
-            "isNameInferred": true,
-            "isDataTypeInferred": true,
             "isHidden": true,
-            "sourceColumn": "[UnderlyingTenorCurrencyKey]",
+            "sourceColumn": "UnderlyingTenorCurrencyKey",
             "lineageTag": "e257ddae-50bc-45a5-979e-5fdc110e0b5b",
             "summarizeBy": "none",
             "isAvailableInMdx": false
           },
           {
-            "type": "calculatedTableColumn",
             "name": "UnderlyingTenorJoin",
             "dataType": "int64",
-            "isNameInferred": true,
-            "isDataTypeInferred": true,
             "isHidden": true,
             "isKey": true,
-            "sourceColumn": "[UnderlyingTenorJoin]",
+            "sourceColumn": "UnderlyingTenorJoin",
             "lineageTag": "2fbd95df-eba8-4335-b3cb-bee888c0bab9",
             "isAvailableInMdx": false
           }
         ],
         "partitions": [
           {
-            "name": "Underlying Tenor",
+            "name": "2025",
             "mode": "import",
             "source": {
-              "type": "calculated",
-              "expression": [
-                " SELECTCOLUMNS(",
-                "     Tenor,",
-                "     \"COBID\", Tenor[COBID],",
-                "     \"Underlying Expiry Date\", Tenor[Expiry Date],",
-                "     \"Underlying Tenor Code\", Tenor[Tenor Code],",
-                "     \"Underlying Tenor Date\", Tenor[Tenor Date],",
-                "     \"Underlying Tenor Day\", Tenor[Tenor Day],",
-                "     \"UnderlyingTenorCurrencyKey\", Tenor[TenorCurrencyKey],",
-                "     \"UnderlyingTenorJoin\", Tenor[TENOR_JOIN]",
-                " )"
-              ]
+              "type": "policyRange",
+              "start": "2025-01-01T00:00:00",
+              "end": "2026-01-01T00:00:00",
+              "granularity": "year"
+            }
+          },
+          {
+            "name": "2026Q20401",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-01T00:00:00",
+              "end": "2026-04-02T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20402",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-02T00:00:00",
+              "end": "2026-04-03T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20403",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-03T00:00:00",
+              "end": "2026-04-04T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20404",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-04T00:00:00",
+              "end": "2026-04-05T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20405",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-05T00:00:00",
+              "end": "2026-04-06T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q1",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-01-01T00:00:00",
+              "end": "2026-04-01T00:00:00",
+              "granularity": "quarter"
+            }
+          },
+          {
+            "name": "2026Q20406",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-06T00:00:00",
+              "end": "2026-04-07T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20407",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-07T00:00:00",
+              "end": "2026-04-08T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20408",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-08T00:00:00",
+              "end": "2026-04-09T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20409",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-09T00:00:00",
+              "end": "2026-04-10T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20410",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-10T00:00:00",
+              "end": "2026-04-11T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20411",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-11T00:00:00",
+              "end": "2026-04-12T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20412",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-12T00:00:00",
+              "end": "2026-04-13T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20413",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-13T00:00:00",
+              "end": "2026-04-14T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20414",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-14T00:00:00",
+              "end": "2026-04-15T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20415",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-15T00:00:00",
+              "end": "2026-04-16T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20416",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-16T00:00:00",
+              "end": "2026-04-17T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20417",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-17T00:00:00",
+              "end": "2026-04-18T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20418",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-18T00:00:00",
+              "end": "2026-04-19T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20419",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-19T00:00:00",
+              "end": "2026-04-20T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20420",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-20T00:00:00",
+              "end": "2026-04-21T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20421",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-21T00:00:00",
+              "end": "2026-04-22T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20422",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-22T00:00:00",
+              "end": "2026-04-23T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20423",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-23T00:00:00",
+              "end": "2026-04-24T00:00:00",
+              "granularity": "day"
             }
           }
-        ]
+        ],
+        "refreshPolicy": {
+          "policyType": "basic",
+          "rollingWindowGranularity": "year",
+          "rollingWindowPeriods": 1,
+          "incrementalGranularity": "day",
+          "incrementalPeriods": 5,
+          "incrementalPeriodsOffset": -1,
+          "sourceExpression": [
+            "let",
+            "    Source = Snowflake.Databases(\"tj90313.west-europe.azure.snowflakecomputing.com\",WarehouseName),",
+            "    RAPTOR_Database = Source{[Name=DBName,Kind=\"Database\"]}[Data],",
+            "    DIMENSION_Schema = RAPTOR_Database{[Name=\"DIMENSION\",Kind=\"Schema\"]}[Data],",
+            "    VW_UNDERLYING_TENOR_PBI_View = DIMENSION_Schema{[Name=\"VW_UNDERLYING_TENOR_PBI\",Kind=\"View\"]}[Data],",
+            "    #\"Filtered Rows\" = Table.SelectRows(VW_UNDERLYING_TENOR_PBI_View, each [COBID] >= DateKey(RangeStart) and [COBID] < DateKey(RangeEnd)),",
+            "    #\"Renamed Columns\" = Table.RenameColumns(#\"Filtered Rows\",{{\"UNDERLYING_EXPIRY_DATE\", \"Underlying Expiry Date\"}, {\"UNDERLYING_TENOR_CODE\", \"Underlying Tenor Code\"}, {\"UNDERLYING_TENOR_DATE\", \"Underlying Tenor Date\"}, {\"UNDERLYING_TENOR_DAY\", \"Underlying Tenor Day\"}, {\"UNDERLYING_TENOR_CURRENCY_KEY\", \"UnderlyingTenorCurrencyKey\"}, {\"UNDERLYING_TENOR_JOIN\", \"UnderlyingTenorJoin\"}})",
+            "in",
+            "    #\"Renamed Columns\""
+          ]
+        }
       },
       {
         "name": "Underlying Tenor Group",
@@ -37556,122 +37785,350 @@
         "lineageTag": "bb103914-568f-4850-ba6d-14878bf1ae15",
         "columns": [
           {
-            "type": "calculatedTableColumn",
             "name": "COBID",
             "dataType": "int64",
-            "isNameInferred": true,
-            "isDataTypeInferred": true,
-            "sourceColumn": "TenorGroupMapping[COBID]",
+            "sourceColumn": "COBID",
             "lineageTag": "890236c2-9092-4928-9633-78fafa357332",
             "isAvailableInMdx": false,
             "summarizeBy": "none"
           },
           {
-            "type": "calculatedTableColumn",
             "name": "PillarGroupCode",
             "dataType": "string",
-            "isNameInferred": true,
-            "isDataTypeInferred": true,
-            "sourceColumn": "TenorGroupMapping[PillarGroupCode]",
+            "sourceColumn": "PillarGroupCode",
             "lineageTag": "1fb0506d-0855-4ee1-918f-d4bccebe0acd",
             "isAvailableInMdx": false
           },
           {
-            "type": "calculatedTableColumn",
             "name": "Tenor Group Code",
             "dataType": "string",
-            "isNameInferred": true,
-            "isDataTypeInferred": true,
-            "sourceColumn": "TenorGroupMapping[Tenor Group Code]",
+            "sourceColumn": "Tenor Group Code",
             "lineageTag": "023f195e-59ad-4ffb-8ff4-579979e1dab3",
             "isAvailableInMdx": false
           },
           {
-            "type": "calculatedTableColumn",
             "name": "Tenor Group Type Code",
             "dataType": "string",
-            "isNameInferred": true,
-            "isDataTypeInferred": true,
-            "sourceColumn": "TenorGroupMapping[Tenor Group Type Code]",
+            "sourceColumn": "Tenor Group Type Code",
             "lineageTag": "866c7937-4163-49ba-9093-be88bcbfcaa9",
             "isAvailableInMdx": false
           },
           {
-            "type": "calculatedTableColumn",
             "name": "TenorCurrencyKey",
             "dataType": "int64",
-            "isNameInferred": true,
-            "isDataTypeInferred": true,
-            "sourceColumn": "TenorGroupMapping[TenorCurrencyKey]",
+            "sourceColumn": "TenorCurrencyKey",
             "lineageTag": "f9316b12-3a60-4604-b700-a62c6d3976ea",
             "isAvailableInMdx": false,
             "summarizeBy": "none"
           },
           {
-            "type": "calculatedTableColumn",
             "name": "TenorGroupJoin",
             "dataType": "string",
-            "isNameInferred": true,
-            "isDataTypeInferred": true,
-            "sourceColumn": "TenorGroupMapping[TenorGroupJoin]",
+            "sourceColumn": "TenorGroupJoin",
             "lineageTag": "4a10e9e9-8521-431f-be1e-72e2f919633e",
             "isAvailableInMdx": false
           },
           {
-            "type": "calculatedTableColumn",
             "name": "TenorJoin",
             "dataType": "string",
-            "isNameInferred": true,
-            "isDataTypeInferred": true,
-            "sourceColumn": "TenorGroupMapping[TenorJoin]",
+            "sourceColumn": "TenorJoin",
             "lineageTag": "9370a7a4-4003-4742-a4ca-62c0d82197c2",
             "isAvailableInMdx": false
           },
           {
-            "type": "calculatedTableColumn",
             "name": "Weighting",
             "dataType": "double",
-            "isNameInferred": true,
-            "isDataTypeInferred": true,
             "isHidden": true,
-            "sourceColumn": "TenorGroupMapping[Weighting]",
+            "sourceColumn": "Weighting",
             "isAvailableInMdx": false,
             "lineageTag": "86052ae9-b3e3-47ba-af92-c70f6a0f5c92"
           },
           {
-            "type": "calculatedTableColumn",
             "name": "TENOR_GROUP_JOIN",
             "dataType": "string",
-            "isNameInferred": true,
-            "isDataTypeInferred": true,
-            "sourceColumn": "TenorGroupMapping[TENOR_GROUP_JOIN]",
+            "sourceColumn": "TENOR_GROUP_JOIN",
             "lineageTag": "46092de6-43f5-4dec-89ef-9fbd1845745b",
             "isAvailableInMdx": false
           },
           {
-            "type": "calculatedTableColumn",
             "name": "TENOR_JOIN",
             "dataType": "decimal",
-            "isNameInferred": true,
-            "isDataTypeInferred": true,
-            "sourceColumn": "TenorGroupMapping[TENOR_JOIN]",
+            "sourceColumn": "TENOR_JOIN",
             "lineageTag": "90774bc7-d6a4-4f70-a6a1-2ecbd1f26439",
             "isAvailableInMdx": false
           }
         ],
         "partitions": [
           {
-            "name": "UnderlyingTenorGroupMapping",
+            "name": "2025",
             "mode": "import",
             "source": {
-              "type": "calculated",
-              "expression": [
-                "TenorGroupMapping",
-                ""
-              ]
+              "type": "policyRange",
+              "start": "2025-01-01T00:00:00",
+              "end": "2026-01-01T00:00:00",
+              "granularity": "year"
+            }
+          },
+          {
+            "name": "2026Q20401",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-01T00:00:00",
+              "end": "2026-04-02T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20402",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-02T00:00:00",
+              "end": "2026-04-03T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20403",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-03T00:00:00",
+              "end": "2026-04-04T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20404",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-04T00:00:00",
+              "end": "2026-04-05T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20405",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-05T00:00:00",
+              "end": "2026-04-06T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q1",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-01-01T00:00:00",
+              "end": "2026-04-01T00:00:00",
+              "granularity": "quarter"
+            }
+          },
+          {
+            "name": "2026Q20406",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-06T00:00:00",
+              "end": "2026-04-07T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20407",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-07T00:00:00",
+              "end": "2026-04-08T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20408",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-08T00:00:00",
+              "end": "2026-04-09T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20409",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-09T00:00:00",
+              "end": "2026-04-10T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20410",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-10T00:00:00",
+              "end": "2026-04-11T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20411",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-11T00:00:00",
+              "end": "2026-04-12T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20412",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-12T00:00:00",
+              "end": "2026-04-13T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20413",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-13T00:00:00",
+              "end": "2026-04-14T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20414",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-14T00:00:00",
+              "end": "2026-04-15T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20415",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-15T00:00:00",
+              "end": "2026-04-16T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20416",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-16T00:00:00",
+              "end": "2026-04-17T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20417",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-17T00:00:00",
+              "end": "2026-04-18T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20418",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-18T00:00:00",
+              "end": "2026-04-19T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20419",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-19T00:00:00",
+              "end": "2026-04-20T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20420",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-20T00:00:00",
+              "end": "2026-04-21T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20421",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-21T00:00:00",
+              "end": "2026-04-22T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20422",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-22T00:00:00",
+              "end": "2026-04-23T00:00:00",
+              "granularity": "day"
+            }
+          },
+          {
+            "name": "2026Q20423",
+            "mode": "import",
+            "source": {
+              "type": "policyRange",
+              "start": "2026-04-23T00:00:00",
+              "end": "2026-04-24T00:00:00",
+              "granularity": "day"
             }
           }
-        ]
+        ],
+        "refreshPolicy": {
+          "policyType": "basic",
+          "rollingWindowGranularity": "year",
+          "rollingWindowPeriods": 1,
+          "incrementalGranularity": "day",
+          "incrementalPeriods": 5,
+          "incrementalPeriodsOffset": -1,
+          "sourceExpression": [
+            "let",
+            "    Source = Snowflake.Databases(\"tj90313.west-europe.azure.snowflakecomputing.com\",WarehouseName),",
+            "    RAPTOR_Database = Source{[Name=DBName,Kind=\"Database\"]}[Data],",
+            "    DIMENSION_Schema = RAPTOR_Database{[Name=\"DIMENSION\",Kind=\"Schema\"]}[Data],",
+            "    VW_UNDERLYING_TENOR_GROUP_MAPPING_PBI_View = DIMENSION_Schema{[Name=\"VW_UNDERLYING_TENOR_GROUP_MAPPING_PBI\",Kind=\"View\"]}[Data],",
+            "    #\"Filtered Rows\" = Table.SelectRows(VW_UNDERLYING_TENOR_GROUP_MAPPING_PBI_View, each [COBID] >= DateKey(RangeStart) and [COBID] < DateKey(RangeEnd)),",
+            "    #\"Renamed Columns\" = Table.RenameColumns(#\"Filtered Rows\",{{\"PILLAR_GROUP_CODE\", \"PillarGroupCode\"}, {\"TENOR_GROUP_CODE\", \"Tenor Group Code\"}, {\"TENOR_GROUP_TYPE_CODE\", \"Tenor Group Type Code\"}, {\"TENOR_CURRENCY_KEY\", \"TenorCurrencyKey\"}, {\"WEIGHTING\", \"Weighting\"}, {\"TENOR_GROUP_JOIN_TXT\", \"TenorGroupJoin\"}, {\"TENOR_JOIN_TXT\", \"TenorJoin\"}})",
+            "in",
+            "    #\"Renamed Columns\""
+          ]
+        }
       },
       {
         "name": "VaR Window Historic",
