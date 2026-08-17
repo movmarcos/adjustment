@@ -45,6 +45,12 @@ STATUS_PENDING        = "Pending"
 STATUS_PENDING_APPROV = "Pending Approval"
 STATUS_REJECTED_SO    = "Rejected - SignedOff"
 
+# UUID v5 namespace for deterministic per-row ADJ_IDs: every statement in the
+# submit transaction recomputes UUID_STRING(NS, batch_id:row_num) instead of
+# sharing a temp table (owner's-rights SiS sessions cannot CREATE TEMPORARY
+# TABLE). Batch ids are single-use uuid4s from the app, so ids never repeat.
+ADJ_ID_NAMESPACE = "b1e8c9d4-3f72-4a6e-8b5a-9c0d1e2f3a4b"
+
 # Stage columns that map 1:1 to ADJ_HEADER columns (same list the app's
 # _direct_row_payload sends per row on the single-row path).
 STAGE_TO_HEADER = [
@@ -200,24 +206,14 @@ def main(session, p_batch):
                                for c in STAGE_TO_HEADER)
 
         # ── Stage → header rows, atomically ──────────────────────────────
-        # Temp table first so the header insert, the audit insert and the
-        # result counts all read the SAME row set (incl. generated ADJ_IDs).
-        # It is created BEFORE the BEGIN on purpose: CREATE TABLE is DDL and
-        # DDL inside an explicit Snowflake transaction commits it — creating
-        # it inside the BEGIN would silently break the batch's atomicity.
-        session.sql(f"""
-            CREATE OR REPLACE TEMPORARY TABLE ADJUSTMENT_APP.TMP_DIRECT_BATCH_SUBMIT AS
-            SELECT
-                UUID_STRING()                        AS ADJ_ID,
-                s.ROW_NUM                            AS ROW_NUM,
-                TRY_TO_NUMBER(s.VALUE_USD, 38, 6)    AS ADJUSTMENT_VALUE_IN_USD,
-                {reason_expr}                        AS REASON,
-                {status_expr}                        AS RUN_STATUS,
-                {stage_cols}
-            FROM ADJUSTMENT_APP.ADJ_DIRECT_STAGE s
-            JOIN {view} v ON v.BATCH_ID = s.BATCH_ID AND v.ROW_NUM = s.ROW_NUM
-            WHERE s.BATCH_ID = '{b_esc}' AND v.IS_VALID
-        """).collect()
+        # NO temp table: the SiS app session runs with owner's rights, where
+        # CREATE TEMPORARY TABLE raises "Unsupported statement type
+        # 'TEMPORARY TABLE'". Instead every statement recomputes the SAME
+        # per-row ADJ_ID deterministically — UUID v5 of batch_id:row_num —
+        # so the audit insert and the result counts key off the headers the
+        # first insert actually created. Pure DML, one transaction.
+        adj_id_expr = (f"UUID_STRING('{ADJ_ID_NAMESPACE}', "
+                       f"'{b_esc}:' || s.ROW_NUM)")
 
         session.sql("BEGIN").collect()
         txn_open = True
@@ -232,27 +228,42 @@ def main(session, p_batch):
                 ADJUSTMENT_OCCURRENCE, {header_stage_cols}
             )
             SELECT
-                t.ADJ_ID, {cobid}, '{_esc(process_type)}', 'Direct', 'Direct',
+                {adj_id_expr}, {cobid}, '{_esc(process_type)}', 'Direct', 'Direct',
                 {cobid}, 1.0, 0.0,
-                t.ADJUSTMENT_VALUE_IN_USD, {cat_expr}, t.REASON,
-                t.RUN_STATUS, TRUE, FALSE, '{_esc(username)}',
-                'ADHOC', {header_stage_cols}
-            FROM ADJUSTMENT_APP.TMP_DIRECT_BATCH_SUBMIT t
+                TRY_TO_NUMBER(s.VALUE_USD, 38, 6), {cat_expr}, {reason_expr},
+                {status_expr}, TRUE, FALSE, '{_esc(username)}',
+                'ADHOC', {stage_cols}
+            FROM ADJUSTMENT_APP.ADJ_DIRECT_STAGE s
+            JOIN {view} v ON v.BATCH_ID = s.BATCH_ID AND v.ROW_NUM = s.ROW_NUM
+            WHERE s.BATCH_ID = '{b_esc}' AND v.IS_VALID
         """).collect()
+
+        # Audit + counts read back the headers ACTUALLY inserted (keyed by
+        # the deterministic IDs over the whole stage batch — IDs of invalid
+        # rows simply match nothing), so they cannot drift from the insert
+        # even if a validation input changed mid-flight.
+        inserted_pred = f"""h.ADJ_ID IN (
+                SELECT UUID_STRING('{ADJ_ID_NAMESPACE}', '{b_esc}:' || s.ROW_NUM)
+                FROM ADJUSTMENT_APP.ADJ_DIRECT_STAGE s
+                WHERE s.BATCH_ID = '{b_esc}')"""
 
         session.sql(f"""
             INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
                 (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
-            SELECT t.ADJ_ID, NULL, t.RUN_STATUS, '{_esc(username)}',
+            SELECT h.ADJ_ID, NULL, h.RUN_STATUS, '{_esc(username)}',
                    'Submitted via Streamlit — Direct / {_esc(process_type)} (batch)'
-            FROM ADJUSTMENT_APP.TMP_DIRECT_BATCH_SUBMIT t
+            FROM ADJUSTMENT_APP.ADJ_HEADER h
+            WHERE {inserted_pred}
         """).collect()
 
-        counts = session.sql("""
-            SELECT RUN_STATUS, COUNT(*) AS N,
-                   ARRAY_AGG(ROW_NUM) WITHIN GROUP (ORDER BY ROW_NUM) AS ROW_NUMS
-            FROM ADJUSTMENT_APP.TMP_DIRECT_BATCH_SUBMIT
-            GROUP BY RUN_STATUS
+        counts = session.sql(f"""
+            SELECT h.RUN_STATUS, COUNT(*) AS N,
+                   ARRAY_AGG(s.ROW_NUM) WITHIN GROUP (ORDER BY s.ROW_NUM) AS ROW_NUMS
+            FROM ADJUSTMENT_APP.ADJ_DIRECT_STAGE s
+            JOIN ADJUSTMENT_APP.ADJ_HEADER h
+              ON h.ADJ_ID = UUID_STRING('{ADJ_ID_NAMESPACE}', '{b_esc}:' || s.ROW_NUM)
+            WHERE s.BATCH_ID = '{b_esc}'
+            GROUP BY h.RUN_STATUS
         """).collect()
 
         # Consume the staged batch in the same transaction.
