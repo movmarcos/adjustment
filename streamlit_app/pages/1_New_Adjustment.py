@@ -179,38 +179,9 @@ def _build_payload() -> dict:
     return payload
 
 
-def _direct_row_payload(row: dict) -> dict:
-    """One staged Direct Adjustment row → one SP_SUBMIT_ADJUSTMENT payload.
-    Called per row by the submit loop in _do_submit (Direct never touches
-    ADJ_LINE_ITEM_JSON — each valid row becomes its own adjustment)."""
-    p = {
-        "cobid":                 wiz["cobid"],
-        "process_type":          wiz["process_type"],
-        "adjustment_type":       "Direct",
-        "username":              current_user_name(),
-        "source_cobid":          wiz["cobid"],
-        "reason":                wiz.get("reason", ""),
-        "requires_approval":     wiz.get("requires_approval", False),
-        "adjustment_occurrence": "ADHOC",
-        "adjustment_category":   wiz.get("adjustment_category"),
-        "adjustment_value_in_usd": float(row["VALUE_USD"]),
-    }
-    for stage_col, payload_key in [
-            ("ENTITY_CODE", "entity_code"), ("SOURCE_SYSTEM_CODE", "source_system_code"),
-            ("DEPARTMENT_CODE", "department_code"), ("BOOK_CODE", "book_code"),
-            ("TRADE_CODE", "trade_code"), ("TRADE_TYPOLOGY", "trade_typology"),
-            ("STRATEGY", "strategy"), ("INSTRUMENT_CODE", "instrument_code"),
-            ("SIMULATION_NAME", "simulation_name"), ("SIMULATION_SOURCE", "simulation_source"),
-            ("MEASURE_TYPE_CODE", "measure_type_code"), ("CURRENCY_CODE", "currency_code"),
-            ("TENOR_CODE", "tenor_code"), ("CURVE_CODE", "curve_code"),
-            ("PRODUCT_CATEGORY_ATTRIBUTES", "product_category_attributes")]:
-        v = row.get(stage_col)
-        if not _direct_cell_blank(v):
-            p[payload_key] = str(v).strip()
-    row_reason = row.get("REASON")
-    if not _direct_cell_blank(row_reason):
-        p["reason"] = str(row_reason).strip()
-    return p
+# Direct rows are turned into ADJ_HEADER rows server-side by
+# SP_SUBMIT_DIRECT_BATCH (14_sp_submit_direct_batch.sql) — the stage-column →
+# header-column mapping lives there (STAGE_TO_HEADER), not in the app.
 
 
 # ── VaR Upload: config-driven schema + JSON upload writer ─────────────────────
@@ -481,8 +452,10 @@ def _do_submit() -> dict:
     wrote_line_items_for = None
     try:
         # Direct Adjustment: one row = one adjustment, never a JSON line item.
-        # Modelled on the FRTBALL fan-out loop below — submit N, collect
-        # ok/fail per unit, report a summary. Invalid rows are never submitted.
+        # ONE set-based call — SP_SUBMIT_DIRECT_BATCH reads the staged batch
+        # server-side and creates every header atomically (all rows or none).
+        # The old per-row CALL loop ran ~10 statements per row and took
+        # minutes on real files.
         if wiz.get("category") == "Direct Adjustment":
             batch_id = wiz.get("direct_batch_id")
             ndf      = wiz.get("direct_ndf")
@@ -492,25 +465,26 @@ def _do_submit() -> dict:
                 return {"status": "Error",
                         "message": "No valid staged rows to submit — parse a CSV "
                                    "with at least one valid row first."}
-            n_total = len(valid_rows)
-            created, failures, statuses = [], [], []
-            for i, (_, row) in enumerate(ndf.iterrows(), start=1):
-                if i not in valid_rows:
-                    continue
-                # Never let one row's exception abort the loop — a network hiccup
-                # on row 5 of 500 must not lose track of rows 1-4's created headers.
-                try:
-                    row_res = _submit_one(_direct_row_payload(row.to_dict()))
-                except Exception as exc:
-                    failures.append(f"row {i}: {exc}")
-                    continue
-                if _is_submit_success(row_res):
-                    created.append(i)
-                    statuses.append(row_res.get("status"))
-                else:
-                    failures.append(f"row {i}: {row_res.get('message', 'not accepted')}")
+            shared = {
+                "batch_id":            batch_id,
+                "cobid":               wiz["cobid"],
+                "process_type":        wiz["process_type"],
+                "username":            current_user_name(),
+                "reason":              wiz.get("reason", ""),
+                "requires_approval":   bool(wiz.get("requires_approval", False)),
+                "adjustment_category": wiz.get("adjustment_category"),
+            }
+            json_str = (json.dumps(shared)
+                        .replace("\\", "\\\\").replace("'", "''"))
             try:
-                _delete_direct_batch(batch_id)
+                rows = run_query(
+                    f"CALL ADJUSTMENT_APP.SP_SUBMIT_DIRECT_BATCH('{json_str}')")
+                raw = rows[0][0] if rows else None
+                out = json.loads(str(raw)) if isinstance(raw, str) else (raw or {})
+            except Exception as exc:
+                out = {"status": "Error", "created": 0, "message": str(exc)}
+            try:
+                _delete_direct_batch(batch_id)   # no-op when the SP consumed it
             except Exception:
                 pass
             wiz["direct_batch_id"] = None
@@ -518,17 +492,25 @@ def _do_submit() -> dict:
             wiz["direct_verdicts"] = None
             wiz["_direct_sig"]     = None
             wiz["direct_rows"]     = None
-            # Partial failure must never read as success: any failed row makes
-            # the overall result an Error, even though the successful rows'
-            # headers already exist (mirrors the FRTBALL fan-out's semantics).
-            if failures:
-                shown = "; ".join(failures[:10])
-                more  = f" (+{len(failures) - 10} more)" if len(failures) > 10 else ""
+            created  = int(out.get("created") or 0)
+            rejected = int(out.get("rejected_signoff") or 0)
+            if out.get("status") == "Error" or not created:
                 return {"status": "Error",
-                        "message": f"Created {len(created)} of {n_total} Direct "
-                                   f"adjustments. Failures: {shown}{more}"}
-            return {"status": statuses[0],
-                    "message": f"Created {len(created)} Direct adjustment(s)."}
+                        "message": out.get("message",
+                                           "Batch submission failed.")}
+            # Sign-off rejections must never read as clean success (their
+            # headers exist for audit, but carry no numbers).
+            if rejected:
+                rej_rows = out.get("rejected_rows") or []
+                shown = ", ".join(str(r) for r in rej_rows[:10])
+                more  = (f" (+{len(rej_rows) - 10} more)"
+                         if len(rej_rows) > 10 else "")
+                return {"status": "Error",
+                        "message": f"Created {created} Direct adjustment(s), "
+                                   f"but {rejected} row(s) were rejected by "
+                                   f"sign-off (rows {shown}{more})."}
+            return {"status": out.get("status"),
+                    "message": f"Created {created} Direct adjustment(s)."}
 
         payload = _build_payload()
 
@@ -1060,9 +1042,8 @@ _DIRECT_STAGE_CHUNK = 500  # rows per INSERT — keeps the generated SQL bounded
 def _direct_cell_blank(v) -> bool:
     """True when a staged/normalized Direct cell carries no real value —
     None, float NaN (pandas' empty-cell marker), or whitespace-only text.
-    Shared by _stage_direct_batch (what gets written) and _direct_row_payload
-    (what gets submitted) so a blank cell never round-trips as the string
-    "nan"."""
+    Used by _stage_direct_batch so a blank cell is staged as NULL, never as
+    the string "nan" (SP_SUBMIT_DIRECT_BATCH reads the staged values)."""
     return v is None or (isinstance(v, float) and pd.isna(v)) or str(v).strip() == ""
 
 
