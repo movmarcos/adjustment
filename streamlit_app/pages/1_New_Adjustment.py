@@ -1094,8 +1094,15 @@ def _render_field_chips(cols, required=None, note="* required · column order an
 
 def _parse_direct_df(df, scope: str):
     """Map pasted columns to stage columns by header name (order/case-free).
-    Returns (normalized_df, unknown_cols, missing_required)."""
-    alias_map, required, _ = _accepted_columns(scope)
+    Returns (normalized_df, unknown_cols, missing_cols).
+
+    The header must match the scope's template EXACTLY as a set (any order,
+    aliases accepted): every template column present and nothing else.
+    Rationale: scopes share most columns (Sensitivity ⊇ Stress), so a file
+    exported for one scope used to pass another scope's required-only check
+    — with extra columns silently ignored — and land in the wrong scope.
+    Both missing and unknown columns now block staging at the call site."""
+    alias_map, required, ordered = _accepted_columns(scope)
     out, seen, first_col_used = {}, set(), {}
     unknown = []
     for c in df.columns:
@@ -1112,8 +1119,13 @@ def _parse_direct_df(df, scope: str):
             # first one wins; surface the drop instead of silently discarding it.
             unknown.append(f"{c} (duplicate of {first_col_used[tgt]})")
     ndf = pd.DataFrame(out)
-    missing_required = sorted(required - seen)
-    return ndf, unknown, missing_required
+    # All template columns must be present, not just the value-required ones.
+    # Fallback to required-only when a scope has no DISPLAY_ORDER config yet,
+    # so a misconfigured scope degrades to the old rule instead of blocking
+    # every file.
+    template = {c for c, _ in ordered}
+    missing_cols = sorted((template or required) - seen)
+    return ndf, unknown, missing_cols
 
 
 def _stage_direct_batch(batch_id: str, ndf) -> int:
@@ -1564,7 +1576,11 @@ def render_direct_form() -> None:
                  "Paste or upload rows — one row = one adjustment. Column order and case don't matter.")
         _ordered_chip_cols = [c for c, _ in _accepted_columns(scope)[2]]
         if _ordered_chip_cols:
-            _render_field_chips(_ordered_chip_cols, required)
+            _render_field_chips(
+                _ordered_chip_cols, required,
+                note="ALL columns must be included (* = value required per "
+                     "row; other columns may be blank) · column order and "
+                     "case don't matter · common aliases accepted")
         else:
             _info_banner(f'No accepted-columns configuration found for the '
                          f'<b>{scope}</b> scope yet — contact an administrator.')
@@ -1665,16 +1681,28 @@ def render_direct_form() -> None:
                 st.error(f"Failed to read the CSV: {_parse_err}. If the columns look "
                          f"wrong, try selecting the delimiter explicitly above.")
             elif df is not None:
-                ndf, unknown_cols, missing_required = _parse_direct_df(df, scope)
+                ndf, unknown_cols, missing_cols = _parse_direct_df(df, scope)
 
+                # The header must match the scope template exactly (any
+                # order): extra columns usually mean a file exported for a
+                # DIFFERENT scope — Sensitivity files carry every Stress
+                # column plus more, so they used to pass the Stress check.
                 if unknown_cols:
-                    st.warning("Column(s) not recognized for this scope (ignored): "
-                               + ", ".join(unknown_cols))
-                if missing_required:
-                    st.error("Missing REQUIRED column(s): " + ", ".join(missing_required)
-                             + " — staging is blocked until the CSV includes them.")
+                    st.error(f"Column(s) not in the {scope} template: "
+                             + ", ".join(unknown_cols)
+                             + f" — the file must match the {scope} template "
+                               f"exactly (column order doesn't matter). If this "
+                               f"file was made for another scope, switch the "
+                               f"Data Scope above; otherwise remove the extra "
+                               f"column(s) or start from the CSV template.")
+                if missing_cols:
+                    st.error(f"Missing column(s): " + ", ".join(missing_cols)
+                             + f" — the file must include every {scope} template "
+                               f"column (optional columns may be left blank, "
+                               f"but the header must be there). Download the "
+                               f"CSV template above for the full list.")
 
-                if missing_required or not len(ndf):
+                if unknown_cols or missing_cols or not len(ndf):
                     # Can't stage this parse — drop any previously staged batch so a
                     # stale/valid batch is never left submittable behind a now-broken CSV.
                     if wiz.get("direct_batch_id"):
