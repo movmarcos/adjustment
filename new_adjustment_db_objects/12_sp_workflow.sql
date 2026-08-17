@@ -7,10 +7,14 @@
 -- rights on ADJ_HEADER could bypass it. These procedures make the control
 -- real at the database level:
 --
---   • The acting identity is CURRENT_USER() — resolved by Snowflake inside
---     the procedure (EXECUTE AS CALLER; in Streamlit-in-Snowflake this is the
---     viewer, provided READ SESSION is granted). It is never taken from an
---     argument the client could fake.
+--   • The acting identity mirrors SP_SUBMIT_ADJUSTMENT's precedence: the
+--     app-resolved viewer name (p_caller) first, CURRENT_USER() as fallback.
+--     Submitter names (ADJ_HEADER.USERNAME) and the ADJ_APPROVERS list are
+--     both maintained in the app-resolved format, so maker-checker compares
+--     names from the same source. NOTE this trusts the client-supplied name
+--     until table write access is locked down in Snowflake (planned) — at
+--     that point flip the precedence back to CURRENT_USER()-only (requires
+--     READ SESSION granted to the app owner role).
 --   • The caller must be an ACTIVE approver for the scope (ADJ_APPROVERS,
 --     NULL scope = all scopes).
 --   • Self-approval is refused (submitter/requester ≠ approver).
@@ -26,17 +30,22 @@ USE SCHEMA ADJUSTMENT_APP;
 -- SP_DECIDE_ADJUSTMENT — approve or reject a Pending Approval adjustment
 -- ─────────────────────────────────────────────────────────────────────────────
 
+-- The caller name moved into the signature; drop the old 3-arg overload so
+-- stale callers fail loudly instead of silently using a different identity.
+DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT(VARCHAR, VARCHAR, VARCHAR);
+
 CREATE OR ALTER PROCEDURE ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT(
     p_adj_id   VARCHAR,
     p_decision VARCHAR,   -- 'Approved' | 'Rejected'
-    p_comment  VARCHAR
+    p_comment  VARCHAR,
+    p_caller   VARCHAR    -- app-resolved viewer name (same source as submit)
 )
 RETURNS VARCHAR
 LANGUAGE PYTHON
 RUNTIME_VERSION = '3.11'
 PACKAGES = ('snowflake-snowpark-python')
 HANDLER = 'main'
-COMMENT = '4-eyes decision on an adjustment, enforced server-side: caller identity from CURRENT_USER(), active approver + scope check, self-approval refused, guarded transition + audit.'
+COMMENT = '4-eyes decision on an adjustment: caller = p_caller (app-resolved, same source as submit) with CURRENT_USER() fallback, active approver + scope check, self-approval refused, guarded transition + audit.'
 EXECUTE AS CALLER
 AS
 $$
@@ -47,7 +56,13 @@ def _esc(v):
     return str(v).replace("'", "''") if v is not None else ""
 
 
-def _caller(session):
+def _caller(session, p_caller):
+    """App-resolved viewer name first (same precedence as SP_SUBMIT_ADJUSTMENT,
+    so submitter/approver names compare like-for-like), CURRENT_USER() as
+    fallback."""
+    u = str(p_caller or "").strip()
+    if u and u.lower() != "unknown":
+        return u
     row = session.sql("SELECT CURRENT_USER() AS U").collect()
     u = str(row[0]["U"]) if row and row[0]["U"] else ""
     return u.strip()
@@ -65,19 +80,19 @@ def _is_approver(session, username, process_type):
     return bool(rows)
 
 
-def main(session, p_adj_id, p_decision, p_comment):
+def main(session, p_adj_id, p_decision, p_comment, p_caller):
     decision = str(p_decision or "").strip().capitalize()
     if decision not in ("Approved", "Rejected"):
         return json.dumps({"status": "error",
                            "message": f"Invalid decision '{p_decision}' — "
                                       f"expected Approved or Rejected."})
 
-    caller = _caller(session)
+    caller = _caller(session, p_caller)
     if not caller or caller.lower() == "unknown":
         return json.dumps({"status": "no_identity",
                            "message": "Caller identity could not be resolved "
-                                      "(READ SESSION grant missing?) — "
-                                      "approvals are blocked."})
+                                      "(no app identity and CURRENT_USER() "
+                                      "empty) — approvals are blocked."})
 
     adj_id = _esc(p_adj_id)
     rows = session.sql(f"""
@@ -139,23 +154,25 @@ $$;
 -- SP_DECIDE_REOPEN — approve or reject a COB sign-off re-open request
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- Entity granularity changed the signature; drop the old 4-arg overload so
--- stale callers fail loudly instead of deciding the wrong row.
+-- Entity granularity then the caller argument changed the signature; drop the
+-- old overloads so stale callers fail loudly instead of deciding the wrong row.
 DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_DECIDE_REOPEN(INT, VARCHAR, VARCHAR, VARCHAR);
+DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_DECIDE_REOPEN(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR);
 
 CREATE OR ALTER PROCEDURE ADJUSTMENT_APP.SP_DECIDE_REOPEN(
     p_cobid        INT,
     p_process_type VARCHAR,
     p_entity_code  VARCHAR,   -- '*' = whole-scope row
     p_decision     VARCHAR,   -- 'Approved' | 'Rejected'
-    p_comment      VARCHAR
+    p_comment      VARCHAR,
+    p_caller       VARCHAR    -- app-resolved viewer name (same source as submit)
 )
 RETURNS VARCHAR
 LANGUAGE PYTHON
 RUNTIME_VERSION = '3.11'
 PACKAGES = ('snowflake-snowpark-python')
 HANDLER = 'main'
-COMMENT = '4-eyes decision on a COB re-open request, enforced server-side: caller from CURRENT_USER(), active approver + scope check, requester cannot decide, guarded transition + sign-off history.'
+COMMENT = '4-eyes decision on a COB re-open request: caller = p_caller (app-resolved, same source as submit) with CURRENT_USER() fallback, active approver + scope check, requester cannot decide, guarded transition + sign-off history.'
 EXECUTE AS CALLER
 AS
 $$
@@ -166,14 +183,17 @@ def _esc(v):
     return str(v).replace("'", "''") if v is not None else ""
 
 
-def main(session, p_cobid, p_process_type, p_entity_code, p_decision, p_comment):
+def main(session, p_cobid, p_process_type, p_entity_code, p_decision, p_comment,
+         p_caller):
     decision = str(p_decision or "").strip().capitalize()
     if decision not in ("Approved", "Rejected"):
         return json.dumps({"status": "error",
                            "message": f"Invalid decision '{p_decision}'."})
 
-    row = session.sql("SELECT CURRENT_USER() AS U").collect()
-    caller = str(row[0]["U"]).strip() if row and row[0]["U"] else ""
+    caller = str(p_caller or "").strip()
+    if not caller or caller.lower() == "unknown":
+        row = session.sql("SELECT CURRENT_USER() AS U").collect()
+        caller = str(row[0]["U"]).strip() if row and row[0]["U"] else ""
     if not caller or caller.lower() == "unknown":
         return json.dumps({"status": "no_identity",
                            "message": "Caller identity could not be resolved — "
@@ -252,5 +272,5 @@ $$;
 -- ═══════════════════════════════════════════════════════════════════════════
 -- VERIFY
 -- ═══════════════════════════════════════════════════════════════════════════
-DESCRIBE PROCEDURE ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT(VARCHAR, VARCHAR, VARCHAR);
-DESCRIBE PROCEDURE ADJUSTMENT_APP.SP_DECIDE_REOPEN(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR);
+DESCRIBE PROCEDURE ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT(VARCHAR, VARCHAR, VARCHAR, VARCHAR);
+DESCRIBE PROCEDURE ADJUSTMENT_APP.SP_DECIDE_REOPEN(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR);

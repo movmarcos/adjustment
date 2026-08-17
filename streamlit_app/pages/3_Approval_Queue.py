@@ -27,14 +27,13 @@ render_sidebar()
 
 user = current_user_name()
 
-# Decisions require a real identity: if resolution degraded (READ SESSION
-# grant missing → "unknown"), the server-side procs refuse anyway — surface
-# it up front instead of failing on click.
+# Decisions require an attributable identity — app-resolved viewer name,
+# same source submit uses (the procs take it as p_caller, with CURRENT_USER()
+# as fallback). Only a fully unresolved identity blocks decisions.
 _identity_ok = bool(user) and str(user).strip().lower() != "unknown"
 if not _identity_ok:
     st.error(
-        "Your identity could not be resolved (the READ SESSION grant may be "
-        "missing on the app's owner role). Approvals are disabled — every "
+        "Your identity could not be resolved. Approvals are disabled — every "
         "decision must be attributable to a verified user. Contact an admin.")
 
 st.markdown("## Approval Queue")
@@ -230,7 +229,8 @@ if len(_bulk_rows) >= 2:
                     res = run_query(
                         f"CALL ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT("
                         f"'{_esc(r.get('ADJ_ID'))}', '{decision}', "
-                        f"'{_esc(_bulk_comment or f'{decision} (bulk) by {user}')}')")
+                        f"'{_esc(_bulk_comment or f'{decision} (bulk) by {user}')}', "
+                        f"'{_esc(user)}')")
                     out = _json.loads(str(res[0][0])) if res else {}
                     if out.get("status") == "ok":
                         done += 1
@@ -420,7 +420,8 @@ else:
                     import json as _json
                     res = run_query(
                         f"CALL ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT("
-                        f"'{_esc(adj_id)}', '{_esc(new_status)}', '{_esc(comment)}')")
+                        f"'{_esc(adj_id)}', '{_esc(new_status)}', '{_esc(comment)}', "
+                        f"'{_esc(user)}')")
                     try:
                         out = _json.loads(str(res[0][0])) if res else {}
                     except (ValueError, TypeError, IndexError):
@@ -479,7 +480,7 @@ def _decide_reopen(cobid, scope, entity, approve, comment):
     res = run_query(
         f"CALL ADJUSTMENT_APP.SP_DECIDE_REOPEN("
         f"{int(cobid)}, '{_esc(scope)}', '{_esc(entity or chr(42))}', "
-        f"'{decision}', '{_esc(comment)}')")
+        f"'{decision}', '{_esc(comment)}', '{_esc(user)}')")
     try:
         out = _json.loads(str(res[0][0])) if res else {}
     except (ValueError, TypeError, IndexError):

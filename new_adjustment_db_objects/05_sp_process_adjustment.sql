@@ -786,15 +786,31 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
 
             # ── Rebuild summary (atomic delete + insert) ─────────────────
             if fact_adj_summary_name:
+                # Only metric columns present in BOTH the adjustment and summary
+                # tables — some scopes have no local-currency column (Stress:
+                # SIMULATION_PL_IN_USD only), the same collapse the scaling
+                # path applies via metric_col_list.
+                summary_metric_cols = [
+                    c for c in dict.fromkeys((metric_name, metric_usd_name))
+                    if c in fact_adj_cols and c in fact_adj_summary_cols
+                ]
+                if not summary_metric_cols:
+                    raise Exception(
+                        f"Neither {metric_name} nor {metric_usd_name} exists in both "
+                        f"{fact_adj_tbl_name} and {fact_adj_summary_name} — check "
+                        f"METRIC_NAME/METRIC_USD_NAME in ADJUSTMENTS_SETTINGS")
+                summary_metric_list = ', '.join(summary_metric_cols)
+                summary_metric_sums = ', '.join(
+                    'SUM(' + c + ')' for c in summary_metric_cols)
                 summary_non_metric = ', '.join([
                     c for c in fact_adj_summary_cols
                     if c not in {metric_name, metric_usd_name}
                 ])
                 upload_summary_insert = f"""
                 INSERT INTO {fact_adj_summary_name}
-                ({summary_non_metric}, {metric_name}{', ' + metric_usd_name if metric_usd_name != metric_name else ''})
+                ({summary_non_metric}, {summary_metric_list})
                 SELECT {summary_non_metric},
-                       SUM({metric_name}){', SUM(' + metric_usd_name + ')' if metric_usd_name != metric_name else ''}
+                       {summary_metric_sums}
                 FROM {fact_adj_tbl_name}
                 WHERE COBID = {cobid}
                 GROUP BY ALL
@@ -1118,15 +1134,31 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
 
             # ── Rebuild summary (atomic delete + insert) ─────────────────
             if fact_adj_summary_name:
+                # Only metric columns present in BOTH the adjustment and summary
+                # tables — some scopes have no local-currency column (Stress:
+                # SIMULATION_PL_IN_USD only), the same collapse the scaling
+                # path applies via metric_col_list.
+                summary_metric_cols = [
+                    c for c in dict.fromkeys((metric_name, metric_usd_name))
+                    if c in fact_adj_cols and c in fact_adj_summary_cols
+                ]
+                if not summary_metric_cols:
+                    raise Exception(
+                        f"Neither {metric_name} nor {metric_usd_name} exists in both "
+                        f"{fact_adj_tbl_name} and {fact_adj_summary_name} — check "
+                        f"METRIC_NAME/METRIC_USD_NAME in ADJUSTMENTS_SETTINGS")
+                summary_metric_list = ', '.join(summary_metric_cols)
+                summary_metric_sums = ', '.join(
+                    'SUM(' + c + ')' for c in summary_metric_cols)
                 summary_non_metric = ', '.join([
                     c for c in fact_adj_summary_cols
                     if c not in {metric_name, metric_usd_name}
                 ])
                 upload_summary_insert = f"""
                 INSERT INTO {fact_adj_summary_name}
-                ({summary_non_metric}, {metric_name}{', ' + metric_usd_name if metric_usd_name != metric_name else ''})
+                ({summary_non_metric}, {summary_metric_list})
                 SELECT {summary_non_metric},
-                       SUM({metric_name}){', SUM(' + metric_usd_name + ')' if metric_usd_name != metric_name else ''}
+                       {summary_metric_sums}
                 FROM {fact_adj_tbl_name}
                 WHERE COBID = {cobid}
                 GROUP BY ALL
