@@ -1,0 +1,85 @@
+=> User review
+
+We have presented the GUI prototype to users and here is the feedback comments received,
+
+
+
+Trade Code Alignment
+The SABRE system shall provide trade codes that are identical to Raptor trade codes to enable drill-down analysis of trade attributes.
+To be raised in the FRTB project for prioritisation – Sindhu/Neal
+
+
+Adjustment Trade Code Handling
+For adjustment entries, the system shall allow the use of either:
+Dummy trade codes  or
+Existing trade codes.
+
+
+Enhanced Validation Rules for Adjustments
+Attached is the spreadsheet with all fields that are used in capital calculator and will be validated.
+Validation rules for adjustments shall be extended beyond format checks to include:
+Data correctness validation
+Detection of typographical errors
+
+
+The system shall validate input values and implement warning rules:
+Verification that referenced book values exist within the current SABRE dataset.
+
+
+Validation Issue Display
+The system shall display validation results in a Streamlit table.
+Each row shall include an additional column that:
+Captures and displays all associated errors and warnings for that row.
+
+
+Copy Trade/Book Functionality
+The original copy trade/book functionality shall be implemented via:
+A filtering capability that allows users to select an existing trade or book’s sensitivities in the required format for direct adjustment.
+Users shall be able to amend trade codes, book codes and associated values after selection.
+
+
+Action Plan:-
+
+=> Fix/develop the prototype to a permanent solution.
+
+=> Incorporate all the above comments.  
+
+
+
+4) Jira - [RAPTOR-2904] FR-22 FRTBSA Curvature Enhancements - MUFG Jira
+
+Problem Description:-
+
+SABRE provides curvature sensitivities for all products, but Raptor output appears filtered to include only trades associated with OrgManager optionality enabled values (for example, FRTB_Optionality = Yes).
+
+Action Taken:-
+
+Curvature optionality logic was implemented
+In fact_frtbsa_sensitivity_measures_sbm_official.sql:36, filtering now uses dimension_typology_group for FRTB_Optionality.
+
+CURVATURE records are included only when option_desc = 'true' (case-insensitive), as shown at fact__frtbsa_sensitivity_measures_sbm_official.sql:46.
+DELTA/VEGA continue using existing is_below_the_line_typology = false behavior.
+
+Tested the fix using the following query, it looks fine.
+
+
+SELECT
+CASE
+WHEN EXISTS (
+SELECT 1
+FROM dimension.typology_group tg
+WHERE tg.typology_group = 'FRTB_Optionality'
+AND UPPER(f.business_product_code4) = UPPER(tg.typology)
+AND f.evaluation_date BETWEEN tg.effective_start_date AND tg.effective_end_date
+AND (
+LOWER(TRIM(COALESCE(tg.option_code,''))) IN ('y','yes','true','1','t')
+OR LOWER(TRIM(COALESCE(tg.option_desc,''))) IN ('y','yes','true','1','t')
+)
+) THEN 'TRUE'
+ELSE 'FALSE_OR_MISSING'
+END AS optionality_flag,
+COUNT(*) AS row_count
+FROM fact.frtbsa_sensitivity_measures_sbm_official f
+WHERE UPPER(f.sensitivity_type) = 'CURVATURE'
+GROUP BY 1;
+

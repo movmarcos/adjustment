@@ -1,0 +1,10 @@
+STRESS:
+Cob	EntityCode	BookCode	SimulationName	InstrumentCode	ProductCategoryAttributes	AdjustmentValueBasePvInUSD	AdjustmentValueSimulationPvInUSD	AdjustmentValueSimulationPlInUSD	Currency	AdjustmentCategory	AdjustmentDetail	AdjustmentFrequency	CounterpartyCode	ScaleFactor	SourceCOBID	TradeCode	TradeTypology	MurexGroup	MurexFamily	GuaranteedEntity	SourceSystemCode
+20260817	MUSEU	Book-FCT	MRM_2008_Financial_Crisis_ALL					6,383.36	USD	IT-Other	(Nicolas Malatier); Adjust CTN; [Adjustment on 8 historical scnerios]	Recurring	N/A								
+
+Sensitivity:
+COBID	EntityCode	BookCode	TenorCode	UnderlyingTenorCode	CurrencyCode	CurveCode	InstrumentCode	MeasureTypeCode	ProductCategoryAttributes	SourceSystemCode	AdjustmentValueInUSD	AdjustmentCategory	AdjustmentDetail	AdjustmentFrequency	CounterpartyCode	ScaleFactor	SourceCOBID	TradeCode	TradeTypology	MurexGroup	MurexFamily	GuaranteedEntity
+20260812	MUSI	Book-A8						CashAdjustment	N/A | N/A | N/A | N/A | N/A | N/A | N/A | N	MS		IT-Other	(Abdullah Alam);Roll books;FX exposure; roll from original value; [Add back FX exposure]	Recurring		1.00 	20260812					
+
+
+FRTB:
