@@ -445,13 +445,20 @@ AS
 WITH status_milestones AS (
     SELECT
         sh.ADJ_ID::VARCHAR AS ADJ_ID,
+        -- MIN_BY pairs the actor with the SAME row as the MIN timestamp; a
+        -- bare MIN(CHANGED_BY) picked the alphabetically smallest user when a
+        -- status was entered twice — naming the wrong person on a 4-eyes view.
         MIN(CASE WHEN sh.NEW_STATUS = 'Pending Approval' THEN sh.CHANGED_AT END) AS APPROVAL_REQUESTED_AT,
-        MIN(CASE WHEN sh.NEW_STATUS = 'Pending Approval' THEN sh.CHANGED_BY END) AS APPROVAL_REQUESTED_BY,
+        MIN_BY(CASE WHEN sh.NEW_STATUS = 'Pending Approval' THEN sh.CHANGED_BY END,
+               CASE WHEN sh.NEW_STATUS = 'Pending Approval' THEN sh.CHANGED_AT END) AS APPROVAL_REQUESTED_BY,
         MIN(CASE WHEN sh.NEW_STATUS = 'Approved'         THEN sh.CHANGED_AT END) AS APPROVED_AT,
-        MIN(CASE WHEN sh.NEW_STATUS = 'Approved'         THEN sh.CHANGED_BY END) AS APPROVED_BY,
+        MIN_BY(CASE WHEN sh.NEW_STATUS = 'Approved'      THEN sh.CHANGED_BY END,
+               CASE WHEN sh.NEW_STATUS = 'Approved'      THEN sh.CHANGED_AT END) AS APPROVED_BY,
         MIN(CASE WHEN sh.NEW_STATUS LIKE 'Rejected%'     THEN sh.CHANGED_AT END) AS REJECTED_AT,
-        MIN(CASE WHEN sh.NEW_STATUS LIKE 'Rejected%'     THEN sh.CHANGED_BY END) AS REJECTED_BY,
-        MIN(CASE WHEN sh.NEW_STATUS LIKE 'Rejected%'     THEN sh.NEW_STATUS  END) AS REJECTED_STATUS
+        MIN_BY(CASE WHEN sh.NEW_STATUS LIKE 'Rejected%'  THEN sh.CHANGED_BY END,
+               CASE WHEN sh.NEW_STATUS LIKE 'Rejected%'  THEN sh.CHANGED_AT END) AS REJECTED_BY,
+        MIN_BY(CASE WHEN sh.NEW_STATUS LIKE 'Rejected%'  THEN sh.NEW_STATUS  END,
+               CASE WHEN sh.NEW_STATUS LIKE 'Rejected%'  THEN sh.CHANGED_AT END) AS REJECTED_STATUS
     FROM ADJUSTMENT_APP.ADJ_STATUS_HISTORY sh
     GROUP BY sh.ADJ_ID::VARCHAR
 )

@@ -129,21 +129,19 @@ def main(session):
 
         # Rows this sync will create or flip (same predicate as the MERGE) —
         # captured first so the history insert records exactly what changed.
+        # LEFT JOIN, not a correlated scalar subquery: Snowflake rejects
+        # correlated subqueries in select-list expressions ("Unsupported
+        # subquery type cannot be evaluated"). (COBID, PROCESS_TYPE,
+        # ENTITY_CODE) is the table's key, so the join cannot fan out.
         to_change = session.sql(f"""
-            SELECT s.COBID, s.ENTITY_CODE,
-                   (SELECT a.SIGN_OFF_STATUS
-                    FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS a
-                    WHERE a.COBID = s.COBID
-                      AND UPPER(a.PROCESS_TYPE) = '{scope.upper()}'
-                      AND UPPER(a.ENTITY_CODE) = s.ENTITY_CODE) AS OLD_STATUS
+            SELECT s.COBID, s.ENTITY_CODE, a.SIGN_OFF_STATUS AS OLD_STATUS
             FROM ({src_sql}) s
-            WHERE NOT EXISTS (
-                SELECT 1 FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS a
-                WHERE a.COBID = s.COBID
-                  AND UPPER(a.PROCESS_TYPE) = '{scope.upper()}'
-                  AND UPPER(a.ENTITY_CODE) = s.ENTITY_CODE
-                  AND UPPER(a.SIGN_OFF_STATUS) <> 'OPEN'
-            )
+            LEFT JOIN ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS a
+              ON a.COBID = s.COBID
+             AND UPPER(a.PROCESS_TYPE) = '{scope.upper()}'
+             AND UPPER(a.ENTITY_CODE) = s.ENTITY_CODE
+            WHERE a.COBID IS NULL
+               OR UPPER(a.SIGN_OFF_STATUS) = 'OPEN'
         """).collect()
 
         if not to_change:
@@ -172,7 +170,7 @@ def main(session):
 
         hist_values = ", ".join(
             f"({int(r['COBID'])}, '{scope}', "
-            f"'{str(r['ENTITY_CODE']).replace(chr(39), chr(39) * 2)}', "
+            f"'{str(r['ENTITY_CODE']).replace(chr(92), chr(92) * 2).replace(chr(39), chr(39) * 2)}', "
             + ("NULL" if r["OLD_STATUS"] is None else "'" + str(r["OLD_STATUS"]) + "'")
             + ", 'SIGNED_OFF', 'EXTERNAL FEED', "
               "'Signed off by the upstream publish system (synced)')"

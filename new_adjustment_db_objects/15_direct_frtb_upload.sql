@@ -33,6 +33,7 @@ ALTER TABLE ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 1. DIRECT_SCOPE_SCHEMA — FRTB (SBM)
 -- ═══════════════════════════════════════════════════════════════════════════
+BEGIN TRANSACTION;
 DELETE FROM ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA WHERE PROCESS_TYPE = 'FRTB';
 INSERT INTO ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
     (PROCESS_TYPE, EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS,
@@ -114,10 +115,12 @@ SELECT
     ]'),
     PARSE_JSON('{"EVALUATION_DATE":"COBID","VERTEX_UNDERLYING":"UNDERLYING_TENOR_CODE",
                  "TRADE_ID":"TRADE_CODE","BUSINESS_ORGANIZATION_CODE":"BOOK_CODE"}');
+COMMIT;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 2. DIRECT_SCOPE_SCHEMA — FRTBDRC
 -- ═══════════════════════════════════════════════════════════════════════════
+BEGIN TRANSACTION;
 DELETE FROM ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA WHERE PROCESS_TYPE = 'FRTBDRC';
 INSERT INTO ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
     (PROCESS_TYPE, EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS,
@@ -197,10 +200,12 @@ SELECT
     ]'),
     PARSE_JSON('{"EVALUATION_DATE":"COBID","TRADE_ID":"TRADE_CODE",
                  "BUSINESS_ORGANIZATION_CODE":"BOOK_CODE"}');
+COMMIT;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 3. DIRECT_SCOPE_SCHEMA — FRTBRRAO
 -- ═══════════════════════════════════════════════════════════════════════════
+BEGIN TRANSACTION;
 DELETE FROM ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA WHERE PROCESS_TYPE = 'FRTBRRAO';
 INSERT INTO ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
     (PROCESS_TYPE, EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS,
@@ -253,6 +258,7 @@ SELECT
     PARSE_JSON('[]'),
     PARSE_JSON('{"EVALUATION_DATE":"COBID","TRADE_ID":"TRADE_CODE",
                  "BUSINESS_ORGANIZATION_CODE":"BOOK_CODE"}');
+COMMIT;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 4. VW_DIRECT_FRTB_ENRICHED — SBM line items → FRTBSA_SENSITIVITY shape
@@ -437,7 +443,13 @@ LEFT JOIN DIMENSION.COMMON_INSTRUMENT_FCD fci2
 LEFT JOIN DIMENSION.FRTB_INSTRUMENT fi
   ON COALESCE(NULLIF(enriched.SECURITY_CODE, ''), 'NA') = fi.FRTB_INSTRUMENT_CODE
  AND COALESCE(NULLIF(enriched.ISSUER_CODE, ''), 'NA') = fi.FRTB_ISSUER_CODE
- AND enriched.EVAL_DATE BETWEEN fi.EFFECTIVE_START_DATE AND fi.EFFECTIVE_END_DATE;
+ AND enriched.EVAL_DATE BETWEEN fi.EFFECTIVE_START_DATE AND fi.EFFECTIVE_END_DATE
+QUALIFY ROW_NUMBER() OVER (
+    -- One output row per line item: dimension joins (TRADE by code+entity,
+    -- instruments by code) can fan out when a code maps to multiple rows
+    -- in the effective window; keep the best-resolved candidate.
+    PARTITION BY ADJ_ID, ROW_NUM
+    ORDER BY td.TRADE_KEY DESC NULLS LAST, ci.COMMON_INSTRUMENT_KEY DESC NULLS LAST) = 1;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 5. VW_DIRECT_FRTBDRC_ENRICHED — DRC line items → FRTBSA_DRC shape
@@ -453,7 +465,7 @@ WITH base AS (
         TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"JTD_LOSS_ORIGINAL"), 38, 10)     AS JTD_LOSS_ORIGINAL,
         TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"JTD_LOSS_USD"), 38, 10)          AS JTD_LOSS_USD,
         TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"JTD_LOSS_USD_ORIGINAL"), 38, 10) AS JTD_LOSS_USD_ORIGINAL,
-        TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"NOTIONAL_AMOUNT"))               AS NOTIONAL_AMOUNT,
+        TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"NOTIONAL_AMOUNT"), 38, 10)      AS NOTIONAL_AMOUNT,
         TRY_TO_DATE(TO_VARCHAR(j.PAYLOAD:"MATURITY_DATE"))                   AS MATURITY_DATE,
         TO_VARCHAR(j.PAYLOAD:"ATTACHMENT")   AS ATTACHMENT,
         TO_VARCHAR(j.PAYLOAD:"BOOK_CODE")    AS BOOK_CODE,
@@ -543,16 +555,19 @@ SELECT
     COALESCE(NULLIF(td.MUREX_INSTRUMENT, ''), 'N/A') AS MUREX_INSTRUMENT,
     td.MUREX_VERSION AS MUREX_VERSION,
     5 AS RAPTOR_LOGIC_TEMPLATE_KEY,
-    CASE WHEN UPPER(COALESCE(enriched.REGION, '')) IN ('MUSI', 'MUSEU')
+    -- Keyed by ENTITY_CODE (required field), matching the SBM view. The
+    -- team's original DRC view compared the optional REGION field against
+    -- entity codes — every MUSI row fell through to NEW YORK/NULL bucket.
+    CASE WHEN UPPER(COALESCE(enriched.ENTITY_CODE, '')) IN ('MUSI', 'MUSEU')
          THEN 'LONDON' ELSE 'NEW YORK' END AS REGION_DATA_SET_CODE,
-    CASE WHEN UPPER(COALESCE(enriched.REGION, '')) = 'MUSI'   THEN enriched.PRA_BUCKET
-         WHEN UPPER(COALESCE(enriched.REGION, '')) = 'MUSEU'  THEN enriched.EBA_BUCKET
-         WHEN UPPER(COALESCE(enriched.REGION, '')) = 'MUSUSA' THEN enriched.FED_BUCKET
-         WHEN UPPER(COALESCE(enriched.REGION, '')) = 'MUSCAN' THEN enriched.BUCKET
+    CASE WHEN UPPER(COALESCE(enriched.ENTITY_CODE, '')) = 'MUSI'   THEN enriched.PRA_BUCKET
+         WHEN UPPER(COALESCE(enriched.ENTITY_CODE, '')) = 'MUSEU'  THEN enriched.EBA_BUCKET
+         WHEN UPPER(COALESCE(enriched.ENTITY_CODE, '')) = 'MUSUSA' THEN enriched.FED_BUCKET
+         WHEN UPPER(COALESCE(enriched.ENTITY_CODE, '')) = 'MUSCAN' THEN enriched.BUCKET
          ELSE NULL END AS REGULATOR_BUCKET,
-    CASE WHEN UPPER(COALESCE(enriched.REGION, '')) = 'MUSI'   THEN enriched.PRA_BUCKET_NAME
-         WHEN UPPER(COALESCE(enriched.REGION, '')) = 'MUSEU'  THEN enriched.EBA_BUCKET_NAME
-         WHEN UPPER(COALESCE(enriched.REGION, '')) = 'MUSUSA' THEN enriched.FED_BUCKET_NAME
+    CASE WHEN UPPER(COALESCE(enriched.ENTITY_CODE, '')) = 'MUSI'   THEN enriched.PRA_BUCKET_NAME
+         WHEN UPPER(COALESCE(enriched.ENTITY_CODE, '')) = 'MUSEU'  THEN enriched.EBA_BUCKET_NAME
+         WHEN UPPER(COALESCE(enriched.ENTITY_CODE, '')) = 'MUSUSA' THEN enriched.FED_BUCKET_NAME
          ELSE NULL END AS REGULATOR_BUCKET_NAME,
     REPLACE(enriched.SECURITY_CODE, '.', '') AS SABRE_SECURITY_CODE,
     enriched.SECURITY_CODE_TYPE AS SABRE_SECURITY_CODE_TYPE,
@@ -599,7 +614,13 @@ LEFT JOIN DIMENSION.FRTB_INSTRUMENT fi
   ON COALESCE(NULLIF(enriched.SECURITY_CODE, ''), NULLIF(enriched.INSTRUMENT_NAME, ''), 'NA')
        = fi.FRTB_INSTRUMENT_CODE
  AND COALESCE(NULLIF(enriched.ISSUER_CODE, ''), 'NA') = fi.FRTB_ISSUER_CODE
- AND enriched.EVAL_DATE BETWEEN fi.EFFECTIVE_START_DATE AND fi.EFFECTIVE_END_DATE;
+ AND enriched.EVAL_DATE BETWEEN fi.EFFECTIVE_START_DATE AND fi.EFFECTIVE_END_DATE
+QUALIFY ROW_NUMBER() OVER (
+    -- One output row per line item: dimension joins (TRADE by code+entity,
+    -- instruments by code) can fan out when a code maps to multiple rows
+    -- in the effective window; keep the best-resolved candidate.
+    PARTITION BY ADJ_ID, ROW_NUM
+    ORDER BY td.TRADE_KEY DESC NULLS LAST, ci.COMMON_INSTRUMENT_KEY DESC NULLS LAST) = 1;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 6. VW_DIRECT_FRTBRRAO_ENRICHED — RRAO line items → FRTBSA_RRAO shape
@@ -611,8 +632,8 @@ WITH base AS (
         h.DIMENSION_ADJ_ID AS ADJUSTMENT_ID,
         h.COBID, h.RUN_LOG_ID, h.FILE_NAME,
         TO_DATE(h.COBID::VARCHAR, 'YYYYMMDD') AS EVAL_DATE,
-        TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"NOTIONAL_AMOUNT"))     AS NOTIONAL_AMOUNT,
-        TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"NOTIONAL_AMOUNT_USD")) AS NOTIONAL_AMOUNT_USD,
+        TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"NOTIONAL_AMOUNT"), 38, 10)     AS NOTIONAL_AMOUNT,
+        TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"NOTIONAL_AMOUNT_USD"), 38, 10) AS NOTIONAL_AMOUNT_USD,
         TO_VARCHAR(j.PAYLOAD:"BOOK_CODE")   AS BOOK_CODE,
         TO_VARCHAR(j.PAYLOAD:"BT_TYPE")     AS BT_TYPE,
         TO_VARCHAR(j.PAYLOAD:"BUSINESS_PRODUCT_CODE1") AS BUSINESS_PRODUCT_CODE1,
@@ -700,7 +721,13 @@ LEFT JOIN DIMENSION.COMMON_INSTRUMENT ci
  AND enriched.EVAL_DATE BETWEEN ci.EFFECTIVE_START_DATE AND ci.EFFECTIVE_END_DATE
 LEFT JOIN DIMENSION.COMMON_INSTRUMENT_FCD fci
   ON enriched.INSTRUMENT_CODE = fci.INSTRUMENT_CODE
- AND fci.IS_CURRENT_ROW = TRUE;
+ AND fci.IS_CURRENT_ROW = TRUE
+QUALIFY ROW_NUMBER() OVER (
+    -- One output row per line item: dimension joins (TRADE by code+entity,
+    -- instruments by code) can fan out when a code maps to multiple rows
+    -- in the effective window; keep the best-resolved candidate.
+    PARTITION BY ADJ_ID, ROW_NUM
+    ORDER BY td.TRADE_KEY DESC NULLS LAST, ci.COMMON_INSTRUMENT_KEY DESC NULLS LAST) = 1;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- VERIFY

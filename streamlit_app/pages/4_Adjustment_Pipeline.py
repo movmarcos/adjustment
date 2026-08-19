@@ -589,7 +589,8 @@ for _, row in df_track.iterrows():
                 WHERE ADJ_ID = '{adj_id}'
                 ORDER BY CHANGED_AT DESC
             """)
-            history_dicts = [dict(h) for h in history] if history else []
+            history_dicts = ([h.as_dict() if hasattr(h, "as_dict") else dict(h)
+                              for h in history] if history else [])
             render_status_timeline(history_dicts)
         except Exception:
             st.info("No history available.")

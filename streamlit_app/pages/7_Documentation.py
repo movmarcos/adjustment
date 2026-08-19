@@ -189,14 +189,20 @@ with tab_overview:
          "Browse everything, view history, and act: Retry failed, Delete, "
          "Submit for approval, Recall."],
         ["<strong>Approval Queue</strong>",
-         "Approvers approve/reject adjustments and COB re-open requests "
-         "(4-eyes: never your own)."],
+         "Approvers approve/reject adjustments and COB sign-off / re-open "
+         "requests (4-eyes: never your own)."],
         ["<strong>Adjustment Pipeline</strong>",
          "Live processing view: what needs attention, what is in flight, "
          "per-adjustment deep dive, force-process."],
+        ["<strong>Sign-Off</strong>",
+         "COB sign-off status for everyone; request a sign-off or re-open "
+         "(both approval-gated); sync from the upstream feed."],
         ["<strong>Admin</strong>",
-         "Restricted: scope config, sign-off override, approvers, page "
-         "administrators."],
+         "Restricted: scope config, approvers, page administrators, "
+         "notifications, reference."],
+        ["<strong>COB Cockpit</strong>",
+         "The close-of-business run sheet: per-scope status, sign-off "
+         "lifecycle and report freshness for one COB."],
         ["<strong>Logs</strong>", "Processing runs, activity feed, and errors."],
     ]))
 

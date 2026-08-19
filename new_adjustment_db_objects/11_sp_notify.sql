@@ -48,7 +48,7 @@ SUBJECT_PREFIX = "[Adjustment App] "
 
 
 def _esc(v):
-    return str(v).replace("'", "''") if v is not None else ""
+    return str(v).replace("\\", "\\\\").replace("'", "''") if v is not None else ""
 
 
 def _h(v):

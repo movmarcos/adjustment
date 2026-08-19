@@ -22,7 +22,7 @@ from utils.snowflake_conn import run_query, run_query_df, current_user_name, saf
 
 def _esc(val):
     """Escape single quotes for safe SQL interpolation."""
-    return str(val).replace("'", "''") if val is not None else ""
+    return str(val).replace("\\", "\\\\").replace("'", "''") if val is not None else ""
 
 
 inject_css()

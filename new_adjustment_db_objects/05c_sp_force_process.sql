@@ -40,7 +40,7 @@ STALE_RUNNING_MINUTES = 240
 
 
 def main(session, p_adj_id):
-    adj_id = str(p_adj_id).replace("'", "''")
+    adj_id = str(p_adj_id).replace("\\", "\\\\").replace("'", "''")
 
     rows = session.sql(f"""
         SELECT PROCESS_TYPE, ADJUSTMENT_ACTION, COBID, RUN_STATUS, IS_DELETED,
@@ -75,7 +75,7 @@ def main(session, p_adj_id):
     # pipeline, which also releases this row's block.)
     blocker_id = r["BLOCKED_BY_ADJ_ID"]
     if blocker_id:
-        esc_blocker = str(blocker_id).replace("'", "''")
+        esc_blocker = str(blocker_id).replace("\\", "\\\\").replace("'", "''")
         blocker_live = session.sql(f"""
             SELECT 1 FROM ADJUSTMENT_APP.ADJ_HEADER
             WHERE ADJ_ID = '{esc_blocker}'
@@ -140,7 +140,7 @@ def main(session, p_adj_id):
         """).collect()
         detail = proc[0][0] if proc else None
     except Exception as e:
-        err = str(e)[:990].replace("'", "''")
+        err = str(e)[:990].replace("\\", "\\\\").replace("'", "''")
         session.sql(f"""
             UPDATE ADJUSTMENT_APP.ADJ_HEADER
             SET RUN_STATUS = 'Failed', ERRORMESSAGE = '{err}'

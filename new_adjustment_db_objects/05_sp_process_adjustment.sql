@@ -106,7 +106,7 @@ def build_direct_extract_sql(cfg, adj_ids_str):
             sel = [f"j.ADJ_ID AS ADJ_ID"]
             for pf, tc, ty in carried:
                 sel.append(f"{_payload_expr(pf, ty)} AS {tc}")
-            mv = str(measure_value).replace("'", "''")
+            mv = str(measure_value).replace("\\", "\\\\").replace("'", "''")
             sel.append(f"'{mv}' AS {name_field}")
             sel.append(f"{_payload_expr(csv_col, 'number')} AS METRIC_VALUE")
             # METRIC_VALUE = TRY_TO_NUMBER(payload:col); rows where it is 0 or NULL
@@ -306,7 +306,7 @@ def trigger_powerbi_refresh(session, process_type, run_log_id, adj_ids_str=None)
             try:
                 warn = ("Processed, but queueing the PowerBI report refresh "
                         "failed — reports may show stale data until the next "
-                        "refresh. Detail: " + err_txt)[:990].replace("'", "''")
+                        "refresh. Detail: " + err_txt)[:990].replace("\\", "\\\\").replace("'", "''")
                 session.sql(f"""
                     UPDATE ADJUSTMENT_APP.ADJ_HEADER
                     SET ERRORMESSAGE = '{warn}'
@@ -350,7 +350,7 @@ def trigger_dbt_handoff(session, process_type, cobid, adj_ids_str=None):
                 warn = ("Processed, but writing the dbt refresh trigger failed "
                         "— Control-M will not start the report rebuild, so "
                         "reports may show stale data. Detail: "
-                        + err_txt)[:990].replace("'", "''")
+                        + err_txt)[:990].replace("\\", "\\\\").replace("'", "''")
                 session.sql(f"""
                     UPDATE ADJUSTMENT_APP.ADJ_HEADER
                     SET ERRORMESSAGE = '{warn}'
@@ -384,7 +384,7 @@ def notify_outcome(session, adj_ids, status):
         return
     try:
         payload = json.dumps({"adj_ids": [str(a) for a in adj_ids],
-                              "status": status}).replace("'", "''")
+                              "status": status}).replace("\\", "\\\\").replace("'", "''")
         session.sql(
             f"CALL ADJUSTMENT_APP.SP_NOTIFY('adjustment_outcome', '{payload}')"
         ).collect()
@@ -482,7 +482,7 @@ def surrogate_key(list_key, key_name):
 
 def _erl_s(v):
     """SQL string literal (quote-escaped) or NULL."""
-    return "NULL" if v is None else "'" + str(v).replace("'", "''") + "'"
+    return "NULL" if v is None else "'" + str(v).replace("\\", "\\\\").replace("'", "''") + "'"
 
 
 def _erl_n(v):
@@ -678,7 +678,10 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             (col('COBID') == cobid) &
             (upper(col('PROCESS_TYPE')) == process_type.upper()) &
             (upper(col('ADJUSTMENT_ACTION')) == adjustment_action.upper()) &
-            (col('RUN_STATUS') == 'Running')
+            (col('RUN_STATUS') == 'Running') &
+            # Belt-and-braces vs the replacement race: a header soft-deleted
+            # after being claimed must never be processed.
+            (col('IS_DELETED') == False)
         )
         if claim_token:
             df_adj = df_adj.filter(col('CLAIM_TOKEN') == claim_token)
@@ -1677,9 +1680,13 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             # (e.g. VaR Scale for two COBs, dispatched in parallel by
             # SP_RUN_PIPELINE) overwrote each other's staging table between
             # build and insert — silently mixing batches.
+            # TRANSIENT, not TEMPORARY: SP_FORCE_PROCESS_ADJUSTMENT runs this
+            # in the app's owner's-rights SiS session, where CREATE TEMPORARY
+            # TABLE raises "Unsupported statement type". Name is unique per
+            # run; dropped after the insert and again in the failure handler.
             _scale_temp = f"{fact_adj_tbl_name}_TEMP_{int(run_log_id)}"
             insert_sql = f"""
-            CREATE OR REPLACE TEMPORARY TABLE {_scale_temp}
+            CREATE OR REPLACE TRANSIENT TABLE {_scale_temp}
             (
                 COBID, ADJUSTMENT_ID, ADJUSTMENT_CREATED_TIMESTAMP,
                 {insert_non_metric}, {metric_col_list},
@@ -2081,7 +2088,7 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                     f"EntityRoll for {process_type} requires FACT_ADJUSTED_TABLE to be "
                     f"configured in ADJUSTMENTS_SETTINGS (distinct from FACT_TABLE).")
 
-            esc_entity = str(entity_code).replace("'", "''")
+            esc_entity = str(entity_code).replace("\\", "\\\\").replace("'", "''")
             view_cols  = set(session.table(fact_adjusted_tbl_name).columns)
 
             # Resolve the entity's surrogate key(s) ONCE → a literal IN list, so
@@ -2213,7 +2220,7 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             # counts must be restricted to THIS roll's process type — otherwise a
             # VaR roll would also flag the entity's Stress/FRTB adjustments, whose
             # rows live in other fact tables and are not being wiped.
-            esc_pt = str(process_type).replace("'", "''")
+            esc_pt = str(process_type).replace("\\", "\\\\").replace("'", "''")
             er_pt_pred = f"UPPER(PROCESS_TYPE) = UPPER('{esc_pt}')"
 
             # The flatten leg cancels the entity's BASE at the target. A roll is
@@ -2278,7 +2285,7 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             _roll_stage = f"EROL_ROLL_STAGE_{int(run_log_id)}"
             _flat_stage = f"EROL_FLAT_STAGE_{int(run_log_id)}"
             _erlog(session, _erctx, "stage_roll (combined view @ source)",
-                   f"CREATE OR REPLACE TEMPORARY TABLE {_roll_stage} AS {er_roll_select}")
+                   f"CREATE OR REPLACE TRANSIENT TABLE {_roll_stage} AS {er_roll_select}")
             er_roll_insert = (f"INSERT INTO {fact_adj_tbl_name} ({ins_cols}) "
                               f"SELECT * FROM {_roll_stage}")
 
@@ -2305,7 +2312,7 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                     # Fallback: flatten reads the combined/adjusted view, so it must
                     # be staged outside the transaction to prune (same as the roll).
                     _erlog(session, _erctx, "stage_flatten (adjusted view @ target)",
-                           f"CREATE OR REPLACE TEMPORARY TABLE {_flat_stage} AS {er_flat_select}")
+                           f"CREATE OR REPLACE TRANSIENT TABLE {_flat_stage} AS {er_flat_select}")
                     er_flatten_insert = (f"INSERT INTO {fact_adj_tbl_name} ({ins_cols}) "
                                          f"SELECT * FROM {_flat_stage}")
 
@@ -2471,9 +2478,17 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             result["message"] = f"Invalid adjustment_action: {adjustment_action}"
 
     except Exception as e:
-        error_msg = str(e).replace("'", "''")
+        error_msg = str(e)[:900].replace("\\", "\\\\").replace("'", "''")
         print(f"Error: {error_msg}")
         result["message"] = f"Error: {error_msg}"
+
+        # Best-effort cleanup of the Scale path's transient staging table
+        # (EROL's stages have their own finally-drop).
+        if '_scale_temp' in dir():
+            try:
+                session.sql(f"DROP TABLE IF EXISTS {_scale_temp}").collect()
+            except Exception:
+                pass
 
         # On failure, flip the still-RUNNING step to FAILED so the log pinpoints
         # where the run stopped (its RUNNING row was already committed live).
@@ -2512,9 +2527,11 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
         # Close run log with failure status (do NOT trigger PowerBI refresh)
         try:
             if 'run_log_id' in dir() and run_log_id:
+                import json as _j
+                json_err = _j.dumps(str(e)[:200])[1:-1].replace("\\", "\\\\").replace("'", "''")
                 session.sql(f"""
                     CALL BATCH.LOAD_RUN_LOG_END_WITH_DETAIL(
-                        {run_log_id}, '{{"status":"Failed","error":"{error_msg[:200]}"}}'
+                        {run_log_id}, '{{"status":"Failed","error":"{json_err}"}}'
                     )
                 """).collect()
         except Exception:

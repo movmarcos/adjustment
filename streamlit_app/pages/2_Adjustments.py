@@ -164,13 +164,13 @@ try:
         in_list = ",".join(str(int(c)) for c in filter_cob)
         where_clauses.append(f"COBID IN ({in_list})")
     if filter_entity:
-        in_list = ",".join("'" + str(e).replace("'", "''") + "'" for e in filter_entity)
+        in_list = ",".join("'" + str(e).replace("\\", "\\\\").replace("'", "''") + "'" for e in filter_entity)
         where_clauses.append(f"ENTITY_CODE IN ({in_list})")
     if filter_dept:
-        in_list = ",".join("'" + str(d).replace("'", "''") + "'" for d in filter_dept)
+        in_list = ",".join("'" + str(d).replace("\\", "\\\\").replace("'", "''") + "'" for d in filter_dept)
         where_clauses.append(f"DEPARTMENT_CODE IN ({in_list})")
     if filter_user:
-        in_list = ",".join("'" + str(u).replace("'", "''") + "'" for u in filter_user)
+        in_list = ",".join("'" + str(u).replace("\\", "\\\\").replace("'", "''") + "'" for u in filter_user)
         where_clauses.append(f"SUBMITTED_BY IN ({in_list})")
 
     where_sql = " AND ".join(where_clauses)
@@ -248,7 +248,7 @@ def _do_clone(src_adj_id, new_cob) -> None:
     all apply normally."""
     import json as _json
     import uuid as _uuid
-    _sid = str(src_adj_id).replace("'", "''")
+    _sid = str(src_adj_id).replace("\\", "\\\\").replace("'", "''")
     copied_line_items_for = None
     try:
         src_rows = run_query(
@@ -417,7 +417,10 @@ def render_adj_card(row, expanded=False):
                 ("Records",      f"{record_cnt:,}" if record_cnt else "—"),
                 ("Created by",   str(row.get("SUBMITTED_BY", "—"))),
                 ("Created",      submitted_at),
-                ("Scale",        f'{row.get("SCALE_FACTOR", 1):.4f}×' if row.get("SCALE_FACTOR") and float(row.get("SCALE_FACTOR", 1)) != 1 else "—"),
+                ("Scale",        f'{row.get("SCALE_FACTOR", 1):.4f}×'
+                                 if pd.notna(row.get("SCALE_FACTOR"))
+                                 and row.get("SCALE_FACTOR")
+                                 and float(row.get("SCALE_FACTOR", 1)) != 1 else "—"),
                 ("Source COB",   str(row.get("SOURCE_COBID", "—")) if row.get("SOURCE_COBID") else "—"),
                 ("Started",      start_date),
                 ("Ended",        process_date),
@@ -491,7 +494,8 @@ def render_adj_card(row, expanded=False):
                 ORDER BY CHANGED_AT DESC
             """)
             # Convert Row objects to dicts
-            history_dicts = [dict(h) for h in history] if history else []
+            history_dicts = ([h.as_dict() if hasattr(h, "as_dict") else dict(h)
+                              for h in history] if history else [])
             render_status_timeline(history_dicts)
         except Exception:
             st.info("No history available.")
@@ -509,9 +513,9 @@ def render_adj_card(row, expanded=False):
         if _flash:
             (st.success if _flash[0] == "success" else st.warning)(_flash[1])
 
-        _aid = str(adj_id).replace("'", "''")
-        _st  = str(run_status).replace("'", "''")
-        _usr = str(user).replace("'", "''")
+        _aid = str(adj_id).replace("\\", "\\\\").replace("'", "''")
+        _st  = str(run_status).replace("\\", "\\\\").replace("'", "''")
+        _usr = str(user).replace("\\", "\\\\").replace("'", "''")
 
         _STALE_MSG = ("Nothing changed — this adjustment's status moved on since "
                       "the page loaded (another user or the pipeline acted on it). "
@@ -593,10 +597,12 @@ def render_adj_card(row, expanded=False):
                         WHERE ADJUSTMENT_ID = {dim_adj_id}
                     """)
                     if process_type:
+                        _pt_esc = (process_type.upper()
+                                   .replace("\\", "\\\\").replace("'", "''"))
                         settings = run_query(f"""
                             SELECT ADJUSTMENTS_TABLE, ADJUSTMENTS_SUMMARY_TABLE
                             FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
-                            WHERE UPPER(PROCESS_TYPE) = '{process_type.upper().replace("'", "''")}'
+                            WHERE UPPER(PROCESS_TYPE) = '{_pt_esc}'
                             LIMIT 1
                         """)
                         if settings:
@@ -795,7 +801,7 @@ if len(_failed_view) >= 2:
                 _ok, _skipped = 0, 0
                 for _, _fr in _failed_view.iterrows():
                     try:
-                        _fid = str(_fr.get("ADJ_ID")).replace("'", "''")
+                        _fid = str(_fr.get("ADJ_ID")).replace("\\", "\\\\").replace("'", "''")
                         rows = run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
                             SET RUN_STATUS = 'Pending',
@@ -810,7 +816,7 @@ if len(_failed_view) >= 2:
                                 INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
                                     (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
                                 VALUES ('{_fid}', 'Failed', 'Pending',
-                                        '{str(user).replace(chr(39), chr(39)*2)}',
+                                        '{str(user).replace(chr(92), chr(92)*2).replace(chr(39), chr(39)*2)}',
                                         'Bulk retry after failure')
                             """)
                             _ok += 1

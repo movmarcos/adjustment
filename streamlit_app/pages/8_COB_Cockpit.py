@@ -38,7 +38,7 @@ user = current_user_name()
 
 
 def _esc(v):
-    return str(v).replace("'", "''") if v is not None else ""
+    return str(v).replace("\\", "\\\\").replace("'", "''") if v is not None else ""
 
 
 def _pill(text, color) -> str:
@@ -150,7 +150,8 @@ _tot   = int(df_counts["N"].sum()) if not df_counts.empty else 0
 _out   = sum(_n(s, OUTSTANDING) for s in ALL_SCOPES)
 _fail  = sum(_n(s, ["Failed"]) for s in ALL_SCOPES)
 _appr  = sum(_n(s, ["Pending Approval"]) for s in ALL_SCOPES)
-_reo   = int((df_so["SIGN_OFF_STATUS"].str.upper() == "REOPEN_REQUESTED").sum()) \
+_reo   = int(df_so["SIGN_OFF_STATUS"].str.upper()
+             .isin(["REOPEN_REQUESTED", "SIGNOFF_REQUESTED"]).sum()) \
          if not df_so.empty else 0
 
 kcols = st.columns(5)
@@ -174,80 +175,46 @@ st.markdown("<br/>", unsafe_allow_html=True)
 
 # ── Sign-off actions (same rules as the New Adjustment page) ─────────────────
 
-def _request_reopen(scope, entity, reason):
-    usr = _esc(current_user_name())
-    ent = _esc(entity or "*")
-    run_query(f"""
-        MERGE INTO ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS t
-        USING (SELECT {int(cobid)} AS COBID) u
-        ON t.COBID = u.COBID AND UPPER(t.PROCESS_TYPE) = '{_esc(scope).upper()}'
-           AND UPPER(t.ENTITY_CODE) = UPPER('{ent}')
-        WHEN MATCHED AND UPPER(t.SIGN_OFF_STATUS) = 'SIGNED_OFF' THEN UPDATE SET
-            t.SIGN_OFF_STATUS     = 'REOPEN_REQUESTED',
-            t.REOPEN_REQUESTED_BY = '{usr}',
-            t.REOPEN_REQUESTED_AT = CURRENT_TIMESTAMP(),
-            t.REOPEN_REASON       = '{_esc(reason)[:490]}',
-            t.REOPEN_APPROVED_BY  = NULL,
-            t.REOPEN_APPROVED_AT  = NULL,
-            t.UPDATED_DATE        = CURRENT_TIMESTAMP()
-    """)
-    rows = run_query(f"""
-        SELECT SIGN_OFF_STATUS, REOPEN_REQUESTED_BY
-        FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-        WHERE COBID = {int(cobid)} AND UPPER(PROCESS_TYPE) = '{_esc(scope).upper()}'
-          AND UPPER(ENTITY_CODE) = UPPER('{ent}')
-    """)
-    if (rows and str(rows[0]["SIGN_OFF_STATUS"]).upper() == "REOPEN_REQUESTED"
-            and str(rows[0]["REOPEN_REQUESTED_BY"] or "") == current_user_name()):
-        run_query(f"""
-            INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
-                (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
-            VALUES ({int(cobid)}, '{_esc(scope)}', '{ent}', 'SIGNED_OFF', 'REOPEN_REQUESTED',
-                    '{usr}', 'Re-open requested (Cockpit): {_esc(reason)[:900]}')
-        """)
+def _signoff_request(scope, entity, action, reason):
+    """One path for both lifecycle changes: SP_REQUEST_SIGNOFF_CHANGE enforces
+    the guarded transition + history; the request goes to the Approval Queue.
+    The Cockpit used to UPDATE the table directly for re-sign-off, silently
+    bypassing the 4-eyes gate the other pages enforce."""
+    res = run_query(
+        f"CALL ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE("
+        f"{int(cobid)}, '{_esc(scope)}', '{_esc(entity or '*')}', "
+        f"'{action}', '{_esc(str(reason or '')[:490])}', TRUE, "
+        f"'{_esc(current_user_name())}')")
+    try:
+        out = json.loads(str(res[0][0])) if res else {}
+    except (ValueError, TypeError, IndexError):
+        out = {}
+    if out.get("status") != "ok":
+        return False, out.get("message",
+                              "The request was not accepted — refresh and retry.")
+    verb = "Sign-off" if action == "SIGNOFF" else "Re-open"
+    if action == "REOPEN":
         try:
             _np = json.dumps({"process_type": scope, "cobid": int(cobid),
                               "requested_by": current_user_name(),
                               "reason": (f"[entity {entity or '*'}] "
-                                         + str(reason)[:280])}).replace("'", "''")
+                                         + str(reason)[:280])}).replace("\\", "\\\\").replace("'", "''")
             run_query(f"CALL ADJUSTMENT_APP.SP_NOTIFY('reopen_requested', '{_np}')")
         except Exception:
             pass
-        _etx = "all entities" if (entity or "*") == "*" else entity
-        return True, (f"Re-open request for COB {cobid} / {scope} ({_etx}) "
-                      f"submitted — approvers decide it on the Approval Queue page.")
-    return False, "The sign-off state changed before the request could be recorded."
+    _etx = "all entities" if (entity or "*") == "*" else entity
+    return True, (f"{verb} request for COB {cobid} / {scope} ({_etx}) "
+                  f"submitted — an approver decides it on the Approval Queue "
+                  f"page. Submissions stay blocked while it is pending.")
+
+
+def _request_reopen(scope, entity, reason):
+    return _signoff_request(scope, entity, "REOPEN", reason)
 
 
 def _resign_off(scope, entity):
-    usr = _esc(current_user_name())
-    ent = _esc(entity or "*")
-    rows = run_query(f"""
-        UPDATE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-        SET SIGN_OFF_STATUS = 'SIGNED_OFF', SIGN_OFF_BY = '{usr}',
-            SIGN_OFF_TIMESTAMP = CURRENT_TIMESTAMP(), SIGNOFF_SOURCE = 'APP',
-            UPDATED_DATE = CURRENT_TIMESTAMP()
-        WHERE COBID = {int(cobid)}
-          AND UPPER(PROCESS_TYPE) = '{_esc(scope).upper()}'
-          AND UPPER(ENTITY_CODE) = UPPER('{ent}')
-          AND UPPER(SIGN_OFF_STATUS) = 'REOPENED'
-    """)
-    try:
-        n = int(rows[0][0]) if rows else 0
-    except (TypeError, ValueError, IndexError):
-        n = 0
-    if n == 0:
-        return False, ("Nothing changed — this entity is no longer in a "
-                       "re-opened state.")
-    run_query(f"""
-        INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
-            (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
-        VALUES ({int(cobid)}, '{_esc(scope)}', '{ent}', 'REOPENED', 'SIGNED_OFF',
-                '{usr}', 'Signed off from the Cockpit after re-open cycle')
-    """)
-    _etx = "all entities" if (entity or "*") == "*" else entity
-    return True, (f"COB {cobid} / {scope} ({_etx}) signed off — new "
-                  f"adjustments are blocked again.")
+    return _signoff_request(scope, entity, "SIGNOFF",
+                            "Sign-off after re-open cycle (Cockpit)")
 
 
 # ── Per-scope run sheet ──────────────────────────────────────────────────────
@@ -274,7 +241,7 @@ for scope in ALL_SCOPES:
                 if str(r.get("ENTITY_CODE") or "*") == "*"), None)
     _blocked_so = [r for r in so_rows
                    if str(r.get("SIGN_OFF_STATUS", "")).upper()
-                   in ("SIGNED_OFF", "REOPEN_REQUESTED")]
+                   in ("SIGNED_OFF", "REOPEN_REQUESTED", "SIGNOFF_REQUESTED")]
 
     # Verdict chip
     outstanding = queued + awaiting + running
@@ -292,9 +259,10 @@ for scope in ALL_SCOPES:
         so_pill = _pill("OPEN", P["success"])
     elif len(so_rows) == 1 and _wc is not None:
         so_pill = {
-            "SIGNED_OFF":       _pill("SIGNED OFF", P["danger"]),
-            "REOPEN_REQUESTED": _pill("RE-OPEN REQUESTED", "#B45309"),
-            "REOPENED":         _pill("RE-OPENED", P["info"]),
+            "SIGNED_OFF":        _pill("SIGNED OFF", P["danger"]),
+            "REOPEN_REQUESTED":  _pill("RE-OPEN REQUESTED", "#B45309"),
+            "SIGNOFF_REQUESTED": _pill("SIGN-OFF REQUESTED", "#B45309"),
+            "REOPENED":          _pill("RE-OPENED", P["info"]),
         }.get(str(_wc.get("SIGN_OFF_STATUS", "")).upper(),
               _pill("OPEN", P["success"]))
     else:
@@ -367,6 +335,11 @@ for scope in ALL_SCOPES:
                             st.session_state["ck_flash"] = (
                                 "warning", friendly_error(ex))
                         safe_rerun()
+            elif so_status == "SIGNOFF_REQUESTED":
+                st.warning(f"{ent_txt}: sign-off requested by "
+                           f"{so.get('REOPEN_REQUESTED_BY') or '—'} — awaiting "
+                           f"approval on the Approval Queue page. Submissions "
+                           f"are blocked while it is pending.")
             elif so_status == "REOPEN_REQUESTED":
                 st.warning(f"{ent_txt}: re-open requested by "
                            f"{so.get('REOPEN_REQUESTED_BY') or '—'} — awaiting "

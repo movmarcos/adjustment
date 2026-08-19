@@ -29,7 +29,7 @@ from snowflake.snowpark import DataFrame
 def _esc(v):
     """Escape a value for inlining as a Snowflake single-quoted string literal.
     Snowflake escapes a quote by doubling it ('' ), NOT with a backslash."""
-    return str(v).replace("'", "''")
+    return str(v).replace("\\", "\\\\").replace("'", "''")
 
 
 def get_table_columns(session, table_name):
@@ -328,6 +328,14 @@ def main(session, p_adjustment):
     # that apply (alias `fact`) to both the original fact and the combined
     # adjusted view (the adjusted view has the same schema as the fact table).
     # ═════════════════════════════════════════════════════════════════════
+    if is_roll and not (fact_adj_tbl and fact_adj_tbl != fact_tbl):
+        # Mirror the processing engine's refusal (05:cross-COB roll needs
+        # FACT_ADJUSTED_TABLE): without it the generic summary below would
+        # silently compute plausible-looking WRONG numbers from the source COB.
+        return session.sql(
+            "SELECT 'Error: cross-COB Roll preview needs FACT_ADJUSTED_TABLE "
+            "configured for this scope (ADJUSTMENTS_SETTINGS)' AS MESSAGE")
+
     if is_roll and fact_adj_tbl and fact_adj_tbl != fact_tbl:
         dim_filters = where_clauses[1:]
         dim_sql     = ("\n      AND " + "\n      AND ".join(dim_filters)) if dim_filters else ""

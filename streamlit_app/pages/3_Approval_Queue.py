@@ -20,7 +20,7 @@ import html as _htmlmod
 
 def _esc(val):
     """Escape single quotes for safe SQL interpolation."""
-    return str(val).replace("'", "''") if val is not None else ""
+    return str(val).replace("\\", "\\\\").replace("'", "''") if val is not None else ""
 
 inject_css()
 render_sidebar()
@@ -163,7 +163,7 @@ except Exception as e:
 df_overlaps = pd.DataFrame()
 if not df_queue.empty:
     try:
-        queued_ids = ",".join(f"'{str(i).replace(chr(39), chr(39)*2)}'" for i in df_queue["ADJ_ID"].dropna())
+        queued_ids = ",".join(f"'{str(i).replace(chr(92), chr(92)*2).replace(chr(39), chr(39)*2)}'" for i in df_queue["ADJ_ID"].dropna())
         df_overlaps = run_query_df(f"""
             SELECT ADJ_ID_A, ADJ_ID_B, COBID,
                    ENTITY_A, ENTITY_B, BOOK_A, BOOK_B, ALERT_MESSAGE
@@ -368,7 +368,8 @@ else:
                     f'<span style="color:{P["grey_700"]}">{reason}</span></div>',
                     unsafe_allow_html=True)
 
-                if row.get("SCALE_FACTOR") and float(row.get("SCALE_FACTOR", 1)) != 1:
+                if (pd.notna(row.get("SCALE_FACTOR")) and row.get("SCALE_FACTOR")
+                        and float(row.get("SCALE_FACTOR", 1)) != 1):
                     st.markdown(
                         f'<div style="font-size:0.85rem;margin-top:0.3rem">'
                         f'<strong>Scale Factor:</strong> {row["SCALE_FACTOR"]:.4f}×</div>',
@@ -587,7 +588,8 @@ try:
     df_recent = run_query_df("""
         SELECT h.ADJ_ID, h.COBID, h.PROCESS_TYPE, h.ADJUSTMENT_TYPE,
                h.ENTITY_CODE, h.RUN_STATUS, h.USERNAME AS SUBMITTED_BY,
-               sh.CHANGED_BY AS ACTIONED_BY, sh.CHANGED_AT, sh.COMMENT
+               sh.NEW_STATUS, sh.CHANGED_BY AS ACTIONED_BY, sh.CHANGED_AT,
+               sh.COMMENT
         FROM ADJUSTMENT_APP.ADJ_STATUS_HISTORY sh
         INNER JOIN ADJUSTMENT_APP.ADJ_HEADER h ON h.ADJ_ID = sh.ADJ_ID
         WHERE sh.NEW_STATUS IN ('Approved', 'Rejected')

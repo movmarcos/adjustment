@@ -5,6 +5,7 @@ Main entry point. Live overview of all adjustments, queue, and pending actions.
 Reads from: VW_DASHBOARD_KPI, DT_DASHBOARD, DT_OVERLAP_ALERTS, VW_RECENT_ACTIVITY.
 """
 import streamlit as st
+import html as _htmlmod
 import plotly.graph_objects as go
 import pandas as pd
 from datetime import datetime
@@ -443,7 +444,7 @@ with col_alerts:
         count = len(df_overlaps)
         rows_html = ""
         for _, r in df_overlaps.iterrows():
-            msg = str(r.get("ALERT_MESSAGE", "") or "").strip()[:55]
+            msg = _htmlmod.escape(str(r.get("ALERT_MESSAGE", "") or "").strip()[:55])
             rows_html += (
                 f'<tr style="border-bottom:1px solid #FFF8E1">'
                 f'<td style="padding:7px 8px;font-size:0.75rem;font-weight:700;'
@@ -511,7 +512,7 @@ with col_alerts:
         count = len(df_errors)
         rows_html = ""
         for _, r in df_errors.iterrows():
-            msg = str(r.get("ERRORMESSAGE", "") or "").strip()[:70]
+            msg = _htmlmod.escape(str(r.get("ERRORMESSAGE", "") or "").strip()[:70])
             adj_label = fmt_adj_id(r.get("DIMENSION_ADJ_ID"))
             rows_html += (
                 f'<tr style="border-bottom:1px solid #FFEBEE">'

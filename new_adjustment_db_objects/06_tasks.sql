@@ -99,8 +99,15 @@ AS
     CALL ADJUSTMENT_APP.SP_SYNC_SIGNOFF_STATUS();
 
 
--- NOTE: Tasks are resumed by deploy.py (resume_pipeline_tasks) as a
--- dedicated step after all DB objects are deployed.
+-- Self-resume: CREATE OR REPLACE always leaves a task SUSPENDED — running
+-- this file standalone (worksheet hotfix, partial deploy) used to silently
+-- halt every pipeline until someone remembered the separate resume step.
+-- deploy.py's resume_pipeline_tasks step is now a harmless double-resume.
+ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_VAR         RESUME;
+ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS      RESUME;
+ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB        RESUME;
+ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY RESUME;
+ALTER TASK ADJUSTMENT_APP.TASK_SYNC_SIGNOFF        RESUME;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- VERIFY

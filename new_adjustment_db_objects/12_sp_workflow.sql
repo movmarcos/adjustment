@@ -53,7 +53,7 @@ import json
 
 
 def _esc(v):
-    return str(v).replace("'", "''") if v is not None else ""
+    return str(v).replace("\\", "\\\\").replace("'", "''") if v is not None else ""
 
 
 def _caller(session, p_caller):
@@ -138,12 +138,12 @@ def main(session, p_adj_id, p_decision, p_comment, p_caller):
                            "message": "The adjustment's status changed before "
                                       "the decision could be applied."})
 
-    comment = _esc(p_comment) if p_comment else f"{decision} by {_esc(caller)}"
+    comment = _esc(str(p_comment)[:990]) if p_comment else f"{decision} by {_esc(caller)}"
     session.sql(f"""
         INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
             (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
         VALUES ('{adj_id}', 'Pending Approval', '{decision}',
-                '{_esc(caller)}', '{comment[:990]}')
+                '{_esc(caller)}', '{comment[:1980]}')
     """).collect()
 
     return json.dumps({"status": "ok", "decision": decision, "by": caller})
@@ -189,7 +189,7 @@ ACTIONS = {
 
 
 def _esc(v):
-    return str(v).replace("'", "''") if v is not None else ""
+    return str(v).replace("\\", "\\\\").replace("'", "''") if v is not None else ""
 
 
 def main(session, p_cobid, p_process_type, p_entity_code, p_action, p_reason,
@@ -219,6 +219,40 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_action, p_reason,
         WHERE COBID = {cobid} AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
           AND UPPER(ENTITY_CODE) = UPPER('{entity}')
     """).collect()
+    if not rows and action == "REOPEN":
+        # Signed off upstream but not yet synced into the app table: create
+        # the row directly in the requested state (source EXTERNAL) — the
+        # same behaviour the New Adjustment page's MERGE used to provide.
+        # Only for REOPEN with approval: a sign-off request needs a real
+        # OPEN row from the feed, and a direct re-open must see the row.
+        if not (True if p_requires_approval is None else bool(p_requires_approval)):
+            return json.dumps({"status": "not_found",
+                               "message": "No sign-off row for this "
+                                          "COB/scope/entity — run the "
+                                          "upstream sync first."})
+        session.sql(f"""
+            INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+                (COBID, PROCESS_TYPE, ENTITY_CODE, SIGN_OFF_STATUS, SIGN_OFF_BY,
+                 SIGN_OFF_TIMESTAMP, SIGNOFF_SOURCE, REOPEN_REQUESTED_BY,
+                 REOPEN_REQUESTED_AT, REOPEN_REASON)
+            SELECT {cobid}, '{scope}', '{entity}', 'REOPEN_REQUESTED',
+                   'EXTERNAL FEED', CURRENT_TIMESTAMP(), 'EXTERNAL',
+                   '{_esc(caller)}', CURRENT_TIMESTAMP(),
+                   '{_esc(str(p_reason or "")[:490])}'
+            WHERE NOT EXISTS (
+                SELECT 1 FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+                WHERE COBID = {cobid} AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
+                  AND UPPER(ENTITY_CODE) = UPPER('{entity}'))
+        """).collect()
+        session.sql(f"""
+            INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
+                (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
+            VALUES ({cobid}, '{scope}', '{entity}', 'SIGNED_OFF', 'REOPEN_REQUESTED',
+                    '{_esc(caller)}', 'Re-open requested (upstream sign-off, not yet synced)')
+        """).collect()
+        return json.dumps({"status": "ok", "action": action,
+                           "new_status": "REOPEN_REQUESTED", "by": caller,
+                           "pending_approval": True})
     if not rows:
         return json.dumps({"status": "not_found",
                            "message": "No sign-off row for this COB/scope/entity "
@@ -233,10 +267,13 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_action, p_reason,
     requires_approval = True if p_requires_approval is None else bool(p_requires_approval)
     new_status = pending_status if requires_approval else direct_status
     from_in = ", ".join(f"'{s}'" for s in from_statuses)
-    reason = _esc(p_reason or "")
+    # Slice the RAW text first, escape after — slicing an escaped string can
+    # split a doubled quote/backslash pair and break the literal.
+    reason = _esc(str(p_reason or "")[:490])
 
     if requires_approval:
         set_clause = (f"SIGN_OFF_STATUS = '{new_status}', "
+                      f"PREV_STATUS = '{cur}', "
                       f"REOPEN_REQUESTED_BY = '{_esc(caller)}', "
                       f"REOPEN_REQUESTED_AT = CURRENT_TIMESTAMP(), "
                       f"REOPEN_REASON = '{reason[:990]}'")
@@ -275,7 +312,7 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_action, p_reason,
         INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
             (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
         VALUES ({cobid}, '{scope}', '{entity}', '{cur}', '{new_status}',
-                '{_esc(caller)}', '{comment[:990]}')
+                '{_esc(caller)}', '{comment[:1980]}')
     """).collect()
 
     return json.dumps({"status": "ok", "action": action,
@@ -323,7 +360,7 @@ PENDING = {
 
 
 def _esc(v):
-    return str(v).replace("'", "''") if v is not None else ""
+    return str(v).replace("\\", "\\\\").replace("'", "''") if v is not None else ""
 
 
 def main(session, p_cobid, p_process_type, p_entity_code, p_decision, p_comment,
@@ -347,7 +384,7 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_decision, p_comment,
     entity = _esc(p_entity_code) if p_entity_code and str(p_entity_code).strip() else "*"
 
     rows = session.sql(f"""
-        SELECT SIGN_OFF_STATUS, REOPEN_REQUESTED_BY
+        SELECT SIGN_OFF_STATUS, REOPEN_REQUESTED_BY, PREV_STATUS
         FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
         WHERE COBID = {cobid} AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
           AND UPPER(ENTITY_CODE) = UPPER('{entity}')
@@ -359,6 +396,12 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_decision, p_comment,
                                       "or re-open request (it may already be "
                                       "decided)."})
     approved_status, rejected_status, label = PENDING[cur]
+    # Rejection reverts to the status the request was raised FROM: a sign-off
+    # request from REOPENED must go back to REOPENED, not OPEN (OPEN falls
+    # through to the upstream feed, which may still say signed off).
+    prev = str(rows[0]["PREV_STATUS"] or "").upper()
+    if cur == "SIGNOFF_REQUESTED" and prev in ("OPEN", "REOPENED"):
+        rejected_status = prev
 
     requester = str(rows[0]["REOPEN_REQUESTED_BY"] or "")
     if requester.strip().upper() == caller.upper():
@@ -410,13 +453,13 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_decision, p_comment,
                            "message": "The request was decided by someone else "
                                       "a moment ago."})
 
-    comment = _esc(p_comment) if p_comment \
+    comment = _esc(str(p_comment)[:990]) if p_comment \
               else f"{label.capitalize()} {decision.lower()} by {_esc(caller)}"
     session.sql(f"""
         INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
             (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
         VALUES ({cobid}, '{scope}', '{entity}', '{cur}', '{new_status}',
-                '{_esc(caller)}', '{comment[:990]}')
+                '{_esc(caller)}', '{comment[:1980]}')
     """).collect()
 
     return json.dumps({"status": "ok", "decision": decision, "by": caller,

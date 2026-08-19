@@ -34,7 +34,7 @@ def _esc(val):
     """Escape a value for safe inclusion in a SQL string literal."""
     if val is None:
         return None
-    return str(val).replace("'", "''")
+    return str(val).replace("\\", "\\\\").replace("'", "''")
 
 # ─── Adjustment type → action mapping ────────────────────────────────────────
 ACTION_MAP = {
@@ -87,7 +87,7 @@ def find_blocking_adj(session, process_type, cobid, adj_values):
     Scale targeting the same data DO overlap.
     """
     pipeline = PIPELINE_TYPES.get(process_type.upper(), [process_type])
-    pipeline_in = ", ".join(f"'{t}'" for t in pipeline)
+    pipeline_in = ", ".join(f"'{_esc(t)}'" for t in pipeline)
 
     dim_conditions = []
     for dim in OVERLAP_DIMS_SUBMIT:
@@ -96,7 +96,7 @@ def find_blocking_adj(session, process_type, cobid, adj_values):
             # New adj is wildcard (NULL) → matches any value on this dimension
             dim_conditions.append("TRUE")
         else:
-            escaped = str(new_val).replace("'", "''")
+            escaped = str(new_val).replace("\\", "\\\\").replace("'", "''")
             dim_conditions.append(
                 f"(r.{dim} IS NULL OR UPPER(r.{dim}) = UPPER('{escaped}'))"
             )
@@ -329,8 +329,11 @@ def main(session, p_adjustment):
                 initial_status = STATUS_PENDING
 
         # ── Blocking check — set before INSERT ──────────────────────────
-        # Direct adjustments skip overlap checking — they are explicit value
-        # insertions. Duplicate detection is handled via GLOBAL_REFERENCE.
+        # Direct/Upload adjustments skip overlap checking — they are explicit
+        # value insertions. NOTE: GLOBAL_REFERENCE replacement below applies
+        # to UPLOAD submissions only (incl. the FRTB file flow); per-row
+        # Direct adjustments carry no reference and are never deduplicated —
+        # resubmitting the same file simply creates additional adjustments.
         blocked_by_adj_id = None
         if initial_status == STATUS_PENDING and adj_action not in ("Direct", "Upload"):
             dim_vals = {
@@ -453,14 +456,28 @@ def main(session, p_adjustment):
                 dup_dim_id = dup["DIMENSION_ADJ_ID"]     # NULL if never processed
                 replaced_adj_ids.append(dup_adj_id)
 
-                # Soft-delete in ADJ_HEADER
-                session.sql(f"""
+                # Soft-delete in ADJ_HEADER. Guarded on NOT-Running: the
+                # pre-transaction Running check races the pipeline's 1-minute
+                # claim — a duplicate claimed between that check and this
+                # UPDATE must NOT be deleted mid-flight (the pipeline would
+                # write fact rows for a Replaced header → double count).
+                upd = session.sql(f"""
                     UPDATE ADJUSTMENT_APP.ADJ_HEADER
                     SET IS_DELETED = TRUE,
                         RUN_STATUS = 'Replaced',
                         ERRORMESSAGE = 'Replaced by new upload with same reference'
                     WHERE ADJ_ID = '{_esc(dup_adj_id)}'
+                      AND RUN_STATUS <> 'Running'
                 """).collect()
+                try:
+                    n_upd = int(upd[0][0]) if upd else 0
+                except (TypeError, ValueError, IndexError):
+                    n_upd = 0
+                if n_upd == 0:
+                    raise Exception(
+                        f"Adjustment with reference '{global_ref}' started "
+                        f"processing while this replacement was being "
+                        f"prepared. Wait for it to finish and resubmit.")
 
                 if dup_dim_id is not None:
                     # Soft-delete in DIMENSION.ADJUSTMENT (numeric key)
@@ -601,7 +618,7 @@ def main(session, p_adjustment):
                     "cobid":           cobid,
                     "adjustment_type": adjustment_type,
                     "submitted_by":    username,
-                }).replace("'", "''")
+                }).replace("\\", "\\\\").replace("'", "''")
                 session.sql(
                     f"CALL ADJUSTMENT_APP.SP_NOTIFY('approval_pending', '{_np}')"
                 ).collect()

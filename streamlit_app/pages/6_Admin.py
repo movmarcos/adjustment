@@ -15,7 +15,7 @@ from utils.snowflake_conn import run_query, run_query_df, current_user_name, saf
 
 def _esc(val):
     """Escape single quotes for safe SQL interpolation."""
-    return str(val).replace("'", "''") if val is not None else ""
+    return str(val).replace("\\", "\\\\").replace("'", "''") if val is not None else ""
 
 inject_css()
 render_sidebar()
@@ -714,7 +714,7 @@ with tab_notify:
                      disabled=not test_email.strip()):
             try:
                 import json as _json
-                _tp = _json.dumps({"email": test_email.strip()}).replace("'", "''")
+                _tp = _json.dumps({"email": test_email.strip()}).replace("\\", "\\\\").replace("'", "''")
                 res = run_query(f"CALL ADJUSTMENT_APP.SP_NOTIFY('test', '{_tp}')")
                 try:
                     out = _json.loads(str(res[0][0])) if res else {}
@@ -850,14 +850,12 @@ with tab_schema:
         ("ADJUSTMENT_APP.ADJ_STATUS_HISTORY",    "TABLE",         "Append-only audit log of every status change"),
         ("ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS",  "TABLE",         "Config: scope → fact table mapping, PK columns, metrics"),
         ("ADJUSTMENT_APP.ADJ_RECURRING_TEMPLATE","TABLE",         "Templates for automatically recurring adjustments"),
-        ("ADJUSTMENT_APP.STREAM_QUEUE_VAR",       "STREAM",        "Standard stream on VW_QUEUE_VAR — fires TASK_PROCESS_VAR"),
-        ("ADJUSTMENT_APP.STREAM_QUEUE_STRESS",    "STREAM",        "Standard stream on VW_QUEUE_STRESS — fires TASK_PROCESS_STRESS"),
-        ("ADJUSTMENT_APP.STREAM_QUEUE_FRTB",      "STREAM",        "Standard stream on VW_QUEUE_FRTB — fires TASK_PROCESS_FRTB"),
-        ("ADJUSTMENT_APP.STREAM_QUEUE_SENSITIVITY","STREAM",       "Standard stream on VW_QUEUE_SENSITIVITY — fires TASK_PROCESS_SENSITIVITY"),
+        # (Streams retired — the pipeline POLLS; tasks fire every minute
+        #  unconditionally and SP_RUN_PIPELINE exits fast when idle.)
         ("ADJUSTMENT_APP.DT_DASHBOARD",          "DYNAMIC TABLE", "Aggregated metrics by scope, status, entity, user"),
         ("ADJUSTMENT_APP.DT_OVERLAP_ALERTS",     "DYNAMIC TABLE", "Self-join detecting overlapping adjustments"),
         ("ADJUSTMENT_APP.VW_DASHBOARD_KPI",      "VIEW",          "Pre-aggregated KPIs for the dashboard"),
-        ("ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS",    "TABLE",         "COB sign-off status per scope. Managed via Admin page"),
+        ("ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS",    "TABLE",         "COB sign-off status per scope+entity. Managed via the Sign-Off page (approval-gated requests)"),
         ("ADJUSTMENT_APP.ADJ_APPROVERS",         "TABLE",         "Authorized approvers with optional scope restriction. Managed via Admin page"),
         ("ADJUSTMENT_APP.VW_SIGNOFF_STATUS",     "VIEW",          "COB sign-off status (reads from ADJ_SIGNOFF_STATUS)"),
         ("ADJUSTMENT_APP.VW_RECENT_ACTIVITY",    "VIEW",          "UNION of submissions + status changes"),
@@ -890,7 +888,7 @@ with tab_schema:
 
     **6. Sign-Off Guard** — When a COB is already signed off in `ADJ_SIGNOFF_STATUS`,
     the submit procedure rejects with "Rejected - SignedOff" status. Manage sign-off
-    status from the **Sign-Off Management** tab above.
+    status from the **Sign-Off page** in the left menu (requests are decided on the Approval Queue page).
     """)
 
     section_title("System Statistics", "line-chart")
@@ -942,7 +940,7 @@ with tab_sql:
     "entity_code": "MUSE"
 }');"""),
         "SP_RUN_PIPELINE": (
-            "Stream-driven orchestrator — blocks overlaps, promotes to Running, processes in parallel, unblocks resolved.",
+            "Polling orchestrator (1-minute task) — blocks overlaps, promotes to Running, processes in parallel, unblocks resolved.",
             """-- Called automatically by scope tasks (TASK_PROCESS_VAR, etc.)
 -- Can also be called manually:
 CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('VaR', '["VaR"]');"""),
@@ -965,11 +963,11 @@ CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT('VaR', 'Scale', 20260328);"""),
     st.markdown("""
     There are four scope tasks, all using **serverless compute** and the same pattern:
 
-    - **`TASK_PROCESS_VAR`** — guarded by `STREAM_QUEUE_VAR`; runs the **VaR** pipeline.
-    - **`TASK_PROCESS_STRESS`** — guarded by `STREAM_QUEUE_STRESS`; runs the **Stress** pipeline.
-    - **`TASK_PROCESS_FRTB`** — guarded by `STREAM_QUEUE_FRTB`; runs the **FRTB** pipeline
-      (all sub-types: FRTB, FRTBDRC, FRTBRRAO, FRTBALL).
-    - **`TASK_PROCESS_SENSITIVITY`** — guarded by `STREAM_QUEUE_SENSITIVITY`; runs the **Sensitivity** pipeline.
+    - **`TASK_PROCESS_VAR`** — every minute; polls and runs the **VaR** pipeline.
+    - **`TASK_PROCESS_STRESS`** — every minute; polls and runs the **Stress** pipeline.
+    - **`TASK_PROCESS_FRTB`** — every minute; polls and runs the **FRTB** pipeline
+      (sub-types FRTB, FRTBDRC, FRTBRRAO — "All FRTB" in the app submits one adjustment per sub-type).
+    - **`TASK_PROCESS_SENSITIVITY`** — every minute; polls and runs the **Sensitivity** pipeline.
 
     Each task is scheduled every **1 minute** but only does work when its stream has new data,
     at which point it calls `SP_RUN_PIPELINE` for that process type. The task definitions are

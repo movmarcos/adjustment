@@ -205,7 +205,7 @@ def _direct_schema(scope: str) -> dict:
     cfg = {"expected": [], "unpivot": None, "fact_mapping": [], "resolutions": [],
            "validation_rules": [], "aliases": {}}
     try:
-        _scope_esc = scope.replace("'", "''")
+        _scope_esc = scope.replace("\\", "\\\\").replace("'", "''")
         try:
             rows = run_query(f"""
                 SELECT EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS,
@@ -286,7 +286,7 @@ def _validate_direct_upload(df: pd.DataFrame, schema: dict) -> dict:
                        if v is not None and str(v).strip() != ""})[:2000]
         if not vals:
             return set(), []
-        in_list = ", ".join("'" + v.replace("'", "''") + "'" for v in vals)
+        in_list = ", ".join("'" + v.replace("\\", "\\\\").replace("'", "''") + "'" for v in vals)
         known = run_query(f"""
             SELECT DISTINCT UPPER({match_col}) AS V
             FROM {dim_table}
@@ -400,10 +400,13 @@ def _render_upload_validation(v: dict, row_count: int) -> None:
             key=_k("rejects_dl"))
     if problems:
         if not v["missing_required"]:
+            # Key versioned by the upload signature: a NEW file gets a NEW
+            # (unchecked) checkbox — consent never carries over.
+            _ov_sig = abs(hash((wiz.get("_upval") or {}).get("sig") or "")) % 10**8
             wiz["_upval_override"] = st.checkbox(
                 "Submit anyway — I understand unresolved codes will be stored "
                 "under the fallback key (-1)",
-                key=_k("upval_override"), value=False)
+                key=_k(f"upval_override_{_ov_sig}"), value=False)
     else:
         wiz["_upval_override"] = False
         checked = ", ".join(v["checked_fields"]) if v["checked_fields"] else "columns"
@@ -442,7 +445,7 @@ def _delete_direct_json_rows(adj_id: str) -> None:
     """Remove pre-written Direct line items for an adj_id. Used to roll back when
     the header submission is rejected/fails, so line items aren't left orphaned."""
     from utils.snowflake_conn import get_session
-    safe = str(adj_id).replace("'", "''")
+    safe = str(adj_id).replace("\\", "\\\\").replace("'", "''")
     get_session().sql(
         f"DELETE FROM ADJUSTMENT_APP.ADJ_LINE_ITEM_JSON WHERE ADJ_ID = '{safe}'"
     ).collect()
@@ -903,7 +906,10 @@ def _completion_checks() -> list:
             ("CSV validated",       wiz.get("uploaded_df") is not None
                                     and _upload_validation_ok()),
             ("Risk-class rules",    not wiz.get("_frtb_rule_errs")),
+            ("Single COB in file",  not wiz.get("_frtb_cob_bad")),
             ("COB date",            bool(wiz.get("cobid"))),
+            ("COB matches the file", wiz.get("_frtb_file_cob") is None
+                                     or wiz.get("cobid") == wiz["_frtb_file_cob"]),
             ("Reference",           bool((wiz.get("global_reference") or "").strip())),
             ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
             ("Reason",              bool((wiz.get("reason") or "").strip())),
@@ -1606,6 +1612,9 @@ def render_direct_form() -> None:
             wiz["uploaded_file_name"] = None
             wiz["_upval"]             = None
             wiz["_frtb_rule_errs"]    = None
+            wiz["_frtb_file_cob"]     = None
+            wiz["_frtb_cob_bad"]      = False
+            wiz["_direct_file_cob"]   = None
             safe_rerun()
     if not wiz.get("process_type"):
         st.info("Select a data scope to continue.")
@@ -1669,6 +1678,7 @@ def render_direct_form() -> None:
             wiz["direct_verdicts"] = None
             wiz["_direct_sig"]     = None
             wiz["direct_rows"]     = None
+            wiz["_direct_file_cob"] = None   # file-COB gate must not survive
         wiz["_direct_in_mode"] = _in_mode
 
         if _in_mode in ("Paste content", "Upload file"):
@@ -2040,6 +2050,10 @@ def render_var_upload_form() -> None:
                 _parse_err = exc
 
     if _parse_err is not None:
+        # A parse failure must not leave a previously parsed upload
+        # submittable behind the error message.
+        wiz["uploaded_df"] = None
+        wiz["_upval"] = None
         st.error(f"Failed to read the CSV: {_parse_err}. If the columns look "
                  f"wrong, try selecting the delimiter explicitly above.")
     elif df is not None:
@@ -2077,6 +2091,11 @@ def render_var_upload_form() -> None:
                 pass
         if "EntityCode" in df.columns and len(df):
             wiz["entity_code"] = str(df["EntityCode"].iloc[0])
+    else:
+        # CSV cleared (paste box emptied / file removed): the previously
+        # parsed upload must NOT stay submittable behind an empty input.
+        wiz["uploaded_df"] = None
+        wiz["_upval"] = None
 
     _csv_card.__exit__(None, None, None)
 
@@ -2114,7 +2133,7 @@ def render_var_upload_form() -> None:
                 SELECT ADJ_ID, ENTITY_CODE, RUN_STATUS, USERNAME, CREATED_DATE, DIMENSION_ADJ_ID
                 FROM ADJUSTMENT_APP.ADJ_HEADER
                 WHERE COBID = {wiz['cobid']}
-                  AND UPPER(GLOBAL_REFERENCE) = UPPER('{wiz["global_reference"].replace("'","''")}')
+                  AND UPPER(GLOBAL_REFERENCE) = UPPER({_sql_str_literal(wiz["global_reference"])})
                   AND IS_DELETED = FALSE
                 ORDER BY CREATED_DATE DESC
             """)
@@ -2157,6 +2176,9 @@ def _frtb_rule_errors(df, rules) -> pd.DataFrame:
         msg   = rule.get("error") or f"{field} is required"
         mask, skip = pd.Series(True, index=df.index), False
         for cond in rule.get("conditions") or []:
+            if not isinstance(cond, (list, tuple)) or len(cond) < 3:
+                skip = True   # malformed config rule: skip it, never crash
+                break
             col, pattern, negate = cond[0], cond[1], bool(cond[2])
             if col not in df.columns:
                 skip = True
@@ -2259,7 +2281,10 @@ def _render_frtb_direct_body(scope: str) -> None:
 
     if _parse_err is not None:
         wiz["uploaded_df"] = None
+        wiz["_upval"] = None
         wiz["_frtb_rule_errs"] = None
+        wiz["_frtb_file_cob"] = None
+        wiz["_frtb_cob_bad"] = False
         st.error(f"Failed to read the CSV: {_parse_err}. If the columns look "
                  f"wrong, pick the delimiter explicitly above.")
     elif df is not None:
@@ -2284,14 +2309,20 @@ def _render_frtb_direct_body(scope: str) -> None:
                        "not processed): " + ", ".join(unknown[:15]))
 
         # COB consistency: every row's COBID must match ONE cob → the header's
+        wiz["_frtb_file_cob"] = None
+        wiz["_frtb_cob_bad"] = False
         if "COBID" in df.columns and len(df):
             _cobs = sorted(pd.to_numeric(df["COBID"], errors="coerce")
                            .dropna().astype(int).unique().tolist())
             if len(_cobs) == 1:
-                wiz["cobid"] = int(_cobs[0])
+                wiz["_frtb_file_cob"] = int(_cobs[0])
+                if not wiz.get("cobid"):
+                    wiz["cobid"] = int(_cobs[0])
             elif len(_cobs) > 1:
+                wiz["_frtb_cob_bad"] = True
                 st.error(f"The file mixes {len(_cobs)} different COBIDs "
-                         f"({_cobs[:5]}…) — one upload covers exactly one COB.")
+                         f"({_cobs[:5]}…) — one upload covers exactly one COB. "
+                         f"Submission is blocked.")
 
         # Reference-data validation (codes vs dimensions) — same engine as
         # VaR Upload, config-driven via RESOLUTIONS.
@@ -2328,7 +2359,13 @@ def _render_frtb_direct_body(scope: str) -> None:
 
         render_df_table(df, max_rows=20, height=200)
     else:
+        # CSV cleared: the previous parse must not stay submittable, and the
+        # rules gate must not report clean for a file that no longer exists.
+        wiz["uploaded_df"] = None
+        wiz["_upval"] = None
         wiz["_frtb_rule_errs"] = None
+        wiz["_frtb_file_cob"] = None
+        wiz["_frtb_cob_bad"] = False
 
     _csv_card.__exit__(None, None, None)
 
@@ -2362,7 +2399,7 @@ def _render_frtb_direct_body(scope: str) -> None:
             dup_rows = run_query(f"""
                 SELECT ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
                 WHERE COBID = {wiz['cobid']}
-                  AND UPPER(GLOBAL_REFERENCE) = UPPER('{wiz["global_reference"].replace("'","''")}')
+                  AND UPPER(GLOBAL_REFERENCE) = UPPER({_sql_str_literal(wiz["global_reference"])})
                   AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
                   AND IS_DELETED = FALSE
             """)
@@ -2420,8 +2457,8 @@ def render_entity_roll_form() -> None:
     wiz["_eroll_remove_count"] = 0
     if wiz.get("cobid") and (wiz.get("entity_code") or "").strip() and wiz.get("process_type"):
         _cob = int(wiz["cobid"])
-        _ent = wiz["entity_code"].strip().replace("'", "''")
-        _pt  = wiz["process_type"].replace("'", "''")
+        _ent = wiz["entity_code"].strip().replace("\\", "\\\\").replace("'", "''")
+        _pt  = wiz["process_type"].replace("\\", "\\\\").replace("'", "''")
         h_cnt = d_cnt = f_cnt = None
         try:
             _hd = run_query(f"""
@@ -2713,7 +2750,7 @@ def _signoff_state(scope, cobid, entity=None):
     App rows govern first (exact entity beats '*'); otherwise the unified
     upstream feed is checked live (an upstream FRTB row covers FRTBDRC and
     FRTBRRAO; SUB_TYPE NULL/'' or NonCVA counts; app REOPENED overrides)."""
-    esc_scope = str(scope).replace("'", "''").upper()
+    esc_scope = str(scope).replace("\\", "\\\\").replace("'", "''").upper()
     ent = str(entity).strip() if entity and str(entity).strip() else None
     try:
         rows = run_query(f"""
@@ -2766,7 +2803,7 @@ def _signoff_state(scope, cobid, entity=None):
         else:
             pt_match = f"UPPER(u.PROCESS_TYPE) = '{esc_scope}'"
         ent_pred = ("AND UPPER(u.ENTITY_CODE) = UPPER('"
-                    + ent.replace("'", "''") + "')") if ent else ""
+                    + ent.replace("\\", "\\\\").replace("'", "''") + "')") if ent else ""
         up = run_query(f"""
             SELECT DISTINCT UPPER(TRIM(u.ENTITY_CODE)) AS E
             FROM {cfg['table']} u
@@ -2802,57 +2839,36 @@ def _signoff_state(scope, cobid, entity=None):
 
 
 def _signoff_history(scope, cobid, entity, old_status, new_status, comment):
+    _e_scope   = _sql_str_literal(scope)
+    _e_ent     = _sql_str_literal(entity or "*")
+    _e_old     = "NULL" if old_status is None else _sql_str_literal(old_status)
+    _e_new     = _sql_str_literal(new_status)
+    _e_user    = _sql_str_literal(current_user_name())
+    _e_comment = _sql_str_literal(comment)
     run_query(f"""
         INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
             (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
-        VALUES ({int(cobid)}, '{str(scope).replace("'", "''")}',
-                '{str(entity or '*').replace("'", "''")}',
-                {"NULL" if old_status is None else "'" + str(old_status).replace("'", "''") + "'"},
-                '{str(new_status).replace("'", "''")}',
-                '{current_user_name().replace("'", "''")}',
-                '{str(comment).replace("'", "''")}')
+        VALUES ({int(cobid)}, {_e_scope}, {_e_ent}, {_e_old}, {_e_new},
+                {_e_user}, {_e_comment})
     """)
 
 
 def _request_reopen(scope, cobid, entity, reason):
-    """SIGNED_OFF → REOPEN_REQUESTED for one entity ('*' = whole scope).
-    Creates the row when the sign-off only exists upstream so far."""
-    esc_scope  = str(scope).replace("'", "''")
-    esc_ent    = str(entity or "*").replace("'", "''")
-    esc_reason = str(reason).replace("'", "''")[:490]
-    usr        = current_user_name().replace("'", "''")
-    run_query(f"""
-        MERGE INTO ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS t
-        USING (SELECT {int(cobid)} AS COBID) u
-        ON t.COBID = u.COBID AND UPPER(t.PROCESS_TYPE) = '{esc_scope.upper()}'
-           AND UPPER(t.ENTITY_CODE) = UPPER('{esc_ent}')
-        WHEN MATCHED AND UPPER(t.SIGN_OFF_STATUS) = 'SIGNED_OFF' THEN UPDATE SET
-            t.SIGN_OFF_STATUS     = 'REOPEN_REQUESTED',
-            t.REOPEN_REQUESTED_BY = '{usr}',
-            t.REOPEN_REQUESTED_AT = CURRENT_TIMESTAMP(),
-            t.REOPEN_REASON       = '{esc_reason}',
-            t.REOPEN_APPROVED_BY  = NULL,
-            t.REOPEN_APPROVED_AT  = NULL,
-            t.UPDATED_DATE        = CURRENT_TIMESTAMP()
-        WHEN NOT MATCHED THEN INSERT
-            (COBID, PROCESS_TYPE, ENTITY_CODE, SIGN_OFF_STATUS, SIGN_OFF_BY,
-             SIGN_OFF_TIMESTAMP, SIGNOFF_SOURCE, REOPEN_REQUESTED_BY,
-             REOPEN_REQUESTED_AT, REOPEN_REASON)
-        VALUES
-            (u.COBID, '{esc_scope}', '{esc_ent}', 'REOPEN_REQUESTED',
-             'EXTERNAL FEED', CURRENT_TIMESTAMP(), 'EXTERNAL', '{usr}',
-             CURRENT_TIMESTAMP(), '{esc_reason}')
-    """)
-    rows = run_query(f"""
-        SELECT SIGN_OFF_STATUS, REOPEN_REQUESTED_BY
-        FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-        WHERE COBID = {int(cobid)} AND UPPER(PROCESS_TYPE) = '{esc_scope.upper()}'
-          AND UPPER(ENTITY_CODE) = UPPER('{esc_ent}')
-    """)
-    if (rows and str(rows[0]["SIGN_OFF_STATUS"]).upper() == "REOPEN_REQUESTED"
-            and str(rows[0]["REOPEN_REQUESTED_BY"] or "") == current_user_name()):
-        _signoff_history(scope, cobid, entity, "SIGNED_OFF", "REOPEN_REQUESTED",
-                         f"Re-open requested: {reason}"[:990])
+    """SIGNED_OFF → REOPEN_REQUESTED for one entity ('*' = whole scope),
+    via SP_REQUEST_SIGNOFF_CHANGE — one server-side state machine for every
+    page (the SP also creates the row when the sign-off only exists upstream
+    so far)."""
+    res = run_query(
+        f"CALL ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE("
+        f"{int(cobid)}, {_sql_str_literal(scope)}, "
+        f"{_sql_str_literal(entity or '*')}, 'REOPEN', "
+        f"{_sql_str_literal(str(reason or '')[:490])}, TRUE, "
+        f"{_sql_str_literal(current_user_name())})")
+    try:
+        out = json.loads(str(res[0][0])) if res else {}
+    except (ValueError, TypeError, IndexError):
+        out = {}
+    if out.get("status") == "ok":
         # Best-effort: notify the scope's approvers (gated by the app's
         # notification switch; never blocks the request).
         try:
@@ -2861,7 +2877,7 @@ def _request_reopen(scope, cobid, entity, reason):
                 "cobid":        int(cobid),
                 "requested_by": current_user_name(),
                 "reason":       f"[entity {entity or '*'}] " + str(reason)[:280],
-            }).replace("'", "''")
+            }).replace("\\", "\\\\").replace("'", "''")
             run_query(f"CALL ADJUSTMENT_APP.SP_NOTIFY('reopen_requested', '{_np}')")
         except Exception:
             pass
@@ -2869,8 +2885,9 @@ def _request_reopen(scope, cobid, entity, reason):
         return True, (f"Re-open request for COB {cobid} / {scope} ({_ent_txt}) "
                       f"submitted — an approver can action it on the Approval "
                       f"Queue page.")
-    return False, ("The sign-off state changed before the request could be "
-                   "recorded — check the current status below.")
+    return False, out.get("message",
+                          "The sign-off state changed before the request "
+                          "could be recorded — check the current status below.")
 
 
 def _resign_off(scope, cobid, entity):
@@ -2878,9 +2895,9 @@ def _resign_off(scope, cobid, entity):
     Sign-off is approval-gated like re-open — SP_REQUEST_SIGNOFF_CHANGE sets
     SIGNOFF_REQUESTED and an approver decides it on the Approval Queue page."""
     import json as _json
-    esc_scope = str(scope).replace("'", "''")
-    esc_ent   = str(entity or "*").replace("'", "''")
-    usr       = current_user_name().replace("'", "''")
+    esc_scope = str(scope).replace("\\", "\\\\").replace("'", "''")
+    esc_ent   = str(entity or "*").replace("\\", "\\\\").replace("'", "''")
+    usr       = current_user_name().replace("\\", "\\\\").replace("'", "''")
     res = run_query(
         f"CALL ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE("
         f"{int(cobid)}, '{esc_scope}', '{esc_ent}', 'SIGNOFF', "
@@ -3073,7 +3090,10 @@ with left:
                         "_preview_sum": None, "_preview_err": None,
                         "direct_batch_id": None, "direct_ndf": None,
                         "direct_verdicts": None, "_direct_sig": None,
-                        "direct_rows": None})
+                        "direct_rows": None,
+                        "_upval": None, "_frtb_rule_errs": None,
+                        "_frtb_file_cob": None, "_frtb_cob_bad": False,
+                        "_direct_file_cob": None})
             safe_rerun()
         if wiz.get("category"):
             st.caption(CATEGORY_UI_DESCS.get(wiz["category"], ""))
@@ -3112,8 +3132,19 @@ with right:
         s = wiz.get("_preview_sum")
         preview_current = (s is not None and wiz.get("_preview_for")
                            == json.dumps(_preview_payload(), sort_keys=True, default=str))
-        if preview_current and _safe_int(s.get("ROWS_AFFECTED")) == 0:
+        # STICKY zero-rows block: once a preview showed 0 rows, submission
+        # stays blocked until a NEW preview runs — merely editing a filter
+        # (which invalidates the preview) must not unlock Submit, or the
+        # "blocked until the preview finds matching rows" promise is a lie.
+        if preview_current:
+            wiz["_zero_preview"] = _safe_int(s.get("ROWS_AFFECTED")) == 0
+        if wiz.get("_zero_preview"):
             zero_rows = True
+        if not preview_current and wiz.get("_zero_preview"):
+            st.warning("The last preview matched **0 rows** and the filters "
+                       "have changed since — run the preview again to unlock "
+                       "Submit.")
+        elif preview_current and _safe_int(s.get("ROWS_AFFECTED")) == 0:
             st.warning(
                 "These filters match **0 rows**, so this adjustment would change "
                 "nothing. One of the filter values probably doesn't exist for this "
@@ -3124,9 +3155,11 @@ with right:
     dup_ok = True
     if ((cat == "VaR Upload" or _is_frtb_file_direct())
             and wiz.get("_dup_adj_ids")):
+        _dup_sig = abs(hash((wiz.get("cobid"),
+                             (wiz.get("global_reference") or "").upper()))) % 10**8
         dup_ok = st.checkbox(
             f"Replace {len(wiz['_dup_adj_ids'])} existing adjustment(s) with this upload",
-            key=_k("dup_confirm"), value=False)
+            key=_k(f"dup_confirm_{_dup_sig}"), value=False)
 
     # ── Entity Roll: destructive-replace agreement ───────────────────────
     eroll_ok = True
@@ -3134,10 +3167,13 @@ with right:
         _n_sup = wiz.get("_eroll_remove_count") or 0
         _sup_txt = (f"{_n_sup} existing adjustment(s) " if _n_sup
                     else "all existing adjustments ")
+        _er_sig = abs(hash((wiz.get("cobid"), wiz.get("source_cobid"),
+                            (wiz.get("entity_code") or "").upper(),
+                            wiz.get("process_type")))) % 10**8
         eroll_ok = st.checkbox(
             f"I understand this Entity Roll will permanently remove {_sup_txt}"
             f"for this entity at the target COB (including data from other systems).",
-            key=_k("eroll_confirm"), value=False)
+            key=_k(f"eroll_confirm_{_er_sig}"), value=False)
 
     # ── Previous submit error ─────────────────────────────────────────────
     _res = wiz.get("result") or {}

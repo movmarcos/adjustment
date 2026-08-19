@@ -243,7 +243,10 @@ COMMENT = 'Direct Adjustment staging: one row per pasted/uploaded CSV line, vali
 CREATE OR ALTER TABLE ADJUSTMENT_APP.DIRECT_ACCEPTED_COLUMNS (
     PROCESS_TYPE   VARCHAR(20)  NOT NULL,
     ACCEPTED_NAME  VARCHAR(100) NOT NULL,      -- stored upper-case
-    STAGE_COLUMN   VARCHAR(50)  NOT NULL,      -- a column of ADJ_DIRECT_STAGE
+    STAGE_COLUMN   VARCHAR(50)  NOT NULL,      -- a column of ADJ_DIRECT_STAGE,
+                                               -- EXCEPT 'COBID' (virtual: the
+                                               -- app validates it against the
+                                               -- page COB and never stages it)
     IS_REQUIRED    BOOLEAN      DEFAULT FALSE, -- required flags live on the canonical name row
     IS_ACTIVE      BOOLEAN      DEFAULT TRUE,
     DISPLAY_ORDER  NUMBER(3,0),               -- grid/template position; NULL = CSV-only
@@ -486,8 +489,10 @@ USING (
 ) src
 ON  t.PROCESS_TYPE = src.PROCESS_TYPE AND t.ACCEPTED_NAME = src.ACCEPTED_NAME
 WHEN MATCHED THEN UPDATE SET
+    -- IS_ACTIVE deliberately NOT touched: an alias deactivated in prod must
+    -- stay deactivated across redeploys.
     t.STAGE_COLUMN = src.STAGE_COLUMN, t.IS_REQUIRED = src.IS_REQUIRED,
-    t.IS_ACTIVE = TRUE, t.DISPLAY_ORDER = src.DISPLAY_ORDER
+    t.DISPLAY_ORDER = src.DISPLAY_ORDER
 WHEN NOT MATCHED THEN INSERT
     (PROCESS_TYPE, ACCEPTED_NAME, STAGE_COLUMN, IS_REQUIRED, IS_ACTIVE, DISPLAY_ORDER)
 VALUES (src.PROCESS_TYPE, src.ACCEPTED_NAME, src.STAGE_COLUMN, src.IS_REQUIRED, TRUE, src.DISPLAY_ORDER);
@@ -513,6 +518,7 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA (
 )
 COMMENT = 'Per-scope Direct Adjustment schema: how to extract/resolve/map JSON payload into the scope fact table.';
 
+BEGIN TRANSACTION;
 DELETE FROM ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA WHERE PROCESS_TYPE = 'VaR';
 INSERT INTO ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
     (PROCESS_TYPE, EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS,
@@ -580,6 +586,7 @@ SELECT
          "target_column":"VAR_SUBCOMPONENT_ID"}
     ]'),
     'ADJ_VALUE', 'ADJ_VALUE', NULL, TRUE;
+COMMIT;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -674,13 +681,17 @@ COMMENT = 'Templates for recurring adjustments. External scheduler creates ADJ_H
 -- 6. SEED DATA — ADJUSTMENTS_SETTINGS
 -- ═══════════════════════════════════════════════════════════════════════════
 
-DELETE FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS;
-
+-- Insert-if-missing (was DELETE + reseed): ADJUSTMENTS_SETTINGS is LIVE
+-- config — the Admin page toggles IS_ACTIVE and ops may hotfix
+-- FACT_TABLE_PK. A redeploy must never wipe those, and the old non-
+-- transactional DELETE+INSERT left a window where the engine saw ZERO
+-- config. Repo-side changes to an EXISTING scope now require a deliberate
+-- UPDATE (or deleting the row first) — that is the point.
 INSERT INTO ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
     (PROCESS_TYPE, FACT_TABLE, FACT_ADJUSTED_TABLE, FACT_TABLE_PK,
      ADJUSTMENTS_TABLE, ADJUSTMENTS_SUMMARY_TABLE,
      METRIC_NAME, METRIC_USD_NAME, IS_ACTIVE)
-VALUES
+SELECT src.* FROM (VALUES
     ('VaR',
      'FACT.VAR_MEASURES',
      'FACT.VAR_MEASURES_COMBINED',
@@ -739,7 +750,13 @@ VALUES
      NULL,
      'NOTIONAL_AMOUNT',
      'NOTIONAL_AMOUNT_USD',
-     TRUE);
+     TRUE)
+) src (PROCESS_TYPE, FACT_TABLE, FACT_ADJUSTED_TABLE, FACT_TABLE_PK,
+       ADJUSTMENTS_TABLE, ADJUSTMENTS_SUMMARY_TABLE,
+       METRIC_NAME, METRIC_USD_NAME, IS_ACTIVE)
+WHERE NOT EXISTS (
+    SELECT 1 FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS t
+    WHERE UPPER(t.PROCESS_TYPE) = UPPER(src.PROCESS_TYPE));
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -768,7 +785,7 @@ VALUES
 CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS (
     COBID                       NUMBER(38,0) NOT NULL,
     PROCESS_TYPE                VARCHAR(30)  NOT NULL,
-    SIGN_OFF_STATUS             VARCHAR(30)  NOT NULL DEFAULT 'OPEN',   -- OPEN | SIGNED_OFF | REOPEN_REQUESTED | REOPENED
+    SIGN_OFF_STATUS             VARCHAR(30)  NOT NULL DEFAULT 'OPEN',   -- OPEN | SIGNOFF_REQUESTED | SIGNED_OFF | REOPEN_REQUESTED | REOPENED
     SIGN_OFF_BY                 VARCHAR(50),
     SIGN_OFF_TIMESTAMP          TIMESTAMP_NTZ(9),
     CREATED_DATE                TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
@@ -792,9 +809,20 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS (
     -- CREATE OR ALTER cannot change a constraint's columns in place, but it
     -- CAN drop the old-named one and add a new-named one. PKs are
     -- informational in Snowflake, so this is metadata-only.
+    -- Status at the moment a request was raised — SP_DECIDE_SIGNOFF_CHANGE
+    -- reverts to it on rejection (a sign-off request raised from REOPENED
+    -- must NOT revert to OPEN: OPEN falls through to the upstream feed,
+    -- which still says signed off, silently destroying the approved re-open).
+    PREV_STATUS                 VARCHAR(30),
+
     CONSTRAINT PK_ADJ_SIGNOFF_STATUS_ENT PRIMARY KEY (COBID, PROCESS_TYPE, ENTITY_CODE)
 )
-COMMENT = 'Sign-off lifecycle per COB + scope + entity (ENTITY_CODE = ''*'' means the whole scope). SIGNED_OFF / REOPEN_REQUESTED block new adjustments for that entity; REOPENED allows them again until the app re-sign-off. First sign-off synced from the upstream publish feed.';
+COMMENT = 'Sign-off lifecycle per COB + scope + entity (ENTITY_CODE = ''*'' means the whole scope). SIGNED_OFF / SIGNOFF_REQUESTED / REOPEN_REQUESTED block new adjustments for that entity; REOPENED allows them again until the approved re-sign-off. First sign-off synced from the upstream publish feed.';
+
+-- Belt-and-braces for pre-existing tables (same pattern as ADJ_ADMINS above).
+ALTER TABLE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+    ADD COLUMN IF NOT EXISTS PREV_STATUS VARCHAR(30)
+    COMMENT 'Status when the pending request was raised; rejection reverts to it.';
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -1043,8 +1071,10 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_CATEGORY (
 )
 COMMENT = 'Managed list of adjustment categories for the New Adjustment page.';
 
-DELETE FROM ADJUSTMENT_APP.ADJ_CATEGORY;
-INSERT INTO ADJUSTMENT_APP.ADJ_CATEGORY (CATEGORY_NAME, SORT_ORDER) VALUES
+-- Insert-if-missing (was DELETE + reseed): categories are admin-managed
+-- operational data — a redeploy must not wipe additions/deactivations.
+INSERT INTO ADJUSTMENT_APP.ADJ_CATEGORY (CATEGORY_NAME, SORT_ORDER)
+SELECT src.* FROM (VALUES
     ('Adjusted by MRM Upload', 10),
     ('Bank Holiday', 20),
     ('Booking Error', 30),
@@ -1063,7 +1093,11 @@ INSERT INTO ADJUSTMENT_APP.ADJ_CATEGORY (CATEGORY_NAME, SORT_ORDER) VALUES
     ('Structured Trade Issue', 160),
     ('Time Series Issue', 170),
     ('Valuation Source Issue', 180),
-    ('VaR Window Issue', 190);
+    ('VaR Window Issue', 190)
+) src (CATEGORY_NAME, SORT_ORDER)
+WHERE NOT EXISTS (
+    SELECT 1 FROM ADJUSTMENT_APP.ADJ_CATEGORY t
+    WHERE UPPER(t.CATEGORY_NAME) = UPPER(src.CATEGORY_NAME));
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 8. VERIFY

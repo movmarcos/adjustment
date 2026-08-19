@@ -167,7 +167,7 @@ def main(session, scope, pipeline_types):
         """).collect()
         if stale:
             stale_ids = ", ".join(
-                "'" + str(r["ADJ_ID"]).replace("'", "''") + "'" for r in stale)
+                "'" + str(r["ADJ_ID"]).replace("\\", "\\\\").replace("'", "''") + "'" for r in stale)
             session.sql(f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER
                 SET RUN_STATUS = 'Failed',
@@ -203,7 +203,7 @@ def main(session, scope, pipeline_types):
             # Best-effort: tell the submitters their run died and was reset.
             try:
                 _np = json.dumps({"adj_ids": [str(r["ADJ_ID"]) for r in stale],
-                                  "status": "Failed"}).replace("'", "''")
+                                  "status": "Failed"}).replace("\\", "\\\\").replace("'", "''")
                 session.sql(
                     f"CALL ADJUSTMENT_APP.SP_NOTIFY('adjustment_outcome', '{_np}')"
                 ).collect()
@@ -344,7 +344,7 @@ def main(session, scope, pipeline_types):
             job.result()
             results.append({"process_type": pt, "cobid": cob, "status": "ok"})
         except Exception as e:
-            err = str(e)[:990].replace("'", "''")
+            err = str(e)[:990].replace("\\", "\\\\").replace("'", "''")
             # Mark OUR still-Running claims for this specific combo as Failed.
             # Scoped by CLAIM_TOKEN so a concurrent run's in-flight work is
             # never collateral damage.
@@ -412,8 +412,8 @@ def _block_pending_overlaps(session, pipeline_in):
     for r in unblocked:
         blocker_id = _find_overlap_in_list(r, proceeding)
         if blocker_id:
-            adj_id = str(r["ADJ_ID"]).replace("'", "''")
-            safe_blocker = str(blocker_id).replace("'", "''")
+            adj_id = str(r["ADJ_ID"]).replace("\\", "\\\\").replace("'", "''")
+            safe_blocker = str(blocker_id).replace("\\", "\\\\").replace("'", "''")
             session.sql(f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER
                 SET BLOCKED_BY_ADJ_ID = '{safe_blocker}'
@@ -456,7 +456,7 @@ def _block_overlapping(session, running_row, pipeline_in):
 
     Overlap rule per dimension: NULL (wildcard) overlaps with any value.
     """
-    adj_id = str(running_row["ADJ_ID"]).replace("'", "''")
+    adj_id = str(running_row["ADJ_ID"]).replace("\\", "\\\\").replace("'", "''")
     cobid  = int(running_row["COBID"])
 
     dim_conditions = []
@@ -465,7 +465,7 @@ def _block_overlapping(session, running_row, pipeline_in):
         if val is None:
             dim_conditions.append("TRUE")
         else:
-            escaped = str(val).replace("'", "''")
+            escaped = str(val).replace("\\", "\\\\").replace("'", "''")
             dim_conditions.append(
                 f"(p.{dim} IS NULL OR UPPER(p.{dim}) = UPPER('{escaped}'))"
             )

@@ -63,7 +63,7 @@ STAGE_TO_HEADER = [
 
 
 def _esc(v):
-    return str(v).replace("'", "''") if v is not None else ""
+    return str(v).replace("\\", "\\\\").replace("'", "''") if v is not None else ""
 
 
 def _app_cfg(session, key, default=""):
@@ -294,7 +294,7 @@ def main(session, p_batch):
                     "cobid":           cobid,
                     "adjustment_type": "Direct",
                     "submitted_by":    username,
-                }).replace("'", "''")
+                }).replace("\\", "\\\\").replace("'", "''")
                 session.sql(
                     f"CALL ADJUSTMENT_APP.SP_NOTIFY('approval_pending', '{_np}')"
                 ).collect()

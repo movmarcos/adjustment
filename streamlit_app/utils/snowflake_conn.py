@@ -63,10 +63,13 @@ def run_query_df(sql: str):
 
 
 def call_procedure(proc_name: str, *args):
-    """Call a stored procedure and return the result."""
-    args_str = ", ".join([
-        f"'{a}'" if isinstance(a, str) else str(a) for a in args
-    ])
+    """Call a stored procedure and return the result. String args are escaped
+    Snowflake-style (backslashes doubled FIRST, then quotes — see call_sp_df)."""
+    def _lit(a):
+        if isinstance(a, str):
+            return "'" + a.replace("\\", "\\\\").replace("'", "''") + "'"
+        return str(a)
+    args_str = ", ".join(_lit(a) for a in args)
     return get_session().sql(f"CALL {proc_name}({args_str})").collect()
 
 

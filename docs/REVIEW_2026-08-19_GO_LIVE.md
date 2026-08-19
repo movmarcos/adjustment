@@ -1,5 +1,11 @@
 # Pre-Go-Live Review — 2026-08-19
 
+> **STATUS UPDATE (same day):** all CRITICAL/HIGH blockers (B1–B9), all
+> mediums (C1–C9) and the A-item seed hardening below were FIXED in the
+> follow-up commit. Remaining open: D-lows explicitly deferred (currency-pair
+> direction needs a data check against DIMENSION.CURRENCY_PAIR) and the §G
+> carried-over items from the July review.
+
 Full-solution review (4 parallel passes: DB objects, stored procedures, app
 pages, app↔DB cross-consistency) triggered by two questions: (a) is there any
 other migration-only code embedded in the repeatable deploy files, and (b) is

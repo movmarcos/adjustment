@@ -32,8 +32,8 @@ $$
 def main(session, process_type, cobid, source_cobid, entity_code):
     NEW_ID  = 999999999      # placeholder for the generated DIMENSION.ADJUSTMENT id
     RUN_LOG = 0              # placeholder for the generated RUN_LOG_ID
-    esc_entity = str(entity_code).replace("'", "''")
-    esc_pt     = str(process_type).replace("'", "''")
+    esc_entity = str(entity_code).replace("\\", "\\\\").replace("'", "''")
+    esc_pt     = str(process_type).replace("\\", "\\\\").replace("'", "''")
     cobid, source_cobid = int(cobid), int(source_cobid)
 
     # ── 1. Resolve scope config (same columns as SP_PROCESS_ADJUSTMENT) ───────
