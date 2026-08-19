@@ -98,7 +98,8 @@ except Exception as e:
 
 try:
     df_so = run_query_df(f"""
-        SELECT PROCESS_TYPE, ENTITY_CODE, SIGN_OFF_STATUS, SIGNOFF_SOURCE,
+        SELECT PROCESS_TYPE, ENTITY_CODE, SUB_TYPE, SIGN_OFF_STATUS,
+               SIGNOFF_SOURCE,
                SIGN_OFF_BY, REOPEN_REQUESTED_BY, REOPEN_REASON, REOPEN_APPROVED_BY
         FROM ADJUSTMENT_APP.VW_SIGNOFF_STATUS
         WHERE COBID = {int(cobid)}
@@ -175,7 +176,7 @@ st.markdown("<br/>", unsafe_allow_html=True)
 
 # ── Sign-off actions (same rules as the New Adjustment page) ─────────────────
 
-def _signoff_request(scope, entity, action, reason, requires_approval):
+def _signoff_request(scope, entity, sub, action, reason, requires_approval):
     """One path for both lifecycle changes: SP_REQUEST_SIGNOFF_CHANGE enforces
     the guarded transition + history. Sign-off applies DIRECTLY by default
     (approval optional — Marcos); re-open always goes through approval."""
@@ -183,6 +184,7 @@ def _signoff_request(scope, entity, action, reason, requires_approval):
     res = run_query(
         f"CALL ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE("
         f"{int(cobid)}, '{_esc(scope)}', '{_esc(entity or '*')}', "
+        f"'{_esc(sub or '')}', "
         f"'{action}', '{_esc(str(reason or '')[:490])}', {_appr}, "
         f"'{_esc(current_user_name())}')")
     try:
@@ -212,12 +214,12 @@ def _signoff_request(scope, entity, action, reason, requires_approval):
                   f"adjustment submissions are blocked again.")
 
 
-def _request_reopen(scope, entity, reason):
-    return _signoff_request(scope, entity, "REOPEN", reason, True)
+def _request_reopen(scope, entity, reason, sub=None):
+    return _signoff_request(scope, entity, sub, "REOPEN", reason, True)
 
 
-def _resign_off(scope, entity):
-    return _signoff_request(scope, entity, "SIGNOFF",
+def _resign_off(scope, entity, sub=None):
+    return _signoff_request(scope, entity, sub, "SIGNOFF",
                             "Sign-off after re-open cycle (Cockpit)", False)
 
 
@@ -312,8 +314,13 @@ for scope in ALL_SCOPES:
         for so in so_rows:
             so_status = str(so.get("SIGN_OFF_STATUS", "")).upper()
             so_ent    = str(so.get("ENTITY_CODE") or "*")
-            ent_txt   = "all entities" if so_ent == "*" else so_ent
-            _key      = f"{scope}_{so_ent}"
+            _sub_raw  = so.get("SUB_TYPE")
+            # NULL SUB_TYPE arrives as None OR pandas NaN — NaN is TRUTHY,
+            # so a bare `or ""` would yield the literal string "nan".
+            so_sub    = "" if (_sub_raw is None or pd.isna(_sub_raw)) \
+                        else str(_sub_raw)
+            ent_txt   = ("all entities" if so_ent == "*" else so_ent)                         + (f" / {so_sub}" if so_sub else "")
+            _key      = f"{scope}_{so_ent}_{so_sub}"
             if so_status == "SIGNED_OFF":
                 src = str(so.get("SIGNOFF_SOURCE") or "EXTERNAL")
                 st.caption(f"**{ent_txt}** signed off by "
@@ -332,7 +339,8 @@ for scope in ALL_SCOPES:
                                  disabled=not reason.strip()):
                         try:
                             ok, msg = _request_reopen(scope, so_ent,
-                                                      reason.strip())
+                                                      reason.strip(),
+                                                      so_sub or None)
                             st.session_state["ck_flash"] = (
                                 "success" if ok else "warning", msg)
                         except Exception as ex:
@@ -369,7 +377,8 @@ for scope in ALL_SCOPES:
                                  use_container_width=True,
                                  disabled=not confirm):
                         try:
-                            ok, msg = _resign_off(scope, so_ent)
+                            ok, msg = _resign_off(scope, so_ent,
+                                                  so_sub or None)
                             st.session_state["ck_flash"] = (
                                 "success" if ok else "warning", msg)
                         except Exception as ex:

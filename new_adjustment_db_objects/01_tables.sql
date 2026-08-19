@@ -815,9 +815,16 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS (
     -- which still says signed off, silently destroying the approved re-open).
     PREV_STATUS                 VARCHAR(30),
 
+    -- Extra granularity dimension from the publish feed (e.g. NonCVA/CVA) —
+    -- part of the LOGICAL key (COBID + PROCESS_TYPE + SUB_TYPE + ENTITY);
+    -- NULL/'' = no sub-type. The informational PK below cannot include it
+    -- (nullable), so uniqueness per sub-type is maintained by the sync and
+    -- the workflow procs, which all key on COALESCE(SUB_TYPE, '').
+    SUB_TYPE                    VARCHAR(30),
+
     CONSTRAINT PK_ADJ_SIGNOFF_STATUS_ENT PRIMARY KEY (COBID, PROCESS_TYPE, ENTITY_CODE)
 )
-COMMENT = 'Sign-off lifecycle per COB + scope + entity (ENTITY_CODE = ''*'' means the whole scope). SIGNED_OFF / SIGNOFF_REQUESTED / REOPEN_REQUESTED block new adjustments for that entity; REOPENED allows them again until the approved re-sign-off. First sign-off synced from the upstream publish feed.';
+COMMENT = 'Sign-off lifecycle per COB + scope + SUB_TYPE + entity (ENTITY_CODE = ''*'' means the whole scope; SUB_TYPE NULL = none). SIGNED_OFF / SIGNOFF_REQUESTED / REOPEN_REQUESTED block new adjustments for that entity; REOPENED allows them again until the approved re-sign-off. First sign-off synced from the upstream publish feed.';
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -836,6 +843,7 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY (
     -- At the END on purpose: CREATE OR ALTER can only APPEND columns, and an
     -- earlier revision of this table may already be deployed without it.
     ENTITY_CODE                 VARCHAR(50)  DEFAULT '*',
+    SUB_TYPE                    VARCHAR(30),
 
     CONSTRAINT PK_ADJ_SIGNOFF_HISTORY PRIMARY KEY (SIGNOFF_HISTORY_ID)
 )

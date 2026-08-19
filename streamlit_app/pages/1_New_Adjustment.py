@@ -2754,7 +2754,8 @@ def _signoff_state(scope, cobid, entity=None):
     ent = str(entity).strip() if entity and str(entity).strip() else None
     try:
         rows = run_query(f"""
-            SELECT ENTITY_CODE, SIGN_OFF_STATUS, SIGNOFF_SOURCE, SIGN_OFF_BY,
+            SELECT ENTITY_CODE, SUB_TYPE, SIGN_OFF_STATUS, SIGNOFF_SOURCE,
+                   SIGN_OFF_BY,
                    REOPEN_REQUESTED_BY, REOPEN_REQUESTED_AT, REOPEN_REASON,
                    REOPEN_APPROVED_BY, REOPEN_APPROVED_AT
             FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
@@ -2770,9 +2771,21 @@ def _signoff_state(scope, cobid, entity=None):
                                "REOPEN_APPROVED_AT")}
         d["status"] = str(r["SIGN_OFF_STATUS"]).upper()
         d["entity"] = str(r["ENTITY_CODE"] or "*")
+        d["sub_type"] = str(r["SUB_TYPE"] or "")
         return d
 
-    app = {str(r["ENTITY_CODE"] or "*").upper(): r for r in rows}
+    # One entity can carry SEVERAL rows (one per SUB_TYPE, '' = none) — the
+    # GOVERNING row is the worst state: blocked beats reopened beats open,
+    # matching check_signoff's any-blocked-blocks rule.
+    _rank = {"SIGNED_OFF": 3, "REOPEN_REQUESTED": 3, "SIGNOFF_REQUESTED": 3,
+             "REOPENED": 2, "OPEN": 1}
+    app = {}
+    for r in rows:
+        k = str(r["ENTITY_CODE"] or "*").upper()
+        cur = app.get(k)
+        if (cur is None or _rank.get(str(r["SIGN_OFF_STATUS"]).upper(), 0)
+                > _rank.get(str(cur["SIGN_OFF_STATUS"]).upper(), 0)):
+            app[k] = r
 
     if ent is not None:
         gov = app.get(ent.upper())
@@ -2853,7 +2866,7 @@ def _signoff_history(scope, cobid, entity, old_status, new_status, comment):
     """)
 
 
-def _request_reopen(scope, cobid, entity, reason):
+def _request_reopen(scope, cobid, entity, reason, sub=""):
     """SIGNED_OFF → REOPEN_REQUESTED for one entity ('*' = whole scope),
     via SP_REQUEST_SIGNOFF_CHANGE — one server-side state machine for every
     page (the SP also creates the row when the sign-off only exists upstream
@@ -2861,7 +2874,8 @@ def _request_reopen(scope, cobid, entity, reason):
     res = run_query(
         f"CALL ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE("
         f"{int(cobid)}, {_sql_str_literal(scope)}, "
-        f"{_sql_str_literal(entity or '*')}, 'REOPEN', "
+        f"{_sql_str_literal(entity or '*')}, {_sql_str_literal(sub or '')}, "
+        f"'REOPEN', "
         f"{_sql_str_literal(str(reason or '')[:490])}, TRUE, "
         f"{_sql_str_literal(current_user_name())})")
     try:
@@ -2890,7 +2904,7 @@ def _request_reopen(scope, cobid, entity, reason):
                           "could be recorded — check the current status below.")
 
 
-def _resign_off(scope, cobid, entity):
+def _resign_off(scope, cobid, entity, sub=""):
     """Sign a re-opened entity off again ('*' = whole scope). Applies
     DIRECTLY (sign-off approval is optional and defaults to off — Marcos);
     SP_REQUEST_SIGNOFF_CHANGE still enforces the guarded transition +
@@ -2901,7 +2915,9 @@ def _resign_off(scope, cobid, entity):
     usr       = current_user_name().replace("\\", "\\\\").replace("'", "''")
     res = run_query(
         f"CALL ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE("
-        f"{int(cobid)}, '{esc_scope}', '{esc_ent}', 'SIGNOFF', "
+        f"{int(cobid)}, '{esc_scope}', '{esc_ent}', "
+        f"'{(sub or '').replace(chr(92), chr(92)*2).replace(chr(39), chr(39)*2)}', "
+        f"'SIGNOFF', "
         f"'Sign-off after re-open cycle', FALSE, '{usr}')")
     try:
         out = _json.loads(str(res[0][0])) if res else {}
@@ -2966,7 +2982,8 @@ def _render_signoff_panel() -> bool:
                          disabled=not reason.strip()):
                 try:
                     ok, msg = _request_reopen(scope, cobid, gov_ent,
-                                              reason.strip())
+                                              reason.strip(),
+                                              state.get("sub_type") or "")
                     st.session_state["na_signoff_flash"] = (
                         "success" if ok else "warning", msg)
                 except Exception as ex:
@@ -2996,7 +3013,8 @@ def _render_signoff_panel() -> bool:
                          key=_k(f"resign_btn_{scope}"), use_container_width=True,
                          disabled=not confirm):
                 try:
-                    ok, msg = _resign_off(scope, cobid, gov_ent)
+                    ok, msg = _resign_off(scope, cobid, gov_ent,
+                                          state.get("sub_type") or "")
                     st.session_state["na_signoff_flash"] = (
                         "success" if ok else "warning", msg)
                 except Exception as ex:

@@ -118,7 +118,8 @@ if _flash:
 df_all = pd.DataFrame()
 try:
     df_all = run_query_df("""
-        SELECT COBID, PROCESS_TYPE, ENTITY_CODE, SIGN_OFF_STATUS, SIGNOFF_SOURCE,
+        SELECT COBID, PROCESS_TYPE, ENTITY_CODE, SUB_TYPE,
+               SIGN_OFF_STATUS, SIGNOFF_SOURCE,
                SIGN_OFF_BY, SIGN_OFF_TIMESTAMP,
                REOPEN_REQUESTED_BY, REOPEN_REQUESTED_AT, REOPEN_REASON,
                REOPEN_APPROVED_BY, REOPEN_APPROVED_AT, UPDATED_DATE
@@ -134,7 +135,11 @@ if df_all.empty:
     st.stop()
 
 df_all["ENTITY_CODE"] = df_all["ENTITY_CODE"].fillna("*")
+df_all["SUB_TYPE"] = df_all["SUB_TYPE"].fillna("")
 df_all["_SU"] = df_all["SIGN_OFF_STATUS"].astype(str).str.upper()
+# Display key: entity plus the sub-type when one exists (extra granularity)
+df_all["_ENT_LBL"] = df_all["ENTITY_CODE"] + df_all["SUB_TYPE"].apply(
+    lambda v: f" / {v}" if str(v) else "")
 _all_cobs = sorted(df_all["COBID"].astype(int).unique().tolist(), reverse=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -219,16 +224,17 @@ def _scope_summary(rows):
 
 def _entity_chips(rows):
     """Compact per-entity chips; a lone '*' row means the whole scope."""
-    if len(rows) == 1 and str(rows.iloc[0]["ENTITY_CODE"]) == "*":
+    if (len(rows) == 1 and str(rows.iloc[0]["ENTITY_CODE"]) == "*"
+            and not str(rows.iloc[0]["SUB_TYPE"])):
         return f'<span style="font-size:0.75rem;color:{P["grey_700"]}">whole scope</span>'
     chips = []
-    for _, r in rows.sort_values("ENTITY_CODE").iterrows():
+    for _, r in rows.sort_values(["ENTITY_CODE", "SUB_TYPE"]).iterrows():
         lbl, col, _ = _STATUS_META.get(str(r["_SU"]),
                                        (str(r["_SU"]), P["grey_700"], False))
         chips.append(
             f'<span style="background:{col}14;color:{col};border:1px solid {col}44;'
             f'border-radius:99px;padding:0 8px;font-size:0.7rem;font-weight:700;'
-            f'white-space:nowrap">{r["ENTITY_CODE"]}&nbsp;·&nbsp;{lbl}</span>')
+            f'white-space:nowrap">{r["_ENT_LBL"]}&nbsp;·&nbsp;{lbl}</span>')
     return '<span style="line-height:1.9">' + " ".join(chips) + "</span>"
 
 
@@ -274,13 +280,17 @@ with bordered_container():
         _scope_opts = sorted(df_cob["PROCESS_TYPE"].unique().tolist())
         act_scope = st.selectbox("Scope", _scope_opts, key="so_act_scope")
     with a2:
-        _ent_opts = sorted(df_cob[df_cob["PROCESS_TYPE"] == act_scope]
-                           ["ENTITY_CODE"].unique().tolist())
-        act_entity = st.selectbox("Entity ('*' = whole scope)", _ent_opts,
-                                  key="so_act_entity")
+        _sel_rows = df_cob[df_cob["PROCESS_TYPE"] == act_scope]
+        _ent_opts = sorted({(r["ENTITY_CODE"], r["SUB_TYPE"])
+                            for _, r in _sel_rows.iterrows()})
+        _sel = st.selectbox(
+            "Entity ('*' = whole scope)", _ent_opts, key="so_act_entity",
+            format_func=lambda t: t[0] + (f" / {t[1]}" if t[1] else ""))
+        act_entity, act_sub = (_sel if _sel else ("*", ""))
 
     _row = df_cob[(df_cob["PROCESS_TYPE"] == act_scope)
-                  & (df_cob["ENTITY_CODE"] == act_entity)]
+                  & (df_cob["ENTITY_CODE"] == act_entity)
+                  & (df_cob["SUB_TYPE"] == act_sub)]
     cur = str(_row["_SU"].values[0]) if not _row.empty else "?"
     lbl, col, blocks = _STATUS_META.get(cur, (cur, P["grey_700"], False))
     _r = _row.iloc[0] if not _row.empty else {}
@@ -288,7 +298,7 @@ with bordered_container():
     st.markdown(
         f'<div style="margin:0.4rem 0 0.6rem;font-size:0.95rem">'
         f'COB <strong>{sel_cob}</strong> · <strong>{act_scope}</strong> · '
-        f'<strong>{act_entity}</strong> is currently &nbsp;{_pill(lbl, col)}'
+        f'<strong>{act_entity}{" / " + act_sub if act_sub else ""}</strong> is currently &nbsp;{_pill(lbl, col)}'
         f'&nbsp;<span style="font-size:0.8rem;color:{P["grey_700"]}">'
         f'{"— new adjustments are BLOCKED" if blocks else "— new adjustments are allowed"}'
         f'</span></div>',
@@ -300,6 +310,7 @@ with bordered_container():
         res = run_query(
             f"CALL ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE("
             f"{int(sel_cob)}, '{_esc(act_scope)}', '{_esc(act_entity)}', "
+            f"'{_esc(act_sub)}', "
             f"'{action}', '{_esc(reason.strip()[:490])}', {_appr}, "
             f"'{_esc(user)}')")
         try:
@@ -343,7 +354,7 @@ with bordered_container():
             help="Unchecked: the sign-off applies immediately. Checked: an "
                  "approver must approve it on the Approval Queue page first.")
         _btn_lbl = ("Request sign-off" if _appr_s else "Sign off") \
-            + f" — {act_scope} ({act_entity})"
+            + f" — {act_scope} ({act_entity}{'/' + act_sub if act_sub else ''})"
         if st.button(_btn_lbl, key="so_act_btn_s", type="primary",
                      disabled=not reason.strip()):
             _request("SIGNOFF", "Sign-off", reason, _appr_s)
@@ -363,7 +374,8 @@ with bordered_container():
         # Re-open stays approval-gated by policy — ticked and locked.
         st.checkbox("Request approval (required by policy)", value=True,
                     disabled=True, key="so_act_appr_r")
-        if st.button(f"Request re-open — {act_scope} ({act_entity})",
+        if st.button(f"Request re-open — {act_scope} "
+                     f"({act_entity}{'/' + act_sub if act_sub else ''})",
                      key="so_act_btn_r", type="primary",
                      disabled=not reason.strip()):
             _request("REOPEN", "Re-open", reason, True)

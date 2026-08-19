@@ -158,9 +158,10 @@ def check_signoff(session, process_type, cobid, entity_code=None):
 
     Upstream: the unified publish feed (ADJ_APP_CONFIG.SIGNOFF_FEED_TABLE,
     default BATCH.PUBLISH_SIGNOFF_STATUS) keyed by COBID + ENTITY_CODE +
-    PROCESS_TYPE. An upstream 'FRTB' row covers FRTB, FRTBDRC and FRTBRRAO
-    (no separate entries exist for DRC/RRAO). SUB_TYPE NULL/'' (VaR-style
-    rows) and 'NonCVA' count; 'CVA' rows do not. An upstream sign-off is
+    PROCESS_TYPE, matched EXACTLY per scope (the feed's 'FRTB' row is SBM
+    only; DRC/RRAO have their own rows when the publish process carries
+    them). SUB_TYPE is an extra granularity
+    dimension — ANY signed-off sub-type row blocks (no filtering). An upstream sign-off is
     overridden by an app REOPENED row for the same entity (or '*').
     The live feed check can be paused during the feed migration via
     ADJ_APP_CONFIG.SIGNOFF_FEED_ENABLED = 'false' (the synced app rows keep
@@ -176,18 +177,28 @@ def check_signoff(session, process_type, cobid, entity_code=None):
         FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
         WHERE COBID = {int(cobid)} AND UPPER(PROCESS_TYPE) = '{pt_esc}'
     """).collect()
-    app = {str(r["E"]): str(r["S"]) for r in app_rows}
+    # One entity can carry SEVERAL rows (one per SUB_TYPE): any blocked
+    # sub-type blocks the entity; REOPENED opens it only when nothing is
+    # blocked. Exact-entity rows take precedence over the '*' row.
+    def _verdict(statuses):
+        if any(x in BLOCKED for x in statuses):
+            return True
+        if any(x == "REOPENED" for x in statuses):
+            return False
+        return None            # OPEN/no statement → caller falls through
+
+    by_ent = {}
+    for r in app_rows:
+        by_ent.setdefault(str(r["E"]), []).append(str(r["S"]))
 
     if ent is not None:
-        s = app.get(ent.upper())
-        if s in (None, "OPEN"):          # no entity-level statement → wildcard
-            s = app.get("*")
-        if s == "REOPENED":
-            return False
-        if s in BLOCKED:
-            return True
+        v = _verdict(by_ent.get(ent.upper(), []))
+        if v is None:
+            v = _verdict(by_ent.get("*", []))
+        if v is not None:
+            return v
     else:
-        if any(s in BLOCKED for s in app.values()):
+        if any(x in BLOCKED for xs in by_ent.values() for x in xs):
             return True
 
     # ── Upstream unified feed (live) ─────────────────────────────────────
@@ -195,10 +206,9 @@ def check_signoff(session, process_type, cobid, entity_code=None):
         return False
     feed = _app_cfg(session, "SIGNOFF_FEED_TABLE",
                     "BATCH.PUBLISH_SIGNOFF_STATUS").strip()
-    if pt_esc in ("FRTB", "FRTBDRC", "FRTBRRAO"):
-        pt_match = f"UPPER(u.PROCESS_TYPE) IN ('FRTB', '{pt_esc}')"
-    else:
-        pt_match = f"UPPER(u.PROCESS_TYPE) = '{pt_esc}'"
+    # Exact match — the feed's 'FRTB' row is SBM only; DRC/RRAO have their
+    # own feed rows when the publish process carries them.
+    pt_match = f"UPPER(u.PROCESS_TYPE) = '{pt_esc}'"
     ent_pred = (f"AND UPPER(u.ENTITY_CODE) = UPPER('{_esc(ent)}')"
                 if ent else "")
     upstream = session.sql(f"""
@@ -206,8 +216,6 @@ def check_signoff(session, process_type, cobid, entity_code=None):
         FROM {feed} u
         WHERE u.COBID = {int(cobid)}
           AND {pt_match}
-          AND (u.SUB_TYPE IS NULL OR TRIM(u.SUB_TYPE) = ''
-               OR UPPER(u.SUB_TYPE) = 'NONCVA')
           AND UPPER(u.PUBLISH_STATUS) = 'SIGNEDOFF'
           {ent_pred}
           AND NOT EXISTS (

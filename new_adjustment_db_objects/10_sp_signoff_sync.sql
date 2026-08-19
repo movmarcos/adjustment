@@ -12,12 +12,13 @@
 --   20260608, MUSUA, VaR,  NULL,   SignedOff,  2026-06-09 17:09:11
 --
 -- Sync rules (deliberately one-way and non-destructive):
---   • A 'SignedOff' feed row (SUB_TYPE NULL/'' or 'NonCVA' — CVA rows are a
---     different universe) → SIGNED_OFF app row per COBID + scope + ENTITY,
---     SIGNOFF_SOURCE = 'EXTERNAL'.
---   • An upstream 'FRTB' row covers FRTB, FRTBDRC and FRTBRRAO — the feed
---     never carries separate DRC/RRAO entries, so one feed row fans out to
---     the three app scopes.
+--   • A 'SignedOff' feed row → SIGNED_OFF app row per COBID + scope +
+--     SUB_TYPE + ENTITY, SIGNOFF_SOURCE = 'EXTERNAL'. SUB_TYPE is an extra
+--     granularity dimension carried verbatim (NULL/'' = none) — no rows are
+--     filtered out.
+--   • EXACT process-type match: the feed's 'FRTB' row is SBM only;
+--     FRTBDRC/FRTBRRAO sync in only when the feed carries those process
+--     types itself (no fan-out).
 --   • Rows already in the app lifecycle (SIGNED_OFF, REOPEN_REQUESTED,
 --     REOPENED) are NEVER touched — an approved in-app re-open must not be
 --     clobbered by the next sync run.
@@ -40,7 +41,7 @@ LANGUAGE PYTHON
 RUNTIME_VERSION = '3.11'
 PACKAGES = ('snowflake-snowpark-python')
 HANDLER = 'main'
-COMMENT = 'Materialises the unified upstream publish sign-off feed into ADJ_SIGNOFF_STATUS as SIGNED_OFF/EXTERNAL rows per COB + scope + entity (FRTB rows fan out to FRTBDRC/FRTBRRAO). Never overwrites the in-app re-open lifecycle.'
+COMMENT = 'Materialises the unified upstream publish sign-off feed into ADJ_SIGNOFF_STATUS as SIGNED_OFF/EXTERNAL rows per COB + scope + entity (EXACT process-type match — no FRTB fan-out). Never overwrites the in-app re-open lifecycle.'
 EXECUTE AS CALLER
 AS
 $$
@@ -48,16 +49,17 @@ import json
 
 LOOKBACK_DAYS = 180
 
-# app scope → predicate on the feed's PROCESS_TYPE
+# app scope → predicate on the feed's PROCESS_TYPE.
+# EXACT match per scope (Marcos, 2026-08): the feed's 'FRTB' row means SBM
+# only — FRTBDRC/FRTBRRAO appear in the app ONLY when the publish table
+# carries those process types itself. No fan-out.
 SCOPE_MATCH = {
     'VaR':         "UPPER(u.PROCESS_TYPE) = 'VAR'",
     'Stress':      "UPPER(u.PROCESS_TYPE) = 'STRESS'",
     'Sensitivity': "UPPER(u.PROCESS_TYPE) = 'SENSITIVITY'",
-    # One upstream FRTB row covers all three FRTB scopes; a row carrying the
-    # sub-scope name directly (if it ever appears) also matches.
-    'FRTB':        "UPPER(u.PROCESS_TYPE) IN ('FRTB')",
-    'FRTBDRC':     "UPPER(u.PROCESS_TYPE) IN ('FRTB', 'FRTBDRC')",
-    'FRTBRRAO':    "UPPER(u.PROCESS_TYPE) IN ('FRTB', 'FRTBRRAO')",
+    'FRTB':        "UPPER(u.PROCESS_TYPE) = 'FRTB'",
+    'FRTBDRC':     "UPPER(u.PROCESS_TYPE) = 'FRTBDRC'",
+    'FRTBRRAO':    "UPPER(u.PROCESS_TYPE) = 'FRTBRRAO'",
 }
 
 
@@ -90,25 +92,27 @@ def main(session):
         # downgraded). This is what makes "which COBs are open" visible in
         # the app; sign-off requests are raised against these rows.
         open_src = f"""
-            SELECT DISTINCT u.COBID, UPPER(TRIM(u.ENTITY_CODE)) AS ENTITY_CODE
+            SELECT DISTINCT u.COBID, UPPER(TRIM(u.ENTITY_CODE)) AS ENTITY_CODE,
+                   NULLIF(TRIM(u.SUB_TYPE), '') AS SUB_TYPE
             FROM {feed} u
             WHERE {pt_match}
               AND UPPER(u.PUBLISH_STATUS) <> 'SIGNEDOFF'
-              AND (u.SUB_TYPE IS NULL OR TRIM(u.SUB_TYPE) = ''
-                   OR UPPER(u.SUB_TYPE) = 'NONCVA')
               AND u.ENTITY_CODE IS NOT NULL AND TRIM(u.ENTITY_CODE) <> ''
               AND u.COBID >= {int(min_cobid)}
         """
         opened = session.sql(f"""
             INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-                (COBID, PROCESS_TYPE, ENTITY_CODE, SIGN_OFF_STATUS, SIGNOFF_SOURCE)
-            SELECT s.COBID, '{scope}', s.ENTITY_CODE, 'OPEN', 'EXTERNAL'
+                (COBID, PROCESS_TYPE, ENTITY_CODE, SUB_TYPE,
+                 SIGN_OFF_STATUS, SIGNOFF_SOURCE)
+            SELECT s.COBID, '{scope}', s.ENTITY_CODE, s.SUB_TYPE,
+                   'OPEN', 'EXTERNAL'
             FROM ({open_src}) s
             WHERE NOT EXISTS (
                 SELECT 1 FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS a
                 WHERE a.COBID = s.COBID
                   AND UPPER(a.PROCESS_TYPE) = '{scope.upper()}'
                   AND UPPER(a.ENTITY_CODE) = s.ENTITY_CODE
+                  AND COALESCE(UPPER(a.SUB_TYPE), '') = COALESCE(UPPER(s.SUB_TYPE), '')
             )
         """).collect()
         try:
@@ -117,12 +121,11 @@ def main(session):
             summary.setdefault("opened", {})[scope] = 0
 
         src_sql = f"""
-            SELECT DISTINCT u.COBID, UPPER(TRIM(u.ENTITY_CODE)) AS ENTITY_CODE
+            SELECT DISTINCT u.COBID, UPPER(TRIM(u.ENTITY_CODE)) AS ENTITY_CODE,
+                   NULLIF(TRIM(u.SUB_TYPE), '') AS SUB_TYPE
             FROM {feed} u
             WHERE {pt_match}
               AND UPPER(u.PUBLISH_STATUS) = 'SIGNEDOFF'
-              AND (u.SUB_TYPE IS NULL OR TRIM(u.SUB_TYPE) = ''
-                   OR UPPER(u.SUB_TYPE) = 'NONCVA')
               AND u.ENTITY_CODE IS NOT NULL AND TRIM(u.ENTITY_CODE) <> ''
               AND u.COBID >= {int(min_cobid)}
         """
@@ -134,12 +137,14 @@ def main(session):
         # subquery type cannot be evaluated"). (COBID, PROCESS_TYPE,
         # ENTITY_CODE) is the table's key, so the join cannot fan out.
         to_change = session.sql(f"""
-            SELECT s.COBID, s.ENTITY_CODE, a.SIGN_OFF_STATUS AS OLD_STATUS
+            SELECT s.COBID, s.ENTITY_CODE, s.SUB_TYPE,
+                   a.SIGN_OFF_STATUS AS OLD_STATUS
             FROM ({src_sql}) s
             LEFT JOIN ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS a
               ON a.COBID = s.COBID
              AND UPPER(a.PROCESS_TYPE) = '{scope.upper()}'
              AND UPPER(a.ENTITY_CODE) = s.ENTITY_CODE
+             AND COALESCE(UPPER(a.SUB_TYPE), '') = COALESCE(UPPER(s.SUB_TYPE), '')
             WHERE a.COBID IS NULL
                OR UPPER(a.SIGN_OFF_STATUS) = 'OPEN'
         """).collect()
@@ -154,6 +159,7 @@ def main(session):
             ON t.COBID = s.COBID
                AND UPPER(t.PROCESS_TYPE) = '{scope.upper()}'
                AND UPPER(t.ENTITY_CODE) = s.ENTITY_CODE
+               AND COALESCE(UPPER(t.SUB_TYPE), '') = COALESCE(UPPER(s.SUB_TYPE), '')
             WHEN MATCHED AND UPPER(t.SIGN_OFF_STATUS) = 'OPEN' THEN UPDATE SET
                 t.SIGN_OFF_STATUS    = 'SIGNED_OFF',
                 t.SIGN_OFF_BY        = 'EXTERNAL FEED',
@@ -161,24 +167,27 @@ def main(session):
                 t.SIGNOFF_SOURCE     = 'EXTERNAL',
                 t.UPDATED_DATE       = CURRENT_TIMESTAMP()
             WHEN NOT MATCHED THEN INSERT
-                (COBID, PROCESS_TYPE, ENTITY_CODE, SIGN_OFF_STATUS,
+                (COBID, PROCESS_TYPE, ENTITY_CODE, SUB_TYPE, SIGN_OFF_STATUS,
                  SIGN_OFF_BY, SIGN_OFF_TIMESTAMP, SIGNOFF_SOURCE)
             VALUES
-                (s.COBID, '{scope}', s.ENTITY_CODE, 'SIGNED_OFF',
+                (s.COBID, '{scope}', s.ENTITY_CODE, s.SUB_TYPE, 'SIGNED_OFF',
                  'EXTERNAL FEED', CURRENT_TIMESTAMP(), 'EXTERNAL')
         """).collect()
 
+        def _hv(v):
+            return ("NULL" if v is None else
+                    "'" + str(v).replace(chr(92), chr(92) * 2)
+                                .replace(chr(39), chr(39) * 2) + "'")
         hist_values = ", ".join(
-            f"({int(r['COBID'])}, '{scope}', "
-            f"'{str(r['ENTITY_CODE']).replace(chr(92), chr(92) * 2).replace(chr(39), chr(39) * 2)}', "
-            + ("NULL" if r["OLD_STATUS"] is None else "'" + str(r["OLD_STATUS"]) + "'")
-            + ", 'SIGNED_OFF', 'EXTERNAL FEED', "
-              "'Signed off by the upstream publish system (synced)')"
+            f"({int(r['COBID'])}, '{scope}', {_hv(r['ENTITY_CODE'])}, "
+            f"{_hv(r['SUB_TYPE'])}, {_hv(r['OLD_STATUS'])}, "
+            "'SIGNED_OFF', 'EXTERNAL FEED', "
+            "'Signed off by the upstream publish system (synced)')"
             for r in to_change)
         session.sql(f"""
             INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
-                (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS,
-                 ACTION_BY, COMMENT)
+                (COBID, PROCESS_TYPE, ENTITY_CODE, SUB_TYPE, OLD_STATUS,
+                 NEW_STATUS, ACTION_BY, COMMENT)
             VALUES {hist_values}
         """).collect()
 

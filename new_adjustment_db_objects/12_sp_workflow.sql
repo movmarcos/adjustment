@@ -158,10 +158,15 @@ $$;
 -- is ALWAYS approval-gated (the UI checkbox is ticked and locked).
 -- ─────────────────────────────────────────────────────────────────────────────
 
+-- SUB_TYPE joined the signature; drop the old overload so stale callers
+-- fail loudly instead of targeting the wrong row.
+DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR, BOOLEAN, VARCHAR);
+
 CREATE OR ALTER PROCEDURE ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE(
     p_cobid             INT,
     p_process_type      VARCHAR,
     p_entity_code       VARCHAR,   -- '*' = whole-scope row
+    p_sub_type          VARCHAR,   -- ''/NULL = no sub-type
     p_action            VARCHAR,   -- 'SIGNOFF' | 'REOPEN'
     p_reason            VARCHAR,
     p_requires_approval BOOLEAN,
@@ -185,21 +190,23 @@ ACTIONS = {
 }
 
 
-FRTB_FAMILY = ("FRTB", "FRTBDRC", "FRTBRRAO")
+# Scopes the publish process natively knows — a missing feed row may be
+# INSERTED for these. FRTBDRC/FRTBRRAO rows are created upstream by Marcos
+# when needed, so for those the propagation is UPDATE-ONLY: the app never
+# invents feed rows the publish process didn't define.
+FEED_NATIVE_SCOPES = ("VAR", "STRESS", "SENSITIVITY", "FRTB")
 
 
-def _propagate_signoff_to_feed(session, cobid, scope, entity):
+def _propagate_signoff_to_feed(session, cobid, scope, entity, sub):
     """Push an APPLIED sign-off into the upstream feed table — the batch
     process reads BATCH.PUBLISH_SIGNOFF_STATUS, so the ADJUSTMENT_APP state
-    must propagate there (same pattern as the rest of the schema). Non-CVA
-    rows only; entity '*' updates every entity of the scope at that COB.
+    must propagate there (same pattern as the rest of the schema). Rows are
+    matched on the SAME SUB_TYPE ('' = none); entity '*' updates every
+    entity of the scope at that COB.
 
-    FRTB granularity: the feed carries ONE 'FRTB' row covering FRTB, FRTBDRC
-    and FRTBRRAO (the sync fans it out the other way). Signing off a single
-    sub-scope therefore does NOT touch the feed — the 'FRTB' feed row flips
-    to SignedOff only once ALL THREE app scopes are SIGNED_OFF for that
-    COB+entity. Until then the app table alone blocks the signed-off
-    sub-scope (check_signoff reads it first).
+    EXACT process-type match (Marcos, 2026-08): the feed's 'FRTB' row is SBM
+    only. FRTBDRC/FRTBRRAO are updated when the publish table carries those
+    process types, and never inserted by the app.
 
     Re-open is deliberately NOT propagated: the feed has no agreed
     "re-opened" vocabulary, and the engine honours the app REOPENED row.
@@ -214,51 +221,38 @@ def _propagate_signoff_to_feed(session, cobid, scope, entity):
     if _cfg("SIGNOFF_FEED_ENABLED", "true").strip().lower() != "true":
         return
     feed = _cfg("SIGNOFF_FEED_TABLE", "BATCH.PUBLISH_SIGNOFF_STATUS").strip()
+    may_insert = str(scope).upper() in FEED_NATIVE_SCOPES
 
-    if str(scope).upper() in FRTB_FAMILY:
-        # Runs inside the caller's transaction, so this count SEES the
-        # sign-off just applied. All three scopes signed off → feed 'FRTB';
-        # otherwise leave the feed untouched.
-        fam = session.sql(f"""
-            SELECT COUNT(DISTINCT UPPER(PROCESS_TYPE)) AS C
-            FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-            WHERE COBID = {int(cobid)}
-              AND UPPER(PROCESS_TYPE) IN ('FRTB', 'FRTBDRC', 'FRTBRRAO')
-              AND UPPER(ENTITY_CODE) = UPPER('{entity}')
-              AND UPPER(SIGN_OFF_STATUS) = 'SIGNED_OFF'
-        """).collect()
-        if int(fam[0]["C"] if fam else 0) < 3:
-            return
-        scope = "FRTB"
-
-    if str(entity) == "*":
+    if str(entity) == "*" or not may_insert:
+        ent_pred = ("" if str(entity) == "*"
+                    else f"AND UPPER(ENTITY_CODE) = UPPER('{entity}')")
         session.sql(f"""
             UPDATE {feed}
             SET PUBLISH_STATUS = 'SignedOff',
                 SIGNOFF_UPDATE_TIME = CURRENT_TIMESTAMP()
             WHERE COBID = {int(cobid)}
               AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
-              AND (SUB_TYPE IS NULL OR TRIM(SUB_TYPE) = ''
-                   OR UPPER(SUB_TYPE) = 'NONCVA')
+              {ent_pred}
+              AND COALESCE(UPPER(TRIM(SUB_TYPE)), '') = UPPER('{sub}')
               AND UPPER(PUBLISH_STATUS) <> 'SIGNEDOFF'
         """).collect()
     else:
         session.sql(f"""
             MERGE INTO {feed} t
             USING (SELECT {int(cobid)} AS COBID, '{scope}' AS PROCESS_TYPE,
-                          '{entity}' AS ENTITY_CODE) s
+                          '{entity}' AS ENTITY_CODE,
+                          NULLIF('{sub}', '') AS SUB_TYPE) s
             ON t.COBID = s.COBID
                AND UPPER(t.PROCESS_TYPE) = UPPER(s.PROCESS_TYPE)
                AND UPPER(t.ENTITY_CODE) = UPPER(s.ENTITY_CODE)
-               AND (t.SUB_TYPE IS NULL OR TRIM(t.SUB_TYPE) = ''
-                    OR UPPER(t.SUB_TYPE) = 'NONCVA')
+               AND COALESCE(UPPER(TRIM(t.SUB_TYPE)), '') = UPPER('{sub}')
             WHEN MATCHED THEN UPDATE SET
                 t.PUBLISH_STATUS = 'SignedOff',
                 t.SIGNOFF_UPDATE_TIME = CURRENT_TIMESTAMP()
             WHEN NOT MATCHED THEN INSERT
                 (COBID, ENTITY_CODE, PROCESS_TYPE, SUB_TYPE,
                  PUBLISH_STATUS, SIGNOFF_UPDATE_TIME)
-            VALUES (s.COBID, s.ENTITY_CODE, s.PROCESS_TYPE, NULL,
+            VALUES (s.COBID, s.ENTITY_CODE, s.PROCESS_TYPE, s.SUB_TYPE,
                     'SignedOff', CURRENT_TIMESTAMP())
         """).collect()
 
@@ -267,8 +261,8 @@ def _esc(v):
     return str(v).replace("\\", "\\\\").replace("'", "''") if v is not None else ""
 
 
-def main(session, p_cobid, p_process_type, p_entity_code, p_action, p_reason,
-         p_requires_approval, p_caller):
+def main(session, p_cobid, p_process_type, p_entity_code, p_sub_type,
+         p_action, p_reason, p_requires_approval, p_caller):
     action = str(p_action or "").strip().upper()
     if action not in ACTIONS:
         return json.dumps({"status": "error",
@@ -288,11 +282,14 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_action, p_reason,
     cobid  = int(p_cobid)
     scope  = _esc(p_process_type)
     entity = _esc(p_entity_code) if p_entity_code and str(p_entity_code).strip() else "*"
+    sub = _esc(str(p_sub_type).strip()) if p_sub_type and str(p_sub_type).strip() else ""
+    sub_pred = f"AND COALESCE(UPPER(SUB_TYPE), '') = UPPER('{sub}')"
 
     rows = session.sql(f"""
         SELECT SIGN_OFF_STATUS FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
         WHERE COBID = {cobid} AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
           AND UPPER(ENTITY_CODE) = UPPER('{entity}')
+          {sub_pred}
     """).collect()
     if not rows and action == "REOPEN":
         # Signed off upstream but not yet synced into the app table: create
@@ -307,22 +304,25 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_action, p_reason,
                                           "upstream sync first."})
         session.sql(f"""
             INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-                (COBID, PROCESS_TYPE, ENTITY_CODE, SIGN_OFF_STATUS, SIGN_OFF_BY,
-                 SIGN_OFF_TIMESTAMP, SIGNOFF_SOURCE, REOPEN_REQUESTED_BY,
-                 REOPEN_REQUESTED_AT, REOPEN_REASON)
-            SELECT {cobid}, '{scope}', '{entity}', 'REOPEN_REQUESTED',
+                (COBID, PROCESS_TYPE, ENTITY_CODE, SUB_TYPE, SIGN_OFF_STATUS,
+                 SIGN_OFF_BY, SIGN_OFF_TIMESTAMP, SIGNOFF_SOURCE,
+                 REOPEN_REQUESTED_BY, REOPEN_REQUESTED_AT, REOPEN_REASON)
+            SELECT {cobid}, '{scope}', '{entity}', NULLIF('{sub}', ''),
+                   'REOPEN_REQUESTED',
                    'EXTERNAL FEED', CURRENT_TIMESTAMP(), 'EXTERNAL',
                    '{_esc(caller)}', CURRENT_TIMESTAMP(),
                    '{_esc(str(p_reason or "")[:490])}'
             WHERE NOT EXISTS (
                 SELECT 1 FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
                 WHERE COBID = {cobid} AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
-                  AND UPPER(ENTITY_CODE) = UPPER('{entity}'))
+                  AND UPPER(ENTITY_CODE) = UPPER('{entity}')
+                  {sub_pred})
         """).collect()
         session.sql(f"""
             INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
-                (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
-            VALUES ({cobid}, '{scope}', '{entity}', 'SIGNED_OFF', 'REOPEN_REQUESTED',
+                (COBID, PROCESS_TYPE, ENTITY_CODE, SUB_TYPE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
+            VALUES ({cobid}, '{scope}', '{entity}', NULLIF('{sub}', ''),
+                    'SIGNED_OFF', 'REOPEN_REQUESTED',
                     '{_esc(caller)}', 'Re-open requested (upstream sign-off, not yet synced)')
         """).collect()
         return json.dumps({"status": "ok", "action": action,
@@ -372,6 +372,7 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_action, p_reason,
             WHERE COBID = {cobid}
               AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
               AND UPPER(ENTITY_CODE) = UPPER('{entity}')
+              {sub_pred}
               AND UPPER(SIGN_OFF_STATUS) IN ({from_in})
         """).collect()
         try:
@@ -385,7 +386,7 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_action, p_reason,
                                           "refresh and try again."})
 
         if new_status == "SIGNED_OFF":
-            _propagate_signoff_to_feed(session, cobid, scope, entity)
+            _propagate_signoff_to_feed(session, cobid, scope, entity, sub)
 
         verb = "Sign-off" if action == "SIGNOFF" else "Re-open"
         comment = (f"{verb} requested by {_esc(caller)}"
@@ -393,8 +394,9 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_action, p_reason,
                   else f"{verb} applied directly by {_esc(caller)} (approval not required)"
         session.sql(f"""
             INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
-                (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
-            VALUES ({cobid}, '{scope}', '{entity}', '{cur}', '{new_status}',
+                (COBID, PROCESS_TYPE, ENTITY_CODE, SUB_TYPE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
+            VALUES ({cobid}, '{scope}', '{entity}', NULLIF('{sub}', ''),
+                    '{cur}', '{new_status}',
                     '{_esc(caller)}', '{comment[:1980]}')
         """).collect()
         session.sql("COMMIT").collect()
@@ -419,10 +421,13 @@ $$;
 -- both request types. Rejection returns the row to its pre-request status.
 -- ─────────────────────────────────────────────────────────────────────────────
 
+DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_DECIDE_SIGNOFF_CHANGE(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR);
+
 CREATE OR ALTER PROCEDURE ADJUSTMENT_APP.SP_DECIDE_SIGNOFF_CHANGE(
     p_cobid        INT,
     p_process_type VARCHAR,
     p_entity_code  VARCHAR,   -- '*' = whole-scope row
+    p_sub_type     VARCHAR,   -- ''/NULL = no sub-type
     p_decision     VARCHAR,   -- 'Approved' | 'Rejected'
     p_comment      VARCHAR,
     p_caller       VARCHAR    -- app-resolved viewer name (same source as submit)
@@ -445,21 +450,23 @@ PENDING = {
 }
 
 
-FRTB_FAMILY = ("FRTB", "FRTBDRC", "FRTBRRAO")
+# Scopes the publish process natively knows — a missing feed row may be
+# INSERTED for these. FRTBDRC/FRTBRRAO rows are created upstream by Marcos
+# when needed, so for those the propagation is UPDATE-ONLY: the app never
+# invents feed rows the publish process didn't define.
+FEED_NATIVE_SCOPES = ("VAR", "STRESS", "SENSITIVITY", "FRTB")
 
 
-def _propagate_signoff_to_feed(session, cobid, scope, entity):
+def _propagate_signoff_to_feed(session, cobid, scope, entity, sub):
     """Push an APPLIED sign-off into the upstream feed table — the batch
     process reads BATCH.PUBLISH_SIGNOFF_STATUS, so the ADJUSTMENT_APP state
-    must propagate there (same pattern as the rest of the schema). Non-CVA
-    rows only; entity '*' updates every entity of the scope at that COB.
+    must propagate there (same pattern as the rest of the schema). Rows are
+    matched on the SAME SUB_TYPE ('' = none); entity '*' updates every
+    entity of the scope at that COB.
 
-    FRTB granularity: the feed carries ONE 'FRTB' row covering FRTB, FRTBDRC
-    and FRTBRRAO (the sync fans it out the other way). Signing off a single
-    sub-scope therefore does NOT touch the feed — the 'FRTB' feed row flips
-    to SignedOff only once ALL THREE app scopes are SIGNED_OFF for that
-    COB+entity. Until then the app table alone blocks the signed-off
-    sub-scope (check_signoff reads it first).
+    EXACT process-type match (Marcos, 2026-08): the feed's 'FRTB' row is SBM
+    only. FRTBDRC/FRTBRRAO are updated when the publish table carries those
+    process types, and never inserted by the app.
 
     Re-open is deliberately NOT propagated: the feed has no agreed
     "re-opened" vocabulary, and the engine honours the app REOPENED row.
@@ -474,51 +481,38 @@ def _propagate_signoff_to_feed(session, cobid, scope, entity):
     if _cfg("SIGNOFF_FEED_ENABLED", "true").strip().lower() != "true":
         return
     feed = _cfg("SIGNOFF_FEED_TABLE", "BATCH.PUBLISH_SIGNOFF_STATUS").strip()
+    may_insert = str(scope).upper() in FEED_NATIVE_SCOPES
 
-    if str(scope).upper() in FRTB_FAMILY:
-        # Runs inside the caller's transaction, so this count SEES the
-        # sign-off just applied. All three scopes signed off → feed 'FRTB';
-        # otherwise leave the feed untouched.
-        fam = session.sql(f"""
-            SELECT COUNT(DISTINCT UPPER(PROCESS_TYPE)) AS C
-            FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-            WHERE COBID = {int(cobid)}
-              AND UPPER(PROCESS_TYPE) IN ('FRTB', 'FRTBDRC', 'FRTBRRAO')
-              AND UPPER(ENTITY_CODE) = UPPER('{entity}')
-              AND UPPER(SIGN_OFF_STATUS) = 'SIGNED_OFF'
-        """).collect()
-        if int(fam[0]["C"] if fam else 0) < 3:
-            return
-        scope = "FRTB"
-
-    if str(entity) == "*":
+    if str(entity) == "*" or not may_insert:
+        ent_pred = ("" if str(entity) == "*"
+                    else f"AND UPPER(ENTITY_CODE) = UPPER('{entity}')")
         session.sql(f"""
             UPDATE {feed}
             SET PUBLISH_STATUS = 'SignedOff',
                 SIGNOFF_UPDATE_TIME = CURRENT_TIMESTAMP()
             WHERE COBID = {int(cobid)}
               AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
-              AND (SUB_TYPE IS NULL OR TRIM(SUB_TYPE) = ''
-                   OR UPPER(SUB_TYPE) = 'NONCVA')
+              {ent_pred}
+              AND COALESCE(UPPER(TRIM(SUB_TYPE)), '') = UPPER('{sub}')
               AND UPPER(PUBLISH_STATUS) <> 'SIGNEDOFF'
         """).collect()
     else:
         session.sql(f"""
             MERGE INTO {feed} t
             USING (SELECT {int(cobid)} AS COBID, '{scope}' AS PROCESS_TYPE,
-                          '{entity}' AS ENTITY_CODE) s
+                          '{entity}' AS ENTITY_CODE,
+                          NULLIF('{sub}', '') AS SUB_TYPE) s
             ON t.COBID = s.COBID
                AND UPPER(t.PROCESS_TYPE) = UPPER(s.PROCESS_TYPE)
                AND UPPER(t.ENTITY_CODE) = UPPER(s.ENTITY_CODE)
-               AND (t.SUB_TYPE IS NULL OR TRIM(t.SUB_TYPE) = ''
-                    OR UPPER(t.SUB_TYPE) = 'NONCVA')
+               AND COALESCE(UPPER(TRIM(t.SUB_TYPE)), '') = UPPER('{sub}')
             WHEN MATCHED THEN UPDATE SET
                 t.PUBLISH_STATUS = 'SignedOff',
                 t.SIGNOFF_UPDATE_TIME = CURRENT_TIMESTAMP()
             WHEN NOT MATCHED THEN INSERT
                 (COBID, ENTITY_CODE, PROCESS_TYPE, SUB_TYPE,
                  PUBLISH_STATUS, SIGNOFF_UPDATE_TIME)
-            VALUES (s.COBID, s.ENTITY_CODE, s.PROCESS_TYPE, NULL,
+            VALUES (s.COBID, s.ENTITY_CODE, s.PROCESS_TYPE, s.SUB_TYPE,
                     'SignedOff', CURRENT_TIMESTAMP())
         """).collect()
 
@@ -527,8 +521,8 @@ def _esc(v):
     return str(v).replace("\\", "\\\\").replace("'", "''") if v is not None else ""
 
 
-def main(session, p_cobid, p_process_type, p_entity_code, p_decision, p_comment,
-         p_caller):
+def main(session, p_cobid, p_process_type, p_entity_code, p_sub_type,
+         p_decision, p_comment, p_caller):
     decision = str(p_decision or "").strip().capitalize()
     if decision not in ("Approved", "Rejected"):
         return json.dumps({"status": "error",
@@ -546,12 +540,15 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_decision, p_comment,
     cobid  = int(p_cobid)
     scope  = _esc(p_process_type)
     entity = _esc(p_entity_code) if p_entity_code and str(p_entity_code).strip() else "*"
+    sub = _esc(str(p_sub_type).strip()) if p_sub_type and str(p_sub_type).strip() else ""
+    sub_pred = f"AND COALESCE(UPPER(SUB_TYPE), '') = UPPER('{sub}')"
 
     rows = session.sql(f"""
         SELECT SIGN_OFF_STATUS, REOPEN_REQUESTED_BY, PREV_STATUS
         FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
         WHERE COBID = {cobid} AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
           AND UPPER(ENTITY_CODE) = UPPER('{entity}')
+          {sub_pred}
     """).collect()
     cur = str(rows[0]["SIGN_OFF_STATUS"]).upper() if rows else ""
     if cur not in PENDING:
@@ -609,6 +606,7 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_decision, p_comment,
             WHERE COBID = {cobid}
               AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
               AND UPPER(ENTITY_CODE) = UPPER('{entity}')
+              {sub_pred}
               AND UPPER(SIGN_OFF_STATUS) = '{cur}'
         """).collect()
         try:
@@ -624,14 +622,15 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_decision, p_comment,
         # Approved sign-off (and a rejected re-open, which lands back on
         # SIGNED_OFF) must reach the feed the batch process reads.
         if new_status == "SIGNED_OFF":
-            _propagate_signoff_to_feed(session, cobid, scope, entity)
+            _propagate_signoff_to_feed(session, cobid, scope, entity, sub)
 
         comment = _esc(str(p_comment)[:990]) if p_comment \
                   else f"{label.capitalize()} {decision.lower()} by {_esc(caller)}"
         session.sql(f"""
             INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
-                (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
-            VALUES ({cobid}, '{scope}', '{entity}', '{cur}', '{new_status}',
+                (COBID, PROCESS_TYPE, ENTITY_CODE, SUB_TYPE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
+            VALUES ({cobid}, '{scope}', '{entity}', NULLIF('{sub}', ''),
+                    '{cur}', '{new_status}',
                     '{_esc(caller)}', '{comment[:1980]}')
         """).collect()
         session.sql("COMMIT").collect()
@@ -652,5 +651,5 @@ $$;
 -- VERIFY
 -- ═══════════════════════════════════════════════════════════════════════════
 DESCRIBE PROCEDURE ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT(VARCHAR, VARCHAR, VARCHAR, VARCHAR);
-DESCRIBE PROCEDURE ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR, BOOLEAN, VARCHAR);
-DESCRIBE PROCEDURE ADJUSTMENT_APP.SP_DECIDE_SIGNOFF_CHANGE(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR);
+DESCRIBE PROCEDURE ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, BOOLEAN, VARCHAR);
+DESCRIBE PROCEDURE ADJUSTMENT_APP.SP_DECIDE_SIGNOFF_CHANGE(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR);

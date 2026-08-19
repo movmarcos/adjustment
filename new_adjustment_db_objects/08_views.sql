@@ -24,6 +24,7 @@ AS
 SELECT
     s.COBID,
     s.PROCESS_TYPE,
+    s.SUB_TYPE,
     s.ENTITY_CODE,
     s.SIGN_OFF_STATUS,
     CASE

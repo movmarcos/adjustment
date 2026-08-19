@@ -472,7 +472,7 @@ st.markdown("<br/>", unsafe_allow_html=True)
 section_title("COB Sign-Off / Re-open Requests", "unlock")
 
 
-def _decide_signoff_change(cobid, scope, entity, approve, comment, verb):
+def _decide_signoff_change(cobid, scope, entity, sub, approve, comment, verb):
     """Decision enforced SERVER-SIDE by SP_DECIDE_SIGNOFF_CHANGE (caller
     identity, active-approver + scope check, requester refusal, guarded
     transition + sign-off history) — one path for both sign-off and re-open
@@ -482,6 +482,7 @@ def _decide_signoff_change(cobid, scope, entity, approve, comment, verb):
     res = run_query(
         f"CALL ADJUSTMENT_APP.SP_DECIDE_SIGNOFF_CHANGE("
         f"{int(cobid)}, '{_esc(scope)}', '{_esc(entity or chr(42))}', "
+        f"'{_esc(sub or '')}', "
         f"'{decision}', '{_esc(comment)}', '{_esc(user)}')")
     try:
         out = _json.loads(str(res[0][0])) if res else {}
@@ -501,7 +502,7 @@ def _decide_signoff_change(cobid, scope, entity, approve, comment, verb):
 
 try:
     df_soreq = run_query_df("""
-        SELECT COBID, PROCESS_TYPE, ENTITY_CODE, SIGN_OFF_STATUS,
+        SELECT COBID, PROCESS_TYPE, ENTITY_CODE, SUB_TYPE, SIGN_OFF_STATUS,
                SIGNOFF_SOURCE, SIGN_OFF_BY,
                REOPEN_REQUESTED_BY, REOPEN_REQUESTED_AT, REOPEN_REASON
         FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
@@ -519,7 +520,9 @@ else:
         r_cob    = int(rr["COBID"])
         r_scope  = str(rr["PROCESS_TYPE"])
         r_ent    = str(rr["ENTITY_CODE"] or "*")
-        r_ent_tx = "all entities" if r_ent == "*" else r_ent
+        _sub_raw = rr.get("SUB_TYPE")
+        r_sub    = "" if (_sub_raw is None or pd.isna(_sub_raw)) else str(_sub_raw)
+        r_ent_tx = ("all entities" if r_ent == "*" else r_ent)                    + (f" / {r_sub}" if r_sub else "")
         r_by     = str(rr["REOPEN_REQUESTED_BY"] or "—")
         r_reason = str(rr["REOPEN_REASON"] or "—")
         _is_signoff = str(rr["SIGN_OFF_STATUS"]).upper() == "SIGNOFF_REQUESTED"
@@ -553,25 +556,25 @@ else:
                     st.caption(f"Not authorized for {r_scope}.")
                 _enabled = _can_scope and not _own_req and _identity_ok
                 if st.button(f"Approve {r_verb.lower()}",
-                             key=f"ro_ok_{r_cob}_{r_scope}_{r_ent}",
+                             key=f"ro_ok_{r_cob}_{r_scope}_{r_ent}_{r_sub}",
                              type="primary", use_container_width=True,
                              disabled=not _enabled):
                     try:
                         _decide_signoff_change(
-                            r_cob, r_scope, r_ent, True,
+                            r_cob, r_scope, r_ent, r_sub, True,
                             f"{r_verb} approved by {user}", r_verb)
                         safe_rerun()
                     except Exception as ex:
                         st.error(f"Approve failed. {friendly_error(ex)}")
                 _ro_comment = st.text_input(
-                    "Rejection reason", key=f"ro_rr_{r_cob}_{r_scope}_{r_ent}",
+                    "Rejection reason", key=f"ro_rr_{r_cob}_{r_scope}_{r_ent}_{r_sub}",
                     label_visibility="collapsed",
                     placeholder="Rejection reason")
-                if st.button("Reject", key=f"ro_no_{r_cob}_{r_scope}_{r_ent}",
+                if st.button("Reject", key=f"ro_no_{r_cob}_{r_scope}_{r_ent}_{r_sub}",
                              use_container_width=True, disabled=not _enabled):
                     try:
                         _decide_signoff_change(
-                            r_cob, r_scope, r_ent, False,
+                            r_cob, r_scope, r_ent, r_sub, False,
                             _ro_comment or f"{r_verb} request rejected", r_verb)
                         safe_rerun()
                     except Exception as ex:
