@@ -262,19 +262,23 @@ for scope in ALL_SCOPES:
         verdict = _pill("Ready to close", P["success"])
 
     if not so_rows:
-        so_pill = _pill("OPEN", P["success"])
+        so_pill = _pill("OPEN", P["danger"])
     elif len(so_rows) == 1 and _wc is not None:
         so_pill = {
-            "SIGNED_OFF":        _pill("SIGNED OFF", P["danger"]),
+            # Palette (Marcos): closed = green, open = red, partial/pending
+            # = orange — the goal of the day is to close the COB.
+            "SIGNED_OFF":        _pill("SIGNED OFF", P["success"]),
             "REOPEN_REQUESTED":  _pill("RE-OPEN REQUESTED", "#B45309"),
             "SIGNOFF_REQUESTED": _pill("SIGN-OFF REQUESTED", "#B45309"),
-            "REOPENED":          _pill("RE-OPENED", P["info"]),
+            "REOPENED":          _pill("RE-OPENED", P["danger"]),
         }.get(str(_wc.get("SIGN_OFF_STATUS", "")).upper(),
-              _pill("OPEN", P["success"]))
+              _pill("OPEN", P["danger"]))
     else:
+        _n_closed = len(_blocked_so)
         so_pill = _pill(
-            f"{len(_blocked_so)}/{len(so_rows)} entities blocked",
-            "#B45309" if _blocked_so else P["success"])
+            f"{_n_closed}/{len(so_rows)} entities signed off",
+            P["success"] if _n_closed == len(so_rows)
+            else ("#B45309" if _n_closed else P["danger"]))
 
     scfg = SCOPE_CONFIG.get(scope, {})
     with bordered_container():

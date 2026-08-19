@@ -38,12 +38,15 @@ def _pill(text, color) -> str:
 
 
 # status → (label, color, blocks submissions?)
+# Palette (Marcos): the day's GOAL is to close the COB — SIGNED OFF (done)
+# is GREEN, OPEN/RE-OPENED (work outstanding) are RED, anything partial or
+# awaiting a decision is ORANGE.
 _STATUS_META = {
-    "OPEN":              ("OPEN",              P["success"], False),
-    "REOPENED":          ("RE-OPENED",         P["info"],    False),
+    "OPEN":              ("OPEN",              P["danger"],  False),
+    "REOPENED":          ("RE-OPENED",         P["danger"],  False),
     "SIGNOFF_REQUESTED": ("SIGN-OFF REQUESTED", "#B45309",   True),
     "REOPEN_REQUESTED":  ("RE-OPEN REQUESTED",  "#B45309",   True),
-    "SIGNED_OFF":        ("SIGNED OFF",        P["danger"],  True),
+    "SIGNED_OFF":        ("SIGNED OFF",        P["success"], True),
 }
 
 inject_css()
@@ -192,7 +195,7 @@ def _scope_summary(rows):
                   f"{_fmt_ts(_p.get('REOPEN_REQUESTED_AT'))} — awaiting "
                   f"approval on the Approval Queue page")
     elif blocked.all():
-        eff, col = "SIGNED OFF", P["danger"]
+        eff, col = "SIGNED OFF", P["success"]
         _s = signed.iloc[0] if not signed.empty else rows.iloc[0]
         detail = (f"Signed off by {_s.get('SIGN_OFF_BY') or 'the upstream feed'} "
                   f"{_fmt_ts(_s.get('SIGN_OFF_TIMESTAMP'))} "
@@ -203,23 +206,25 @@ def _scope_summary(rows):
         detail = (f"{len(signed)} entit{'y' if len(signed) == 1 else 'ies'} "
                   f"signed off, {_open_n} still open")
     elif (rows["_SU"] == "REOPENED").any():
-        eff, col = "RE-OPENED", P["info"]
+        eff, col = "RE-OPENED", P["danger"]
         _r = rows[rows["_SU"] == "REOPENED"].iloc[0]
         detail = (f"Re-opened (approved by "
                   f"{_r.get('REOPEN_APPROVED_BY') or '—'}) — sign off again "
                   f"when done")
     else:
-        eff, col = "OPEN", P["success"]
+        eff, col = "OPEN", P["danger"]
         detail = "Open per the upstream feed — adjustments allowed"
 
     n_block = int(blocked.sum())
     if n_block == len(rows):
-        sub, sub_col = "Blocked", P["danger"]
+        sub = "Blocked"
     elif n_block:
-        sub, sub_col = f"Blocked for {n_block}/{len(rows)} entities", "#B45309"
+        sub = f"Blocked for {n_block}/{len(rows)} entities"
     else:
-        sub, sub_col = "Allowed", P["success"]
-    return eff, col, sub, sub_col, detail
+        sub = "Allowed"
+    # Informational only — neutral colour so it never fights the status pill
+    # (green now means CLOSED, not "you may submit").
+    return eff, col, sub, P["grey_700"], detail
 
 
 def _entity_chips(rows):
@@ -273,121 +278,114 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # ACTION — one clear, contextual action for one entity of the selected COB
 # ══════════════════════════════════════════════════════════════════════════════
 
-with bordered_container():
-    section_title("Change a Sign-Off", "edit")
-    a1, a2 = st.columns(2)
-    with a1:
-        _scope_opts = sorted(df_cob["PROCESS_TYPE"].unique().tolist())
-        act_scope = st.selectbox("Scope", _scope_opts, key="so_act_scope")
-    with a2:
-        _sel_rows = df_cob[df_cob["PROCESS_TYPE"] == act_scope]
-        _ent_opts = sorted({(r["ENTITY_CODE"], r["SUB_TYPE"])
-                            for _, r in _sel_rows.iterrows()})
-        _sel = st.selectbox(
-            "Entity ('*' = whole scope)", _ent_opts, key="so_act_entity",
-            format_func=lambda t: t[0] + (f" / {t[1]}" if t[1] else ""))
-        act_entity, act_sub = (_sel if _sel else ("*", ""))
+# ══════════════════════════════════════════════════════════════════════════════
+# ACTIONS — two single-purpose cards: SIGN OFF (left) and RE-OPEN (right).
+# Never mixed in one area: each card lists only the rows it can act on.
+# ══════════════════════════════════════════════════════════════════════════════
 
-    _row = df_cob[(df_cob["PROCESS_TYPE"] == act_scope)
-                  & (df_cob["ENTITY_CODE"] == act_entity)
-                  & (df_cob["SUB_TYPE"] == act_sub)]
-    cur = str(_row["_SU"].values[0]) if not _row.empty else "?"
-    lbl, col, blocks = _STATUS_META.get(cur, (cur, P["grey_700"], False))
-    _r = _row.iloc[0] if not _row.empty else {}
+def _row_label(t):
+    return f"{t[0]} · {t[1]}" + (f" / {t[2]}" if t[2] else "")
 
-    st.markdown(
-        f'<div style="margin:0.4rem 0 0.6rem;font-size:0.95rem">'
-        f'COB <strong>{sel_cob}</strong> · <strong>{act_scope}</strong> · '
-        f'<strong>{act_entity}{" / " + act_sub if act_sub else ""}</strong> is currently &nbsp;{_pill(lbl, col)}'
-        f'&nbsp;<span style="font-size:0.8rem;color:{P["grey_700"]}">'
-        f'{"— new adjustments are BLOCKED" if blocks else "— new adjustments are allowed"}'
-        f'</span></div>',
-        unsafe_allow_html=True)
 
-    def _request(action: str, verb: str, reason: str,
-                 requires_approval: bool) -> None:
-        _appr = "TRUE" if requires_approval else "FALSE"
-        res = run_query(
-            f"CALL ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE("
-            f"{int(sel_cob)}, '{_esc(act_scope)}', '{_esc(act_entity)}', "
-            f"'{_esc(act_sub)}', "
-            f"'{action}', '{_esc(reason.strip()[:490])}', {_appr}, "
-            f"'{_esc(user)}')")
-        try:
-            out = json.loads(str(res[0][0])) if res else {}
-        except (ValueError, TypeError, IndexError):
-            out = {}
-        if out.get("status") == "ok":
-            if out.get("pending_approval"):
-                msg = (f"{verb} requested for COB {sel_cob} / {act_scope} "
-                       f"({act_entity}) — an approver decides it on the "
-                       f"Approval Queue page. Submissions are blocked while "
-                       f"it is pending.")
-            elif action == "SIGNOFF":
-                msg = (f"COB {sel_cob} / {act_scope} ({act_entity}) is now "
-                       f"SIGNED OFF — new adjustment submissions are blocked.")
-            else:
-                msg = (f"COB {sel_cob} / {act_scope} ({act_entity}) is now "
-                       f"RE-OPENED — new adjustment submissions are allowed.")
-            st.session_state["so_flash"] = ("success", msg)
+def _request(scope_, entity_, sub_, action, verb, reason, requires_approval):
+    _appr = "TRUE" if requires_approval else "FALSE"
+    res = run_query(
+        f"CALL ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE("
+        f"{int(sel_cob)}, '{_esc(scope_)}', '{_esc(entity_)}', "
+        f"'{_esc(sub_)}', "
+        f"'{action}', '{_esc(reason.strip()[:490])}', {_appr}, "
+        f"'{_esc(user)}')")
+    try:
+        out = json.loads(str(res[0][0])) if res else {}
+    except (ValueError, TypeError, IndexError):
+        out = {}
+    _lbl = f"{scope_} · {entity_}" + (f" / {sub_}" if sub_ else "")
+    if out.get("status") == "ok":
+        if out.get("pending_approval"):
+            msg = (f"{verb} requested for COB {sel_cob} / {_lbl} — an "
+                   f"approver decides it on the Approval Queue page. "
+                   f"Submissions are blocked while it is pending.")
+        elif action == "SIGNOFF":
+            msg = (f"COB {sel_cob} / {_lbl} is now SIGNED OFF — new "
+                   f"adjustment submissions are blocked.")
         else:
-            st.session_state["so_flash"] = (
-                "warning", f"{verb} was NOT applied — "
-                           f"{out.get('message', 'no detail')}")
-        safe_rerun()
+            msg = (f"COB {sel_cob} / {_lbl} is now RE-OPENED — new "
+                   f"adjustment submissions are allowed.")
+        st.session_state["so_flash"] = ("success", msg)
+    else:
+        st.session_state["so_flash"] = (
+            "warning", f"{verb} was NOT applied — "
+                       f"{out.get('message', 'no detail')}")
+    safe_rerun()
 
-    if cur in ("OPEN", "REOPENED"):
-        st.markdown(
-            f'<div style="font-size:0.85rem;color:{P["grey_700"]}">'
-            f'The one available action: <strong>sign off</strong>. It applies '
-            f'immediately and closes the COB for {act_scope} (no new '
-            f'adjustments) — tick the box below if you want an approver to '
-            f'confirm it first.</div>',
-            unsafe_allow_html=True)
-        reason = st.text_input("Reason *", key="so_act_reason_s",
-                               placeholder="e.g. all adjustments for this COB are done")
-        # Approval for SIGN-OFF is OPTIONAL (Marcos): unchecked by default →
-        # the sign-off applies immediately; tick it to route via an approver.
-        _appr_s = st.checkbox(
-            "Request approval before signing off (optional)", value=False,
-            key="so_act_appr_s",
-            help="Unchecked: the sign-off applies immediately. Checked: an "
-                 "approver must approve it on the Approval Queue page first.")
-        _btn_lbl = ("Request sign-off" if _appr_s else "Sign off") \
-            + f" — {act_scope} ({act_entity}{'/' + act_sub if act_sub else ''})"
-        if st.button(_btn_lbl, key="so_act_btn_s", type="primary",
-                     disabled=not reason.strip()):
-            _request("SIGNOFF", "Sign-off", reason, _appr_s)
 
-    elif cur == "SIGNED_OFF":
-        _by = str(_r.get("SIGN_OFF_BY") or "the upstream feed")
-        st.markdown(
-            f'<div style="font-size:0.85rem;color:{P["grey_700"]}">'
-            f'Signed off by <strong>{_by}</strong> '
-            f'({_r.get("SIGNOFF_SOURCE") or "EXTERNAL"}). The one available '
-            f'action: <strong>request a re-open</strong>. Once approved, new '
-            f'adjustments are allowed again until the COB is signed off '
-            f'again.</div>',
-            unsafe_allow_html=True)
-        reason = st.text_input("Reason *", key="so_act_reason_r",
-                               placeholder="e.g. late booking needs an adjustment on this COB")
-        # Re-open stays approval-gated by policy — ticked and locked.
-        st.checkbox("Request approval (required by policy)", value=True,
-                    disabled=True, key="so_act_appr_r")
-        if st.button(f"Request re-open — {act_scope} "
-                     f"({act_entity}{'/' + act_sub if act_sub else ''})",
-                     key="so_act_btn_r", type="primary",
-                     disabled=not reason.strip()):
-            _request("REOPEN", "Re-open", reason, True)
+# Pending requests: a read-only strip — decisions live on the Approval Queue.
+_pending_rows = df_cob[df_cob["_SU"].isin(["SIGNOFF_REQUESTED",
+                                           "REOPEN_REQUESTED"])]
+if not _pending_rows.empty:
+    _plist = " · ".join(
+        f"{r['PROCESS_TYPE']} {r['_ENT_LBL']} "
+        f"({'sign-off' if r['_SU'] == 'SIGNOFF_REQUESTED' else 're-open'} "
+        f"by {r.get('REOPEN_REQUESTED_BY') or '—'})"
+        for _, r in _pending_rows.iterrows())
+    st.warning(f"**Awaiting approval on the Approval Queue page:** {_plist}")
 
-    elif cur in ("SIGNOFF_REQUESTED", "REOPEN_REQUESTED"):
-        _verb = "sign-off" if cur == "SIGNOFF_REQUESTED" else "re-open"
-        st.warning(
-            f"A {_verb} request by "
-            f"**{_r.get('REOPEN_REQUESTED_BY') or '—'}** "
-            f"({_r.get('REOPEN_REQUESTED_AT')}) is awaiting approval on the "
-            f"**Approval Queue** page — no further action is possible here "
-            f"until it is decided. Reason: {_r.get('REOPEN_REASON') or '—'}")
+_act_l, _act_r = st.columns(2)
+
+with _act_l:
+    with bordered_container():
+        section_title("Sign Off", "check-circle")
+        st.caption("Close a scope for this COB — new adjustments are blocked "
+                   "once signed off.")
+        _elig_s = sorted({(r["PROCESS_TYPE"], r["ENTITY_CODE"], r["SUB_TYPE"])
+                          for _, r in df_cob[df_cob["_SU"].isin(
+                              ["OPEN", "REOPENED"])].iterrows()})
+        if not _elig_s:
+            st.info("Nothing to sign off — everything on this COB is already "
+                    "signed off or awaiting approval.")
+        else:
+            _sel_s = st.selectbox("What to sign off", _elig_s,
+                                  key="so_signoff_target",
+                                  format_func=_row_label)
+            _rsn_s = st.text_input(
+                "Reason *", key="so_signoff_reason",
+                placeholder="e.g. all adjustments for this COB are done")
+            # Sign-off approval is OPTIONAL: unchecked = applies immediately.
+            _appr_s = st.checkbox(
+                "Request approval first (optional)", value=False,
+                key="so_signoff_appr")
+            if st.button(("Request sign-off" if _appr_s else "Sign off now"),
+                         key="so_signoff_btn", type="primary",
+                         use_container_width=True,
+                         disabled=not (_sel_s and _rsn_s.strip())):
+                _request(_sel_s[0], _sel_s[1], _sel_s[2], "SIGNOFF",
+                         "Sign-off", _rsn_s, _appr_s)
+
+with _act_r:
+    with bordered_container():
+        section_title("Re-Open", "unlock")
+        st.caption("Allow adjustments again on a signed-off scope — always "
+                   "needs an approver (4-eyes).")
+        _elig_r = sorted({(r["PROCESS_TYPE"], r["ENTITY_CODE"], r["SUB_TYPE"])
+                          for _, r in df_cob[df_cob["_SU"] == "SIGNED_OFF"]
+                          .iterrows()})
+        if not _elig_r:
+            st.info("Nothing to re-open — nothing on this COB is signed off.")
+        else:
+            _sel_r = st.selectbox("What to re-open", _elig_r,
+                                  key="so_reopen_target",
+                                  format_func=_row_label)
+            _rsn_r = st.text_input(
+                "Reason *", key="so_reopen_reason",
+                placeholder="e.g. late booking needs an adjustment on this COB")
+            # Re-open approval is REQUIRED by policy — ticked and locked.
+            st.checkbox("Request approval (required by policy)", value=True,
+                        disabled=True, key="so_reopen_appr")
+            if st.button("Request re-open", key="so_reopen_btn",
+                         use_container_width=True,
+                         disabled=not (_sel_r and _rsn_r.strip())):
+                _request(_sel_r[0], _sel_r[1], _sel_r[2], "REOPEN",
+                         "Re-open", _rsn_r, True)
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
