@@ -358,6 +358,47 @@ def main(session, p_adjustment):
             }
             blocked_by_adj_id = find_blocking_adj(session, process_type, cobid, dim_vals)
 
+        # ── Resolve VaR component NAMES → legacy IDs ─────────────────────
+        # The form captures NAMES; DIMENSION.ADJUSTMENT carries only the ID
+        # columns, so without ids the dimension row (and the activity grids)
+        # lose the VaR component. Resolve UNAMBIGUOUS ids from
+        # DIMENSION.VAR_SUB_COMPONENT; an ambiguous name keeps NULL ids
+        # (never guess a wrong id — processing matches by name anyway).
+        # Best-effort: a lookup failure must not block the submission.
+        if (str(process_type).upper() == "VAR"
+                and (adj.get("var_component_name") or adj.get("var_sub_component_name"))
+                and not (adj.get("var_component_id") and adj.get("var_sub_component_id"))):
+            try:
+                preds = []
+                if adj.get("var_component_name"):
+                    preds.append("UPPER(VAR_COMPONENT_NAME) = "
+                                 f"UPPER('{_esc(adj['var_component_name'])}')")
+                if adj.get("var_sub_component_name"):
+                    preds.append("UPPER(VAR_SUB_COMPONENT_NAME) = "
+                                 f"UPPER('{_esc(adj['var_sub_component_name'])}')")
+                if adj.get("day_type") is not None:
+                    preds.append(f"VAR_SUB_COMPONENT_DAY_TYPE = {int(adj['day_type'])}")
+                vrow = session.sql(f"""
+                    SELECT COUNT(DISTINCT VAR_COMPONENT_ID)     AS C1,
+                           MIN(VAR_COMPONENT_ID)                AS I1,
+                           COUNT(DISTINCT VAR_SUB_COMPONENT_ID) AS C2,
+                           MIN(VAR_SUB_COMPONENT_ID)            AS I2
+                    FROM DIMENSION.VAR_SUB_COMPONENT
+                    WHERE {' AND '.join(preds)}
+                """).collect()
+                if vrow:
+                    v = vrow[0]
+                    if (not adj.get("var_component_id")
+                            and adj.get("var_component_name")
+                            and int(v["C1"] or 0) == 1):
+                        adj["var_component_id"] = int(v["I1"])
+                    if (not adj.get("var_sub_component_id")
+                            and adj.get("var_sub_component_name")
+                            and int(v["C2"] or 0) == 1):
+                        adj["var_sub_component_id"] = int(v["I2"])
+            except Exception as vex:
+                print(f"VaR component id resolution skipped (non-fatal): {vex}")
+
         # ── Build the INSERT ─────────────────────────────────────────────
         # Use pre-generated ADJ_ID if provided (VaR Upload writes line items first),
         # otherwise generate a new UUID.

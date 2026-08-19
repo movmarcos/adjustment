@@ -840,26 +840,44 @@ COMMENT = 'Authorized approvers for the Approval Queue. NULL PROCESS_TYPE means 
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- 7b. ADJ_ADMINS — Users allowed to use the Admin page
+-- 7b. ADJ_ADMINS — Users AND roles allowed to use the Admin page
 --
 -- The Admin page manages approvers, sign-off, and scope config — the controls
 -- the 4-eyes workflow depends on — so access to it must itself be controlled.
+-- Two entry kinds (ADMIN_TYPE):
+--   USER — NAME is a Snowflake username (as CURRENT_USER() returns it).
+--   ROLE — NAME is a Snowflake role; every user DIRECTLY granted the role is
+--          an admin. Membership is resolved at page load via
+--          SHOW GRANTS OF ROLE — if the app's owner role lacks the privilege
+--          to run it, ROLE rows are ignored (USER rows keep working).
 -- While this table is EMPTY the app runs in bootstrap mode (page open to all,
 -- with a prominent warning) so the first admin can be registered.
--- Deliberately NOT seeded and never wiped on redeploy: membership is
--- operational data owned by the admins themselves.
+-- Only the BI_DEVELOPER role row is seeded (idempotent MERGE); user
+-- membership is operational data owned by the admins themselves and is never
+-- wiped on redeploy.
 -- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_ADMINS (
     ADMIN_ID                    NUMBER(38,0) NOT NULL AUTOINCREMENT,
-    USERNAME                    VARCHAR(50)  NOT NULL,
+    USERNAME                    VARCHAR(50)  NOT NULL,   -- user OR role name (see ADMIN_TYPE)
+    ADMIN_TYPE                  VARCHAR(10)  DEFAULT 'USER',  -- 'USER' | 'ROLE'
     IS_ACTIVE                   BOOLEAN      DEFAULT TRUE,
     ADDED_BY                    VARCHAR(50),
     ADDED_DATE                  TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
 
     CONSTRAINT PK_ADJ_ADMINS PRIMARY KEY (ADMIN_ID)
 )
-COMMENT = 'Users authorized to use the Admin page. Empty table = bootstrap mode (open access with warning) until the first admin is added. Not seeded; survives redeploys.';
+COMMENT = 'Users (ADMIN_TYPE=USER) and Snowflake roles (ADMIN_TYPE=ROLE, direct grantees resolved via SHOW GRANTS OF ROLE) authorized to use the Admin page. Empty table = bootstrap mode. Only the BI_DEVELOPER role row is seeded; survives redeploys.';
+
+-- Pre-ADMIN_TYPE deployments: existing rows are users.
+UPDATE ADJUSTMENT_APP.ADJ_ADMINS SET ADMIN_TYPE = 'USER' WHERE ADMIN_TYPE IS NULL;
+
+-- Standing admin role (Marcos, 2026-08): BI_DEVELOPER members are admins.
+MERGE INTO ADJUSTMENT_APP.ADJ_ADMINS t
+USING (SELECT 'BI_DEVELOPER' AS USERNAME, 'ROLE' AS ADMIN_TYPE) s
+ON UPPER(t.USERNAME) = s.USERNAME AND t.ADMIN_TYPE = s.ADMIN_TYPE
+WHEN NOT MATCHED THEN INSERT (USERNAME, ADMIN_TYPE, IS_ACTIVE, ADDED_BY)
+VALUES (s.USERNAME, s.ADMIN_TYPE, TRUE, 'SEED');
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -954,6 +972,10 @@ COMMENT = 'Append-only log of every notification attempt from SP_NOTIFY.';
 ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER
     ADD COLUMN IF NOT EXISTS START_DATE TIMESTAMP_NTZ(9)
     COMMENT 'Set when the adjustment transitions to Running. Distinct from PROCESS_DATE (end).';
+
+-- NOTE: the one-time VaR component-id backfill (names → legacy ids for rows
+-- created before 03_sp_submit_adjustment resolved ids at submit) lives in
+-- migrations/2026-08-19_var_component_id_backfill.sql — run it ONCE at deploy.
 
 -- Drop the legacy ADJUSTMENT_BASE_TABLE config column: every scope now reads
 -- adjustments from ADJUSTMENT_APP.ADJ_HEADER (hardcoded in SP_PROCESS_ADJUSTMENT),

@@ -29,12 +29,41 @@ user = current_user_name()
 # ADJ_ADMINS is empty the page runs in bootstrap mode (open, with a warning)
 # so the first admin can be registered in the Approvers tab.
 # ──────────────────────────────────────────────────────────────────────────────
+def _role_members(role: str) -> set:
+    """Usernames DIRECTLY granted a Snowflake role, via SHOW GRANTS OF ROLE.
+    Cached per session. Returns None (not empty set) when the command fails —
+    the app's owner role may lack the privilege — so the caller can tell
+    'no members' apart from 'could not resolve'."""
+    cache = st.session_state.setdefault("_admin_role_members", {})
+    if role in cache:
+        return cache[role]
+    try:
+        rows = run_query(f'SHOW GRANTS OF ROLE "{role.replace(chr(34), "")}"')
+        members = set()
+        for r in rows or []:
+            d = r.as_dict() if hasattr(r, "as_dict") else dict(r)
+            granted_to = str(d.get("granted_to") or d.get("GRANTED_TO") or "")
+            grantee    = str(d.get("grantee_name") or d.get("GRANTEE_NAME") or "")
+            if granted_to.upper() == "USER" and grantee:
+                members.add(grantee.strip().upper())
+        cache[role] = members
+    except Exception:
+        cache[role] = None
+    return cache[role]
+
+
 _admin_bootstrap = False
 try:
     _admin_rows = run_query(
-        "SELECT USERNAME FROM ADJUSTMENT_APP.ADJ_ADMINS WHERE IS_ACTIVE = TRUE")
+        "SELECT USERNAME, COALESCE(ADMIN_TYPE, 'USER') AS ADMIN_TYPE "
+        "FROM ADJUSTMENT_APP.ADJ_ADMINS WHERE IS_ACTIVE = TRUE")
 except Exception:
-    _admin_rows = []
+    try:  # pre-ADMIN_TYPE deployment
+        _admin_rows = run_query(
+            "SELECT USERNAME, 'USER' AS ADMIN_TYPE "
+            "FROM ADJUSTMENT_APP.ADJ_ADMINS WHERE IS_ACTIVE = TRUE")
+    except Exception:
+        _admin_rows = []
 if not _admin_rows:
     _admin_bootstrap = True
     st.warning(
@@ -42,12 +71,41 @@ if not _admin_rows:
         "currently open to every user. Add the first administrator in the "
         "*Approvers* tab to lock it down.")
 else:
-    _admin_users = {str(r["USERNAME"]).strip().upper() for r in _admin_rows}
-    if str(user).strip().upper() not in _admin_users:
+    _me = str(user).strip().upper()
+    _admin_users = {str(r["USERNAME"]).strip().upper() for r in _admin_rows
+                    if str(r["ADMIN_TYPE"]).upper() == "USER"}
+    _admin_roles = [str(r["USERNAME"]).strip().upper() for r in _admin_rows
+                    if str(r["ADMIN_TYPE"]).upper() == "ROLE"]
+    _is_admin = _me in _admin_users
+    _roles_unresolved = []
+    if not _is_admin:
+        for _role in _admin_roles:
+            _members = _role_members(_role)
+            if _members is None:
+                _roles_unresolved.append(_role)
+            elif _me in _members:
+                _is_admin = True
+                break
+    if not _is_admin and _roles_unresolved and not _admin_users:
+        # Admin roles exist but none could be resolved AND no user entries to
+        # fall back on — locking everyone out here would be unrecoverable
+        # from inside the app, so stay open with a loud warning instead.
+        _admin_bootstrap = True
+        st.warning(
+            "**Admin-role membership could not be verified** ("
+            + ", ".join(_roles_unresolved) +
+            ") — the app's owner role cannot run SHOW GRANTS OF ROLE. The "
+            "page stays open so this can be fixed: either grant the "
+            "privilege, or add named user administrators in the Approvers "
+            "tab.")
+        _is_admin = True
+    if not _is_admin:
         st.markdown("## Admin — Configuration")
         st.error(
             f"You ({user}) are not authorized to use the Admin page. "
-            f"Ask an existing administrator to add you in the Approvers tab.")
+            f"Access is granted to listed administrators"
+            + (f" and members of: {', '.join(_admin_roles)}" if _admin_roles else "")
+            + ". Ask an existing administrator to add you in the Approvers tab.")
         st.stop()
 
 st.markdown("## Admin — Configuration")
@@ -386,27 +444,29 @@ with tab_approvers:
     st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Page Administrators", "lock")
     st.caption(
-        "Only users listed here (active) can open the Admin page. While the list "
+        "Users listed here (active) — and every member of the listed Snowflake "
+        "ROLES (e.g. BI_DEVELOPER) — can open the Admin page. While the list "
         "is empty the page is open to everyone — add the first administrator to "
         "lock it down. You cannot deactivate yourself.")
     try:
         df_admins = run_query_df("""
-            SELECT ADMIN_ID, USERNAME, IS_ACTIVE, ADDED_BY, ADDED_DATE
+            SELECT ADMIN_ID, USERNAME, COALESCE(ADMIN_TYPE, 'USER') AS ADMIN_TYPE,
+                   IS_ACTIVE, ADDED_BY, ADDED_DATE
             FROM ADJUSTMENT_APP.ADJ_ADMINS
-            ORDER BY USERNAME
+            ORDER BY ADMIN_TYPE, USERNAME
         """)
         if not df_admins.empty:
             render_df_table(df_admins, max_rows=100, height=300)
             adm_cols = st.columns([2, 1, 1])
             with adm_cols[0]:
                 admin_options = [
-                    f"{r['USERNAME']} (ID {r['ADMIN_ID']}) — {'Active' if r['IS_ACTIVE'] else 'Inactive'}"
+                    f"{r['USERNAME']} [{r['ADMIN_TYPE']}] (ID {r['ADMIN_ID']}) — {'Active' if r['IS_ACTIVE'] else 'Inactive'}"
                     for _, r in df_admins.iterrows()
                 ]
                 sel_admin = st.selectbox("Select administrator", admin_options,
                                          key="toggle_admin")
             _sel_admin_id   = int(sel_admin.split("ID ")[1].split(")")[0])
-            _sel_admin_user = sel_admin.split(" (ID ")[0].strip().upper()
+            _sel_admin_user = sel_admin.split(" [")[0].strip().upper()
             with adm_cols[1]:
                 if st.button("Activate", key="activate_admin_btn"):
                     try:
@@ -441,21 +501,45 @@ with tab_approvers:
         st.info(f"Administrators table not available: {e}")
 
     with st.form("new_admin_form"):
-        adm_username = st.text_input(
-            "Username", placeholder="e.g. JSMITH", key="admin_user",
-            help="Snowflake username as returned by CURRENT_USER().")
+        fa1, fa2 = st.columns([1, 2])
+        with fa1:
+            adm_type = st.selectbox(
+                "Type", ["User", "Snowflake Role"], key="admin_type",
+                help="User: one Snowflake username. Snowflake Role: every "
+                     "user directly granted that role becomes an admin.")
+        with fa2:
+            adm_username = st.text_input(
+                "Name", placeholder="e.g. JSMITH or BI_DEVELOPER",
+                key="admin_user",
+                help="Username as returned by CURRENT_USER(), or the role "
+                     "name exactly as it exists in Snowflake.")
         adm_submit = st.form_submit_button("Add Administrator", type="primary")
         if adm_submit:
             if not adm_username.strip():
-                st.error("Username is required.")
+                st.error("Name is required.")
             else:
                 try:
+                    _t = "ROLE" if adm_type == "Snowflake Role" else "USER"
                     run_query(f"""
                         INSERT INTO ADJUSTMENT_APP.ADJ_ADMINS
-                            (USERNAME, IS_ACTIVE, ADDED_BY)
-                        VALUES (UPPER('{_esc(adm_username.strip())}'), TRUE, '{_esc(user)}')
+                            (USERNAME, ADMIN_TYPE, IS_ACTIVE, ADDED_BY)
+                        VALUES (UPPER('{_esc(adm_username.strip())}'), '{_t}',
+                                TRUE, '{_esc(user)}')
                     """)
-                    st.success(f"Administrator {adm_username.strip().upper()} added.")
+                    if _t == "ROLE":
+                        _m = _role_members(adm_username.strip().upper())
+                        if _m is None:
+                            st.warning(
+                                "Role added, but its membership could NOT be "
+                                "verified (the app cannot run SHOW GRANTS OF "
+                                "ROLE) — role-based access will not work "
+                                "until that privilege is granted.")
+                        else:
+                            st.success(f"Role {adm_username.strip().upper()} "
+                                       f"added — {len(_m)} member(s) resolve "
+                                       f"as administrators.")
+                    else:
+                        st.success(f"Administrator {adm_username.strip().upper()} added.")
                     safe_rerun()
                 except Exception as ex:
                     st.error(f"Failed to add administrator: {ex}")

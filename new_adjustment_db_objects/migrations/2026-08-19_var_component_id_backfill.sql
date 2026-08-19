@@ -1,0 +1,46 @@
+-- =============================================================================
+-- ONE-TIME MIGRATION — run once at deploy, 2026-08-19
+-- VaR component NAMES → legacy IDs for rows created before the fix.
+--
+-- The New Adjustment form captures VAR_COMPONENT_NAME / VAR_SUB_COMPONENT_NAME;
+-- ids were left NULL, so DIMENSION.ADJUSTMENT (id columns only) and the
+-- activity grids lost the VaR component. SP_SUBMIT_ADJUSTMENT now resolves
+-- ids at submit time — these idempotent UPDATEs repair the rows that already
+-- existed. Only UNAMBIGUOUS names are resolved (exactly 1 distinct id);
+-- re-running is harmless (finds nothing left to do).
+-- =============================================================================
+
+UPDATE ADJUSTMENT_APP.ADJ_HEADER h
+SET VAR_COMPONENT_ID = m.I
+FROM (SELECT UPPER(VAR_COMPONENT_NAME) AS N, MIN(VAR_COMPONENT_ID) AS I
+      FROM DIMENSION.VAR_SUB_COMPONENT
+      GROUP BY UPPER(VAR_COMPONENT_NAME)
+      HAVING COUNT(DISTINCT VAR_COMPONENT_ID) = 1) m
+WHERE h.VAR_COMPONENT_ID IS NULL
+  AND UPPER(h.VAR_COMPONENT_NAME) = m.N;
+
+UPDATE ADJUSTMENT_APP.ADJ_HEADER h
+SET VAR_SUB_COMPONENT_ID = m.I
+FROM (SELECT UPPER(VAR_COMPONENT_NAME) AS CN, UPPER(VAR_SUB_COMPONENT_NAME) AS N,
+             MIN(VAR_SUB_COMPONENT_ID) AS I
+      FROM DIMENSION.VAR_SUB_COMPONENT
+      GROUP BY UPPER(VAR_COMPONENT_NAME), UPPER(VAR_SUB_COMPONENT_NAME)
+      HAVING COUNT(DISTINCT VAR_SUB_COMPONENT_ID) = 1) m
+WHERE h.VAR_SUB_COMPONENT_ID IS NULL
+  AND UPPER(h.VAR_SUB_COMPONENT_NAME) = m.N
+  AND (h.VAR_COMPONENT_NAME IS NULL OR UPPER(h.VAR_COMPONENT_NAME) = m.CN);
+
+-- Propagate the repaired ids to the already-created dimension rows.
+UPDATE DIMENSION.ADJUSTMENT d
+SET VAR_COMPONENT_ID     = COALESCE(d.VAR_COMPONENT_ID, h.VAR_COMPONENT_ID),
+    VAR_SUB_COMPONENT_ID = COALESCE(d.VAR_SUB_COMPONENT_ID, h.VAR_SUB_COMPONENT_ID)
+FROM ADJUSTMENT_APP.ADJ_HEADER h
+WHERE h.DIMENSION_ADJ_ID = d.ADJUSTMENT_ID
+  AND (d.VAR_COMPONENT_ID IS NULL OR d.VAR_SUB_COMPONENT_ID IS NULL)
+  AND (h.VAR_COMPONENT_ID IS NOT NULL OR h.VAR_SUB_COMPONENT_ID IS NOT NULL);
+
+-- VERIFY (expect 0 rows with a name but no id after the run):
+SELECT COUNT(*) AS STILL_UNRESOLVED
+FROM ADJUSTMENT_APP.ADJ_HEADER
+WHERE (VAR_COMPONENT_NAME IS NOT NULL AND VAR_COMPONENT_ID IS NULL)
+   OR (VAR_SUB_COMPONENT_NAME IS NOT NULL AND VAR_SUB_COMPONENT_ID IS NULL);

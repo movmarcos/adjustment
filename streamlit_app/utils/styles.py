@@ -1564,7 +1564,11 @@ def build_activity_grid_df(df_source):
         "Book":            col("BOOK_CODE").fillna("—").astype(str),
         "Measure":         col("MEASURE_TYPE_CODE").fillna("—").astype(str),
         "Simulation":      col("SIMULATION_NAME").fillna("—").astype(str),
-        "VaR Comp":        col("VAR_COMPONENT_ID").fillna("—").astype(str),
+        # Per-row coalesce — prefer the NAME the user filtered by; legacy rows
+        # (pre name-capture) only have the numeric id, so fall back to it.
+        "VaR Comp":        col("VAR_COMPONENT_NAME")
+                           .combine_first(col("VAR_COMPONENT_ID"))
+                           .fillna("—").astype(str),
         "User":            pick("USERNAME", "SUBMITTED_BY").fillna("—").astype(str),
         "Records":         col("RECORD_COUNT").apply(lambda v: _grid_int_str(v, commas=True)),
         "Created":         fmt_dt(pick("CREATED_DATE", "SUBMITTED_AT")),
