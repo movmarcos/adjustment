@@ -86,11 +86,37 @@ section_title("Upstream Sync", "refresh-cw")
 st.caption("Pulls every COB/scope/entity from BATCH.PUBLISH_SIGNOFF_STATUS: "
            "not-signed-off rows appear as OPEN, signed-off rows as SIGNED_OFF. "
            "Runs automatically every 30 minutes — use the button to refresh now.")
+def _sync_summary(raw) -> str:
+    """Turn the sync SP's JSON result into a sentence a user can read."""
+    import json as _json
+    try:
+        out = _json.loads(str(raw)) if not isinstance(raw, dict) else raw
+    except (ValueError, TypeError):
+        return f"Sync complete: {raw}"
+    if out.get("status") == "skipped":
+        return out.get("message", "Sync is currently paused.")
+    opened = out.get("opened") or {}
+    synced = out.get("synced") or {}
+    n_open = sum(int(v or 0) for v in opened.values())
+    n_sign = sum(int(v or 0) for v in synced.values())
+    if not n_open and not n_sign:
+        return ("Sync complete — everything is already up to date "
+                "(no new open or signed-off COBs in the feed).")
+    parts = []
+    if n_open:
+        _by = ", ".join(f"{s}: {int(v)}" for s, v in opened.items() if int(v or 0))
+        parts.append(f"{n_open} new open entr{'y' if n_open == 1 else 'ies'} ({_by})")
+    if n_sign:
+        _by = ", ".join(f"{s}: {int(v)}" for s, v in synced.items() if int(v or 0))
+        parts.append(f"{n_sign} newly signed off ({_by})")
+    return "Sync complete — " + " and ".join(parts) + "."
+
+
 if st.button("Sync from upstream feed now", key="signoff_sync_btn"):
     try:
         res = run_query("CALL ADJUSTMENT_APP.SP_SYNC_SIGNOFF_STATUS()")
         st.session_state["so_flash"] = (
-            "success", f"Sync complete: {res[0][0] if res else 'no result'}")
+            "success", _sync_summary(res[0][0] if res else "no result"))
     except Exception as ex:
         st.session_state["so_flash"] = (
             "warning", f"Sync failed. The database reported: {ex}")

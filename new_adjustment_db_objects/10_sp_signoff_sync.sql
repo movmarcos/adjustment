@@ -46,7 +46,7 @@ AS
 $$
 import json
 
-LOOKBACK_DAYS = 45
+LOOKBACK_DAYS = 180
 
 # app scope → predicate on the feed's PROCESS_TYPE
 SCOPE_MATCH = {

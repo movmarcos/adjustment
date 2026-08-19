@@ -507,6 +507,8 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA (
     WRITER_OVERRIDE   VARCHAR(100),
     IS_ACTIVE         BOOLEAN          DEFAULT TRUE,
     CREATED_DATE      TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
+    VALIDATION_RULES  VARIANT,      -- conditional mandatory rules (15_direct_frtb_upload)
+    ALIASES           VARIANT,      -- business header-name aliases (15_direct_frtb_upload)
     CONSTRAINT PK_DIRECT_SCOPE_SCHEMA PRIMARY KEY (PROCESS_TYPE)
 )
 COMMENT = 'Per-scope Direct Adjustment schema: how to extract/resolve/map JSON payload into the scope fact table.';
@@ -860,7 +862,10 @@ COMMENT = 'Authorized approvers for the Approval Queue. NULL PROCESS_TYPE means 
 CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_ADMINS (
     ADMIN_ID                    NUMBER(38,0) NOT NULL AUTOINCREMENT,
     USERNAME                    VARCHAR(50)  NOT NULL,   -- user OR role name (see ADMIN_TYPE)
-    ADMIN_TYPE                  VARCHAR(10)  DEFAULT 'USER',  -- 'USER' | 'ROLE'
+    -- No DEFAULT on purpose: CREATE OR ALTER cannot ADD a column with a
+    -- default to an existing table. Writers set it explicitly; readers
+    -- COALESCE(ADMIN_TYPE, 'USER'); the UPDATE below backfills NULLs.
+    ADMIN_TYPE                  VARCHAR(10),             -- 'USER' | 'ROLE'
     IS_ACTIVE                   BOOLEAN      DEFAULT TRUE,
     ADDED_BY                    VARCHAR(50),
     ADDED_DATE                  TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
@@ -869,7 +874,13 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_ADMINS (
 )
 COMMENT = 'Users (ADMIN_TYPE=USER) and Snowflake roles (ADMIN_TYPE=ROLE, direct grantees resolved via SHOW GRANTS OF ROLE) authorized to use the Admin page. Empty table = bootstrap mode. Only the BI_DEVELOPER role row is seeded; survives redeploys.';
 
--- Pre-ADMIN_TYPE deployments: existing rows are users.
+-- Belt-and-braces for tables created before ADMIN_TYPE existed (same pattern
+-- as ADJ_HEADER.START_DATE below).
+ALTER TABLE ADJUSTMENT_APP.ADJ_ADMINS
+    ADD COLUMN IF NOT EXISTS ADMIN_TYPE VARCHAR(10)
+    COMMENT 'USER (Snowflake username) or ROLE (direct grantees of the Snowflake role are admins)';
+
+-- Pre-ADMIN_TYPE deployments and any NULL inserts: rows are users.
 UPDATE ADJUSTMENT_APP.ADJ_ADMINS SET ADMIN_TYPE = 'USER' WHERE ADMIN_TYPE IS NULL;
 
 -- Standing admin role (Marcos, 2026-08): BI_DEVELOPER members are admins.
