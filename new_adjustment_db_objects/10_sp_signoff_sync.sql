@@ -85,6 +85,37 @@ def main(session):
     summary = {"feed": feed, "lookback_min_cobid": int(min_cobid), "synced": {}}
 
     for scope, pt_match in SCOPE_MATCH.items():
+        # ── Open COBs: every feed row NOT signed off materialises as an OPEN
+        # app row (insert-only — an existing row of ANY status is never
+        # downgraded). This is what makes "which COBs are open" visible in
+        # the app; sign-off requests are raised against these rows.
+        open_src = f"""
+            SELECT DISTINCT u.COBID, UPPER(TRIM(u.ENTITY_CODE)) AS ENTITY_CODE
+            FROM {feed} u
+            WHERE {pt_match}
+              AND UPPER(u.PUBLISH_STATUS) <> 'SIGNEDOFF'
+              AND (u.SUB_TYPE IS NULL OR TRIM(u.SUB_TYPE) = ''
+                   OR UPPER(u.SUB_TYPE) = 'NONCVA')
+              AND u.ENTITY_CODE IS NOT NULL AND TRIM(u.ENTITY_CODE) <> ''
+              AND u.COBID >= {int(min_cobid)}
+        """
+        opened = session.sql(f"""
+            INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+                (COBID, PROCESS_TYPE, ENTITY_CODE, SIGN_OFF_STATUS, SIGNOFF_SOURCE)
+            SELECT s.COBID, '{scope}', s.ENTITY_CODE, 'OPEN', 'EXTERNAL'
+            FROM ({open_src}) s
+            WHERE NOT EXISTS (
+                SELECT 1 FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS a
+                WHERE a.COBID = s.COBID
+                  AND UPPER(a.PROCESS_TYPE) = '{scope.upper()}'
+                  AND UPPER(a.ENTITY_CODE) = s.ENTITY_CODE
+            )
+        """).collect()
+        try:
+            summary.setdefault("opened", {})[scope] = int(opened[0][0]) if opened else 0
+        except (TypeError, ValueError, IndexError):
+            summary.setdefault("opened", {})[scope] = 0
+
         src_sql = f"""
             SELECT DISTINCT u.COBID, UPPER(TRIM(u.ENTITY_CODE)) AS ENTITY_CODE
             FROM {feed} u

@@ -151,15 +151,152 @@ $$;
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- SP_DECIDE_REOPEN — approve or reject a COB sign-off re-open request
+-- SP_REQUEST_SIGNOFF_CHANGE — raise a sign-off OR re-open request on a COB
+--
+-- There is no standalone "open the COB" concept: open rows come from the
+-- upstream publish feed (materialised by SP_SYNC_SIGNOFF_STATUS). This proc
+-- raises the two lifecycle changes the app can make — SIGNOFF (open →
+-- signed off) and REOPEN (signed off → open) — BOTH as approval requests by
+-- default (p_requires_approval; the UI keeps the checkbox ticked and
+-- disabled — the direct-apply branch exists only for a future policy change).
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- Entity granularity then the caller argument changed the signature; drop the
--- old overloads so stale callers fail loudly instead of deciding the wrong row.
+CREATE OR ALTER PROCEDURE ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE(
+    p_cobid             INT,
+    p_process_type      VARCHAR,
+    p_entity_code       VARCHAR,   -- '*' = whole-scope row
+    p_action            VARCHAR,   -- 'SIGNOFF' | 'REOPEN'
+    p_reason            VARCHAR,
+    p_requires_approval BOOLEAN,
+    p_caller            VARCHAR    -- app-resolved viewer name (same source as submit)
+)
+RETURNS VARCHAR
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER = 'main'
+COMMENT = 'Raise a COB sign-off or re-open request (approval-gated by default): guarded transition from the compatible current status + sign-off history. Requester recorded in REOPEN_REQUESTED_BY/AT/REASON for both request types.'
+EXECUTE AS CALLER
+AS
+$$
+import json
+
+# action → (pending status, direct-apply status, statuses it can start from)
+ACTIONS = {
+    "SIGNOFF": ("SIGNOFF_REQUESTED", "SIGNED_OFF", ("OPEN", "REOPENED")),
+    "REOPEN":  ("REOPEN_REQUESTED",  "REOPENED",   ("SIGNED_OFF",)),
+}
+
+
+def _esc(v):
+    return str(v).replace("'", "''") if v is not None else ""
+
+
+def main(session, p_cobid, p_process_type, p_entity_code, p_action, p_reason,
+         p_requires_approval, p_caller):
+    action = str(p_action or "").strip().upper()
+    if action not in ACTIONS:
+        return json.dumps({"status": "error",
+                           "message": f"Invalid action '{p_action}' — "
+                                      f"expected SIGNOFF or REOPEN."})
+    pending_status, direct_status, from_statuses = ACTIONS[action]
+
+    caller = str(p_caller or "").strip()
+    if not caller or caller.lower() == "unknown":
+        row = session.sql("SELECT CURRENT_USER() AS U").collect()
+        caller = str(row[0]["U"]).strip() if row and row[0]["U"] else ""
+    if not caller or caller.lower() == "unknown":
+        return json.dumps({"status": "no_identity",
+                           "message": "Caller identity could not be resolved — "
+                                      "requests are blocked."})
+
+    cobid  = int(p_cobid)
+    scope  = _esc(p_process_type)
+    entity = _esc(p_entity_code) if p_entity_code and str(p_entity_code).strip() else "*"
+
+    rows = session.sql(f"""
+        SELECT SIGN_OFF_STATUS FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+        WHERE COBID = {cobid} AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
+          AND UPPER(ENTITY_CODE) = UPPER('{entity}')
+    """).collect()
+    if not rows:
+        return json.dumps({"status": "not_found",
+                           "message": "No sign-off row for this COB/scope/entity "
+                                      "— run the upstream sync first."})
+    cur = str(rows[0]["SIGN_OFF_STATUS"]).upper()
+    if cur not in from_statuses:
+        return json.dumps({"status": "wrong_state",
+                           "message": f"Cannot request {action.lower()} from "
+                                      f"status {cur} (needs "
+                                      f"{' or '.join(from_statuses)})."})
+
+    requires_approval = True if p_requires_approval is None else bool(p_requires_approval)
+    new_status = pending_status if requires_approval else direct_status
+    from_in = ", ".join(f"'{s}'" for s in from_statuses)
+    reason = _esc(p_reason or "")
+
+    if requires_approval:
+        set_clause = (f"SIGN_OFF_STATUS = '{new_status}', "
+                      f"REOPEN_REQUESTED_BY = '{_esc(caller)}', "
+                      f"REOPEN_REQUESTED_AT = CURRENT_TIMESTAMP(), "
+                      f"REOPEN_REASON = '{reason[:990]}'")
+    elif action == "SIGNOFF":
+        set_clause = (f"SIGN_OFF_STATUS = '{new_status}', "
+                      f"SIGN_OFF_BY = '{_esc(caller)}', "
+                      f"SIGN_OFF_TIMESTAMP = CURRENT_TIMESTAMP(), "
+                      f"SIGNOFF_SOURCE = 'APP'")
+    else:
+        set_clause = (f"SIGN_OFF_STATUS = '{new_status}', "
+                      f"REOPEN_APPROVED_BY = '{_esc(caller)}', "
+                      f"REOPEN_APPROVED_AT = CURRENT_TIMESTAMP()")
+
+    upd = session.sql(f"""
+        UPDATE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+        SET {set_clause}, UPDATED_DATE = CURRENT_TIMESTAMP()
+        WHERE COBID = {cobid}
+          AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
+          AND UPPER(ENTITY_CODE) = UPPER('{entity}')
+          AND UPPER(SIGN_OFF_STATUS) IN ({from_in})
+    """).collect()
+    try:
+        n = int(upd[0][0]) if upd else 0
+    except (TypeError, ValueError, IndexError):
+        n = 0
+    if n == 0:
+        return json.dumps({"status": "wrong_state",
+                           "message": "The status changed a moment ago — "
+                                      "refresh and try again."})
+
+    verb = "Sign-off" if action == "SIGNOFF" else "Re-open"
+    comment = (f"{verb} requested by {_esc(caller)}"
+               + (f": {reason[:900]}" if reason else "")) if requires_approval \
+              else f"{verb} applied directly by {_esc(caller)} (approval not required)"
+    session.sql(f"""
+        INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
+            (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
+        VALUES ({cobid}, '{scope}', '{entity}', '{cur}', '{new_status}',
+                '{_esc(caller)}', '{comment[:990]}')
+    """).collect()
+
+    return json.dumps({"status": "ok", "action": action,
+                       "new_status": new_status, "by": caller,
+                       "pending_approval": requires_approval})
+$$;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- SP_DECIDE_SIGNOFF_CHANGE — approve/reject a pending sign-off OR re-open
+-- request. Replaces SP_DECIDE_REOPEN (dropped below): one decision path for
+-- both request types. Rejection returns the row to its pre-request status.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- Old proc superseded (generalised to both request types); drop all overloads
+-- so stale callers fail loudly.
 DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_DECIDE_REOPEN(INT, VARCHAR, VARCHAR, VARCHAR);
 DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_DECIDE_REOPEN(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR);
+DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_DECIDE_REOPEN(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR);
 
-CREATE OR ALTER PROCEDURE ADJUSTMENT_APP.SP_DECIDE_REOPEN(
+CREATE OR ALTER PROCEDURE ADJUSTMENT_APP.SP_DECIDE_SIGNOFF_CHANGE(
     p_cobid        INT,
     p_process_type VARCHAR,
     p_entity_code  VARCHAR,   -- '*' = whole-scope row
@@ -172,11 +309,17 @@ LANGUAGE PYTHON
 RUNTIME_VERSION = '3.11'
 PACKAGES = ('snowflake-snowpark-python')
 HANDLER = 'main'
-COMMENT = '4-eyes decision on a COB re-open request: caller = p_caller (app-resolved, same source as submit) with CURRENT_USER() fallback, active approver + scope check, requester cannot decide, guarded transition + sign-off history.'
+COMMENT = '4-eyes decision on a pending COB sign-off/re-open request: caller = p_caller with CURRENT_USER() fallback, active approver + scope check, requester cannot decide, guarded transition + sign-off history.'
 EXECUTE AS CALLER
 AS
 $$
 import json
+
+# pending status → (approved status, rejected/revert status, label)
+PENDING = {
+    "REOPEN_REQUESTED":  ("REOPENED",   "SIGNED_OFF", "re-open"),
+    "SIGNOFF_REQUESTED": ("SIGNED_OFF", "OPEN",       "sign-off"),
+}
 
 
 def _esc(v):
@@ -209,14 +352,18 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_decision, p_comment,
         WHERE COBID = {cobid} AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
           AND UPPER(ENTITY_CODE) = UPPER('{entity}')
     """).collect()
-    if not rows or str(rows[0]["SIGN_OFF_STATUS"]).upper() != "REOPEN_REQUESTED":
+    cur = str(rows[0]["SIGN_OFF_STATUS"]).upper() if rows else ""
+    if cur not in PENDING:
         return json.dumps({"status": "not_pending",
-                           "message": "This COB/scope has no pending re-open "
-                                      "request (it may already be decided)."})
+                           "message": "This COB/scope has no pending sign-off "
+                                      "or re-open request (it may already be "
+                                      "decided)."})
+    approved_status, rejected_status, label = PENDING[cur]
+
     requester = str(rows[0]["REOPEN_REQUESTED_BY"] or "")
     if requester.strip().upper() == caller.upper():
         return json.dumps({"status": "self_approval",
-                           "message": "You cannot decide your own re-open request."})
+                           "message": f"You cannot decide your own {label} request."})
 
     approver = session.sql(f"""
         SELECT 1 FROM ADJUSTMENT_APP.ADJ_APPROVERS
@@ -232,13 +379,19 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_decision, p_comment,
                                       f"for scope {p_process_type}."})
 
     if decision == "Approved":
-        set_clause = (f"SIGN_OFF_STATUS = 'REOPENED', "
-                      f"REOPEN_APPROVED_BY = '{_esc(caller)}', "
-                      f"REOPEN_APPROVED_AT = CURRENT_TIMESTAMP()")
-        new_status = "REOPENED"
+        new_status = approved_status
+        if new_status == "SIGNED_OFF":
+            set_clause = (f"SIGN_OFF_STATUS = 'SIGNED_OFF', "
+                          f"SIGN_OFF_BY = '{_esc(caller)}', "
+                          f"SIGN_OFF_TIMESTAMP = CURRENT_TIMESTAMP(), "
+                          f"SIGNOFF_SOURCE = 'APP'")
+        else:
+            set_clause = (f"SIGN_OFF_STATUS = 'REOPENED', "
+                          f"REOPEN_APPROVED_BY = '{_esc(caller)}', "
+                          f"REOPEN_APPROVED_AT = CURRENT_TIMESTAMP()")
     else:
-        set_clause = "SIGN_OFF_STATUS = 'SIGNED_OFF'"
-        new_status = "SIGNED_OFF"
+        new_status = rejected_status
+        set_clause = f"SIGN_OFF_STATUS = '{new_status}'"
 
     upd = session.sql(f"""
         UPDATE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
@@ -246,7 +399,7 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_decision, p_comment,
         WHERE COBID = {cobid}
           AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
           AND UPPER(ENTITY_CODE) = UPPER('{entity}')
-          AND UPPER(SIGN_OFF_STATUS) = 'REOPEN_REQUESTED'
+          AND UPPER(SIGN_OFF_STATUS) = '{cur}'
     """).collect()
     try:
         n = int(upd[0][0]) if upd else 0
@@ -257,20 +410,22 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_decision, p_comment,
                            "message": "The request was decided by someone else "
                                       "a moment ago."})
 
-    comment = _esc(p_comment) if p_comment else f"Re-open {decision.lower()} by {_esc(caller)}"
+    comment = _esc(p_comment) if p_comment \
+              else f"{label.capitalize()} {decision.lower()} by {_esc(caller)}"
     session.sql(f"""
         INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
             (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
-        VALUES ({cobid}, '{scope}', '{entity}', 'REOPEN_REQUESTED', '{new_status}',
+        VALUES ({cobid}, '{scope}', '{entity}', '{cur}', '{new_status}',
                 '{_esc(caller)}', '{comment[:990]}')
     """).collect()
 
     return json.dumps({"status": "ok", "decision": decision, "by": caller,
-                       "new_status": new_status})
+                       "request_type": label, "new_status": new_status})
 $$;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- VERIFY
 -- ═══════════════════════════════════════════════════════════════════════════
 DESCRIBE PROCEDURE ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT(VARCHAR, VARCHAR, VARCHAR, VARCHAR);
-DESCRIBE PROCEDURE ADJUSTMENT_APP.SP_DECIDE_REOPEN(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR);
+DESCRIBE PROCEDURE ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR, BOOLEAN, VARCHAR);
+DESCRIBE PROCEDURE ADJUSTMENT_APP.SP_DECIDE_SIGNOFF_CHANGE(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR);

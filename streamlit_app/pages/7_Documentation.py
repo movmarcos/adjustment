@@ -329,23 +329,27 @@ with tab_approval:
         ("Signed off again", "from the app"),
     ]))
     _html(_table(["Status", "Meaning", "Can submit?"], [
-        [_pill("OPEN / no entry", P["success"]), "COB never signed off for the scope.", "Yes"],
+        [_pill("OPEN", P["success"]),
+         "COB open per the upstream feed (synced in) — not yet signed off.", "Yes"],
+        [_pill("SIGNOFF_REQUESTED", "#B45309"),
+         "An app sign-off request is awaiting approval.", "No"],
         [_pill("SIGNED_OFF", P["danger"]),
-         "Signed off (upstream feed, app re-sign-off, or admin).", "No"],
+         "Signed off (upstream feed, or app request approved).", "No"],
         [_pill("REOPEN_REQUESTED", "#B45309"),
          "A re-open request is awaiting approval.", "No"],
         [_pill("REOPENED", P["info"]),
-         "Re-open approved — adjust, then sign off again from the app.", "Yes"],
+         "Re-open approved — adjust, then request sign-off again.", "Yes"],
     ]))
     _html(_card(
-        "<strong>How to re-open:</strong> on the New Adjustment page, select "
-        "the scope and COB — the sign-off panel appears with a "
-        "<em>Request re-open</em> button (reason required). An approver (not "
-        "the requester) actions it in the Approval Queue's <em>COB Re-open "
-        "Requests</em> section. Once re-opened, submit the adjustments needed, "
-        "then use <em>Sign off again</em> on the same panel — this second "
-        "sign-off is allowed from the app because the upstream one already "
-        "happened. Every transition is recorded in the sign-off history."))
+        "<strong>Both lifecycle changes are approval-gated requests</strong> "
+        "(the checkboxes on the Sign-Off page are ticked and locked by "
+        "policy): <em>request sign-off</em> on an OPEN/REOPENED entry, or "
+        "<em>request re-open</em> on a SIGNED_OFF one — from the Sign-Off "
+        "page (re-open also from the New Adjustment panel). An approver who "
+        "is not the requester actions it in the Approval Queue's <em>COB "
+        "Sign-Off / Re-open Requests</em> section. Rejection returns the "
+        "entry to its previous status. Every transition is recorded in the "
+        "sign-off history."))
 
     section_title("Who can do what", "user")
     _html(_table(["Action", "Who"], [
@@ -353,10 +357,13 @@ with tab_approval:
          "Any app user"],
         ["Approve/reject adjustments and re-open requests",
          "Registered approvers (per scope), never for their own requests"],
-        ["Manage approvers, scope config, sign-off overrides, page admins",
+        ["View COB sign-off status", "Any app user (Sign-Off page)"],
+        ["Manage approvers, scope config, page admins",
          "Page administrators (Admin page; access controlled by the "
          "administrators list, with a warning-flagged open ‘bootstrap’ mode "
          "until the first admin is registered)"],
+        ["Sign-off overrides, upstream sync, manual sign-off entries",
+         "Page administrators (Sign-Off page, admin-gated controls)"],
     ]))
 
 # ╔════════════════════════════════════════════════════════════════════════════╗

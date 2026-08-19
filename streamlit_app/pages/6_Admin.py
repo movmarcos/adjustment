@@ -24,7 +24,7 @@ user = current_user_name()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # AUTHORIZATION GATE
-# This page manages approvers, sign-off, and scope config — the controls the
+# This page manages approvers and scope config — the controls the
 # 4-eyes workflow depends on — so access must itself be controlled. While
 # ADJ_ADMINS is empty the page runs in bootstrap mode (open, with a warning)
 # so the first admin can be registered in the Approvers tab.
@@ -61,11 +61,12 @@ st.markdown("<br/>", unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
 
-(tab_health, tab_scopes, tab_signoff, tab_approvers, tab_recurring,
+# Sign-off management moved to its own page (5_Sign_Off.py) so every user
+# can see the COB sign-off status; its mutating controls stay admin-gated there.
+(tab_health, tab_scopes, tab_approvers, tab_recurring,
  tab_notify, tab_schema, tab_sql) = st.tabs([
     "System Health",
     "Scope Configuration",
-    "Sign-Off Management",
     "Approvers",
     "Recurring Templates",
     "Notifications",
@@ -279,208 +280,7 @@ with tab_scopes:
         unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — SIGN-OFF MANAGEMENT
-# ══════════════════════════════════════════════════════════════════════════════
-
-with tab_signoff:
-    section_title("COB Sign-Off Status", "lock")
-    st.markdown(
-        f'<div style="background:{P["info_lt"]};border:1px solid #90CAF9;border-radius:8px;'
-        f'padding:0.7rem 1rem;margin-bottom:1rem;font-size:0.85rem">'
-        f'The <strong>first sign-off</strong> for a COB/scope arrives from the upstream '
-        f'publish system and is synced in automatically (also on a 30-minute task). '
-        f'While a COB is <strong>SIGNED_OFF</strong> or has a <strong>re-open request '
-        f'pending</strong>, no new adjustments can be submitted. Business users request a '
-        f're-open from the New Adjustment page; approvers action it on the Approval Queue '
-        f'page; once re-opened and finished, the COB is signed off again from the app. '
-        f'This panel is the admin override — every change here is written to '
-        f'<code>ADJ_SIGNOFF_HISTORY</code>.'
-        f'</div>',
-        unsafe_allow_html=True)
-
-    def _so_hist(cobid, scope, entity, old_status, new_status, comment):
-        run_query(f"""
-            INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
-                (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
-            VALUES ({int(cobid)}, '{_esc(scope)}', '{_esc(entity or "*")}',
-                    '{_esc(old_status)}',
-                    '{_esc(new_status)}', '{_esc(user)}', '{_esc(comment)}')
-        """)
-
-    if st.button("Sync from upstream feed now", key="signoff_sync_btn"):
-        try:
-            res = run_query("CALL ADJUSTMENT_APP.SP_SYNC_SIGNOFF_STATUS()")
-            st.success(f"Sync complete: {res[0][0] if res else 'no result'}")
-        except Exception as ex:
-            st.error(f"Sync failed. The database reported: {ex}")
-
-    # --- Current sign-off status ---
-    try:
-        df_signoff = run_query_df("""
-            SELECT COBID, PROCESS_TYPE, ENTITY_CODE, SIGN_OFF_STATUS, SIGNOFF_SOURCE,
-                   SIGN_OFF_BY, SIGN_OFF_TIMESTAMP,
-                   REOPEN_REQUESTED_BY, REOPEN_REQUESTED_AT, REOPEN_REASON,
-                   REOPEN_APPROVED_BY, REOPEN_APPROVED_AT, UPDATED_DATE
-            FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-            ORDER BY COBID DESC, PROCESS_TYPE
-        """)
-
-        if not df_signoff.empty:
-            _blocked = df_signoff["SIGN_OFF_STATUS"].str.upper().isin(
-                ["SIGNED_OFF", "REOPEN_REQUESTED"])
-            sm1, sm2, sm3, sm4 = st.columns(4)
-            sm1.metric("Total Entries", len(df_signoff))
-            sm2.metric("Blocked (signed off / request pending)", int(_blocked.sum()))
-            sm3.metric("Re-opened", int((df_signoff["SIGN_OFF_STATUS"].str.upper()
-                                         == "REOPENED").sum()))
-            sm4.metric("Open", int((~_blocked).sum()
-                                   - int((df_signoff["SIGN_OFF_STATUS"].str.upper()
-                                          == "REOPENED").sum())))
-
-            render_df_table(df_signoff, max_rows=200, height=300)
-
-            # --- Admin override (audited) ---
-            st.markdown("<br/>", unsafe_allow_html=True)
-            section_title("Admin Override", "refresh-cw")
-            st.caption(
-                "Normal path: re-open via the Approval Queue, re-sign-off from the "
-                "New Adjustment page. Use these only when that flow is not possible.")
-            toggle_cols = st.columns(3)
-            with toggle_cols[0]:
-                cob_options = sorted(df_signoff["COBID"].unique(), reverse=True)
-                sel_cob = st.selectbox("COBID", cob_options, key="signoff_toggle_cob")
-            with toggle_cols[1]:
-                scope_options = sorted(df_signoff[df_signoff["COBID"] == sel_cob]["PROCESS_TYPE"].unique())
-                sel_scope = st.selectbox("Process Type", scope_options, key="signoff_toggle_scope")
-            _ent_opts = sorted(df_signoff[
-                (df_signoff["COBID"] == sel_cob)
-                & (df_signoff["PROCESS_TYPE"] == sel_scope)
-            ]["ENTITY_CODE"].fillna("*").unique())
-            sel_entity = st.selectbox(
-                "Entity ('*' = whole scope)", _ent_opts or ["*"],
-                key="signoff_toggle_entity")
-            current_row = df_signoff[
-                (df_signoff["COBID"] == sel_cob)
-                & (df_signoff["PROCESS_TYPE"] == sel_scope)
-                & (df_signoff["ENTITY_CODE"].fillna("*") == sel_entity)
-            ]
-            current_status = (str(current_row["SIGN_OFF_STATUS"].values[0]).upper()
-                              if not current_row.empty else "OPEN")
-            with toggle_cols[2]:
-                st.markdown("<br/>", unsafe_allow_html=True)
-                st.caption(f"Current status: {current_status}")
-
-            ov1, ov2 = st.columns(2)
-            with ov1:
-                if st.button("Re-open (admin override)", key="admin_reopen_btn",
-                             disabled=current_status not in ("SIGNED_OFF", "REOPEN_REQUESTED")):
-                    try:
-                        rows = run_query(f"""
-                            UPDATE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-                            SET SIGN_OFF_STATUS    = 'REOPENED',
-                                REOPEN_APPROVED_BY = '{_esc(user)}',
-                                REOPEN_APPROVED_AT = CURRENT_TIMESTAMP(),
-                                UPDATED_DATE       = CURRENT_TIMESTAMP()
-                            WHERE COBID = {int(sel_cob)}
-                              AND PROCESS_TYPE = '{_esc(sel_scope)}'
-                              AND UPPER(ENTITY_CODE) = UPPER('{_esc(sel_entity)}')
-                              AND UPPER(SIGN_OFF_STATUS) IN ('SIGNED_OFF', 'REOPEN_REQUESTED')
-                        """)
-                        n = int(rows[0][0]) if rows else 0
-                        if n:
-                            _so_hist(sel_cob, sel_scope, sel_entity, current_status, "REOPENED",
-                                     "Admin override re-open")
-                            st.success(f"COB {sel_cob} / {sel_scope} / {sel_entity} re-opened.")
-                        else:
-                            st.warning("Nothing changed — status moved on; refresh.")
-                        safe_rerun()
-                    except Exception as ex:
-                        st.error(f"Re-open failed: {ex}")
-            with ov2:
-                if st.button("Sign off (admin override)", key="admin_signoff_btn",
-                             disabled=current_status == "SIGNED_OFF"):
-                    try:
-                        rows = run_query(f"""
-                            UPDATE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-                            SET SIGN_OFF_STATUS    = 'SIGNED_OFF',
-                                SIGN_OFF_BY        = '{_esc(user)}',
-                                SIGN_OFF_TIMESTAMP = CURRENT_TIMESTAMP(),
-                                SIGNOFF_SOURCE     = 'ADMIN',
-                                UPDATED_DATE       = CURRENT_TIMESTAMP()
-                            WHERE COBID = {int(sel_cob)}
-                              AND PROCESS_TYPE = '{_esc(sel_scope)}'
-                              AND UPPER(ENTITY_CODE) = UPPER('{_esc(sel_entity)}')
-                              AND UPPER(SIGN_OFF_STATUS) <> 'SIGNED_OFF'
-                        """)
-                        n = int(rows[0][0]) if rows else 0
-                        if n:
-                            _so_hist(sel_cob, sel_scope, sel_entity, current_status, "SIGNED_OFF",
-                                     "Admin override sign-off")
-                            st.success(f"COB {sel_cob} / {sel_scope} / {sel_entity} signed off.")
-                        else:
-                            st.warning("Nothing changed — status moved on; refresh.")
-                        safe_rerun()
-                    except Exception as ex:
-                        st.error(f"Sign-off failed: {ex}")
-        else:
-            st.info("No sign-off entries yet — run the upstream sync above, or "
-                    "use the form below to create one manually.")
-    except Exception as e:
-        st.info(f"Sign-off table not available: {e}")
-
-    # --- Add new sign-off entry ---
-    st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Add Sign-Off Entry", "lock")
-    with st.form("new_signoff_form"):
-        sc1, sc2, sc3, sc4 = st.columns(4)
-        with sc1:
-            so_cobid = st.text_input("COBID", placeholder="e.g. 20260328", key="so_cobid")
-        with sc2:
-            so_scope = st.selectbox("Process Type", list(SCOPE_CONFIG.keys()), key="so_scope")
-        with sc3:
-            so_entity = st.text_input("Entity ('*' = whole scope)", value="*",
-                                      key="so_entity")
-        with sc4:
-            so_status = st.selectbox("Initial Status", ["OPEN", "SIGNED_OFF"], key="so_status")
-
-        so_submit = st.form_submit_button("Add Entry", type="primary")
-        if so_submit:
-            if not so_cobid.strip():
-                st.error("COBID is required.")
-            else:
-                try:
-                    ts = "CURRENT_TIMESTAMP()" if so_status == "SIGNED_OFF" else "NULL"
-                    by = f"'{_esc(user)}'" if so_status == "SIGNED_OFF" else "NULL"
-                    cobid_int = int(so_cobid.strip())
-                    run_query(f"""
-                        MERGE INTO ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS tgt
-                        USING (SELECT {cobid_int} AS COBID, '{_esc(so_scope)}' AS PROCESS_TYPE,
-                                      '{_esc((so_entity or "*").strip() or "*")}' AS ENTITY_CODE) src
-                        ON tgt.COBID = src.COBID AND tgt.PROCESS_TYPE = src.PROCESS_TYPE
-                           AND UPPER(tgt.ENTITY_CODE) = UPPER(src.ENTITY_CODE)
-                        WHEN MATCHED THEN UPDATE SET
-                            SIGN_OFF_STATUS    = '{_esc(so_status)}',
-                            SIGN_OFF_BY        = {by},
-                            SIGN_OFF_TIMESTAMP = {ts},
-                            SIGNOFF_SOURCE     = 'ADMIN',
-                            UPDATED_DATE       = CURRENT_TIMESTAMP()
-                        WHEN NOT MATCHED THEN INSERT
-                            (COBID, PROCESS_TYPE, ENTITY_CODE, SIGN_OFF_STATUS, SIGN_OFF_BY,
-                             SIGN_OFF_TIMESTAMP, SIGNOFF_SOURCE)
-                        VALUES ({cobid_int}, '{_esc(so_scope)}', src.ENTITY_CODE,
-                                '{_esc(so_status)}', {by}, {ts}, 'ADMIN')
-                    """)
-                    _so_hist(cobid_int, so_scope, (so_entity or "*").strip() or "*",
-                             "OPEN", so_status,
-                             "Manual entry created on the Admin page")
-                    st.success(f"Sign-off entry created: COB {so_cobid.strip()} / {so_scope} = {so_status}")
-                    safe_rerun()
-                except Exception as ex:
-                    st.error(f"Failed to add entry: {ex}")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — APPROVERS MANAGEMENT
+# TAB 2 — APPROVERS MANAGEMENT
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_approvers:
@@ -662,7 +462,7 @@ with tab_approvers:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — RECURRING TEMPLATES
+# TAB 3 — RECURRING TEMPLATES
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_recurring:
@@ -751,7 +551,7 @@ with tab_recurring:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 5 — NOTIFICATIONS
+# TAB 4 — NOTIFICATIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_notify:
@@ -954,7 +754,7 @@ with tab_notify:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 6 — SCHEMA REFERENCE
+# TAB 5 — SCHEMA REFERENCE
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_schema:
@@ -1030,7 +830,7 @@ with tab_schema:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — SQL REFERENCE
+# TAB 6 — SQL REFERENCE
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_sql:

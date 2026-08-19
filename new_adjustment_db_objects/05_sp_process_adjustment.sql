@@ -126,6 +126,67 @@ def build_direct_extract_sql(cfg, adj_ids_str):
                f" AND {_payload_expr(metric_pf, 'number')} <> 0"
 
 
+def _write_direct_frtb_enriched(session, adj_ids_str, cobid, dim_ids_str,
+                                fact_adj_tbl_name, view_name,
+                                metric_name, metric_usd_name):
+    """Shared FRTB Direct-upload writer (WRITER_OVERRIDE targets below).
+
+    All mapping/derivation lives in the per-scope enriched view
+    (15_direct_frtb_upload.sql) — this just inserts the intersection of the
+    view's columns with the live adjustment table, skipping rows whose
+    metrics are all zero/NULL (legacy skip-zero behaviour). ADJUSTMENT_ID and
+    RUN_LOG_ID flow through the view from ADJ_HEADER, which the caller has
+    already stamped."""
+    view_cols = set(session.table(view_name).columns)
+    tgt_cols = [c for c in session.table(fact_adj_tbl_name).columns
+                if c in view_cols]
+    if not tgt_cols:
+        raise Exception(f"No overlapping columns between {view_name} and "
+                        f"{fact_adj_tbl_name} — check the enriched view.")
+    nz = [f"COALESCE(v.{m}, 0) <> 0"
+          for m in dict.fromkeys((metric_name, metric_usd_name))
+          if m in view_cols]
+    zero_pred = f" AND ({' OR '.join(nz)})" if nz else ""
+    cols = ", ".join(tgt_cols)
+    session.sql(f"""
+        INSERT INTO {fact_adj_tbl_name} ({cols})
+        SELECT {", ".join('v.' + c for c in tgt_cols)}
+        FROM {view_name} v
+        WHERE v.ADJ_ID IN ({adj_ids_str}){zero_pred}
+    """).collect()
+    return session.sql(f"""
+        SELECT COUNT(*) AS CNT FROM {fact_adj_tbl_name}
+        WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
+    """).collect()[0]["CNT"]
+
+
+def write_direct_frtb_sbm(session, adj_ids, adj_ids_str, dim_adj_map, cobid,
+                          fact_adj_tbl_name, metric_name, metric_usd_name,
+                          run_log_id):
+    dim_ids_str = ', '.join(str(v) for v in dim_adj_map.values())
+    return _write_direct_frtb_enriched(
+        session, adj_ids_str, cobid, dim_ids_str, fact_adj_tbl_name,
+        "ADJUSTMENT_APP.VW_DIRECT_FRTB_ENRICHED", metric_name, metric_usd_name)
+
+
+def write_direct_frtb_drc(session, adj_ids, adj_ids_str, dim_adj_map, cobid,
+                          fact_adj_tbl_name, metric_name, metric_usd_name,
+                          run_log_id):
+    dim_ids_str = ', '.join(str(v) for v in dim_adj_map.values())
+    return _write_direct_frtb_enriched(
+        session, adj_ids_str, cobid, dim_ids_str, fact_adj_tbl_name,
+        "ADJUSTMENT_APP.VW_DIRECT_FRTBDRC_ENRICHED", metric_name, metric_usd_name)
+
+
+def write_direct_frtb_rrao(session, adj_ids, adj_ids_str, dim_adj_map, cobid,
+                           fact_adj_tbl_name, metric_name, metric_usd_name,
+                           run_log_id):
+    dim_ids_str = ', '.join(str(v) for v in dim_adj_map.values())
+    return _write_direct_frtb_enriched(
+        session, adj_ids_str, cobid, dim_ids_str, fact_adj_tbl_name,
+        "ADJUSTMENT_APP.VW_DIRECT_FRTBRRAO_ENRICHED", metric_name, metric_usd_name)
+
+
 def update_header_status(session, df_adjustments, cobid, new_status, error_msg=None):
     """Update ADJ_HEADER.RUN_STATUS for the processed adjustments."""
     london_now = session.sql(
@@ -1019,6 +1080,16 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                     WHERE h2.ADJ_ID IN ({adj_ids_str})
                     GROUP BY h2.ADJ_ID
                 ) rtenor ON rtenor.ADJ_ID = h.ADJ_ID"""),
+                'UNDERLYING_TENOR_CURRENCY_KEY': ('rutenor', f"""
+                LEFT JOIN (
+                    SELECT h2.ADJ_ID, MAX(ut.UNDERLYING_TENOR_CURRENCY_KEY) AS K
+                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                    JOIN DIMENSION.UNDERLYING_TENOR_CURRENCY ut
+                      ON UPPER(ut.UNDERYLING_TENOR_CODE) =
+                         UPPER(h2.UNDERLYING_TENOR_CODE)
+                    WHERE h2.ADJ_ID IN ({adj_ids_str})
+                    GROUP BY h2.ADJ_ID
+                ) rutenor ON rutenor.ADJ_ID = h.ADJ_ID"""),
                 'CURVE_CURRENCY_KEY': ('rcurve', f"""
                 LEFT JOIN (
                     SELECT h2.ADJ_ID, MAX(cc.CURVE_CURRENCY_KEY) AS K

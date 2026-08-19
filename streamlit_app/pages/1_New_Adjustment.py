@@ -112,10 +112,22 @@ wiz: dict = st.session_state["wiz"]
 # SUBMISSION LOGIC
 # ══════════════════════════════════════════════════════════════════════════════
 
+# FRTB scopes' Direct adjustments are FILE-based (one file = one adjustment,
+# routed through the Upload engine + per-scope enriched views) — unlike the
+# generic per-row Direct flow. Business-wise they are still "Direct
+# Adjustment"; the Upload routing is internal plumbing.
+FRTB_FILE_SCOPES = ("FRTB", "FRTBDRC", "FRTBRRAO")
+
+
+def _is_frtb_file_direct() -> bool:
+    return (wiz.get("category") == "Direct Adjustment"
+            and wiz.get("process_type") in FRTB_FILE_SCOPES)
+
+
 def _build_payload() -> dict:
     cat = wiz.get("category")
 
-    if cat == "VaR Upload":
+    if cat == "VaR Upload" or _is_frtb_file_direct():
         return {
             "cobid":                 wiz["cobid"],
             "process_type":          wiz["process_type"],
@@ -190,22 +202,38 @@ def _direct_schema(scope: str) -> dict:
     cache_key = f"_ref_direct_schema_{scope}"
     if cache_key in st.session_state:
         return st.session_state[cache_key]
-    cfg = {"expected": [], "unpivot": None, "fact_mapping": [], "resolutions": []}
+    cfg = {"expected": [], "unpivot": None, "fact_mapping": [], "resolutions": [],
+           "validation_rules": [], "aliases": {}}
     try:
-        rows = run_query(f"""
-            SELECT EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS
-            FROM ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
-            WHERE UPPER(PROCESS_TYPE) = UPPER('{scope.replace("'", "''")}')
-              AND IS_ACTIVE = TRUE
-        """)
+        _scope_esc = scope.replace("'", "''")
+        try:
+            rows = run_query(f"""
+                SELECT EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS,
+                       VALIDATION_RULES, ALIASES
+                FROM ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
+                WHERE UPPER(PROCESS_TYPE) = UPPER('{_scope_esc}')
+                  AND IS_ACTIVE = TRUE
+            """)
+        except Exception:
+            # Pre-15_direct_frtb_upload deployment: the rules/aliases columns
+            # don't exist yet — degrade to the original shape.
+            rows = run_query(f"""
+                SELECT EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS,
+                       NULL AS VALIDATION_RULES, NULL AS ALIASES
+                FROM ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
+                WHERE UPPER(PROCESS_TYPE) = UPPER('{_scope_esc}')
+                  AND IS_ACTIVE = TRUE
+            """)
         if rows:
             def _j(v):
                 return json.loads(v) if isinstance(v, str) else v
             r = rows[0]
-            cfg["expected"]     = _j(r["EXPECTED_COLUMNS"]) or []
-            cfg["unpivot"]      = _j(r["UNPIVOT"])
-            cfg["fact_mapping"] = _j(r["FACT_MAPPING"]) or []
-            cfg["resolutions"]  = _j(r["RESOLUTIONS"]) or []
+            cfg["expected"]         = _j(r["EXPECTED_COLUMNS"]) or []
+            cfg["unpivot"]          = _j(r["UNPIVOT"])
+            cfg["fact_mapping"]     = _j(r["FACT_MAPPING"]) or []
+            cfg["resolutions"]      = _j(r["RESOLUTIONS"]) or []
+            cfg["validation_rules"] = _j(r["VALIDATION_RULES"]) or []
+            cfg["aliases"]          = _j(r["ALIASES"]) or {}
     except Exception:
         pass
     st.session_state[cache_key] = cfg
@@ -456,7 +484,7 @@ def _do_submit() -> dict:
         # server-side and creates every header atomically (all rows or none).
         # The old per-row CALL loop ran ~10 statements per row and took
         # minutes on real files.
-        if wiz.get("category") == "Direct Adjustment":
+        if wiz.get("category") == "Direct Adjustment" and not _is_frtb_file_direct():
             batch_id = wiz.get("direct_batch_id")
             ndf      = wiz.get("direct_ndf")
             verdicts = wiz.get("direct_verdicts") or []
@@ -541,7 +569,8 @@ def _do_submit() -> dict:
         # For VaR Upload: write line items BEFORE the SP call so that
         # navigating away can't interrupt the write. Pre-generate the
         # ADJ_ID so both line items and header share the same ID.
-        if wiz.get("category") == "VaR Upload" and wiz.get("uploaded_df") is not None:
+        if ((wiz.get("category") == "VaR Upload" or _is_frtb_file_direct())
+                and wiz.get("uploaded_df") is not None):
             adj_id = str(_uuid.uuid4())
             payload["adj_id"] = adj_id
             n = _write_direct_json_rows(adj_id, wiz["uploaded_df"])
@@ -702,7 +731,7 @@ CATEGORY_BTN_ICONS = {
 # while reusing CATEGORY_CONFIG's for the other two.
 CATEGORY_UI_DESCS = {
     "Scaling Adjustment": CATEGORY_CONFIG["Scaling Adjustment"]["desc"],
-    "Direct Adjustment":   "Paste/upload a CSV of exact values — one adjustment per row (all scopes)",
+    "Direct Adjustment":   "Paste/upload a CSV of exact values — per row (VaR/Stress/Sens) or per file (FRTB layouts)",
     "VaR Upload":          "Upload one file of exact VaR adjustment values (CSV, whole file = one adjustment)",
     "Entity Roll":         CATEGORY_CONFIG["Entity Roll"]["desc"],
 }
@@ -867,6 +896,18 @@ def _completion_checks() -> list:
             ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
             ("Reason",              bool((wiz.get("reason") or "").strip())),
         ]
+    elif _is_frtb_file_direct():
+        checks += [
+            ("Data scope",          bool(wiz.get("process_type"))),
+            ("CSV data",            wiz.get("uploaded_df") is not None),
+            ("CSV validated",       wiz.get("uploaded_df") is not None
+                                    and _upload_validation_ok()),
+            ("Risk-class rules",    not wiz.get("_frtb_rule_errs")),
+            ("COB date",            bool(wiz.get("cobid"))),
+            ("Reference",           bool((wiz.get("global_reference") or "").strip())),
+            ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
+            ("Reason",              bool((wiz.get("reason") or "").strip())),
+        ]
     elif cat == "Direct Adjustment":
         _n_valid = sum(1 for v in (wiz.get("direct_verdicts") or []) if v["IS_VALID"])
         checks += [
@@ -875,6 +916,8 @@ def _completion_checks() -> list:
                                     and len(wiz["direct_ndf"]) > 0),
             ("At least 1 valid row", _n_valid > 0),
             ("COB date",            bool(wiz.get("cobid"))),
+            ("COB matches the file", wiz.get("_direct_file_cob") is None
+                                     or wiz.get("cobid") == wiz["_direct_file_cob"]),
             ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
             ("Reason",              bool((wiz.get("reason") or "").strip())),
         ]
@@ -1033,8 +1076,13 @@ _DIRECT_STAGE_COLS = [
     "TRADE_CODE", "TRADE_TYPOLOGY", "STRATEGY", "INSTRUMENT_CODE",
     "SIMULATION_NAME", "SIMULATION_SOURCE", "MEASURE_TYPE_CODE",
     "CURRENCY_CODE", "VALUE_USD",
-    "TENOR_CODE", "CURVE_CODE", "PRODUCT_CATEGORY_ATTRIBUTES", "REASON",
+    "TENOR_CODE", "UNDERLYING_TENOR_CODE", "CURVE_CODE",
+    "PRODUCT_CATEGORY_ATTRIBUTES", "REASON",
 ]
+# COBID is part of the CSV template but is NEVER staged: the file's COB is
+# validated against the COB entered on the page (they must match) and the
+# header takes the page value. Mapping target for the parser only.
+_DIRECT_VIRTUAL_COLS = {"COBID"}
 
 _DIRECT_STAGE_CHUNK = 500  # rows per INSERT — keeps the generated SQL bounded
 
@@ -1553,12 +1601,24 @@ def render_direct_form() -> None:
             wiz["direct_verdicts"] = None
             wiz["_direct_sig"]     = None
             wiz["direct_rows"]     = None
+            # File-based FRTB state must not survive a scope switch either
+            wiz["uploaded_df"]        = None
+            wiz["uploaded_file_name"] = None
+            wiz["_upval"]             = None
+            wiz["_frtb_rule_errs"]    = None
             safe_rerun()
     if not wiz.get("process_type"):
         st.info("Select a data scope to continue.")
         return
 
     scope = wiz["process_type"]
+
+    # FRTB scopes: file-based Direct (one file = one adjustment, FRTB
+    # layouts) — everything below this point is the per-row generic flow.
+    if scope in FRTB_FILE_SCOPES:
+        _render_frtb_direct_body(scope)
+        return
+
     accepted_map, required, _ = _accepted_columns(scope)
 
     with _card():
@@ -1702,7 +1762,39 @@ def render_direct_form() -> None:
                                f"but the header must be there). Download the "
                                f"CSV template above for the full list.")
 
-                if unknown_cols or missing_cols or not len(ndf):
+                # ── COB in the file vs COB on the page ───────────────────
+                # The file must carry ONE COBID on every row; the user still
+                # enters the COB in Batch Details and the two must match —
+                # a stale file aimed at the wrong COB dies here, not in a
+                # report. COBID itself is never staged (header takes the
+                # page value).
+                cob_bad = False
+                wiz["_direct_file_cob"] = None
+                if "COBID" in ndf.columns:
+                    _cob_num = pd.to_numeric(ndf["COBID"], errors="coerce")
+                    _cobs = sorted(_cob_num.dropna().astype(int).unique().tolist())
+                    if _cob_num.isna().any():
+                        cob_bad = True
+                        st.error("Some rows have a blank or non-numeric COBID "
+                                 "— every row must carry the file's COB "
+                                 "(YYYYMMDD).")
+                    if len(_cobs) > 1:
+                        cob_bad = True
+                        st.error(f"The file mixes {len(_cobs)} different "
+                                 f"COBIDs ({', '.join(map(str, _cobs[:5]))}…) "
+                                 f"— one batch covers exactly one COB.")
+                    elif len(_cobs) == 1:
+                        wiz["_direct_file_cob"] = int(_cobs[0])
+                        if wiz.get("cobid") and wiz["cobid"] != _cobs[0]:
+                            cob_bad = True
+                            st.error(f"The file says COB {_cobs[0]} but the "
+                                     f"page says COB {wiz['cobid']} — they "
+                                     f"must match. Fix whichever one is wrong.")
+                        elif not wiz.get("cobid"):
+                            st.info(f"File COB is {_cobs[0]} — enter the same "
+                                    f"COB in Batch Details below to confirm.")
+
+                if unknown_cols or missing_cols or cob_bad or not len(ndf):
                     # Can't stage this parse — drop any previously staged batch so a
                     # stale/valid batch is never left submittable behind a now-broken CSV.
                     if wiz.get("direct_batch_id"):
@@ -1742,7 +1834,9 @@ def render_direct_form() -> None:
                # front-end crashes on it and the app's width-clamp CSS
                # squeezes its canvas; plain widgets are the proven path).
             ordered = _accepted_columns(scope)[2]     # [(stage_col, ord), ...]
-            row_cols = [c for c, _ in ordered]
+            # Virtual columns (COBID) are CSV-template-only — the row builder
+            # takes the COB from Batch Details, never per row.
+            row_cols = [c for c, _ in ordered if c not in _DIRECT_VIRTUAL_COLS]
             if not row_cols:
                 st.info("No entry fields configured for this scope yet — "
                         "use Paste content or Upload file.")
@@ -2048,6 +2142,243 @@ def render_var_upload_form() -> None:
         wiz["_dup_adj_ids"] = []
 
 
+def _frtb_rule_errors(df, rules) -> pd.DataFrame:
+    """Row-level conditional-rule errors (ROW, COLUMN, ERROR) — the confirmed
+    FRTB mandatory matrix (per RISK_CLASS / SENSITIVITY_TYPE), config-driven
+    from DIRECT_SCOPE_SCHEMA.VALIDATION_RULES. Mirrors the FRTB prototype's
+    validate_mandatory conditional pass."""
+    import re as _re
+    errors = []
+    up    = {c: df[c].astype(str).str.strip().str.upper() for c in df.columns}
+    blank = {c: df[c].isna() | up[c].isin(("", "NAN", "NONE"))
+             for c in df.columns}
+    for rule in rules or []:
+        field = rule.get("field")
+        msg   = rule.get("error") or f"{field} is required"
+        mask, skip = pd.Series(True, index=df.index), False
+        for cond in rule.get("conditions") or []:
+            col, pattern, negate = cond[0], cond[1], bool(cond[2])
+            if col not in df.columns:
+                skip = True
+                break
+            m = up[col].str.contains(pattern, flags=_re.IGNORECASE, na=False)
+            mask &= (~m if negate else m)
+        if skip:
+            continue
+        if field not in df.columns:
+            bad, suffix = mask, " (column missing from input)"
+        else:
+            bad, suffix = mask & blank[field], ""
+        for idx in bad[bad].index:
+            errors.append({"ROW": int(idx) + 1, "COLUMN": field,
+                           "ERROR": msg + suffix})
+    return pd.DataFrame(errors, columns=["ROW", "COLUMN", "ERROR"])
+
+
+def _render_frtb_direct_body(scope: str) -> None:
+    """FRTB Direct Adjustment body — SBM ('FRTB'), DRC and RRAO layouts.
+    Rendered by render_direct_form when an FRTB scope is selected: one file =
+    one adjustment (Upload action internally); rows become ADJ_LINE_ITEM_JSON
+    payloads and the pipeline's per-scope writer (15_direct_frtb_upload.sql
+    views) maps them into the FRTBSA_* adjustment tables."""
+    _FRTB_LABELS = {"FRTB": "SBM (FRTB)", "FRTBDRC": "DRC", "FRTBRRAO": "RRAO"}
+
+    schema = _direct_schema(scope)
+    expected  = [c.get("name") for c in schema["expected"] if c.get("name")]
+    required  = {c.get("name") for c in schema["expected"]
+                 if c.get("name") and c.get("required")}
+    aliases   = {str(k).upper(): str(v).upper()
+                 for k, v in (schema.get("aliases") or {}).items()}
+
+    _csv_card = _card()
+    _csv_card.__enter__()
+    _sec(3, f"CSV Upload — {_FRTB_LABELS[scope]}",
+         "One file = one adjustment. Column order and case don't matter; "
+         "business header names (e.g. EVALUATION_DATE, TRADE_ID) are accepted.")
+    if expected:
+        _render_field_chips(
+            expected, required,
+            note="* = always required · other fields become required by "
+                 "risk class / sensitivity type (validated below) · order "
+                 "and case don't matter")
+        st.download_button(
+            "Download CSV template", data=",".join(expected) + "\n",
+            file_name=f"frtb_{scope.lower()}_template.csv",
+            mime="text/csv", key=_k("frtbup_tmpl"))
+    else:
+        _info_banner(f'No upload schema configured for <b>{scope}</b> — '
+                     f'deploy 15_direct_frtb_upload.sql or contact an admin.')
+
+    _in_mode = st.radio(
+        "How do you want to provide the data?",
+        ["Paste content", "Upload file"],
+        horizontal=True, key=_k("frtbup_mode"), label_visibility="collapsed")
+
+    _DELIMS = {"Auto-detect": None, "Comma ( , )": ",", "Semicolon ( ; )": ";",
+               "Tab": "\t", "Pipe ( | )": "|"}
+    delim_choice = st.selectbox(
+        "Delimiter", list(_DELIMS.keys()), index=0, key=_k("frtbup_delim"))
+
+    def _read_csv(buf):
+        sep = _DELIMS[delim_choice]
+        # dtype=str so codes never get float-mangled ('12345' → '12345.0')
+        if sep is None:
+            return pd.read_csv(buf, sep=None, engine="python", dtype=str)
+        return pd.read_csv(buf, sep=sep, dtype=str)
+
+    df, _src_token, _parse_err = None, None, None
+    if _in_mode == "Upload file":
+        up_file = st.file_uploader(
+            "Upload CSV file", type=["csv", "txt"], key=_k("frtbup_file"),
+            help="First row must be the header.")
+        if up_file is not None:
+            try:
+                _raw = up_file.getvalue()
+                from io import StringIO
+                try:
+                    _text = _raw.decode("utf-8-sig")
+                except UnicodeDecodeError:
+                    _text = _raw.decode("latin-1")
+                df = _read_csv(StringIO(_text))
+                wiz["uploaded_file_name"] = up_file.name
+                _src_token = f"file:{up_file.name}:{len(_raw)}:{delim_choice}"
+            except Exception as exc:
+                _parse_err = exc
+    else:
+        csv_text = st.text_area(
+            "Paste CSV Data Here", value="", height=160, key=_k("frtbup_csv"),
+            help="Paste the full CSV content including the header row.")
+        if csv_text.strip():
+            try:
+                from io import StringIO
+                df = _read_csv(StringIO(csv_text.strip()))
+                wiz["uploaded_file_name"] = f"CSV_Pasted_{len(df)}_rows.csv"
+                _src_token = f"paste:{hash(csv_text)}:{delim_choice}"
+            except Exception as exc:
+                _parse_err = exc
+
+    if _parse_err is not None:
+        wiz["uploaded_df"] = None
+        wiz["_frtb_rule_errs"] = None
+        st.error(f"Failed to read the CSV: {_parse_err}. If the columns look "
+                 f"wrong, pick the delimiter explicitly above.")
+    elif df is not None:
+        # Canonical headers: uppercase + accepted business-name aliases —
+        # the payload keys MUST be canonical (the enriched views read them).
+        df.columns = [str(c).strip().upper() for c in df.columns]
+        _renamed = {c: aliases[c] for c in df.columns if c in aliases}
+        if _renamed:
+            df = df.rename(columns=_renamed)
+            st.caption("Renamed business headers: "
+                       + ", ".join(f"{a} → {b}" for a, b in _renamed.items()))
+        wiz["uploaded_df"] = df
+
+        missing_req = sorted(required - set(df.columns))
+        unknown     = [c for c in df.columns if c not in expected]
+        if missing_req:
+            st.error("Missing REQUIRED column(s): " + ", ".join(missing_req)
+                     + " — submission is blocked until the file includes them.")
+        if unknown:
+            st.warning("Column(s) not in the "
+                       f"{_FRTB_LABELS[scope]} layout (stored with the upload, "
+                       "not processed): " + ", ".join(unknown[:15]))
+
+        # COB consistency: every row's COBID must match ONE cob → the header's
+        if "COBID" in df.columns and len(df):
+            _cobs = sorted(pd.to_numeric(df["COBID"], errors="coerce")
+                           .dropna().astype(int).unique().tolist())
+            if len(_cobs) == 1:
+                wiz["cobid"] = int(_cobs[0])
+            elif len(_cobs) > 1:
+                st.error(f"The file mixes {len(_cobs)} different COBIDs "
+                         f"({_cobs[:5]}…) — one upload covers exactly one COB.")
+
+        # Reference-data validation (codes vs dimensions) — same engine as
+        # VaR Upload, config-driven via RESOLUTIONS.
+        if schema["expected"] or schema["resolutions"]:
+            _sig = (f'{scope}|{len(df)}|'
+                    f'{",".join(map(str, df.columns))}|{_src_token}')
+            if (wiz.get("_upval") or {}).get("sig") != _sig:
+                with st.spinner("Validating codes against reference data…"):
+                    wiz["_upval"] = {
+                        "sig": _sig,
+                        "result": _validate_direct_upload(df, schema)}
+            _render_upload_validation(wiz["_upval"]["result"], len(df))
+
+        # Conditional mandatory matrix (risk class / sensitivity type)
+        rule_errs = _frtb_rule_errors(df, schema.get("validation_rules"))
+        if missing_req:
+            wiz["_frtb_rule_errs"] = max(len(rule_errs), 1)
+        else:
+            wiz["_frtb_rule_errs"] = len(rule_errs)
+        if not rule_errs.empty:
+            st.error(f"{len(rule_errs)} conditional-rule error(s) — every row "
+                     f"must satisfy the mandatory matrix for its risk class:")
+            # One line per row with ALL of its errors (user-review feedback)
+            _per_row = (rule_errs
+                        .assign(E=rule_errs["COLUMN"] + ": " + rule_errs["ERROR"])
+                        .groupby("ROW")["E"]
+                        .apply(lambda s: " · ".join(s))
+                        .reset_index()
+                        .rename(columns={"E": "ERRORS"}))
+            render_df_table(_per_row, max_rows=50, height=220)
+        elif not missing_req:
+            st.success(f"All {len(df)} row(s) satisfy the "
+                       f"{_FRTB_LABELS[scope]} mandatory matrix.")
+
+        render_df_table(df, max_rows=20, height=200)
+    else:
+        wiz["_frtb_rule_errs"] = None
+
+    _csv_card.__exit__(None, None, None)
+
+    with _card():
+        _sec(4, "Upload Details", "COB is taken from the file when present.")
+        g1, g2 = st.columns(2)
+        with g1:
+            wiz["cobid"] = _int_input("COB Date (YYYYMMDD) *", "frtbup_cobid",
+                                      wiz.get("cobid"))
+        with g2:
+            rv = st.text_input("Reference *", key=_k("frtbup_ref"),
+                               value=wiz.get("global_reference") or "",
+                               placeholder="e.g. SBM EQ desk correction",
+                               help="Unique reference for this upload. "
+                                    "Re-submitting the same COB + Reference "
+                                    "replaces the previous adjustment.")
+            wiz["global_reference"] = rv.strip() or None
+
+    with _card():
+        _sec(5, "Business Context", "Why is this adjustment needed?")
+        wiz["adjustment_category"] = _code_select(
+            "Adjustment Category *", _k("frtbup_adj_category"),
+            wiz.get("adjustment_category"), _category_options()) or None
+        wiz["reason"] = st.text_area("Reason / Business Justification *",
+                                     value=wiz.get("reason", ""), height=70,
+                                     key=_k("frtbup_reason"))
+
+    # Duplicate-reference check — same replace semantics as VaR Upload
+    if wiz.get("cobid") and wiz.get("global_reference"):
+        try:
+            dup_rows = run_query(f"""
+                SELECT ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
+                WHERE COBID = {wiz['cobid']}
+                  AND UPPER(GLOBAL_REFERENCE) = UPPER('{wiz["global_reference"].replace("'","''")}')
+                  AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
+                  AND IS_DELETED = FALSE
+            """)
+        except Exception:
+            dup_rows = []
+        if dup_rows:
+            st.warning(f"An adjustment already exists for COB {wiz['cobid']} "
+                       f"with reference “{wiz['global_reference']}” — "
+                       f"submitting will replace it.")
+            wiz["_dup_adj_ids"] = [r[0] for r in dup_rows]
+        else:
+            wiz["_dup_adj_ids"] = []
+    else:
+        wiz["_dup_adj_ids"] = []
+
+
 def render_entity_roll_form() -> None:
     st.markdown(
         f'<div style="background:{P["danger_lt"]};border:1px solid #FECACA;border-radius:10px;'
@@ -2181,7 +2512,7 @@ def _ticket_html(missing: list) -> str:
         kv += _ticket_row("Roll",
                           f'{wiz.get("source_cobid")} → {wiz.get("cobid")}'
                           if roll_set else None, roll_set)
-    elif cat == "VaR Upload":
+    elif cat == "VaR Upload" or _is_frtb_file_direct():
         df_up = wiz.get("uploaded_df")
         kv += _ticket_row("Scope",     wiz.get("process_type"))
         kv += _ticket_row("COB",       wiz.get("cobid"))
@@ -2348,7 +2679,7 @@ def _signoff_scopes() -> list:
     return [pt] if pt else []
 
 
-_SIGNOFF_BLOCKED = ("SIGNED_OFF", "REOPEN_REQUESTED")
+_SIGNOFF_BLOCKED = ("SIGNED_OFF", "REOPEN_REQUESTED", "SIGNOFF_REQUESTED")
 
 
 def _signoff_feed_cfg():
@@ -2543,34 +2874,28 @@ def _request_reopen(scope, cobid, entity, reason):
 
 
 def _resign_off(scope, cobid, entity):
-    """REOPENED → SIGNED_OFF (source APP) for one entity ('*' = whole scope)."""
+    """Raise a SIGN-OFF REQUEST for a re-opened entity ('*' = whole scope).
+    Sign-off is approval-gated like re-open — SP_REQUEST_SIGNOFF_CHANGE sets
+    SIGNOFF_REQUESTED and an approver decides it on the Approval Queue page."""
+    import json as _json
     esc_scope = str(scope).replace("'", "''")
     esc_ent   = str(entity or "*").replace("'", "''")
     usr       = current_user_name().replace("'", "''")
-    rows = run_query(f"""
-        UPDATE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-        SET SIGN_OFF_STATUS    = 'SIGNED_OFF',
-            SIGN_OFF_BY        = '{usr}',
-            SIGN_OFF_TIMESTAMP = CURRENT_TIMESTAMP(),
-            SIGNOFF_SOURCE     = 'APP',
-            UPDATED_DATE       = CURRENT_TIMESTAMP()
-        WHERE COBID = {int(cobid)}
-          AND UPPER(PROCESS_TYPE) = '{esc_scope.upper()}'
-          AND UPPER(ENTITY_CODE) = UPPER('{esc_ent}')
-          AND UPPER(SIGN_OFF_STATUS) = 'REOPENED'
-    """)
+    res = run_query(
+        f"CALL ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE("
+        f"{int(cobid)}, '{esc_scope}', '{esc_ent}', 'SIGNOFF', "
+        f"'Sign-off after re-open cycle', TRUE, '{usr}')")
     try:
-        n = int(rows[0][0]) if rows else 0
-    except (TypeError, ValueError, IndexError):
-        n = 0
-    if n == 0:
-        return False, ("Nothing changed — this entity is no longer in a "
-                       "re-opened state (someone may have signed it off already).")
-    _signoff_history(scope, cobid, entity, "REOPENED", "SIGNED_OFF",
-                     "Signed off from the app after re-open cycle")
+        out = _json.loads(str(res[0][0])) if res else {}
+    except (ValueError, TypeError, IndexError):
+        out = {}
+    if out.get("status") != "ok":
+        return False, out.get("message",
+                              "The sign-off request was not accepted.")
     _ent_txt = "all entities" if (entity or "*") == "*" else entity
-    return True, (f"COB {cobid} / {scope} ({_ent_txt}) signed off — new "
-                  f"adjustments are blocked again.")
+    return True, (f"Sign-off requested for COB {cobid} / {scope} ({_ent_txt}) "
+                  f"— an approver must approve it on the Approval Queue page. "
+                  f"New submissions are blocked while it is pending.")
 
 
 def _render_signoff_panel() -> bool:
@@ -2637,6 +2962,11 @@ def _render_signoff_panel() -> bool:
                        f"{state.get('REOPEN_REQUESTED_BY') or '—'} — awaiting "
                        f"approval on the Approval Queue page. Submissions stay "
                        f"blocked until it is approved.")
+        elif status == "SIGNOFF_REQUESTED":
+            st.warning(f"**{label}: sign-off requested** by "
+                       f"{state.get('REOPEN_REQUESTED_BY') or '—'} — awaiting "
+                       f"approval on the Approval Queue page. Submissions are "
+                       f"blocked while the sign-off is pending.")
         elif status == "REOPENED":
             st.info(f"**{label} is re-opened** (approved by "
                     f"{state.get('REOPEN_APPROVED_BY') or '—'}). Submit the "
@@ -2792,7 +3122,8 @@ with right:
 
     # ── VaR Upload: replacement confirmation ──────────────────────────────
     dup_ok = True
-    if cat == "VaR Upload" and wiz.get("_dup_adj_ids"):
+    if ((cat == "VaR Upload" or _is_frtb_file_direct())
+            and wiz.get("_dup_adj_ids")):
         dup_ok = st.checkbox(
             f"Replace {len(wiz['_dup_adj_ids'])} existing adjustment(s) with this upload",
             key=_k("dup_confirm"), value=False)

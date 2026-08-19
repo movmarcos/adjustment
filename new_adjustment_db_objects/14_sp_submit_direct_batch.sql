@@ -57,7 +57,8 @@ STAGE_TO_HEADER = [
     "ENTITY_CODE", "SOURCE_SYSTEM_CODE", "DEPARTMENT_CODE", "BOOK_CODE",
     "TRADE_CODE", "TRADE_TYPOLOGY", "STRATEGY", "INSTRUMENT_CODE",
     "SIMULATION_NAME", "SIMULATION_SOURCE", "MEASURE_TYPE_CODE",
-    "CURRENCY_CODE", "TENOR_CODE", "CURVE_CODE", "PRODUCT_CATEGORY_ATTRIBUTES",
+    "CURRENCY_CODE", "TENOR_CODE", "UNDERLYING_TENOR_CODE", "CURVE_CODE",
+    "PRODUCT_CATEGORY_ATTRIBUTES",
 ]
 
 
@@ -79,7 +80,7 @@ def check_signoff(session, process_type, cobid, entity_code=None):
     lifecycle documentation. Called once per DISTINCT entity in the batch."""
     pt_esc = _esc(process_type).upper()
     ent = str(entity_code).strip() if entity_code and str(entity_code).strip() else None
-    BLOCKED = ("SIGNED_OFF", "REOPEN_REQUESTED")
+    BLOCKED = ("SIGNED_OFF", "REOPEN_REQUESTED", "SIGNOFF_REQUESTED")
 
     app_rows = session.sql(f"""
         SELECT UPPER(COALESCE(ENTITY_CODE, '*')) AS E, UPPER(SIGN_OFF_STATUS) AS S
