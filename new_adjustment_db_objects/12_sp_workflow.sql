@@ -185,6 +185,84 @@ ACTIONS = {
 }
 
 
+FRTB_FAMILY = ("FRTB", "FRTBDRC", "FRTBRRAO")
+
+
+def _propagate_signoff_to_feed(session, cobid, scope, entity):
+    """Push an APPLIED sign-off into the upstream feed table — the batch
+    process reads BATCH.PUBLISH_SIGNOFF_STATUS, so the ADJUSTMENT_APP state
+    must propagate there (same pattern as the rest of the schema). Non-CVA
+    rows only; entity '*' updates every entity of the scope at that COB.
+
+    FRTB granularity: the feed carries ONE 'FRTB' row covering FRTB, FRTBDRC
+    and FRTBRRAO (the sync fans it out the other way). Signing off a single
+    sub-scope therefore does NOT touch the feed — the 'FRTB' feed row flips
+    to SignedOff only once ALL THREE app scopes are SIGNED_OFF for that
+    COB+entity. Until then the app table alone blocks the signed-off
+    sub-scope (check_signoff reads it first).
+
+    Re-open is deliberately NOT propagated: the feed has no agreed
+    "re-opened" vocabulary, and the engine honours the app REOPENED row.
+    Skipped while SIGNOFF_FEED_ENABLED is false (feed migration)."""
+    def _cfg(key, default=""):
+        rows = session.sql(
+            f"SELECT CONFIG_VALUE FROM ADJUSTMENT_APP.ADJ_APP_CONFIG "
+            f"WHERE CONFIG_KEY = '{key}'").collect()
+        v = rows[0]["CONFIG_VALUE"] if rows else None
+        return str(v) if v is not None else default
+
+    if _cfg("SIGNOFF_FEED_ENABLED", "true").strip().lower() != "true":
+        return
+    feed = _cfg("SIGNOFF_FEED_TABLE", "BATCH.PUBLISH_SIGNOFF_STATUS").strip()
+
+    if str(scope).upper() in FRTB_FAMILY:
+        # Runs inside the caller's transaction, so this count SEES the
+        # sign-off just applied. All three scopes signed off → feed 'FRTB';
+        # otherwise leave the feed untouched.
+        fam = session.sql(f"""
+            SELECT COUNT(DISTINCT UPPER(PROCESS_TYPE)) AS C
+            FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+            WHERE COBID = {int(cobid)}
+              AND UPPER(PROCESS_TYPE) IN ('FRTB', 'FRTBDRC', 'FRTBRRAO')
+              AND UPPER(ENTITY_CODE) = UPPER('{entity}')
+              AND UPPER(SIGN_OFF_STATUS) = 'SIGNED_OFF'
+        """).collect()
+        if int(fam[0]["C"] if fam else 0) < 3:
+            return
+        scope = "FRTB"
+
+    if str(entity) == "*":
+        session.sql(f"""
+            UPDATE {feed}
+            SET PUBLISH_STATUS = 'SignedOff',
+                SIGNOFF_UPDATE_TIME = CURRENT_TIMESTAMP()
+            WHERE COBID = {int(cobid)}
+              AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
+              AND (SUB_TYPE IS NULL OR TRIM(SUB_TYPE) = ''
+                   OR UPPER(SUB_TYPE) = 'NONCVA')
+              AND UPPER(PUBLISH_STATUS) <> 'SIGNEDOFF'
+        """).collect()
+    else:
+        session.sql(f"""
+            MERGE INTO {feed} t
+            USING (SELECT {int(cobid)} AS COBID, '{scope}' AS PROCESS_TYPE,
+                          '{entity}' AS ENTITY_CODE) s
+            ON t.COBID = s.COBID
+               AND UPPER(t.PROCESS_TYPE) = UPPER(s.PROCESS_TYPE)
+               AND UPPER(t.ENTITY_CODE) = UPPER(s.ENTITY_CODE)
+               AND (t.SUB_TYPE IS NULL OR TRIM(t.SUB_TYPE) = ''
+                    OR UPPER(t.SUB_TYPE) = 'NONCVA')
+            WHEN MATCHED THEN UPDATE SET
+                t.PUBLISH_STATUS = 'SignedOff',
+                t.SIGNOFF_UPDATE_TIME = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (COBID, ENTITY_CODE, PROCESS_TYPE, SUB_TYPE,
+                 PUBLISH_STATUS, SIGNOFF_UPDATE_TIME)
+            VALUES (s.COBID, s.ENTITY_CODE, s.PROCESS_TYPE, NULL,
+                    'SignedOff', CURRENT_TIMESTAMP())
+        """).collect()
+
+
 def _esc(v):
     return str(v).replace("\\", "\\\\").replace("'", "''") if v is not None else ""
 
@@ -284,33 +362,50 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_action, p_reason,
                       f"REOPEN_APPROVED_BY = '{_esc(caller)}', "
                       f"REOPEN_APPROVED_AT = CURRENT_TIMESTAMP()")
 
-    upd = session.sql(f"""
-        UPDATE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-        SET {set_clause}, UPDATED_DATE = CURRENT_TIMESTAMP()
-        WHERE COBID = {cobid}
-          AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
-          AND UPPER(ENTITY_CODE) = UPPER('{entity}')
-          AND UPPER(SIGN_OFF_STATUS) IN ({from_in})
-    """).collect()
+    # App status + feed propagation + history commit or roll back TOGETHER —
+    # the batch process must never see a different sign-off state than the app.
+    session.sql("BEGIN").collect()
     try:
-        n = int(upd[0][0]) if upd else 0
-    except (TypeError, ValueError, IndexError):
-        n = 0
-    if n == 0:
-        return json.dumps({"status": "wrong_state",
-                           "message": "The status changed a moment ago — "
-                                      "refresh and try again."})
+        upd = session.sql(f"""
+            UPDATE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+            SET {set_clause}, UPDATED_DATE = CURRENT_TIMESTAMP()
+            WHERE COBID = {cobid}
+              AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
+              AND UPPER(ENTITY_CODE) = UPPER('{entity}')
+              AND UPPER(SIGN_OFF_STATUS) IN ({from_in})
+        """).collect()
+        try:
+            n = int(upd[0][0]) if upd else 0
+        except (TypeError, ValueError, IndexError):
+            n = 0
+        if n == 0:
+            session.sql("ROLLBACK").collect()
+            return json.dumps({"status": "wrong_state",
+                               "message": "The status changed a moment ago — "
+                                          "refresh and try again."})
 
-    verb = "Sign-off" if action == "SIGNOFF" else "Re-open"
-    comment = (f"{verb} requested by {_esc(caller)}"
-               + (f": {reason[:900]}" if reason else "")) if requires_approval \
-              else f"{verb} applied directly by {_esc(caller)} (approval not required)"
-    session.sql(f"""
-        INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
-            (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
-        VALUES ({cobid}, '{scope}', '{entity}', '{cur}', '{new_status}',
-                '{_esc(caller)}', '{comment[:1980]}')
-    """).collect()
+        if new_status == "SIGNED_OFF":
+            _propagate_signoff_to_feed(session, cobid, scope, entity)
+
+        verb = "Sign-off" if action == "SIGNOFF" else "Re-open"
+        comment = (f"{verb} requested by {_esc(caller)}"
+                   + (f": {reason[:900]}" if reason else "")) if requires_approval \
+                  else f"{verb} applied directly by {_esc(caller)} (approval not required)"
+        session.sql(f"""
+            INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
+                (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
+            VALUES ({cobid}, '{scope}', '{entity}', '{cur}', '{new_status}',
+                    '{_esc(caller)}', '{comment[:1980]}')
+        """).collect()
+        session.sql("COMMIT").collect()
+    except Exception as e:
+        try:
+            session.sql("ROLLBACK").collect()
+        except Exception:
+            pass
+        return json.dumps({"status": "error",
+                           "message": f"Sign-off could not be applied (nothing "
+                                      f"was changed): {str(e)[:300]}"})
 
     return json.dumps({"status": "ok", "action": action,
                        "new_status": new_status, "by": caller,
@@ -348,6 +443,84 @@ PENDING = {
     "REOPEN_REQUESTED":  ("REOPENED",   "SIGNED_OFF", "re-open"),
     "SIGNOFF_REQUESTED": ("SIGNED_OFF", "OPEN",       "sign-off"),
 }
+
+
+FRTB_FAMILY = ("FRTB", "FRTBDRC", "FRTBRRAO")
+
+
+def _propagate_signoff_to_feed(session, cobid, scope, entity):
+    """Push an APPLIED sign-off into the upstream feed table — the batch
+    process reads BATCH.PUBLISH_SIGNOFF_STATUS, so the ADJUSTMENT_APP state
+    must propagate there (same pattern as the rest of the schema). Non-CVA
+    rows only; entity '*' updates every entity of the scope at that COB.
+
+    FRTB granularity: the feed carries ONE 'FRTB' row covering FRTB, FRTBDRC
+    and FRTBRRAO (the sync fans it out the other way). Signing off a single
+    sub-scope therefore does NOT touch the feed — the 'FRTB' feed row flips
+    to SignedOff only once ALL THREE app scopes are SIGNED_OFF for that
+    COB+entity. Until then the app table alone blocks the signed-off
+    sub-scope (check_signoff reads it first).
+
+    Re-open is deliberately NOT propagated: the feed has no agreed
+    "re-opened" vocabulary, and the engine honours the app REOPENED row.
+    Skipped while SIGNOFF_FEED_ENABLED is false (feed migration)."""
+    def _cfg(key, default=""):
+        rows = session.sql(
+            f"SELECT CONFIG_VALUE FROM ADJUSTMENT_APP.ADJ_APP_CONFIG "
+            f"WHERE CONFIG_KEY = '{key}'").collect()
+        v = rows[0]["CONFIG_VALUE"] if rows else None
+        return str(v) if v is not None else default
+
+    if _cfg("SIGNOFF_FEED_ENABLED", "true").strip().lower() != "true":
+        return
+    feed = _cfg("SIGNOFF_FEED_TABLE", "BATCH.PUBLISH_SIGNOFF_STATUS").strip()
+
+    if str(scope).upper() in FRTB_FAMILY:
+        # Runs inside the caller's transaction, so this count SEES the
+        # sign-off just applied. All three scopes signed off → feed 'FRTB';
+        # otherwise leave the feed untouched.
+        fam = session.sql(f"""
+            SELECT COUNT(DISTINCT UPPER(PROCESS_TYPE)) AS C
+            FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+            WHERE COBID = {int(cobid)}
+              AND UPPER(PROCESS_TYPE) IN ('FRTB', 'FRTBDRC', 'FRTBRRAO')
+              AND UPPER(ENTITY_CODE) = UPPER('{entity}')
+              AND UPPER(SIGN_OFF_STATUS) = 'SIGNED_OFF'
+        """).collect()
+        if int(fam[0]["C"] if fam else 0) < 3:
+            return
+        scope = "FRTB"
+
+    if str(entity) == "*":
+        session.sql(f"""
+            UPDATE {feed}
+            SET PUBLISH_STATUS = 'SignedOff',
+                SIGNOFF_UPDATE_TIME = CURRENT_TIMESTAMP()
+            WHERE COBID = {int(cobid)}
+              AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
+              AND (SUB_TYPE IS NULL OR TRIM(SUB_TYPE) = ''
+                   OR UPPER(SUB_TYPE) = 'NONCVA')
+              AND UPPER(PUBLISH_STATUS) <> 'SIGNEDOFF'
+        """).collect()
+    else:
+        session.sql(f"""
+            MERGE INTO {feed} t
+            USING (SELECT {int(cobid)} AS COBID, '{scope}' AS PROCESS_TYPE,
+                          '{entity}' AS ENTITY_CODE) s
+            ON t.COBID = s.COBID
+               AND UPPER(t.PROCESS_TYPE) = UPPER(s.PROCESS_TYPE)
+               AND UPPER(t.ENTITY_CODE) = UPPER(s.ENTITY_CODE)
+               AND (t.SUB_TYPE IS NULL OR TRIM(t.SUB_TYPE) = ''
+                    OR UPPER(t.SUB_TYPE) = 'NONCVA')
+            WHEN MATCHED THEN UPDATE SET
+                t.PUBLISH_STATUS = 'SignedOff',
+                t.SIGNOFF_UPDATE_TIME = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (COBID, ENTITY_CODE, PROCESS_TYPE, SUB_TYPE,
+                 PUBLISH_STATUS, SIGNOFF_UPDATE_TIME)
+            VALUES (s.COBID, s.ENTITY_CODE, s.PROCESS_TYPE, NULL,
+                    'SignedOff', CURRENT_TIMESTAMP())
+        """).collect()
 
 
 def _esc(v):
@@ -427,31 +600,49 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_decision, p_comment,
         new_status = rejected_status
         set_clause = f"SIGN_OFF_STATUS = '{new_status}'"
 
-    upd = session.sql(f"""
-        UPDATE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-        SET {set_clause}, UPDATED_DATE = CURRENT_TIMESTAMP()
-        WHERE COBID = {cobid}
-          AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
-          AND UPPER(ENTITY_CODE) = UPPER('{entity}')
-          AND UPPER(SIGN_OFF_STATUS) = '{cur}'
-    """).collect()
+    # App status + feed propagation + history commit or roll back TOGETHER.
+    session.sql("BEGIN").collect()
     try:
-        n = int(upd[0][0]) if upd else 0
-    except (TypeError, ValueError, IndexError):
-        n = 0
-    if n == 0:
-        return json.dumps({"status": "not_pending",
-                           "message": "The request was decided by someone else "
-                                      "a moment ago."})
+        upd = session.sql(f"""
+            UPDATE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+            SET {set_clause}, UPDATED_DATE = CURRENT_TIMESTAMP()
+            WHERE COBID = {cobid}
+              AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
+              AND UPPER(ENTITY_CODE) = UPPER('{entity}')
+              AND UPPER(SIGN_OFF_STATUS) = '{cur}'
+        """).collect()
+        try:
+            n = int(upd[0][0]) if upd else 0
+        except (TypeError, ValueError, IndexError):
+            n = 0
+        if n == 0:
+            session.sql("ROLLBACK").collect()
+            return json.dumps({"status": "not_pending",
+                               "message": "The request was decided by someone else "
+                                          "a moment ago."})
 
-    comment = _esc(str(p_comment)[:990]) if p_comment \
-              else f"{label.capitalize()} {decision.lower()} by {_esc(caller)}"
-    session.sql(f"""
-        INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
-            (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
-        VALUES ({cobid}, '{scope}', '{entity}', '{cur}', '{new_status}',
-                '{_esc(caller)}', '{comment[:1980]}')
-    """).collect()
+        # Approved sign-off (and a rejected re-open, which lands back on
+        # SIGNED_OFF) must reach the feed the batch process reads.
+        if new_status == "SIGNED_OFF":
+            _propagate_signoff_to_feed(session, cobid, scope, entity)
+
+        comment = _esc(str(p_comment)[:990]) if p_comment \
+                  else f"{label.capitalize()} {decision.lower()} by {_esc(caller)}"
+        session.sql(f"""
+            INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
+                (COBID, PROCESS_TYPE, ENTITY_CODE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
+            VALUES ({cobid}, '{scope}', '{entity}', '{cur}', '{new_status}',
+                    '{_esc(caller)}', '{comment[:1980]}')
+        """).collect()
+        session.sql("COMMIT").collect()
+    except Exception as e:
+        try:
+            session.sql("ROLLBACK").collect()
+        except Exception:
+            pass
+        return json.dumps({"status": "error",
+                           "message": f"The decision could not be applied "
+                                      f"(nothing was changed): {str(e)[:300]}"})
 
     return json.dumps({"status": "ok", "decision": decision, "by": caller,
                        "request_type": label, "new_status": new_status})
