@@ -819,11 +819,6 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS (
 )
 COMMENT = 'Sign-off lifecycle per COB + scope + entity (ENTITY_CODE = ''*'' means the whole scope). SIGNED_OFF / SIGNOFF_REQUESTED / REOPEN_REQUESTED block new adjustments for that entity; REOPENED allows them again until the approved re-sign-off. First sign-off synced from the upstream publish feed.';
 
--- Belt-and-braces for pre-existing tables (same pattern as ADJ_ADMINS above).
-ALTER TABLE ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-    ADD COLUMN IF NOT EXISTS PREV_STATUS VARCHAR(30)
-    COMMENT 'Status when the pending request was raised; rejection reverts to it.';
-
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 7a. ADJ_SIGNOFF_HISTORY — append-only audit of sign-off transitions
@@ -902,15 +897,6 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_ADMINS (
 )
 COMMENT = 'Users (ADMIN_TYPE=USER) and Snowflake roles (ADMIN_TYPE=ROLE, direct grantees resolved via SHOW GRANTS OF ROLE) authorized to use the Admin page. Empty table = bootstrap mode. Only the BI_DEVELOPER role row is seeded; survives redeploys.';
 
--- Belt-and-braces for tables created before ADMIN_TYPE existed (same pattern
--- as ADJ_HEADER.START_DATE below).
-ALTER TABLE ADJUSTMENT_APP.ADJ_ADMINS
-    ADD COLUMN IF NOT EXISTS ADMIN_TYPE VARCHAR(10)
-    COMMENT 'USER (Snowflake username) or ROLE (direct grantees of the Snowflake role are admins)';
-
--- Pre-ADMIN_TYPE deployments and any NULL inserts: rows are users.
-UPDATE ADJUSTMENT_APP.ADJ_ADMINS SET ADMIN_TYPE = 'USER' WHERE ADMIN_TYPE IS NULL;
-
 -- Standing admin role (Marcos, 2026-08): BI_DEVELOPER members are admins.
 MERGE INTO ADJUSTMENT_APP.ADJ_ADMINS t
 USING (SELECT 'BI_DEVELOPER' AS USERNAME, 'ROLE' AS ADMIN_TYPE) s
@@ -960,17 +946,6 @@ ON t.CONFIG_KEY = s.CONFIG_KEY
 WHEN NOT MATCHED THEN INSERT (CONFIG_KEY, CONFIG_VALUE, DESCRIPTION)
 VALUES (s.CONFIG_KEY, s.CONFIG_VALUE, s.DESCRIPTION);
 
--- One-time correction: SIGNOFF_FEED_TABLE was first seeded with a misspelled
--- default (PUBLISH_SIGNOF_STATUS, single F). The seed MERGE never overwrites
--- existing values, so fix ONLY that known-bad value here — an admin-set
--- custom table name is preserved.
-UPDATE ADJUSTMENT_APP.ADJ_APP_CONFIG
-SET CONFIG_VALUE = 'BATCH.PUBLISH_SIGNOFF_STATUS',
-    UPDATED_BY   = 'DEPLOY',
-    UPDATED_AT   = CURRENT_TIMESTAMP()
-WHERE CONFIG_KEY = 'SIGNOFF_FEED_TABLE'
-  AND CONFIG_VALUE = 'BATCH.PUBLISH_SIGNOF_STATUS';
-
 
 -- Who receives what. Recipients must be Snowflake users of this account with
 -- a VERIFIED profile email — Snowflake refuses delivery otherwise.
@@ -1003,24 +978,6 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_NOTIFICATION_LOG (
     CONSTRAINT PK_ADJ_NOTIFICATION_LOG PRIMARY KEY (NOTIFICATION_ID)
 )
 COMMENT = 'Append-only log of every notification attempt from SP_NOTIFY.';
-
-
--- ═══════════════════════════════════════════════════════════════════════════
--- MIGRATION — add START_DATE to existing ADJ_HEADER
--- ═══════════════════════════════════════════════════════════════════════════
-ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER
-    ADD COLUMN IF NOT EXISTS START_DATE TIMESTAMP_NTZ(9)
-    COMMENT 'Set when the adjustment transitions to Running. Distinct from PROCESS_DATE (end).';
-
--- NOTE: the one-time VaR component-id backfill (names → legacy ids for rows
--- created before 03_sp_submit_adjustment resolved ids at submit) lives in
--- migrations/2026-08-19_var_component_id_backfill.sql — run it ONCE at deploy.
-
--- Drop the legacy ADJUSTMENT_BASE_TABLE config column: every scope now reads
--- adjustments from ADJUSTMENT_APP.ADJ_HEADER (hardcoded in SP_PROCESS_ADJUSTMENT),
--- so the per-scope base-table pointer is dead config.
-ALTER TABLE ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
-    DROP COLUMN IF EXISTS ADJUSTMENT_BASE_TABLE;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- EROL_PROCESS_LOG — REAL-TIME per-statement diagnostics for engine runs

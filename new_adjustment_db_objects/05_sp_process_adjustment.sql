@@ -17,10 +17,6 @@
 
 USE SCHEMA ADJUSTMENT_APP;
 
--- The claim-token argument changed the signature; drop the old 3-arg overload
--- so stale callers fail loudly instead of running the pre-token code.
-DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT(STRING, STRING, INT);
-
 CREATE OR ALTER PROCEDURE ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT(
     process_type STRING,
     adjustment_action STRING,

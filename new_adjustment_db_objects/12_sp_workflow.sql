@@ -30,10 +30,6 @@ USE SCHEMA ADJUSTMENT_APP;
 -- SP_DECIDE_ADJUSTMENT — approve or reject a Pending Approval adjustment
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- The caller name moved into the signature; drop the old 3-arg overload so
--- stale callers fail loudly instead of silently using a different identity.
-DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT(VARCHAR, VARCHAR, VARCHAR);
-
 CREATE OR ALTER PROCEDURE ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT(
     p_adj_id   VARCHAR,
     p_decision VARCHAR,   -- 'Approved' | 'Rejected'
@@ -326,12 +322,6 @@ $$;
 -- request. Replaces SP_DECIDE_REOPEN (dropped below): one decision path for
 -- both request types. Rejection returns the row to its pre-request status.
 -- ─────────────────────────────────────────────────────────────────────────────
-
--- Old proc superseded (generalised to both request types); drop all overloads
--- so stale callers fail loudly.
-DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_DECIDE_REOPEN(INT, VARCHAR, VARCHAR, VARCHAR);
-DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_DECIDE_REOPEN(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR);
-DROP PROCEDURE IF EXISTS ADJUSTMENT_APP.SP_DECIDE_REOPEN(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR);
 
 CREATE OR ALTER PROCEDURE ADJUSTMENT_APP.SP_DECIDE_SIGNOFF_CHANGE(
     p_cobid        INT,
