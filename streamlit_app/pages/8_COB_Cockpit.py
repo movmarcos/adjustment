@@ -175,15 +175,15 @@ st.markdown("<br/>", unsafe_allow_html=True)
 
 # ── Sign-off actions (same rules as the New Adjustment page) ─────────────────
 
-def _signoff_request(scope, entity, action, reason):
+def _signoff_request(scope, entity, action, reason, requires_approval):
     """One path for both lifecycle changes: SP_REQUEST_SIGNOFF_CHANGE enforces
-    the guarded transition + history; the request goes to the Approval Queue.
-    The Cockpit used to UPDATE the table directly for re-sign-off, silently
-    bypassing the 4-eyes gate the other pages enforce."""
+    the guarded transition + history. Sign-off applies DIRECTLY by default
+    (approval optional — Marcos); re-open always goes through approval."""
+    _appr = "TRUE" if requires_approval else "FALSE"
     res = run_query(
         f"CALL ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE("
         f"{int(cobid)}, '{_esc(scope)}', '{_esc(entity or '*')}', "
-        f"'{action}', '{_esc(str(reason or '')[:490])}', TRUE, "
+        f"'{action}', '{_esc(str(reason or '')[:490])}', {_appr}, "
         f"'{_esc(current_user_name())}')")
     try:
         out = json.loads(str(res[0][0])) if res else {}
@@ -203,18 +203,22 @@ def _signoff_request(scope, entity, action, reason):
         except Exception:
             pass
     _etx = "all entities" if (entity or "*") == "*" else entity
-    return True, (f"{verb} request for COB {cobid} / {scope} ({_etx}) "
-                  f"submitted — an approver decides it on the Approval Queue "
-                  f"page. Submissions stay blocked while it is pending.")
+    if out.get("pending_approval"):
+        return True, (f"{verb} request for COB {cobid} / {scope} ({_etx}) "
+                      f"submitted — an approver decides it on the Approval "
+                      f"Queue page. Submissions stay blocked while it is "
+                      f"pending.")
+    return True, (f"COB {cobid} / {scope} ({_etx}) signed off — new "
+                  f"adjustment submissions are blocked again.")
 
 
 def _request_reopen(scope, entity, reason):
-    return _signoff_request(scope, entity, "REOPEN", reason)
+    return _signoff_request(scope, entity, "REOPEN", reason, True)
 
 
 def _resign_off(scope, entity):
     return _signoff_request(scope, entity, "SIGNOFF",
-                            "Sign-off after re-open cycle (Cockpit)")
+                            "Sign-off after re-open cycle (Cockpit)", False)
 
 
 # ── Per-scope run sheet ──────────────────────────────────────────────────────

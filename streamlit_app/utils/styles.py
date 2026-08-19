@@ -564,6 +564,20 @@ def inject_css():
     }}
     [data-baseweb="select"] > div {{ border-radius: var(--r-sm) !important; }}
 
+    /* Multiselect value tags (every page's filters): the theme's brand red
+       leaked in as the tag background while the text stayed black —
+       unreadable. Brand red pill with WHITE text + white ✕, like the
+       primary buttons. */
+    .stMultiSelect [data-baseweb="tag"] {{
+        background-color: var(--brand) !important;
+        border-radius: 99px !important;
+    }}
+    .stMultiSelect [data-baseweb="tag"] span,
+    .stMultiSelect [data-baseweb="tag"] [role="presentation"] {{
+        color: #ffffff !important;
+    }}
+    .stMultiSelect [data-baseweb="tag"] svg {{ fill: #ffffff !important; }}
+
     /* Thin scrollbars */
     ::-webkit-scrollbar {{ height: 8px; width: 8px; }}
     ::-webkit-scrollbar-thumb {{ background: var(--ink-3); border-radius: 4px; }}

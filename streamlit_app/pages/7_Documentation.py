@@ -347,12 +347,13 @@ with tab_approval:
          "Re-open approved — adjust, then request sign-off again.", "Yes"],
     ]))
     _html(_card(
-        "<strong>Both lifecycle changes are approval-gated requests</strong> "
-        "(the checkboxes on the Sign-Off page are ticked and locked by "
-        "policy): <em>request sign-off</em> on an OPEN/REOPENED entry, or "
-        "<em>request re-open</em> on a SIGNED_OFF one — from the Sign-Off "
-        "page (re-open also from the New Adjustment panel). An approver who "
-        "is not the requester actions it in the Approval Queue's <em>COB "
+        "<strong>Sign-off applies immediately</strong> on an OPEN/REOPENED "
+        "entry (approval is <em>optional</em> — tick the checkbox on the "
+        "Sign-Off page to route it via an approver first). "
+        "<strong>Re-open always goes through approval</strong> (its checkbox "
+        "is ticked and locked by policy): request it on a SIGNED_OFF entry "
+        "from the Sign-Off page or the New Adjustment panel, and an approver "
+        "who is not the requester actions it in the Approval Queue's <em>COB "
         "Sign-Off / Re-open Requests</em> section. Rejection returns the "
         "entry to its previous status. Every transition is recorded in the "
         "sign-off history."))

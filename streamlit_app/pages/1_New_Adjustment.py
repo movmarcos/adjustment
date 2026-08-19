@@ -2891,9 +2891,10 @@ def _request_reopen(scope, cobid, entity, reason):
 
 
 def _resign_off(scope, cobid, entity):
-    """Raise a SIGN-OFF REQUEST for a re-opened entity ('*' = whole scope).
-    Sign-off is approval-gated like re-open — SP_REQUEST_SIGNOFF_CHANGE sets
-    SIGNOFF_REQUESTED and an approver decides it on the Approval Queue page."""
+    """Sign a re-opened entity off again ('*' = whole scope). Applies
+    DIRECTLY (sign-off approval is optional and defaults to off — Marcos);
+    SP_REQUEST_SIGNOFF_CHANGE still enforces the guarded transition +
+    history. Re-open, by contrast, always goes through approval."""
     import json as _json
     esc_scope = str(scope).replace("\\", "\\\\").replace("'", "''")
     esc_ent   = str(entity or "*").replace("\\", "\\\\").replace("'", "''")
@@ -2901,18 +2902,17 @@ def _resign_off(scope, cobid, entity):
     res = run_query(
         f"CALL ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE("
         f"{int(cobid)}, '{esc_scope}', '{esc_ent}', 'SIGNOFF', "
-        f"'Sign-off after re-open cycle', TRUE, '{usr}')")
+        f"'Sign-off after re-open cycle', FALSE, '{usr}')")
     try:
         out = _json.loads(str(res[0][0])) if res else {}
     except (ValueError, TypeError, IndexError):
         out = {}
     if out.get("status") != "ok":
         return False, out.get("message",
-                              "The sign-off request was not accepted.")
+                              "The sign-off was not applied.")
     _ent_txt = "all entities" if (entity or "*") == "*" else entity
-    return True, (f"Sign-off requested for COB {cobid} / {scope} ({_ent_txt}) "
-                  f"— an approver must approve it on the Approval Queue page. "
-                  f"New submissions are blocked while it is pending.")
+    return True, (f"COB {cobid} / {scope} ({_ent_txt}) signed off — new "
+                  f"adjustment submissions are blocked again.")
 
 
 def _render_signoff_panel() -> bool:

@@ -151,10 +151,11 @@ $$;
 --
 -- There is no standalone "open the COB" concept: open rows come from the
 -- upstream publish feed (materialised by SP_SYNC_SIGNOFF_STATUS). This proc
--- raises the two lifecycle changes the app can make — SIGNOFF (open →
--- signed off) and REOPEN (signed off → open) — BOTH as approval requests by
--- default (p_requires_approval; the UI keeps the checkbox ticked and
--- disabled — the direct-apply branch exists only for a future policy change).
+-- applies the two lifecycle changes the app can make — SIGNOFF (open →
+-- signed off) and REOPEN (signed off → open). Approval routing per
+-- p_requires_approval (Marcos's policy): SIGNOFF is OPTIONAL-approval —
+-- the UI checkbox is unchecked by default so it applies directly; REOPEN
+-- is ALWAYS approval-gated (the UI checkbox is ticked and locked).
 -- ─────────────────────────────────────────────────────────────────────────────
 
 CREATE OR ALTER PROCEDURE ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE(
