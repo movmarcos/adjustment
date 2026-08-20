@@ -71,21 +71,42 @@ if not _admin_rows:
         "currently open to every user. Add the first administrator in the "
         "*Approvers* tab to lock it down.")
 else:
-    _me = str(user).strip().upper()
+    def _identity_keys(name: str) -> set:
+        """Comparable forms of an identity. The app-resolved viewer name is
+        often the EMAIL (st.user, when READ SESSION is absent) while SHOW
+        GRANTS OF ROLE returns Snowflake USERNAMES — frequently the same
+        person as 'MARCOS.MAGRI@BANK.COM' vs 'MARCOS.MAGRI'. Compare on the
+        full string AND the local part (before '@'), both upper-cased."""
+        n = str(name or "").strip().upper()
+        if not n:
+            return set()
+        keys = {n}
+        if "@" in n:
+            keys.add(n.split("@", 1)[0])
+        return keys
+
+    _me_keys = _identity_keys(user)
     _admin_users = {str(r["USERNAME"]).strip().upper() for r in _admin_rows
                     if str(r["ADMIN_TYPE"]).upper() == "USER"}
     _admin_roles = [str(r["USERNAME"]).strip().upper() for r in _admin_rows
                     if str(r["ADMIN_TYPE"]).upper() == "ROLE"]
-    _is_admin = _me in _admin_users
+    _is_admin = any(_identity_keys(u) & _me_keys for u in _admin_users)
     _roles_unresolved = []
+    _role_report = {}
     if not _is_admin:
         for _role in _admin_roles:
             _members = _role_members(_role)
             if _members is None:
                 _roles_unresolved.append(_role)
-            elif _me in _members:
-                _is_admin = True
-                break
+                _role_report[_role] = None
+            else:
+                _role_report[_role] = len(_members)
+                _member_keys = set()
+                for m in _members:
+                    _member_keys |= _identity_keys(m)
+                if _me_keys & _member_keys:
+                    _is_admin = True
+                    break
     if not _is_admin and _roles_unresolved and not _admin_users:
         # Admin roles exist but none could be resolved AND no user entries to
         # fall back on — locking everyone out here would be unrecoverable
@@ -106,6 +127,29 @@ else:
             f"Access is granted to listed administrators"
             + (f" and members of: {', '.join(_admin_roles)}" if _admin_roles else "")
             + ". Ask an existing administrator to add you in the Approvers tab.")
+        # Diagnostics so a wrong denial is debuggable on the spot instead of
+        # a guessing game (identity-format mismatch, unresolvable role, or a
+        # nested grant SHOW GRANTS OF ROLE cannot see).
+        with st.expander("Why am I not authorized? (diagnostics)"):
+            st.markdown(
+                f"- Your resolved identity: **{user}** "
+                f"(compared as: {', '.join(sorted(_me_keys)) or '—'})")
+            for _role in _admin_roles:
+                _n = _role_report.get(_role, "not checked")
+                if _n is None:
+                    st.markdown(
+                        f"- Role **{_role}**: membership could **not** be "
+                        f"verified — the app cannot run `SHOW GRANTS OF ROLE "
+                        f"{_role}`. Fix: grant the app owner role the "
+                        f"{_role} role (or MANAGE GRANTS), or add yourself "
+                        f"as a USER administrator.")
+                else:
+                    st.markdown(
+                        f"- Role **{_role}**: {_n} directly-granted user(s) "
+                        f"resolved — your identity did not match any of "
+                        f"them. Note: only DIRECT grants count; membership "
+                        f"through another role is not visible to "
+                        f"`SHOW GRANTS OF ROLE`.")
         st.stop()
 
 st.markdown("## Admin — Configuration")

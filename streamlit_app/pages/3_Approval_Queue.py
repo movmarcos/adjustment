@@ -93,13 +93,27 @@ try:
 except Exception:
     qs = {}
 
-c1, c2, c3 = st.columns(3)
+# Pending COB sign-off / re-open requests are decided on THIS page too, so
+# the header boxes must count them alongside the adjustments.
+try:
+    _so_stats = run_query("""
+        SELECT COUNT(*) AS N
+        FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+        WHERE UPPER(SIGN_OFF_STATUS) IN ('SIGNOFF_REQUESTED', 'REOPEN_REQUESTED')
+    """)
+    n_so_pending = int(_so_stats[0]["N"]) if _so_stats else 0
+except Exception:
+    n_so_pending = 0
+
+c1, c2, c3, c4 = st.columns(4)
 stat_items = [
-    ("Awaiting Approval", qs.get("TOTAL_PENDING", 0), P["info"],    "clipboard"),
-    ("Scopes",            qs.get("SCOPES", 0),         P["primary"], "bar-chart"),
-    ("Submitters",        qs.get("SUBMITTERS", 0),      P["grey_700"],"user"),
+    ("Adjustments awaiting", qs.get("TOTAL_PENDING", 0), P["info"],   "clipboard"),
+    ("Sign-off requests",    n_so_pending, "#B45309" if n_so_pending
+                                           else P["grey_700"], "unlock"),
+    ("Scopes",               qs.get("SCOPES", 0),        P["primary"], "bar-chart"),
+    ("Submitters",           qs.get("SUBMITTERS", 0),    P["grey_700"], "user"),
 ]
-for col, (label, val, color, icon_name) in zip([c1, c2, c3], stat_items):
+for col, (label, val, color, icon_name) in zip([c1, c2, c3, c4], stat_items):
     col.markdown(
         f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
         f'border-top:3px solid {color};border-radius:8px;padding:0.8rem;text-align:center">'
