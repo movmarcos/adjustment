@@ -197,19 +197,21 @@ ACTIONS = {
 FEED_NATIVE_SCOPES = ("VAR", "STRESS", "SENSITIVITY", "FRTB")
 
 
-def _propagate_signoff_to_feed(session, cobid, scope, entity, sub):
-    """Push an APPLIED sign-off into the upstream feed table — the batch
-    process reads BATCH.PUBLISH_SIGNOFF_STATUS, so the ADJUSTMENT_APP state
-    must propagate there (same pattern as the rest of the schema). Rows are
-    matched on the SAME SUB_TYPE ('' = none); entity '*' updates every
-    entity of the scope at that COB.
+def _propagate_to_feed(session, cobid, scope, entity, sub, publish_status):
+    """Push an APPLIED lifecycle change into the upstream feed table — the
+    batch process reads BATCH.PUBLISH_SIGNOFF_STATUS, so the ADJUSTMENT_APP
+    state must propagate there (same pattern as the rest of the schema).
+    Rows are matched on the SAME SUB_TYPE ('' = none); entity '*' updates
+    every entity of the scope at that COB.
 
-    EXACT process-type match (Marcos, 2026-08): the feed's 'FRTB' row is SBM
-    only. FRTBDRC/FRTBRRAO are updated when the publish table carries those
-    process types, and never inserted by the app.
+    publish_status 'SignedOff' (sign-off applied): update-or-insert for the
+    feed's native scopes, UPDATE-ONLY for FRTBDRC/FRTBRRAO (the app never
+    invents process types the publish process didn't define).
+    publish_status 'InProgress' (re-open approved — Marcos, 2026-08): the
+    feed goes BACK to InProgress; UPDATE-ONLY of currently-SignedOff rows,
+    never an insert (nothing to revert if the feed has no row).
 
-    Re-open is deliberately NOT propagated: the feed has no agreed
-    "re-opened" vocabulary, and the engine honours the app REOPENED row.
+    EXACT process-type match: the feed's 'FRTB' row is SBM only.
     Skipped while SIGNOFF_FEED_ENABLED is false (feed migration)."""
     def _cfg(key, default=""):
         rows = session.sql(
@@ -221,20 +223,25 @@ def _propagate_signoff_to_feed(session, cobid, scope, entity, sub):
     if _cfg("SIGNOFF_FEED_ENABLED", "true").strip().lower() != "true":
         return
     feed = _cfg("SIGNOFF_FEED_TABLE", "BATCH.PUBLISH_SIGNOFF_STATUS").strip()
-    may_insert = str(scope).upper() in FEED_NATIVE_SCOPES
+    signing_off = str(publish_status).upper() == "SIGNEDOFF"
+    may_insert = signing_off and str(scope).upper() in FEED_NATIVE_SCOPES
+    # Sign-off touches rows not yet SignedOff; re-open touches ONLY rows
+    # that currently say SignedOff (never resurrects anything else).
+    state_guard = ("AND UPPER(PUBLISH_STATUS) <> 'SIGNEDOFF'" if signing_off
+                   else "AND UPPER(PUBLISH_STATUS) = 'SIGNEDOFF'")
 
     if str(entity) == "*" or not may_insert:
         ent_pred = ("" if str(entity) == "*"
                     else f"AND UPPER(ENTITY_CODE) = UPPER('{entity}')")
         session.sql(f"""
             UPDATE {feed}
-            SET PUBLISH_STATUS = 'SignedOff',
+            SET PUBLISH_STATUS = '{publish_status}',
                 SIGNOFF_UPDATE_TIME = CURRENT_TIMESTAMP()
             WHERE COBID = {int(cobid)}
               AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
               {ent_pred}
               AND COALESCE(UPPER(TRIM(SUB_TYPE)), '') = UPPER('{sub}')
-              AND UPPER(PUBLISH_STATUS) <> 'SIGNEDOFF'
+              {state_guard}
         """).collect()
     else:
         session.sql(f"""
@@ -386,7 +393,9 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_sub_type,
                                           "refresh and try again."})
 
         if new_status == "SIGNED_OFF":
-            _propagate_signoff_to_feed(session, cobid, scope, entity, sub)
+            _propagate_to_feed(session, cobid, scope, entity, sub, "SignedOff")
+        elif new_status == "REOPENED":
+            _propagate_to_feed(session, cobid, scope, entity, sub, "InProgress")
 
         verb = "Sign-off" if action == "SIGNOFF" else "Re-open"
         comment = (f"{verb} requested by {_esc(caller)}"
@@ -457,19 +466,21 @@ PENDING = {
 FEED_NATIVE_SCOPES = ("VAR", "STRESS", "SENSITIVITY", "FRTB")
 
 
-def _propagate_signoff_to_feed(session, cobid, scope, entity, sub):
-    """Push an APPLIED sign-off into the upstream feed table — the batch
-    process reads BATCH.PUBLISH_SIGNOFF_STATUS, so the ADJUSTMENT_APP state
-    must propagate there (same pattern as the rest of the schema). Rows are
-    matched on the SAME SUB_TYPE ('' = none); entity '*' updates every
-    entity of the scope at that COB.
+def _propagate_to_feed(session, cobid, scope, entity, sub, publish_status):
+    """Push an APPLIED lifecycle change into the upstream feed table — the
+    batch process reads BATCH.PUBLISH_SIGNOFF_STATUS, so the ADJUSTMENT_APP
+    state must propagate there (same pattern as the rest of the schema).
+    Rows are matched on the SAME SUB_TYPE ('' = none); entity '*' updates
+    every entity of the scope at that COB.
 
-    EXACT process-type match (Marcos, 2026-08): the feed's 'FRTB' row is SBM
-    only. FRTBDRC/FRTBRRAO are updated when the publish table carries those
-    process types, and never inserted by the app.
+    publish_status 'SignedOff' (sign-off applied): update-or-insert for the
+    feed's native scopes, UPDATE-ONLY for FRTBDRC/FRTBRRAO (the app never
+    invents process types the publish process didn't define).
+    publish_status 'InProgress' (re-open approved — Marcos, 2026-08): the
+    feed goes BACK to InProgress; UPDATE-ONLY of currently-SignedOff rows,
+    never an insert (nothing to revert if the feed has no row).
 
-    Re-open is deliberately NOT propagated: the feed has no agreed
-    "re-opened" vocabulary, and the engine honours the app REOPENED row.
+    EXACT process-type match: the feed's 'FRTB' row is SBM only.
     Skipped while SIGNOFF_FEED_ENABLED is false (feed migration)."""
     def _cfg(key, default=""):
         rows = session.sql(
@@ -481,20 +492,25 @@ def _propagate_signoff_to_feed(session, cobid, scope, entity, sub):
     if _cfg("SIGNOFF_FEED_ENABLED", "true").strip().lower() != "true":
         return
     feed = _cfg("SIGNOFF_FEED_TABLE", "BATCH.PUBLISH_SIGNOFF_STATUS").strip()
-    may_insert = str(scope).upper() in FEED_NATIVE_SCOPES
+    signing_off = str(publish_status).upper() == "SIGNEDOFF"
+    may_insert = signing_off and str(scope).upper() in FEED_NATIVE_SCOPES
+    # Sign-off touches rows not yet SignedOff; re-open touches ONLY rows
+    # that currently say SignedOff (never resurrects anything else).
+    state_guard = ("AND UPPER(PUBLISH_STATUS) <> 'SIGNEDOFF'" if signing_off
+                   else "AND UPPER(PUBLISH_STATUS) = 'SIGNEDOFF'")
 
     if str(entity) == "*" or not may_insert:
         ent_pred = ("" if str(entity) == "*"
                     else f"AND UPPER(ENTITY_CODE) = UPPER('{entity}')")
         session.sql(f"""
             UPDATE {feed}
-            SET PUBLISH_STATUS = 'SignedOff',
+            SET PUBLISH_STATUS = '{publish_status}',
                 SIGNOFF_UPDATE_TIME = CURRENT_TIMESTAMP()
             WHERE COBID = {int(cobid)}
               AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
               {ent_pred}
               AND COALESCE(UPPER(TRIM(SUB_TYPE)), '') = UPPER('{sub}')
-              AND UPPER(PUBLISH_STATUS) <> 'SIGNEDOFF'
+              {state_guard}
         """).collect()
     else:
         session.sql(f"""
@@ -620,9 +636,12 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_sub_type,
                                           "a moment ago."})
 
         # Approved sign-off (and a rejected re-open, which lands back on
-        # SIGNED_OFF) must reach the feed the batch process reads.
+        # SIGNED_OFF) must reach the feed the batch process reads; an
+        # APPROVED re-open flips the feed back to InProgress.
         if new_status == "SIGNED_OFF":
-            _propagate_signoff_to_feed(session, cobid, scope, entity, sub)
+            _propagate_to_feed(session, cobid, scope, entity, sub, "SignedOff")
+        elif new_status == "REOPENED":
+            _propagate_to_feed(session, cobid, scope, entity, sub, "InProgress")
 
         comment = _esc(str(p_comment)[:990]) if p_comment \
                   else f"{label.capitalize()} {decision.lower()} by {_esc(caller)}"
