@@ -109,7 +109,6 @@ with _hd2:
         except Exception as ex:
             st.session_state["so_flash"] = (
                 "warning", f"Sync failed. The database reported: {ex}")
-        st.cache_data.clear()
         safe_rerun()
 
 _flash = st.session_state.pop("so_flash", None)
@@ -152,21 +151,19 @@ _HIST_SQL = """
 """
 
 
-@st.cache_data(ttl=120, show_spinner=True)
-def _load_signoff_data():
-    """Both page queries, PLAIN sequential run_query_df — exactly like every
-    other page's grids. (An async collect_nowait attempt hung indefinitely
-    in the SiS session — async query execution is not reliable there; never
-    reintroduce it.) Cached 120s so revisits and widget interactions are
-    instant; sync and both actions clear the cache."""
-    return run_query_df(_STATUS_SQL), run_query_df(_HIST_SQL)
-
-
+# Plain direct queries, NO st.cache_data and NO async — the SiS runtime this
+# app runs on supports neither reliably (st.cache_data failed at call time and
+# the page fell through to "no data"; collect_nowait hung forever). This is
+# the exact pattern every other page's grids use. Do not re-add either.
 df_all, df_hist_cached = pd.DataFrame(), pd.DataFrame()
 try:
-    df_all, df_hist_cached = _load_signoff_data()
+    df_all = run_query_df(_STATUS_SQL)
 except Exception as e:
-    st.info(f"Sign-off table not available: {e}")
+    st.warning(f"Could not load sign-off status — the database reported: {e}")
+try:
+    df_hist_cached = run_query_df(_HIST_SQL)
+except Exception as e:
+    st.warning(f"Could not load sign-off history — the database reported: {e}")
 
 if df_all.empty:
     st.info("No sign-off entries yet — press **Sync from upstream feed** "
@@ -349,7 +346,6 @@ def _request(scope_, entity_, sub_, action, verb, reason, requires_approval):
         st.session_state["so_flash"] = (
             "warning", f"{verb} was NOT applied — "
                        f"{out.get('message', 'no detail')}")
-    st.cache_data.clear()
     safe_rerun()
 
 
