@@ -23,6 +23,7 @@ st.set_page_config(
 from utils.styles import (
     inject_css, render_sidebar, section_title,
     P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, fmt_adj_id, icon,
+    fmt_user_dt,
 )
 from utils.snowflake_conn import run_query, run_query_df
 
@@ -43,7 +44,7 @@ def _fmt_ts(val, fmt="%d %b %Y %H:%M:%S"):
     if val is None or str(val) in ("NaT", "None", ""):
         return "—"
     if hasattr(val, "strftime"):
-        return val.strftime(fmt)
+        return fmt_user_dt(val, fmt)
     return str(val)
 
 

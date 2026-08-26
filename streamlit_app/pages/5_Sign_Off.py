@@ -22,7 +22,7 @@ import pandas as pd
 st.set_page_config(page_title="Sign-Off · MUFG", page_icon="🔒", layout="wide", initial_sidebar_state="expanded")
 
 from utils.styles import (inject_css, render_sidebar, section_title, P,
-                          ALL_SCOPES, icon, bordered_container)
+                          ALL_SCOPES, icon, bordered_container, fmt_user_dt)
 from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
 
 
@@ -169,10 +169,7 @@ with _ck2:
         unsafe_allow_html=True)
 
 def _fmt_ts(v):
-    try:
-        return pd.to_datetime(v).strftime("%d %b %H:%M")
-    except (ValueError, TypeError):
-        return ""
+    return fmt_user_dt(v, "%d %b %H:%M")
 
 
 def _scope_summary(rows):
@@ -458,3 +455,111 @@ else:
         unsafe_allow_html=True)
     st.caption(f"{len(_groups)} COB/scope line(s) · "
                f"{len(df_grid)} underlying entit(y/ies)")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LATEST CHANGES — the most recent lifecycle event per COB/scope/entity:
+# who signed off or re-opened, when, on whose request and why. Entries that
+# are simply OPEN from the feed with no history are NOT shown (nothing
+# happened to them yet).
+# ══════════════════════════════════════════════════════════════════════════════
+import html as _htmlmod
+
+st.markdown("<br/>", unsafe_allow_html=True)
+section_title("Latest Changes", "file-text")
+st.caption("The last thing that happened to each COB/scope/entity — sign-offs, "
+           "re-opens and pending requests, with who and why. First-time open "
+           "entries with no activity are not listed.")
+
+df_hist = pd.DataFrame()
+try:
+    df_hist = run_query_df("""
+        SELECT h.COBID, h.PROCESS_TYPE, COALESCE(h.ENTITY_CODE, '*') AS ENTITY_CODE,
+               h.SUB_TYPE, h.OLD_STATUS, h.NEW_STATUS, h.ACTION_BY, h.ACTION_AT,
+               h.COMMENT,
+               s.REOPEN_REQUESTED_BY, s.REOPEN_REASON, s.REOPEN_APPROVED_BY,
+               s.SIGN_OFF_BY, s.SIGNOFF_SOURCE
+        FROM ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY h
+        LEFT JOIN ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS s
+          ON s.COBID = h.COBID
+         AND UPPER(s.PROCESS_TYPE) = UPPER(h.PROCESS_TYPE)
+         AND UPPER(COALESCE(s.ENTITY_CODE, '*')) = UPPER(COALESCE(h.ENTITY_CODE, '*'))
+         AND COALESCE(UPPER(s.SUB_TYPE), '') = COALESCE(UPPER(h.SUB_TYPE), '')
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY h.COBID, UPPER(h.PROCESS_TYPE),
+                         UPPER(COALESCE(h.ENTITY_CODE, '*')),
+                         COALESCE(UPPER(h.SUB_TYPE), '')
+            ORDER BY h.ACTION_AT DESC, h.SIGNOFF_HISTORY_ID DESC) = 1
+        ORDER BY h.ACTION_AT DESC
+        LIMIT 200
+    """)
+except Exception as _ex:
+    st.info(f"Sign-off history not available: {_ex}")
+
+if df_hist.empty:
+    st.caption("No sign-off activity recorded yet.")
+else:
+    def _nz(v):
+        """NaN/None-safe string ('' for empty)."""
+        return "" if (v is None or (isinstance(v, float) and pd.isna(v))) \
+            else str(v)
+
+    _EVENT_META = {
+        "SIGNED_OFF":        ("SIGNED OFF",         P["success"]),
+        "REOPENED":          ("RE-OPENED",          P["danger"]),
+        "SIGNOFF_REQUESTED": ("SIGN-OFF REQUESTED", "#B45309"),
+        "REOPEN_REQUESTED":  ("RE-OPEN REQUESTED",  "#B45309"),
+        "OPEN":              ("BACK TO OPEN",       P["danger"]),
+    }
+    _th = (f'style="text-align:left;padding:7px 12px;font-size:0.7rem;'
+           f'text-transform:uppercase;letter-spacing:.05em;'
+           f'color:{P["grey_700"]};border-bottom:2px solid {P["border"]};'
+           f'white-space:nowrap"')
+    _td = (f'style="padding:7px 12px;font-size:0.82rem;'
+           f'border-bottom:1px solid {P["border"]};vertical-align:middle"')
+    _rows_html = []
+    for _, h in df_hist.iterrows():
+        ev = str(h["NEW_STATUS"]).upper()
+        lbl, col = _EVENT_META.get(ev, (ev, P["grey_700"]))
+        ent = _nz(h["ENTITY_CODE"]) or "*"
+        sub = _nz(h["SUB_TYPE"])
+        ent_lbl = ent + (f" / {sub}" if sub else "")
+        when = fmt_user_dt(h["ACTION_AT"]) or "—"
+
+        # Who asked, who approved, and why — the applied event's actor is
+        # the approver (or the direct actor); the request metadata lives on
+        # the status row.
+        actor = _nz(h["ACTION_BY"]) or "—"
+        requester = _nz(h.get("REOPEN_REQUESTED_BY"))
+        reason = _nz(h.get("REOPEN_REASON")) or _nz(h.get("COMMENT"))
+        if ev in ("SIGNOFF_REQUESTED", "REOPEN_REQUESTED"):
+            req_txt, appr_txt = actor, "awaiting approval"
+        elif ev in ("SIGNED_OFF", "REOPENED"):
+            req_txt = requester or "—"
+            appr_txt = actor
+        else:
+            req_txt, appr_txt = requester or "—", actor
+
+        _rows_html.append(
+            f'<tr>'
+            f'<td {_td}><strong>{int(h["COBID"])}</strong></td>'
+            f'<td {_td}><strong>{_htmlmod.escape(str(h["PROCESS_TYPE"]))}</strong></td>'
+            f'<td {_td}>{_htmlmod.escape(ent_lbl)}</td>'
+            f'<td {_td}>{_pill(lbl, col)}</td>'
+            f'<td style="padding:7px 12px;font-size:0.82rem;'
+            f'border-bottom:1px solid {P["border"]};vertical-align:middle;'
+            f'white-space:nowrap">{when}</td>'
+            f'<td {_td}>{_htmlmod.escape(req_txt)}</td>'
+            f'<td {_td}>{_htmlmod.escape(appr_txt)}</td>'
+            f'<td {_td}><span style="color:{P["grey_700"]};font-size:0.8rem">'
+            f'{_htmlmod.escape(reason[:160])}</span></td>'
+            f'</tr>')
+    st.markdown(
+        f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
+        f'border-radius:10px;overflow-x:auto">'
+        f'<table style="width:100%;border-collapse:collapse">'
+        f'<tr><th {_th}>COB</th><th {_th}>Scope</th><th {_th}>Entity</th>'
+        f'<th {_th}>Event</th><th {_th}>When</th><th {_th}>Requested by</th>'
+        f'<th {_th}>Approved / actioned by</th><th {_th}>Reason</th></tr>'
+        + "".join(_rows_html)
+        + '</table></div>',
+        unsafe_allow_html=True)

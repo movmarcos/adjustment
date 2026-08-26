@@ -11,7 +11,7 @@ import pandas as pd
 st.set_page_config(page_title="Approval Queue · MUFG", page_icon="✅", layout="wide", initial_sidebar_state="expanded")
 
 from utils.styles import (
-    inject_css, render_sidebar, render_filter_chips,
+    inject_css, render_sidebar, render_filter_chips, fmt_user_dt,
     section_title, status_badge, P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, icon, bordered_container,
 )
 from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
@@ -295,7 +295,7 @@ else:
         scope_cfg   = SCOPE_CONFIG.get(scope, {})
 
         if hasattr(submitted_at, "strftime"):
-            submitted_at = submitted_at.strftime("%d %b %Y %H:%M")
+            submitted_at = fmt_user_dt(submitted_at)
 
         has_overlap = (not df_overlaps.empty and (
             (df_overlaps["ADJ_ID_A"] == adj_id).any() or
@@ -548,12 +548,12 @@ else:
                             f"{r_ent_tx}**")
                 if _is_signoff:
                     st.caption(f"Requested by {r_by} at "
-                               f"{rr['REOPEN_REQUESTED_AT']} — approving signs "
+                               f"{fmt_user_dt(rr['REOPEN_REQUESTED_AT'])} — approving signs "
                                f"the COB off (blocks new adjustments); "
                                f"rejecting keeps it open.")
                 else:
                     st.caption(f"Requested by {r_by} at "
-                               f"{rr['REOPEN_REQUESTED_AT']} — originally "
+                               f"{fmt_user_dt(rr['REOPEN_REQUESTED_AT'])} — originally "
                                f"signed off by {rr['SIGN_OFF_BY'] or '—'} "
                                f"({rr['SIGNOFF_SOURCE'] or 'EXTERNAL'}). "
                                f"Approving re-opens the COB for adjustments.")
@@ -621,7 +621,7 @@ try:
             color = STATUS_COLORS.get(row.get("NEW_STATUS", status), "#9E9E9E")
             at = row.get("CHANGED_AT", "")
             if hasattr(at, "strftime"):
-                at = at.strftime("%d %b %H:%M")
+                at = fmt_user_dt(at, "%d %b %H:%M")
             st.markdown(
                 f'<div class="queue-item" style="border-left:3px solid {color}">'
                 f'<div style="display:flex;justify-content:space-between">'

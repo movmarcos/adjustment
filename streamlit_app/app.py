@@ -100,7 +100,10 @@ health_dot = (f'<span style="display:inline-block;width:8px;height:8px;'
 # HEADER BANNER
 # ──────────────────────────────────────────────────────────────────────────────
 
-london_now = datetime.now(pytz.timezone("Europe/London")).strftime("%d %b %Y  %H:%M")
+from utils.styles import get_user_tz, USER_TZ_OPTIONS
+_tz = get_user_tz()
+_tz_label = next((l for l, z in USER_TZ_OPTIONS.items() if z == _tz), "London")
+london_now = datetime.now(pytz.timezone(_tz)).strftime("%d %b %Y  %H:%M")
 
 st.markdown(f"""
 <div style="background:linear-gradient(135deg,{P['accent']} 0%,#2A2A48 100%);
@@ -128,7 +131,7 @@ st.markdown(f"""
     </div>
     <div style="text-align:right">
       <div style="font-size:0.65rem;color:rgba(255,255,255,.4);text-transform:uppercase;
-        letter-spacing:.1em;margin-bottom:3px">London Time</div>
+        letter-spacing:.1em;margin-bottom:3px">{_tz_label} Time</div>
       <div style="font-size:1.05rem;font-weight:700;color:white;letter-spacing:.03em">
         {london_now}
       </div>

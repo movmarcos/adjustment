@@ -12,7 +12,7 @@ st.set_page_config(page_title="Adjustments · MUFG", page_icon="📋", layout="w
 
 from utils.styles import (
     inject_css, render_sidebar, render_filter_chips, render_status_timeline,
-    render_lifecycle_bar,
+    render_lifecycle_bar, fmt_user_dt,
     status_badge, section_title, P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, STATUS_ICONS,
     fmt_adj_id, icon, render_activity_grid, SELECTION_UNSUPPORTED, bordered_container,
 )
@@ -405,7 +405,7 @@ def render_adj_card(row, expanded=False):
                 if val is None or str(val) == "NaT":
                     return "—"
                 if hasattr(val, "strftime"):
-                    return val.strftime("%d %b %Y %H:%M")
+                    return fmt_user_dt(val) or "—"
                 return str(val) if str(val) not in ("None", "") else "—"
 
             submitted_at = _fmt_ts(row.get("SUBMITTED_AT"))

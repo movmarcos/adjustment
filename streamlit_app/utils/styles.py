@@ -150,6 +150,98 @@ STATUS_ICONS = {
 # not belong there. Filters, however, must be able to reach every stored value.)
 ALL_SCOPES = ["VaR", "Stress", "Sensitivity", "FRTB", "FRTBDRC", "FRTBRRAO"]
 
+# ══════════════════════════════════════════════════════════════════════════════
+# DISPLAY TIMEZONE — timestamps are STORED as NTZ London wall-clock (engine
+# convention); every DISPLAY converts to the user's chosen timezone.
+# Preference: sidebar selector → ADJ_USER_PREFS (default Europe/London).
+# ══════════════════════════════════════════════════════════════════════════════
+import pytz as _pytz
+
+STORAGE_TZ = "Europe/London"
+USER_TZ_OPTIONS = {          # label shown → IANA zone
+    "London":   "Europe/London",
+    "New York": "America/New_York",
+    "India":    "Asia/Kolkata",
+    "Japan":    "Asia/Tokyo",
+}
+
+
+def get_user_tz() -> str:
+    """The viewer's display timezone (IANA), cached per session."""
+    tz = st.session_state.get("_user_tz")
+    if tz:
+        return tz
+    tz = STORAGE_TZ
+    try:
+        from utils.snowflake_conn import run_query, current_user_name
+        _u = str(current_user_name()).replace("\\", "\\\\").replace("'", "''")
+        rows = run_query(
+            f"SELECT DISPLAY_TZ FROM ADJUSTMENT_APP.ADJ_USER_PREFS "
+            f"WHERE UPPER(USERNAME) = UPPER('{_u}')")
+        if rows and rows[0]["DISPLAY_TZ"]:
+            _cand = str(rows[0]["DISPLAY_TZ"])
+            if _cand in USER_TZ_OPTIONS.values():
+                tz = _cand
+    except Exception:
+        pass
+    st.session_state["_user_tz"] = tz
+    return tz
+
+
+def set_user_tz(tz: str) -> None:
+    """Persist the viewer's display timezone (best-effort) + session cache."""
+    if tz not in USER_TZ_OPTIONS.values():
+        return
+    st.session_state["_user_tz"] = tz
+    try:
+        from utils.snowflake_conn import run_query, current_user_name
+        _u = str(current_user_name()).replace("\\", "\\\\").replace("'", "''")
+        run_query(f"""
+            MERGE INTO ADJUSTMENT_APP.ADJ_USER_PREFS t
+            USING (SELECT '{_u}' AS USERNAME) s
+            ON UPPER(t.USERNAME) = UPPER(s.USERNAME)
+            WHEN MATCHED THEN UPDATE SET
+                t.DISPLAY_TZ = '{tz}', t.UPDATED_AT = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (USERNAME, DISPLAY_TZ)
+            VALUES (s.USERNAME, '{tz}')
+        """)
+    except Exception:
+        pass   # display preference only — never break the page over it
+
+
+def fmt_user_dt(value, fmt: str = "%d %b %Y %H:%M") -> str:
+    """One naive (London wall-clock) timestamp → user's timezone, formatted.
+    Returns '' for NULL/NaT/unparseable."""
+    if value is None:
+        return ""
+    try:
+        ts = pd.to_datetime(value, errors="coerce")
+        if ts is pd.NaT or pd.isna(ts):
+            return ""
+        if ts.tzinfo is None:
+            ts = ts.tz_localize(STORAGE_TZ, ambiguous=True,
+                                nonexistent="shift_forward")
+        return ts.tz_convert(get_user_tz()).strftime(fmt)
+    except Exception:
+        try:
+            return value.strftime(fmt)   # last resort: unconverted
+        except Exception:
+            return ""
+
+
+def fmt_user_dt_series(series, fmt: str = "%d %b %Y %H:%M",
+                       na: str = "—") -> "pd.Series":
+    """Series version of fmt_user_dt (grids)."""
+    try:
+        ts = pd.to_datetime(series, errors="coerce")
+        if getattr(ts.dt, "tz", None) is None:
+            ts = ts.dt.tz_localize(STORAGE_TZ, ambiguous=True,
+                                   nonexistent="shift_forward")
+        return ts.dt.tz_convert(get_user_tz()).dt.strftime(fmt).fillna(na)
+    except Exception:
+        return pd.to_datetime(series, errors="coerce").dt.strftime(fmt).fillna(na)
+
+
 SCOPE_CONFIG = {
     "VaR":         {"icon": "bar-chart",  "color": "#D50032", "bg": "#FFF0F3", "label": "VaR"},
     "Stress":      {"icon": "activity",   "color": "#1D4ED8", "bg": "#EFF6FF", "label": "Stress"},
@@ -1340,7 +1432,7 @@ def render_status_timeline(history_rows):
         by     = h.get("CHANGED_BY", "system")
         at     = h.get("CHANGED_AT", "")
         if hasattr(at, "strftime"):
-            at = at.strftime("%d %b %Y %H:%M")
+            at = fmt_user_dt(at)
         comment = h.get("COMMENT", "")
         # User-sourced text is HTML-escaped: an unclosed tag in a comment or
         # reason would otherwise corrupt the page for every viewer.
@@ -1388,7 +1480,7 @@ def render_lifecycle_bar(track_row: dict):
             return ""
         if hasattr(val, "strftime"):
             try:
-                return val.strftime("%H:%M")
+                return fmt_user_dt(val, "%H:%M")
             except Exception:
                 return ""
         return ""
@@ -1559,7 +1651,7 @@ def build_activity_grid_df(df_source):
         return pd.Series([None] * n)
 
     def fmt_dt(series):
-        return pd.to_datetime(series, errors="coerce").dt.strftime("%d %b %Y %H:%M").fillna("—")
+        return fmt_user_dt_series(series)
 
     start = pd.to_datetime(col("START_DATE"), errors="coerce")
     end = pd.to_datetime(col("PROCESS_DATE"), errors="coerce")
@@ -1713,7 +1805,7 @@ def render_df_table(df, max_rows=200, height=None, highlight=None, formats=None)
         if isinstance(v, float):
             return f"{int(v):,}" if v.is_integer() else f"{v:,.4g}"
         if hasattr(v, "strftime"):
-            return v.strftime("%d %b %Y %H:%M")
+            return fmt_user_dt(v)
         return _hm.escape(str(v))
 
     th = "".join(
@@ -1775,6 +1867,25 @@ def render_sidebar():
         """, unsafe_allow_html=True)
 
         # Nav links are rendered automatically by Streamlit (stSidebarNav) here.
+
+        # ── Display timezone (per-user, default London) ──────────────────────
+        # Every timestamp in the app converts to this zone for display; the
+        # engine keeps storing London wall-clock NTZ.
+        _cur_tz = get_user_tz()
+        _labels = list(USER_TZ_OPTIONS.keys())
+        _cur_label = next((l for l, z in USER_TZ_OPTIONS.items()
+                           if z == _cur_tz), "London")
+        _sel_label = st.selectbox(
+            "🕒 Timezone", _labels, index=_labels.index(_cur_label),
+            key="sb_user_tz",
+            help="Times across the app are shown in this timezone. "
+                 "Data is stored in London time.")
+        if USER_TZ_OPTIONS[_sel_label] != _cur_tz:
+            set_user_tz(USER_TZ_OPTIONS[_sel_label])
+            try:
+                st.rerun()
+            except AttributeError:
+                st.experimental_rerun()
 
         # ── Spacer pushes user section to the bottom ─────────────────────────
         st.markdown(

@@ -873,6 +873,25 @@ COMMENT = 'Authorized approvers for the Approval Queue. NULL PROCESS_TYPE means 
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- 7a2. ADJ_USER_PREFS — per-user display preferences
+--
+-- Timestamps are STORED as NTZ London wall-clock (the engine's convention);
+-- the app converts them for DISPLAY into each user's chosen timezone
+-- (sidebar selector; default Europe/London). One row per user, written by
+-- the app on change. Not seeded; survives redeploys.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_USER_PREFS (
+    USERNAME       VARCHAR(200) NOT NULL,
+    DISPLAY_TZ     VARCHAR(50),               -- IANA name, e.g. Asia/Tokyo
+    UPDATED_AT     TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP(),
+
+    CONSTRAINT PK_ADJ_USER_PREFS PRIMARY KEY (USERNAME)
+)
+COMMENT = 'Per-user display preferences (display timezone; default Europe/London when absent). Written by the app; not seeded.';
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- 7b. ADJ_ADMINS — Users AND roles allowed to use the Admin page
 --
 -- The Admin page manages approvers, sign-off, and scope config — the controls
