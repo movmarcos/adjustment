@@ -152,24 +152,14 @@ _HIST_SQL = """
 """
 
 
-@st.cache_data(ttl=120, show_spinner="Loading sign-off status…")
+@st.cache_data(ttl=120, show_spinner=True)
 def _load_signoff_data():
-    """BOTH page queries in one cached call, fired CONCURRENTLY: the first
-    paint waits for the slower of the two instead of their sum. Cached 120s
-    (page revisits are instant); sync and both actions clear the cache so
-    changes show immediately."""
-    from utils.snowflake_conn import get_session
-    sess = get_session()
-    try:
-        j1 = sess.sql(_STATUS_SQL).collect_nowait()
-        j2 = sess.sql(_HIST_SQL).collect_nowait()
-        rows1, rows2 = j1.result(), j2.result()
-        df1 = pd.DataFrame([r.as_dict() for r in rows1])
-        df2 = pd.DataFrame([r.as_dict() for r in rows2])
-        return df1, df2
-    except Exception:
-        # Older Snowpark without collect_nowait — sequential fallback.
-        return run_query_df(_STATUS_SQL), run_query_df(_HIST_SQL)
+    """Both page queries, PLAIN sequential run_query_df — exactly like every
+    other page's grids. (An async collect_nowait attempt hung indefinitely
+    in the SiS session — async query execution is not reliable there; never
+    reintroduce it.) Cached 120s so revisits and widget interactions are
+    instant; sync and both actions clear the cache."""
+    return run_query_df(_STATUS_SQL), run_query_df(_HIST_SQL)
 
 
 df_all, df_hist_cached = pd.DataFrame(), pd.DataFrame()
