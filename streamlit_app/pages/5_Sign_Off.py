@@ -16,6 +16,7 @@ Reads: ADJ_SIGNOFF_STATUS. Writes via SP_REQUEST_SIGNOFF_CHANGE only;
 approvals happen on the Approval Queue page.
 """
 import json
+import html as _hesc
 import streamlit as st
 import pandas as pd
 
@@ -236,7 +237,7 @@ def _entity_chips(rows):
         chips.append(
             f'<span style="background:{col}14;color:{col};border:1px solid {col}44;'
             f'border-radius:99px;padding:0 8px;font-size:0.7rem;font-weight:700;'
-            f'white-space:nowrap">{r["_ENT_LBL"]}&nbsp;·&nbsp;{lbl}</span>')
+            f'white-space:nowrap">{_hesc.escape(str(r["_ENT_LBL"]))}&nbsp;·&nbsp;{lbl}</span>')
     return '<span style="line-height:1.9">' + " ".join(chips) + "</span>"
 
 
@@ -435,13 +436,13 @@ else:
         _rows_html.append(
             f'<tr>'
             f'<td {_td}><strong>{int(g_cob)}</strong></td>'
-            f'<td {_td}><strong>{g_scope}</strong></td>'
+            f'<td {_td}><strong>{_hesc.escape(str(g_scope))}</strong></td>'
             f'<td {_td}>{_pill(eff, col)}</td>'
             f'<td {_td}><span style="color:{sub_col};font-weight:700;'
             f'font-size:0.78rem">{sub}</span></td>'
             f'<td {_td}>{_entity_chips(g_rows)}</td>'
             f'<td {_td}><span style="color:{P["grey_700"]};font-size:0.8rem">'
-            f'{detail}</span></td>'
+            f'{_hesc.escape(str(detail))}</span></td>'
             f'</tr>')
     st.markdown(
         f'<div style="background:{P["white"]};border:1px solid {P["border"]};'

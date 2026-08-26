@@ -9,6 +9,7 @@ external requests, so they render inside the Streamlit-in-Snowflake sandbox
 (external origins like Google Fonts are blocked there).
 """
 import streamlit as st
+import pandas as pd
 
 # Every page imports this module, so bootstrap config.py onto sys.path here:
 # in SiS the stage root is already importable; locally config.py is at the repo

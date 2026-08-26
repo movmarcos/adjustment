@@ -23,7 +23,7 @@ st.set_page_config(
 from utils.styles import (
     inject_css, render_sidebar, section_title,
     P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, fmt_adj_id, icon,
-    fmt_user_dt,
+    fmt_user_dt, render_df_table,
 )
 from utils.snowflake_conn import run_query, run_query_df
 
@@ -150,8 +150,8 @@ def _cob_filter(col="COBID"):
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
-tab_runs, tab_activity, tab_errors = st.tabs(
-    ["Processing Runs", "Activity Feed", "Errors"])
+tab_runs, tab_activity, tab_errors, tab_signoff = st.tabs(
+    ["Processing Runs", "Activity Feed", "Errors", "Sign-Off"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -456,3 +456,54 @@ with tab_errors:
                   f'word-break:break-word">{err_msg}</div>'
                 f'</div>',
                 unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — SIGN-OFF AUDIT  (full ADJ_SIGNOFF_HISTORY, newest first)
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_signoff:
+    section_title("Sign-Off Audit Trail", "lock")
+    st.caption("Every sign-off lifecycle transition — sync, requests, "
+               "approvals, rejections — newest first. Times in your selected "
+               "timezone.")
+    try:
+        _sf1, _sf2, _sf3 = st.columns(3)
+        _so_hist_all = run_query_df("""
+            SELECT COBID, PROCESS_TYPE, COALESCE(ENTITY_CODE, '*') AS ENTITY_CODE,
+                   SUB_TYPE, OLD_STATUS, NEW_STATUS, ACTION_BY, ACTION_AT, COMMENT
+            FROM ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
+            ORDER BY ACTION_AT DESC
+            LIMIT 1000
+        """)
+        if _so_hist_all.empty:
+            st.info("No sign-off activity recorded yet.")
+        else:
+            with _sf1:
+                _so_cobs = sorted(_so_hist_all["COBID"].astype(int).unique(),
+                                  reverse=True)
+                _f_cob = st.multiselect("COB", _so_cobs, default=[],
+                                        key="lg_so_cob",
+                                        format_func=lambda v: str(v))
+            with _sf2:
+                _f_scope = st.multiselect(
+                    "Scope", sorted(_so_hist_all["PROCESS_TYPE"].unique()),
+                    default=[], key="lg_so_scope")
+            with _sf3:
+                _f_event = st.multiselect(
+                    "Event", sorted(_so_hist_all["NEW_STATUS"]
+                                    .astype(str).unique()),
+                    default=[], key="lg_so_event")
+            _df = _so_hist_all
+            if _f_cob:
+                _df = _df[_df["COBID"].astype(int).isin(_f_cob)]
+            if _f_scope:
+                _df = _df[_df["PROCESS_TYPE"].isin(_f_scope)]
+            if _f_event:
+                _df = _df[_df["NEW_STATUS"].astype(str).isin(_f_event)]
+            _show = _df.copy()
+            _show["ACTION_AT"] = _show["ACTION_AT"].apply(
+                lambda v: fmt_user_dt(v, "%d %b %Y %H:%M:%S"))
+            st.caption(f"{len(_show)} transition(s)")
+            render_df_table(_show, max_rows=300, height=380)
+    except Exception as _ex:
+        st.info(f"Sign-off history not available: {_ex}")

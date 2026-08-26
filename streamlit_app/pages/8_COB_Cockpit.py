@@ -151,6 +151,8 @@ _tot   = int(df_counts["N"].sum()) if not df_counts.empty else 0
 _out   = sum(_n(s, OUTSTANDING) for s in ALL_SCOPES)
 _fail  = sum(_n(s, ["Failed"]) for s in ALL_SCOPES)
 _appr  = sum(_n(s, ["Pending Approval"]) for s in ALL_SCOPES)
+# Count matches the label: pending requests of BOTH kinds for THIS COB
+# (each row = one request; sub-typed entries are distinct requests).
 _reo   = int(df_so["SIGN_OFF_STATUS"].str.upper()
              .isin(["REOPEN_REQUESTED", "SIGNOFF_REQUESTED"]).sum()) \
          if not df_so.empty else 0
@@ -161,7 +163,7 @@ for col, (label, val, color, icon_name) in zip(kcols, [
     ("Outstanding",       _out,  P["warning"] if _out else P["success"], "clock"),
     ("Awaiting approval", _appr, P["info"] if _appr else P["success"], "clipboard"),
     ("Failed",            _fail, P["danger"] if _fail else P["success"], "x-circle"),
-    ("Re-open requests",  _reo,  "#B45309" if _reo else P["success"], "unlock"),
+    ("Pending requests",  _reo,  "#B45309" if _reo else P["success"], "unlock"),
 ]):
     col.markdown(
         f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
