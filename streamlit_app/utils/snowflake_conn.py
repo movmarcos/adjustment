@@ -137,11 +137,20 @@ def current_user_name() -> str:
     This is the primary and most reliable method.
 
     Fallback: st.experimental_user / st.user for edge cases.
+
+    Cached per session: this is called 2-3x on EVERY page render (page top,
+    sidebar, helpers) and each rerun — uncached it was 2-3 Snowflake
+    round-trips per widget interaction, a large share of perceived page
+    latency. Identity cannot change within a session, so caching is safe.
     """
+    _cached = st.session_state.get("_current_user_cached")
+    if _cached:
+        return _cached
     # 1. Primary — SQL CURRENT_USER()  (works in SiS with READ SESSION grant)
     try:
         row = get_session().sql("SELECT CURRENT_USER() AS U").collect()
         if row and row[0]["U"]:
+            st.session_state["_current_user_cached"] = str(row[0]["U"])
             return str(row[0]["U"])
     except Exception:
         pass
@@ -152,6 +161,7 @@ def current_user_name() -> str:
         if eu is not None:
             name = eu.get("user_name") or eu.get("email")
             if name:
+                st.session_state["_current_user_cached"] = str(name)
                 return str(name)
     except Exception:
         pass
@@ -162,6 +172,7 @@ def current_user_name() -> str:
         if u is not None:
             name = u.get("user_name") or u.get("email")
             if name:
+                st.session_state["_current_user_cached"] = str(name)
                 return str(name)
     except Exception:
         pass

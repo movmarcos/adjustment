@@ -109,6 +109,7 @@ with _hd2:
         except Exception as ex:
             st.session_state["so_flash"] = (
                 "warning", f"Sync failed. The database reported: {ex}")
+        st.cache_data.clear()
         safe_rerun()
 
 _flash = st.session_state.pop("so_flash", None)
@@ -119,17 +120,61 @@ if _flash:
 # LOAD — all sign-off rows (one query drives the whole page)
 # ══════════════════════════════════════════════════════════════════════════════
 
-df_all = pd.DataFrame()
+_STATUS_SQL = """
+    SELECT COBID, PROCESS_TYPE, ENTITY_CODE, SUB_TYPE,
+           SIGN_OFF_STATUS, SIGNOFF_SOURCE,
+           SIGN_OFF_BY, SIGN_OFF_TIMESTAMP,
+           REOPEN_REQUESTED_BY, REOPEN_REQUESTED_AT, REOPEN_REASON,
+           REOPEN_APPROVED_BY, REOPEN_APPROVED_AT, UPDATED_DATE
+    FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+    ORDER BY COBID DESC, PROCESS_TYPE, ENTITY_CODE
+"""
+
+_HIST_SQL = """
+    SELECT h.COBID, h.PROCESS_TYPE, COALESCE(h.ENTITY_CODE, '*') AS ENTITY_CODE,
+           h.SUB_TYPE, h.OLD_STATUS, h.NEW_STATUS, h.ACTION_BY, h.ACTION_AT,
+           h.COMMENT,
+           s.REOPEN_REQUESTED_BY, s.REOPEN_REASON, s.REOPEN_APPROVED_BY,
+           s.SIGN_OFF_BY, s.SIGNOFF_SOURCE
+    FROM ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY h
+    LEFT JOIN ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS s
+      ON s.COBID = h.COBID
+     AND UPPER(s.PROCESS_TYPE) = UPPER(h.PROCESS_TYPE)
+     AND UPPER(COALESCE(s.ENTITY_CODE, '*')) = UPPER(COALESCE(h.ENTITY_CODE, '*'))
+     AND COALESCE(UPPER(s.SUB_TYPE), '') = COALESCE(UPPER(h.SUB_TYPE), '')
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY h.COBID, UPPER(h.PROCESS_TYPE),
+                     UPPER(COALESCE(h.ENTITY_CODE, '*')),
+                     COALESCE(UPPER(h.SUB_TYPE), '')
+        ORDER BY h.ACTION_AT DESC, h.SIGNOFF_HISTORY_ID DESC) = 1
+    ORDER BY h.ACTION_AT DESC
+    LIMIT 200
+"""
+
+
+@st.cache_data(ttl=120, show_spinner="Loading sign-off status…")
+def _load_signoff_data():
+    """BOTH page queries in one cached call, fired CONCURRENTLY: the first
+    paint waits for the slower of the two instead of their sum. Cached 120s
+    (page revisits are instant); sync and both actions clear the cache so
+    changes show immediately."""
+    from utils.snowflake_conn import get_session
+    sess = get_session()
+    try:
+        j1 = sess.sql(_STATUS_SQL).collect_nowait()
+        j2 = sess.sql(_HIST_SQL).collect_nowait()
+        rows1, rows2 = j1.result(), j2.result()
+        df1 = pd.DataFrame([r.as_dict() for r in rows1])
+        df2 = pd.DataFrame([r.as_dict() for r in rows2])
+        return df1, df2
+    except Exception:
+        # Older Snowpark without collect_nowait — sequential fallback.
+        return run_query_df(_STATUS_SQL), run_query_df(_HIST_SQL)
+
+
+df_all, df_hist_cached = pd.DataFrame(), pd.DataFrame()
 try:
-    df_all = run_query_df("""
-        SELECT COBID, PROCESS_TYPE, ENTITY_CODE, SUB_TYPE,
-               SIGN_OFF_STATUS, SIGNOFF_SOURCE,
-               SIGN_OFF_BY, SIGN_OFF_TIMESTAMP,
-               REOPEN_REQUESTED_BY, REOPEN_REQUESTED_AT, REOPEN_REASON,
-               REOPEN_APPROVED_BY, REOPEN_APPROVED_AT, UPDATED_DATE
-        FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-        ORDER BY COBID DESC, PROCESS_TYPE, ENTITY_CODE
-    """)
+    df_all, df_hist_cached = _load_signoff_data()
 except Exception as e:
     st.info(f"Sign-off table not available: {e}")
 
@@ -314,6 +359,7 @@ def _request(scope_, entity_, sub_, action, verb, reason, requires_approval):
         st.session_state["so_flash"] = (
             "warning", f"{verb} was NOT applied — "
                        f"{out.get('message', 'no detail')}")
+    st.cache_data.clear()
     safe_rerun()
 
 
@@ -471,30 +517,8 @@ st.caption("The last thing that happened to each COB/scope/entity — sign-offs,
            "re-opens and pending requests, with who and why. First-time open "
            "entries with no activity are not listed.")
 
-df_hist = pd.DataFrame()
-try:
-    df_hist = run_query_df("""
-        SELECT h.COBID, h.PROCESS_TYPE, COALESCE(h.ENTITY_CODE, '*') AS ENTITY_CODE,
-               h.SUB_TYPE, h.OLD_STATUS, h.NEW_STATUS, h.ACTION_BY, h.ACTION_AT,
-               h.COMMENT,
-               s.REOPEN_REQUESTED_BY, s.REOPEN_REASON, s.REOPEN_APPROVED_BY,
-               s.SIGN_OFF_BY, s.SIGNOFF_SOURCE
-        FROM ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY h
-        LEFT JOIN ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS s
-          ON s.COBID = h.COBID
-         AND UPPER(s.PROCESS_TYPE) = UPPER(h.PROCESS_TYPE)
-         AND UPPER(COALESCE(s.ENTITY_CODE, '*')) = UPPER(COALESCE(h.ENTITY_CODE, '*'))
-         AND COALESCE(UPPER(s.SUB_TYPE), '') = COALESCE(UPPER(h.SUB_TYPE), '')
-        QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY h.COBID, UPPER(h.PROCESS_TYPE),
-                         UPPER(COALESCE(h.ENTITY_CODE, '*')),
-                         COALESCE(UPPER(h.SUB_TYPE), '')
-            ORDER BY h.ACTION_AT DESC, h.SIGNOFF_HISTORY_ID DESC) = 1
-        ORDER BY h.ACTION_AT DESC
-        LIMIT 200
-    """)
-except Exception as _ex:
-    st.info(f"Sign-off history not available: {_ex}")
+# Pre-fetched concurrently with the status rows at the top of the page.
+df_hist = df_hist_cached
 
 if df_hist.empty:
     st.caption("No sign-off activity recorded yet.")
