@@ -878,9 +878,12 @@ with bordered_container():
             return (f'{fmt_adj_id(r.get("DIMENSION_ADJ_ID"))} · {r.get("PROCESS_TYPE")} · '
                     f'{r.get("ADJUSTMENT_TYPE")} · {r.get("RUN_STATUS")} · '
                     f'{r.get("ENTITY_CODE") or "—"}')
+        # Breathing room between the grid and the picker so they don't crowd.
+        st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
         choice = st.selectbox(
-            "Open an adjustment", options=[None] + list(range(len(view_df))),
-            format_func=_opt_label, key="adj_pick", label_visibility="collapsed")
+            "Open an adjustment for details / actions",
+            options=[None] + list(range(len(view_df))),
+            format_func=_opt_label, key="adj_pick")
         selected = view_df.iloc[choice].to_dict() if choice is not None else None
 
 # ── Bulk retry — all FAILED rows in the current filtered view ────────────────
