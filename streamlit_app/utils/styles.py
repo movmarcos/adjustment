@@ -368,6 +368,16 @@ def inject_css():
     [data-testid="stSidebar"] [data-baseweb="select"] svg {{
         fill: #E2E5EA !important;
     }}
+    /* The widget LABEL word ("Timezone"): Streamlit's stWidgetLabel sets its
+       own color that out-specifies the sidebar * rule, so it stays dark.
+       Force the label and its inner <p> light. */
+    [data-testid="stSidebar"] [data-testid="stWidgetLabel"],
+    [data-testid="stSidebar"] [data-testid="stWidgetLabel"] * ,
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] label p {{
+        color: #E2E5EA !important;
+        -webkit-text-fill-color: #E2E5EA !important;
+    }}
 
     /* Logo area red top-stripe */
     [data-testid="stSidebar"] > div:first-child::before {{
