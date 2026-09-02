@@ -36,15 +36,20 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # FILTERS
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Distinct dimension values for the COB / Entity / Department / User filters below
-# (reads the app's adjustment headers only — small, one lightweight query).
-try:
-    _fopts = run_query_df("""
-        SELECT DISTINCT COBID, ENTITY_CODE, DEPARTMENT_CODE, SUBMITTED_BY
-        FROM ADJUSTMENT_APP.VW_MY_WORK
-    """)
-except Exception:
-    _fopts = pd.DataFrame(columns=["COBID", "ENTITY_CODE", "DEPARTMENT_CODE", "SUBMITTED_BY"])
+# Distinct dimension values for the COB / Entity / Department / User filters
+# below. Cached in session_state: filter options don't change meaningfully
+# within a session, and re-running this DISTINCT query on every filter
+# keystroke (each keystroke reruns the page) added avoidable latency.
+if "_adj_filter_opts" not in st.session_state:
+    try:
+        st.session_state["_adj_filter_opts"] = run_query_df("""
+            SELECT DISTINCT COBID, ENTITY_CODE, DEPARTMENT_CODE, SUBMITTED_BY
+            FROM ADJUSTMENT_APP.VW_MY_WORK
+        """)
+    except Exception:
+        st.session_state["_adj_filter_opts"] = pd.DataFrame(
+            columns=["COBID", "ENTITY_CODE", "DEPARTMENT_CODE", "SUBMITTED_BY"])
+_fopts = st.session_state["_adj_filter_opts"]
 
 def _distinct(col, reverse=False):
     if _fopts.empty or col not in _fopts.columns:
@@ -185,21 +190,31 @@ except Exception as e:
     df_adjs = pd.DataFrame()
     st.warning(f"Could not load adjustments: {e}")
 
-# Load lifecycle tracking data for all adjustments
+# Lifecycle tracking — ONLY for the (≤200) adjustments actually shown.
+# Previously this loaded ALL of VW_ADJUSTMENT_TRACK (no LIMIT) on EVERY
+# rerun; since each filter keystroke reruns the page, and the view now
+# self-joins ADJ_HEADER, that unbounded query per keystroke froze the page.
+# Bounding it to the shown ADJ_IDs makes it cheap and constant.
 df_track = pd.DataFrame()
-try:
-    df_track = run_query_df("""
-        SELECT ADJ_ID, CURRENT_STAGE, REPORT_STATUS,
-               SUBMITTED_AT, APPROVAL_REQUESTED_AT, APPROVED_AT,
-               PROCESSING_STARTED_AT, PROCESSING_ENDED_AT,
-               PBI_QUEUED_AT, PBI_STARTED_AT, PBI_COMPLETED_AT,
-               PBI_REFRESH_DURATION_SEC, PBI_QUEUE_WAIT_SEC,
-               REFRESH_PATH, DBT_TRIGGER_TIME,
-               RUN_STATUS
-    FROM ADJUSTMENT_APP.VW_ADJUSTMENT_TRACK
-    """)
-except Exception:
-    pass
+if not df_adjs.empty and "ADJ_ID" in df_adjs.columns:
+    _ids = [str(a) for a in df_adjs["ADJ_ID"].dropna().unique().tolist()]
+    if _ids:
+        _in = ",".join(
+            "'" + i.replace("\\", "\\\\").replace("'", "''") + "'" for i in _ids)
+        try:
+            df_track = run_query_df(f"""
+                SELECT ADJ_ID, CURRENT_STAGE, REPORT_STATUS,
+                       SUBMITTED_AT, APPROVAL_REQUESTED_AT, APPROVED_AT,
+                       PROCESSING_STARTED_AT, PROCESSING_ENDED_AT,
+                       PBI_QUEUED_AT, PBI_STARTED_AT, PBI_COMPLETED_AT,
+                       PBI_REFRESH_DURATION_SEC, PBI_QUEUE_WAIT_SEC,
+                       REFRESH_PATH, DBT_TRIGGER_TIME,
+                       RUN_STATUS
+                FROM ADJUSTMENT_APP.VW_ADJUSTMENT_TRACK
+                WHERE ADJ_ID IN ({_in})
+            """)
+        except Exception:
+            pass
 
 # Backwards compat alias
 df_report_status = df_track
