@@ -21,7 +21,7 @@ st.set_page_config(
 
 from utils.styles import (
     inject_css, render_sidebar, P, build_activity_grid_df, render_df_table,
-    bordered_container,
+    bordered_container, grid_pager, render_pager,
 )
 
 inject_css()
@@ -83,9 +83,9 @@ STYLES = {
         "so the page stays short like A.",
     "D — st.table (Streamlit's static table)":
         "Streamlit's built-in static HTML table, default styling.",
-    "E — Paginated HTML: 25 rows per page + page picker":
-        "Short page, tiny table, no scrollbars anywhere. Next 25 rows via "
-        "the picker.",
+    "E — Paginated: 25 rows + clickable page numbers below":
+        "Short page, small table, no scrollbars anywhere. Click the page "
+        "numbers under the grid (« 1 2 3 … ») to move through the rows.",
     "F — Markdown pipe table":
         "The simplest possible table — plain markdown, no custom HTML.",
     "G — st.dataframe sized to show ALL rows (long page)":
@@ -130,12 +130,12 @@ elif letter == "D":
 
 elif letter == "E":
     per = 25
-    pages = max(1, (len(grid) + per - 1) // per)
-    pg = st.selectbox("Page", list(range(1, pages + 1)), key="lab_pg")
-    chunk = grid.iloc[(pg - 1) * per: pg * per]
+    cur, pages = grid_pager(len(grid), per, key="lab_pgnum")
+    chunk = grid.iloc[cur * per:(cur + 1) * per]
     render_df_table(chunk, max_rows=per)
-    st.caption(f"Rows {(pg - 1) * per + 1}–{min(pg * per, len(grid))} "
+    st.caption(f"Rows {cur * per + 1}–{min((cur + 1) * per, len(grid))} "
                f"of {len(grid)}")
+    render_pager(pages, key="lab_pgnum")
 
 elif letter == "F":
     show = grid.head(100)

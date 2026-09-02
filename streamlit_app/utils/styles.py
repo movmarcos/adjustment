@@ -1805,6 +1805,65 @@ def resolve_selected_adjustment(df_source, selection_rows):
 SELECTION_UNSUPPORTED = object()
 
 
+def grid_pager(total_rows, per_page=25, key="pager"):
+    """Current page for a paginated grid. Call BEFORE rendering the slice:
+        cur, pages = grid_pager(len(df), 25, key="mygrid_pg")
+        render_df_table(df.iloc[cur*25:(cur+1)*25])
+        render_pager(pages, key="mygrid_pg")   # clickable numbers below
+    Returns (current_page_0_based, total_pages)."""
+    pages = max(1, (int(total_rows) + int(per_page) - 1) // int(per_page))
+    cur = min(int(st.session_state.get(key, 0)), pages - 1)
+    st.session_state[key] = cur
+    return cur, pages
+
+
+def render_pager(pages, key="pager"):
+    """Clickable page-number bar (« 1 2 [3] … 12 ») rendered BELOW a grid.
+    Windowed to at most 9 numbers with ellipses; the current page is the
+    highlighted (primary, disabled) button. Uses on_click callbacks so the
+    grid above reflects the new page in the same rerun."""
+    pages = int(pages)
+    if pages <= 1:
+        return
+    cur = min(int(st.session_state.get(key, 0)), pages - 1)
+
+    def _go(p):
+        st.session_state[key] = int(p)
+
+    if pages <= 9:
+        window = list(range(pages))
+    else:
+        window = sorted({0, pages - 1,
+                         *range(max(0, cur - 2), min(pages, cur + 3))})
+    items = []          # page index, or None for an ellipsis gap
+    prev_p = None
+    for p in window:
+        if prev_p is not None and p - prev_p > 1:
+            items.append(None)
+        items.append(p)
+        prev_p = p
+
+    slots = [0.9] + [0.8] * len(items) + [0.9]
+    spacer = max(0.5, 12 - sum(slots))
+    cols = st.columns(slots + [spacer])
+    with cols[0]:
+        st.button("‹", key=f"{key}_prev", disabled=cur <= 0,
+                  on_click=_go, args=(cur - 1,), use_container_width=True)
+    for i, p in enumerate(items):
+        with cols[i + 1]:
+            if p is None:
+                st.markdown("<div style='text-align:center;padding-top:6px;"
+                            "color:#8A94A6'>…</div>", unsafe_allow_html=True)
+            else:
+                st.button(str(p + 1), key=f"{key}_p{p}",
+                          type="primary" if p == cur else "secondary",
+                          disabled=p == cur,
+                          on_click=_go, args=(p,), use_container_width=True)
+    with cols[len(items) + 1]:
+        st.button("›", key=f"{key}_next", disabled=cur >= pages - 1,
+                  on_click=_go, args=(cur + 1,), use_container_width=True)
+
+
 def _df_height(n_rows, cap):
     """st.dataframe height that FITS n_rows exactly (~35px per row + header),
     capped so large tables scroll internally instead of growing the page

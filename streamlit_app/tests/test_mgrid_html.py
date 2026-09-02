@@ -87,6 +87,15 @@ def test_activity_grid_fixed_height_and_selection_sentinel(captured):
     assert kwargs.get("height") == 73
 
 
+def test_grid_pager_math(monkeypatch):
+    from utils.styles import grid_pager
+    monkeypatch.setattr(styles.st, "session_state", {}, raising=False)
+    assert grid_pager(0, 25, key="t1") == (0, 1)       # empty → one page
+    assert grid_pager(120, 25, key="t2") == (0, 5)     # 120/25 → 5 pages
+    styles.st.session_state["t3"] = 99                  # stale page clamps
+    assert grid_pager(50, 25, key="t3") == (1, 2)
+
+
 def test_activity_grid_empty_shows_info(captured, monkeypatch):
     infos = []
     monkeypatch.setattr(streamlit, "info", lambda *a, **k: infos.append(a))
