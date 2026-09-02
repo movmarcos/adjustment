@@ -41,9 +41,12 @@ USE SCHEMA ADJUSTMENT_APP;
 -- Applied INLINE via WITH TAG below on purpose: these tasks are CREATE OR
 -- REPLACE, which drops any tag applied out-of-band on every redeploy.
 -- Requires Enterprise Edition; the owner role needs CREATE TAG once.
+-- Values are display-ready ("Adjustment App") — they surface as-is in cost
+-- dashboards — so the tag is deliberately free-text (no ALLOWED_VALUES).
 CREATE TAG IF NOT EXISTS ADJUSTMENT_APP.SOLUTION
-    ALLOWED_VALUES 'ADJUSTMENT_ENGINE'
-    COMMENT = 'Cost/governance attribution: which solution owns this object.';
+    COMMENT = 'Cost/governance attribution: display name of the solution that owns this object.';
+-- Normalize environments deployed while the tag briefly had ALLOWED_VALUES.
+ALTER TAG ADJUSTMENT_APP.SOLUTION UNSET ALLOWED_VALUES;
 
 -- ─── VaR ───────────────────────────────────────────────────────────────────
 
@@ -53,7 +56,7 @@ CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_VAR
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible VaR adjustments. LARGE: VaR Entity Rolls move ~900M rows/leg.'
-    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'ADJUSTMENT_ENGINE')
+    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'Adjustment App')
 AS
     CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('VaR', '["VaR"]');
 
@@ -66,7 +69,7 @@ CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible Stress adjustments.'
-    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'ADJUSTMENT_ENGINE')
+    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'Adjustment App')
 AS
     CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('Stress', '["Stress"]');
 
@@ -79,7 +82,7 @@ CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible FRTB-pipeline adjustments (FRTB, FRTBDRC, FRTBRRAO).'
-    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'ADJUSTMENT_ENGINE')
+    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'Adjustment App')
 AS
     CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('FRTB', '["FRTB","FRTBDRC","FRTBRRAO"]');
 
@@ -92,7 +95,7 @@ CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible Sensitivity adjustments.'
-    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'ADJUSTMENT_ENGINE')
+    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'Adjustment App')
 AS
     CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('Sensitivity', '["Sensitivity"]');
 
@@ -109,7 +112,7 @@ CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_SYNC_SIGNOFF
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
     SCHEDULE  = '30 MINUTE'
     COMMENT   = 'Every 30 min: sync upstream publish sign-offs into ADJ_SIGNOFF_STATUS.'
-    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'ADJUSTMENT_ENGINE')
+    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'Adjustment App')
 AS
     CALL ADJUSTMENT_APP.SP_SYNC_SIGNOFF_STATUS();
 
