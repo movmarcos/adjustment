@@ -1805,6 +1805,15 @@ def resolve_selected_adjustment(df_source, selection_rows):
 SELECTION_UNSUPPORTED = object()
 
 
+def _df_height(n_rows, cap):
+    """st.dataframe height that FITS n_rows exactly (~35px per row + header),
+    capped so large tables scroll internally instead of growing the page
+    (short pages are what keeps Menlo isolation from white-tiling). Small
+    tables get no empty filler rows."""
+    fit = 35 * (int(n_rows) + 1) + 3
+    return min(fit, int(cap)) if cap else fit
+
+
 def _styler_cellmap(styler, func, subset):
     """Version-safe per-cell CSS map: Styler.map (pandas >= 2.1) or the older
     Styler.applymap. Keeps grids working across the SiS pandas versions."""
@@ -1850,7 +1859,8 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
                                 lambda v: STATUS_STYLE.get(v, ""), ["Status"])
     except Exception:
         shown = grid_df   # very old pandas: plain values beat no grid
-    st.dataframe(shown, use_container_width=True, height=height)
+    st.dataframe(shown, use_container_width=True,
+                 height=_df_height(len(grid_df), height))
     return SELECTION_UNSUPPORTED if selectable else None
 
 
@@ -1917,11 +1927,12 @@ def render_df_table(df, max_rows=1000, height=440, highlight=None,
             sty = sty.apply(_rowcss, axis=1)
     except Exception:
         sty = show   # very old pandas: plain values beat no grid
+    _h = _df_height(len(show), height)
     try:
-        st.dataframe(sty, use_container_width=True, height=height,
+        st.dataframe(sty, use_container_width=True, height=_h,
                      column_config=column_config)
     except TypeError:
-        st.dataframe(sty, use_container_width=True, height=height)
+        st.dataframe(sty, use_container_width=True, height=_h)
     if len(df) > max_rows:
         st.caption(f"Showing the first {int(max_rows)} of {len(df):,} rows.")
 

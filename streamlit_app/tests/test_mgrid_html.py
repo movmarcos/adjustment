@@ -35,14 +35,21 @@ def captured(monkeypatch):
     return calls
 
 
-def test_render_df_table_uses_fixed_height_dataframe(captured):
+def test_render_df_table_small_table_fits_content(captured):
     df = pd.DataFrame({"Comment": ["cost is $5", "plain"],
                        "Amount": [1234.5, None]})
     render_df_table(df, formats={"Amount": "{:,.2f}"}, height=300)
     assert len(captured) == 1
     _, kwargs = captured[0]
-    assert kwargs.get("height") == 300          # bounded → internal scroll
+    # 2 rows fit in 35*(2+1)+3 = 108px — no empty filler rows below.
+    assert kwargs.get("height") == 108
     assert kwargs.get("use_container_width") is True
+
+
+def test_render_df_table_large_table_capped(captured):
+    render_df_table(pd.DataFrame({"A": range(200)}), height=300)
+    _, kwargs = captured[0]
+    assert kwargs.get("height") == 300          # cap → internal scroll
 
 
 def test_render_df_table_max_rows_caption(captured, monkeypatch):
@@ -75,7 +82,9 @@ def test_activity_grid_fixed_height_and_selection_sentinel(captured):
     got = render_activity_grid(src, selectable=True)
     assert got is SELECTION_UNSUPPORTED
     _, kwargs = captured[0]
-    assert kwargs.get("height") == 380          # Grid Lab style A geometry
+    # 1 row fits in 35*(1+1)+3 = 73px; the 380px style-A cap applies only
+    # to tables taller than that.
+    assert kwargs.get("height") == 73
 
 
 def test_activity_grid_empty_shows_info(captured, monkeypatch):
