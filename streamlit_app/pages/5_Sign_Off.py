@@ -173,21 +173,16 @@ _all_cobs = sorted(df_all["COBID"].astype(int).unique().tolist(), reverse=True)
 # COCKPIT — the sign-off state of ONE COB, per scope, at a glance
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Prominent business-date picker. A segmented radio makes the choice (and the
-# available dates) evident at a glance; it degrades to a selectbox only when
-# there are too many dates to lay out as a row.
+# Prominent business-date picker — a dropdown. Everything below covers the
+# selected date.
 st.markdown(
     f'<div style="font-size:0.75rem;font-weight:700;text-transform:uppercase;'
     f'letter-spacing:.07em;color:{P["grey_700"]};margin-bottom:1px">'
     f'{icon("calendar", size=13)} &nbsp;Business date (COB) — everything below '
     f'covers the selected date</div>', unsafe_allow_html=True)
 
-_COB_RADIO_MAX = 15
-if len(_all_cobs) <= _COB_RADIO_MAX:
-    sel_cob = st.radio("COB", _all_cobs, index=0, horizontal=True,
-                       format_func=lambda v: str(v), key="so_cob_radio",
-                       label_visibility="collapsed")
-else:
+_cb1, _cb2 = st.columns([1, 3])
+with _cb1:
     sel_cob = st.selectbox("COB", _all_cobs, index=0, key="so_cob",
                            format_func=lambda v: str(v),
                            label_visibility="collapsed")
