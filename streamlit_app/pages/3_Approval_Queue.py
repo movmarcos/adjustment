@@ -23,6 +23,18 @@ def _esc(val):
     """Escape single quotes for safe SQL interpolation."""
     return str(val).replace("\\", "\\\\").replace("'", "''") if val is not None else ""
 
+
+def _pill(text, color):
+    return (f'<span style="background:{color}18;color:{color};'
+            f'border:1px solid {color}55;border-radius:99px;padding:1px 10px;'
+            f'font-size:0.74rem;font-weight:700;white-space:nowrap">{text}</span>')
+
+
+def _scope_pill(scope):
+    cfg = SCOPE_CONFIG.get(str(scope), {})
+    return _pill(_htmlmod.escape(str(scope) or "—"), cfg.get("color", P["grey_700"]))
+
+
 inject_css()
 render_sidebar()
 
@@ -302,12 +314,11 @@ else:
             (df_overlaps["ADJ_ID_A"] == adj_id).any() or
             (df_overlaps["ADJ_ID_B"] == adj_id).any()
         ))
+        _cob_lbl = row.get("COBID", "—")
         expander_label = (
-            f'ADJ {adj_short} · {scope} · '
-            f'{adj_type} · by {submitted_by}  — OVERLAP'
-            if has_overlap else
-            f'ADJ {adj_short} · {scope} · '
-            f'{adj_type} · by {submitted_by}'
+            f'ADJ {adj_short} · COB {_cob_lbl} · {scope} · {adj_type} · '
+            f'entity {entity} · book {book} · by {submitted_by}'
+            + ("  — ⚠ OVERLAP" if has_overlap else "")
         )
         with st.expander(expander_label, expanded=has_overlap):
             col_info, col_actions = st.columns([3, 1])
@@ -542,23 +553,40 @@ else:
         r_reason = str(rr["REOPEN_REASON"] or "—")
         _is_signoff = str(rr["SIGN_OFF_STATUS"]).upper() == "SIGNOFF_REQUESTED"
         r_verb   = "Sign-off" if _is_signoff else "Re-open"
+        _verb_col = "#B45309" if _is_signoff else P["danger"]
         with bordered_container():
             c_info, c_act = st.columns([2.4, 1])
             with c_info:
-                st.markdown(f"**{r_verb} request — COB {r_cob} · {r_scope} · "
-                            f"{r_ent_tx}**")
+                # Header: what + where, as pills so it scans like the rest of
+                # the app (Sign-off orange, Re-open red; scope in its colour).
+                st.markdown(
+                    '<div style="display:flex;align-items:center;gap:8px;'
+                    'flex-wrap:wrap;margin-bottom:4px">'
+                    + _pill(f"{r_verb.upper()} REQUEST", _verb_col)
+                    + _scope_pill(r_scope)
+                    + f'<span style="font-weight:700;font-size:0.95rem">COB {r_cob}'
+                    + f' · {_htmlmod.escape(r_ent_tx)}</span></div>',
+                    unsafe_allow_html=True)
+                st.markdown(
+                    f'<div style="font-size:0.8rem;color:{P["grey_700"]}">'
+                    f'Requested by <strong>{_htmlmod.escape(r_by)}</strong> at '
+                    f'{fmt_user_dt(rr["REOPEN_REQUESTED_AT"])}</div>',
+                    unsafe_allow_html=True)
                 if _is_signoff:
-                    st.caption(f"Requested by {r_by} at "
-                               f"{fmt_user_dt(rr['REOPEN_REQUESTED_AT'])} — approving signs "
-                               f"the COB off (blocks new adjustments); "
-                               f"rejecting keeps it open.")
+                    _ctx = ("Approving <strong>signs the COB off</strong> "
+                            "(blocks new adjustments); rejecting keeps it open.")
                 else:
-                    st.caption(f"Requested by {r_by} at "
-                               f"{fmt_user_dt(rr['REOPEN_REQUESTED_AT'])} — originally "
-                               f"signed off by {rr['SIGN_OFF_BY'] or '—'} "
-                               f"({rr['SIGNOFF_SOURCE'] or 'EXTERNAL'}). "
-                               f"Approving re-opens the COB for adjustments.")
-                st.markdown(f"Reason: {r_reason}")
+                    _ctx = ("Originally signed off by "
+                            f"<strong>{_htmlmod.escape(str(rr['SIGN_OFF_BY'] or '—'))}</strong> "
+                            f"({_htmlmod.escape(str(rr['SIGNOFF_SOURCE'] or 'EXTERNAL'))}). "
+                            "Approving <strong>re-opens the COB</strong> for adjustments.")
+                st.markdown(
+                    f'<div style="font-size:0.8rem;color:{P["grey_700"]};'
+                    f'margin-top:2px">{_ctx}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div style="font-size:0.84rem;margin-top:6px">'
+                    f'<span style="color:{P["grey_700"]}">Reason:</span> '
+                    f'{_htmlmod.escape(r_reason)}</div>', unsafe_allow_html=True)
             with c_act:
                 _own_req = (user and r_by != "—"
                             and user.strip().upper() == r_by.strip().upper())
