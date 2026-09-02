@@ -714,7 +714,12 @@ try:
             render_grid(
                 ["Adj", "Outcome", "COB", "Scope", "Type", "Entity",
                  "Submitted by", "Decided by", "When", "Comment"],
-                _rows)
+                _rows,
+                color_cols={
+                    "Outcome": {"APPROVED": STATUS_COLORS.get("Approved", P["success"]),
+                                "REJECTED": STATUS_COLORS.get("Rejected", P["danger"])},
+                    "Scope": lambda v: SCOPE_CONFIG.get(str(v), {}).get("color", P["grey_700"]),
+                })
             st.caption(f"{len(_d)} decision(s), newest first.")
 except Exception as _ex:
     st.info(f"No approval history available yet. ({_ex})")

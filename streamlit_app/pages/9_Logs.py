@@ -540,8 +540,13 @@ with tab_signoff:
                     f'<span style="color:{P["grey_700"]}">'
                     f'{_esc_html(ev.get("COMMENT") or "")}</span>',
                 ])
+            _ev_colors = {lbl: col for (lbl, col) in _SO_EVENT.values()}
             render_grid(
                 ["Time", "Event", "COB", "Scope", "Entity", "From", "By",
-                 "Comment"], _rows)
+                 "Comment"], _rows,
+                color_cols={
+                    "Event": _ev_colors, "From": _ev_colors,
+                    "Scope": lambda v: SCOPE_CONFIG.get(str(v), {}).get("color", P["grey_700"]),
+                })
     except Exception as _ex:
         st.info(f"Sign-off history not available: {_ex}")

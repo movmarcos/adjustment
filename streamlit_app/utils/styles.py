@@ -1789,6 +1789,18 @@ def resolve_selected_adjustment(df_source, selection_rows):
 SELECTION_UNSUPPORTED = object()
 
 
+def _styler_cellmap(styler, func, subset):
+    """Version-safe per-cell CSS map: Styler.map (pandas >= 2.1) or the older
+    Styler.applymap. Keeps grids working across the SiS pandas versions."""
+    _m = getattr(styler, "map", None)
+    if _m is not None:
+        try:
+            return _m(func, subset=subset)
+        except TypeError:
+            pass
+    return styler.applymap(func, subset=subset)
+
+
 def _supports_df_selection(st):
     """True if this Streamlit can do st.dataframe row-selection (>= 1.35).
     Older Streamlit-in-Snowflake runtimes ship pre-1.35 and lack it (the same
@@ -1801,15 +1813,12 @@ def _supports_df_selection(st):
 
 
 def render_activity_grid(df_source, *, selectable=False, key=None,
-                         height=None, empty_msg="No adjustments yet."):
-    """Render the shared 19-column activity grid through the canonical
-    render_grid (.mgrid look) so it matches every other table in the app.
-    Flows in the page by default (no nested scroll box) exactly like every
-    other grid; pass height only for a deliberately bounded box.
-    Selection is always done by the caller's picker: this returns
-    SELECTION_UNSUPPORTED when selectable=True (the runtimes we target lack
-    native st.dataframe selection anyway), else None."""
-    import html as _hm
+                         height=440, empty_msg="No adjustments yet."):
+    """Shared 19-column activity grid via NATIVE st.dataframe: scrolls
+    internally at a fixed height (never rolls the page), real frozen header,
+    handles hundreds of rows, never renders blank. Status text is colour-coded
+    via a Styler. Selection is via the caller's picker — returns
+    SELECTION_UNSUPPORTED when selectable, else None."""
     import streamlit as st
 
     if df_source is None or df_source.empty:
@@ -1817,23 +1826,9 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
         return None
 
     grid_df = build_activity_grid_df(df_source)
-
-    rows = []
-    for _, row in grid_df.iterrows():
-        cells = []
-        for c in grid_df.columns:
-            v = "" if row[c] is None else str(row[c])
-            if c == "Status":
-                sty = STATUS_STYLE.get(v, f"color:{P['grey_700']}")
-                cells.append(f'<span style="{sty}">{_hm.escape(v)}</span>')
-            else:
-                cells.append(_hm.escape(v))
-        rows.append(cells)
-    # Numeric-ish columns right-aligned for scan-ability.
-    _right = {"COB", "Source COB", "Records"}
-    aligns = ["right" if c in _right else "left" for c in grid_df.columns]
-    render_grid([_hm.escape(str(c)) for c in grid_df.columns], rows,
-                aligns=aligns, height=height)
+    styler = _styler_cellmap(grid_df.style.hide(axis="index"),
+                             lambda v: STATUS_STYLE.get(v, ""), ["Status"])
+    st.dataframe(styler, use_container_width=True, height=height)
     return SELECTION_UNSUPPORTED if selectable else None
 
 
@@ -1854,105 +1849,106 @@ def bordered_container():
         return c
 
 
-def render_grid(headers, rows, *, aligns=None, height=None, caption=None,
-                return_html=False):
-    """THE canonical grid renderer — one look for every table in the app.
+def render_df_table(df, max_rows=1000, height=440, highlight=None,
+                    formats=None, color_cols=None, column_config=None):
+    """CANONICAL grid — native st.dataframe. Scrolls INTERNALLY at a fixed
+    height (never rolls the page), real frozen header, robust for hundreds of
+    rows, never renders blank.
 
-    headers : list[str] — column headers.
-    rows    : list — each item is one of
-                • a list/tuple of cell HTML strings (a normal row), or
-                • {"divider": "text"} for a full-width section/day divider, or
-                • {"cells": [...], "hot": bool} to tint a row red.
-              Cell content is emitted AS-IS (already-safe HTML — pills, links,
-              escaped text). Callers escape their own user text.
-    aligns  : optional list of "left"/"right" per column.
-    height  : optional px; bounds the grid in a vertical scroll box.
-    All styling comes from the shared .mgrid CSS classes, so grids are
-    visually identical across pages regardless of who calls this."""
-    aligns = aligns or ["left"] * len(headers)
-    _rcls = [" r" if a == "right" else "" for a in aligns]
-    thead = "".join(f'<th class="{("r" if a=="right" else "")}">{h}</th>'
-                    for h, a in zip(headers, aligns))
-    body = []
-    for row in rows:
-        if isinstance(row, dict) and "divider" in row:
-            body.append(f'<tr class="mgrid-div"><td colspan="{len(headers)}">'
-                        f'{row["divider"]}</td></tr>')
-            continue
-        if isinstance(row, dict):
-            cells = row.get("cells", [])
-            hot = row.get("hot", False)
-        else:
-            cells, hot = row, False
-        _bg = f' style="background:{P["danger_lt"]}"' if hot else ""
-        tds = "".join(f'<td class="{_rcls[i] if i < len(_rcls) else ""}">{c}</td>'
-                      for i, c in enumerate(cells))
-        body.append(f"<tr{_bg}>{tds}</tr>")
-    # Bounded vertical scroll only when a height is asked for; otherwise the
-    # grid flows in the page (horizontal scroll only) — no nested scroll.
-    _wrap_style = (f' style="max-height:{int(height)}px;overflow:auto"'
-                   if height else "")
-    html = (f'<div class="mgrid-wrap"{_wrap_style}>'
-            f'<table class="mgrid"><thead><tr>{thead}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div>')
-    if return_html:
-        return html
-    st.markdown(html, unsafe_allow_html=True)
-
-
-def render_df_table(df, max_rows=200, height=None, highlight=None, formats=None):
-    """Theme-proof READ-ONLY table for a DataFrame. Delegates to render_grid,
-    so it shares the one canonical .mgrid look with every other table.
-    Use render_activity_grid where row SELECTION is needed.
-
-    highlight: optional callable(row_dict) -> bool; True tints the row red.
-    formats:   optional {column: format_string}, e.g. {"DIFF": "{:,.2f}"}.
+    highlight:  callable(row_dict)->bool; True tints the row red.
+    formats:    {column: python_format}, e.g. {"COST": "${:,.2f}"}.
+    color_cols: {column: {value: '#hex'}} or {column: callable(value)->'#hex'}
+                — colours that column's TEXT by value (status/scope colouring).
     """
-    import html as _hm
     import pandas as _pd
-
     if df is None or len(df) == 0:
         st.caption("No rows.")
         return
-    show = df.head(int(max_rows))
-    formats = formats or {}
-    numeric = {c for c in show.columns
-               if _pd.api.types.is_numeric_dtype(show[c])}
-
-    def _fmt(col, v):
-        try:
-            if v is None or _pd.isna(v):
-                return "—"
-        except (TypeError, ValueError):
-            pass
-        if col in formats:
+    show = df.head(int(max_rows)).reset_index(drop=True)
+    sty = show.style.hide(axis="index")
+    if formats:
+        def _mk(fmt):
+            return lambda v: (fmt.format(v) if _pd.notna(v) else "—")
+        sty = sty.format({c: _mk(f) for c, f in formats.items()
+                          if c in show.columns})
+    if color_cols:
+        for _col, _spec in color_cols.items():
+            if _col not in show.columns:
+                continue
+            def _css(v, spec=_spec):
+                hexc = spec(v) if callable(spec) else spec.get(str(v), "")
+                return f"color:{hexc};font-weight:700" if hexc else ""
+            sty = _styler_cellmap(sty, _css, [_col])
+    if highlight:
+        def _rowcss(row):
             try:
-                return _hm.escape(formats[col].format(v))
-            except (ValueError, TypeError):
-                pass
-        if isinstance(v, bool):
-            return "TRUE" if v else "FALSE"
-        if isinstance(v, int):
-            return f"{v:,}"
-        if isinstance(v, float):
-            return f"{int(v):,}" if v.is_integer() else f"{v:,.4g}"
-        if hasattr(v, "strftime"):
-            return fmt_user_dt(v)
-        return _hm.escape(str(v))
-
-    aligns = ["right" if c in numeric else "left" for c in show.columns]
-    rows = []
-    for _, row in show.iterrows():
-        try:
-            hot = bool(highlight(row.to_dict())) if highlight else False
-        except Exception:
-            hot = False
-        rows.append({"cells": [_fmt(c, row[c]) for c in show.columns],
-                     "hot": hot})
-    render_grid([_hm.escape(str(c)) for c in show.columns], rows,
-                aligns=aligns, height=height)
+                hot = bool(highlight(row.to_dict()))
+            except Exception:
+                hot = False
+            return [f"background-color:{P['danger_lt']}" if hot else ""] * len(row)
+        sty = sty.apply(_rowcss, axis=1)
+    try:
+        st.dataframe(sty, use_container_width=True, height=height,
+                     column_config=column_config)
+    except TypeError:
+        st.dataframe(sty, use_container_width=True, height=height)
     if len(df) > max_rows:
         st.caption(f"Showing the first {int(max_rows)} of {len(df):,} rows.")
+
+
+def render_grid(headers, rows, *, aligns=None, height=440, caption=None,
+                return_html=False, color_cols=None):
+    """Compatibility wrapper over render_df_table for the legacy
+    (headers, rows) callers. Cells may contain HTML (old pill markup) — it is
+    stripped to plain text because the native grid shows values, not markup.
+    Divider rows ({"divider": text}) become a leading 'Section' column so
+    day/section grouping survives as sortable data.
+    color_cols may name columns to colour by value (see render_df_table)."""
+    import re as _re
+    import html as _hm2
+    import pandas as _pd
+
+    def _plain(x):
+        return _hm2.unescape(_re.sub(r"<[^>]+>", "", str(x))).strip()
+
+    if return_html:
+        # Small composed tables (Logs Runs/Activity per-day chunks) keep the
+        # lightweight inline .mgrid HTML — they were never the problem.
+        _al = aligns or []
+        _rc = ["r" if (i < len(_al) and _al[i] == "right") else ""
+               for i in range(len(headers))]
+        _th = "".join(f'<th class="{_rc[i]}">{h}</th>'
+                      for i, h in enumerate(headers))
+        _body = []
+        for row in rows:
+            if isinstance(row, dict) and "divider" in row:
+                _body.append(f'<tr class="mgrid-div"><td colspan="{len(headers)}">'
+                             f'{row["divider"]}</td></tr>')
+                continue
+            cells = row.get("cells", []) if isinstance(row, dict) else row
+            _body.append("<tr>" + "".join(
+                f'<td class="{_rc[i] if i < len(_rc) else ""}">{c}</td>'
+                for i, c in enumerate(cells)) + "</tr>")
+        return (f'<div class="mgrid-wrap"><table class="mgrid">'
+                f'<thead><tr>{_th}</tr></thead>'
+                f'<tbody>{"".join(_body)}</tbody></table></div>')
+
+    # Direct render -> native scrollable st.dataframe.
+    hdrs = [_plain(h) for h in headers]
+    has_div = any(isinstance(r, dict) and "divider" in r for r in rows)
+    records, cur = [], None
+    for row in rows:
+        if isinstance(row, dict) and "divider" in row:
+            cur = _plain(row["divider"])
+            continue
+        cells = row.get("cells", []) if isinstance(row, dict) else row
+        rec = {}
+        if has_div:
+            rec["Section"] = cur or ""
+        for h, c in zip(hdrs, cells):
+            rec[h] = _plain(c)
+        records.append(rec)
+    render_df_table(_pd.DataFrame(records), height=height, color_cols=color_cols)
 
 
 def render_sidebar():

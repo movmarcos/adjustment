@@ -510,9 +510,18 @@ with tab_act:
                 _entity_chips(g_rows),
                 f'<span style="color:{P["grey_700"]};font-size:0.8rem">{_detail}</span>',
             ])
+        _signoff_colors = {
+            "SIGNED OFF": P["success"], "OPEN": P["danger"],
+            "RE-OPENED": P["danger"], "PARTIALLY SIGNED OFF": "#B45309",
+            "SIGN-OFF PENDING": "#B45309", "RE-OPEN PENDING": "#B45309",
+        }
         render_grid(
             ["COB", "Scope", "Sign-off", "Submissions", "Entities", "Detail"],
-            _rows)
+            _rows,
+            color_cols={
+                "Sign-off": _signoff_colors,
+                "Scope": lambda v: SCOPE_CONFIG.get(str(v), {}).get("color", P["grey_700"]),
+            })
         st.caption(f"{len(_groups)} COB/scope line(s) · "
                    f"{len(df_grid)} underlying entit(y/ies)")
 
@@ -592,7 +601,12 @@ with tab_hist:
                 f'<span style="color:{P["grey_700"]}">'
                 f'{_cell(_nz(h.get("COMMENT"))[:160])}</span>',
             ])
+        _ev_colors = {lbl: col for (lbl, col) in _EVENT_META.values()}
         render_grid(
             ["Time", "Event", "COB", "Scope", "Entity", "From", "By", "Comment"],
-            _rows)
+            _rows,
+            color_cols={
+                "Event": _ev_colors, "From": _ev_colors,
+                "Scope": lambda v: SCOPE_CONFIG.get(str(v), {}).get("color", P["grey_700"]),
+            })
         st.caption(f"{len(_df)} event(s), newest first.")
