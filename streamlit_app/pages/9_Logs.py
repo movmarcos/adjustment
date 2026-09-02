@@ -74,11 +74,14 @@ def _fmt_int(v):
 
 
 def _esc_html(v) -> str:
-    """HTML-escape AND whitespace-normalize: newlines inside user text
-    (reasons, comments, error messages) end the markdown HTML block and
-    blank the whole table — collapse them to single spaces."""
+    """HTML-escape, whitespace-normalize AND neutralize '$': newlines end
+    the markdown HTML block, and a $...$ pair (two amounts in one comment)
+    triggers Streamlit's LaTeX math and swallows the table markup between
+    them — either way the grid renders as a blank white box."""
     import html
-    return html.escape(" ".join(str(v).split())) if v is not None else ""
+    if v is None:
+        return ""
+    return html.escape(" ".join(str(v).split())).replace("$", "&#36;")
 
 
 def _pill(text, color) -> str:

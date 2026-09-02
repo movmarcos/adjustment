@@ -465,7 +465,7 @@ else:
             f'font-size:0.78rem">{sub}</span></td>'
             f'<td {_td}>{_entity_chips(g_rows)}</td>'
             f'<td {_td}><span style="color:{P["grey_700"]};font-size:0.8rem">'
-            f'{_hesc.escape(" ".join(str(detail).split()))}</span></td>'
+            f'{_hesc.escape(" ".join(str(detail).split())).replace("$", "&#36;")}</span></td>'
             f'</tr>')
     st.markdown(
         f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
@@ -502,6 +502,14 @@ else:
         if v is None or (isinstance(v, float) and pd.isna(v)):
             return ""
         return " ".join(str(v).split())
+
+    def _cell(v):
+        """User text → safe HTML cell: NaN-safe, whitespace-normalized,
+        HTML-escaped, and with '$' neutralized to &#36; — Streamlit's
+        markdown treats a $...$ pair as LaTeX math and a comment mentioning
+        two amounts ('moved $2m ... $ risk') swallows the table markup
+        between them, blanking the whole day-grid."""
+        return _hesc.escape(_nz(v)).replace("$", "&#36;")
 
     _EVENT_META = {
         "SIGNED_OFF":        ("SIGNED OFF",         P["success"]),
@@ -549,9 +557,9 @@ else:
         feed_rows = []
         for _, h in day_df.iterrows():
             sub = _nz(h.get("SUB_TYPE"))
-            ent = _hesc.escape(_nz(h.get("ENTITY_CODE")) or "*") + (
+            ent = (_cell(h.get("ENTITY_CODE")) or "*") + (
                 f' <span style="color:{P["grey_700"]}">/ '
-                f'{_hesc.escape(sub)}</span>' if sub else "")
+                f'{_cell(sub)}</span>' if sub else "")
             _old = _nz(h.get("OLD_STATUS")).upper()
             frm = (_ev_pill(_old) if _old else
                    f'<span style="color:{P["grey_700"]}">—</span>')
@@ -562,9 +570,9 @@ else:
                 _scope_pill(h.get("PROCESS_TYPE")),
                 ent,
                 frm,
-                _hesc.escape(_nz(h.get("ACTION_BY")) or "—"),
+                _cell(h.get("ACTION_BY")) or "—",
                 f'<span style="color:{P["grey_700"]}">'
-                f'{_hesc.escape(_nz(h.get("COMMENT"))[:160])}</span>',
+                f'{_cell(_nz(h.get("COMMENT"))[:160])}</span>',
             ])
         st.markdown(_hist_table(
             ["Time", "Event", "COB", "Scope", "Entity", "From", "By",
