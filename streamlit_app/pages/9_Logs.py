@@ -23,7 +23,7 @@ st.set_page_config(
 from utils.styles import (
     inject_css, render_sidebar, section_title,
     P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, fmt_adj_id, icon,
-    fmt_user_dt, render_df_table,
+    fmt_user_dt,
 )
 from utils.snowflake_conn import run_query, run_query_df
 
@@ -500,10 +500,60 @@ with tab_signoff:
                 _df = _df[_df["PROCESS_TYPE"].isin(_f_scope)]
             if _f_event:
                 _df = _df[_df["NEW_STATUS"].astype(str).isin(_f_event)]
-            _show = _df.copy()
-            _show["ACTION_AT"] = _show["ACTION_AT"].apply(
-                lambda v: fmt_user_dt(v, "%d %b %Y %H:%M:%S"))
-            st.caption(f"{len(_show)} transition(s)")
-            render_df_table(_show, max_rows=300, height=380)
+            st.caption(f"{len(_df)} transition(s)")
+
+            # Same palette as the Sign-Off page: done=green, open work=red,
+            # awaiting a decision=orange.
+            _SO_EVENT = {
+                "SIGNED_OFF":        ("SIGNED OFF",         P["success"]),
+                "REOPENED":          ("RE-OPENED",          P["danger"]),
+                "OPEN":              ("OPEN",               P["danger"]),
+                "SIGNOFF_REQUESTED": ("SIGN-OFF REQUESTED", "#B45309"),
+                "REOPEN_REQUESTED":  ("RE-OPEN REQUESTED",  "#B45309"),
+            }
+
+            def _so_pill(status):
+                lbl, col = _SO_EVENT.get(str(status).upper(),
+                                         (str(status) or "—", P["grey_700"]))
+                return _pill(lbl, col)
+
+            # Day-grouped feed with badges — same style as the Activity tab.
+            _df = _df.head(300).copy()
+            _df["_DAY"] = _df["ACTION_AT"].apply(
+                lambda v: fmt_user_dt(v, "%A %d %b %Y"))
+            for day, day_df in _df.groupby("_DAY", sort=False):
+                st.markdown(
+                    f'<div style="font-size:0.78rem;font-weight:700;'
+                    f'text-transform:uppercase;letter-spacing:.06em;'
+                    f'color:{P["grey_700"]};margin:0.9rem 0 0.3rem 0">{day}</div>',
+                    unsafe_allow_html=True)
+                feed_rows = []
+                for _, ev in day_df.iterrows():
+                    _sub = ev.get("SUB_TYPE")
+                    _sub = "" if (_sub is None or pd.isna(_sub)) else str(_sub)
+                    ent = _esc_html(ev.get("ENTITY_CODE") or "*") + (
+                        f' <span style="color:{P["grey_700"]}">/ '
+                        f'{_esc_html(_sub)}</span>' if _sub else "")
+                    _old = str(ev.get("OLD_STATUS") or "").upper()
+                    frm = (_so_pill(_old) if _old else
+                           f'<span style="color:{P["grey_700"]}">—</span>')
+                    feed_rows.append([
+                        fmt_user_dt(ev.get("ACTION_AT"), "%H:%M:%S"),
+                        _so_pill(ev.get("NEW_STATUS")),
+                        f'<strong>{int(ev.get("COBID"))}</strong>',
+                        _scope_pill(ev.get("PROCESS_TYPE")),
+                        ent,
+                        frm,
+                        _esc_html(ev.get("ACTION_BY") or "—"),
+                        f'<span style="color:{P["grey_700"]}">'
+                        f'{_esc_html(ev.get("COMMENT") or "")}</span>',
+                    ])
+                st.markdown(_table(
+                    ["Time", "Event", "COB", "Scope", "Entity", "From",
+                     "By", "Comment"],
+                    feed_rows,
+                    aligns=["right", "left", "left", "left", "left", "left",
+                            "left", "left"]),
+                    unsafe_allow_html=True)
     except Exception as _ex:
         st.info(f"Sign-off history not available: {_ex}")
