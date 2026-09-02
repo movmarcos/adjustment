@@ -1204,20 +1204,20 @@ def inject_css():
        identical regardless of which page or helper built them.
        Pure server-rendered HTML on purpose: st.dataframe on the SiS runtime
        (1.22.0 live) paints onto a <canvas> that can mount at zero size inside
-       the Snowflake iframe (worst inside tabs/expanders) and stay a blank
-       white box forever. Plain DOM cannot fail to paint.
-       overflow:auto on the wrapper makes IT the scroll container, so the
-       sticky header below can only stick within the wrapper — it can never
-       overlay the page like the old page-scroll sticky headers did. */
+       the Snowflake iframe and stay a blank white box forever. Plain DOM
+       cannot fail to paint.
+       DELIBERATELY no position:sticky and no internal vertical scroll box:
+       the user's traffic goes through Menlo Security remote browser
+       isolation, whose compositor paints white tiles over regions it must
+       re-render live — sticky elements and nested scroll containers are its
+       worst cases. A flat table in a single page scroll is what it renders
+       reliably (the pre-redesign grids worked for exactly this reason). */
     .mgrid-wrap {{
-        overflow: auto; background: {P["card"]};
+        overflow-x: auto; background: {P["card"]};
         border: 1px solid {P["border"]}; border-radius: 8px;
     }}
-    /* border-collapse must be separate: Chrome drops sticky th backgrounds
-       under border-collapse:collapse. */
     .mgrid {{ width: 100%; border-collapse: separate; border-spacing: 0; }}
     .mgrid th {{
-        position: sticky; top: 0; z-index: 2;
         text-align: left; padding: 8px 12px; font-size: 0.7rem;
         font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
         color: {P["grey_700"]}; background: {P["card"]};
@@ -1823,13 +1823,16 @@ def _grid_cell_text(v):
     return " ".join(s.split())
 
 
-def _render_mgrid(show, *, height=440, right_cols=(), fmt=None,
+def _render_mgrid(show, *, height=None, right_cols=(), fmt=None,
                   cell_css=None, row_css=None):
     """Emit a DataFrame as the canonical .mgrid HTML table via st.markdown.
     Server-rendered DOM — cannot render as a white box (st.dataframe's canvas
-    can, on the SiS 1.26 runtime). Scrolls internally: the wrapper gets
-    max-height (not height, so short tables leave no white gap) and
-    overflow:auto; the CSS sticky header sticks inside that wrapper only.
+    can, on the live SiS runtime). The table FLOWS IN THE PAGE: no sticky
+    header, no internal vertical scroll box, horizontal scroll only when the
+    table is wider than the page. Menlo Security browser isolation (the
+    users' network path) paints white tiles over sticky elements and nested
+    scroll regions — a flat single-scroll document is the one shape it
+    renders reliably. `height` is accepted for API compatibility and ignored.
 
     show:       DataFrame of raw values (display order).
     right_cols: column names to right-align.
@@ -1869,9 +1872,8 @@ def _render_mgrid(show, *, height=440, right_cols=(), fmt=None,
             style = f' style="{css}"' if css else ""
             tds.append(f"<td{klass}{style}>{txt}</td>")
         body.append("<tr>" + "".join(tds) + "</tr>")
-    cap = f"max-height:{int(height)}px;" if height else ""
     st.markdown(
-        f'<div class="mgrid-wrap" style="{cap}"><table class="mgrid">'
+        f'<div class="mgrid-wrap"><table class="mgrid">'
         f"<thead><tr>{th}</tr></thead>"
         f'<tbody>{"".join(body)}</tbody></table></div>',
         unsafe_allow_html=True)
@@ -1890,10 +1892,10 @@ def _supports_df_selection(st):
 
 def render_activity_grid(df_source, *, selectable=False, key=None,
                          height=440, empty_msg="No adjustments yet."):
-    """Shared 19-column activity grid as server-rendered .mgrid HTML: scrolls
-    internally (max-height wrapper — never rolls the page), sticky header
-    contained in the wrapper, and — being plain DOM, not st.dataframe's
-    canvas — physically cannot render as a white box on the SiS 1.26 runtime.
+    """Shared 19-column activity grid as server-rendered .mgrid HTML that
+    flows in the page (no sticky header, no nested scroll box — the shapes
+    Menlo browser isolation paints white tiles over), and — being plain DOM,
+    not st.dataframe's canvas — physically cannot render as a white box.
     Status text is colour-coded inline. Selection is via the caller's picker —
     returns SELECTION_UNSUPPORTED when selectable, else None."""
     import streamlit as st
@@ -1929,9 +1931,9 @@ def bordered_container():
 def render_df_table(df, max_rows=1000, height=440, highlight=None,
                     formats=None, color_cols=None, column_config=None):
     """CANONICAL grid — server-rendered .mgrid HTML (NOT st.dataframe, whose
-    canvas renders as a permanent white box on the SiS 1.26 runtime). Scrolls
-    INTERNALLY via a max-height wrapper (short tables leave no white gap,
-    long ones never roll the page) with a sticky header contained in it.
+    canvas renders as a permanent white box on the live SiS runtime). The
+    table flows in the page — no sticky header, no internal scroll box —
+    because Menlo browser isolation white-tiles those; height is ignored.
 
     highlight:  callable(row_dict)->bool; True tints the row red.
     formats:    {column: python_format}, e.g. {"COST": "${:,.2f}"}.

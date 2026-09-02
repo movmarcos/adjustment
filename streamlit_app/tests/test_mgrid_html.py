@@ -56,7 +56,9 @@ def test_render_df_table_is_pure_single_line_html(captured):
     assert "1,234.50" in html
     assert "—" in html                           # NaN placeholder
     assert 'class="r"' in html                   # numeric col right-aligned
-    assert "max-height:440px" in html            # bounded, not fixed height
+    # Menlo browser isolation white-tiles nested scroll regions — the grid
+    # must flow in the page with no internal vertical scroll cap.
+    assert "max-height" not in html
 
 
 def test_render_df_table_color_and_highlight(captured):
