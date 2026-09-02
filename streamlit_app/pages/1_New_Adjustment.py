@@ -1277,7 +1277,15 @@ def _measure_type_options(process_type=None):
 
 
 def _code_select(label, key, value, options, help=None, placeholder="— select —"):
-    """Dropdown over reference codes; free-text fallback when none are available."""
+    """Dropdown over reference codes; free-text fallback when none are available.
+
+    Controlled-widget pattern: session_state[key] is the SINGLE source of
+    truth. Never pass `index` alongside `key` — the model-derived index and
+    the widget's own state fight, so the first selection reverts on the next
+    rerun and the user must pick twice (bug reported on every combo box).
+    We seed session_state[key] from the model only when the widget is new or
+    its stored value is no longer valid for the current options (e.g. a parent
+    filter changed the list), then let the widget own it."""
     if not options:
         return st.text_input(label, value=value or "", key=key + "_txt",
                              help=help).strip()
@@ -1285,8 +1293,9 @@ def _code_select(label, key, value, options, help=None, placeholder="— select 
     opts = [""] + list(options)
     if cur and cur not in opts:          # keep an already-set value selectable
         opts.insert(1, cur)
-    idx = opts.index(cur) if cur in opts else 0
-    return st.selectbox(label, opts, index=idx, key=key, help=help,
+    if key not in st.session_state or st.session_state[key] not in opts:
+        st.session_state[key] = cur if cur in opts else ""
+    return st.selectbox(label, opts, key=key, help=help,
                         format_func=lambda x: placeholder if x == "" else x)
 
 
