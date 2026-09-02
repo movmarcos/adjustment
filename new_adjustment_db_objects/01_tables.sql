@@ -978,6 +978,9 @@ USING (
     UNION ALL
     SELECT 'SIGNOFF_FEED_ENABLED', 'true',
            'When true, SP_SUBMIT_ADJUSTMENT and SP_SYNC_SIGNOFF_STATUS consult the upstream feed table live. Set to false only while the unified feed table does not exist yet.'
+    UNION ALL
+    SELECT 'COST_PER_CREDIT_USD', '3.00',
+           'Price of one Snowflake credit in USD. Editable on the Tasks & Cost page; converts credit usage into money.'
 ) s
 ON t.CONFIG_KEY = s.CONFIG_KEY
 WHEN NOT MATCHED THEN INSERT (CONFIG_KEY, CONFIG_VALUE, DESCRIPTION)
