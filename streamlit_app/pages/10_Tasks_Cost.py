@@ -7,13 +7,14 @@ Three panels:
     it (SHOW TASKS returns an empty warehouse column), or "Warehouse: NAME"
     if a task is ever moved onto a dedicated warehouse.
   • Recent runs — INFORMATION_SCHEMA.TASK_HISTORY (live, last 7 days).
-  • Cost — serverless credits are attributed PER TASK
-    (SERVERLESS_TASK_HISTORY); warehouse credits are metered PER WAREHOUSE
-    (WAREHOUSE_METERING_HISTORY — includes the app's own queries; a future
-    warehouse-based task would show up under its warehouse here, not in the
-    per-task table). Credits × the configurable price (ADJ_APP_CONFIG key
-    COST_PER_CREDIT_USD) = money. ACCOUNT_USAGE is preferred (long history,
-    ~2h lag) with INFORMATION_SCHEMA fallback (live, ≤14 days).
+  • Cost — SERVERLESS TASK USAGE ONLY, attributed exactly per task
+    (SERVERLESS_TASK_HISTORY) × the configurable credit price (ADJ_APP_CONFIG
+    key COST_PER_CREDIT_USD). The Streamlit/dynamic-table warehouse is
+    deliberately EXCLUDED: it is shared with other processes, so its metering
+    is not this solution's cost (Marcos, 2026-09). A task moved onto a shared
+    warehouse would likewise stop being attributable — keep tasks serverless.
+    ACCOUNT_USAGE preferred (long history, ~2h lag); INFORMATION_SCHEMA
+    fallback (live, ≤14 days).
 All queries are plain run_query/run_query_df with loud warnings on failure —
 no caching, no async (SiS runtime).
 """
@@ -38,9 +39,10 @@ user = current_user_name()
 st.markdown("## Tasks & Cost")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
-    "Health of the background tasks and what the system costs to run. "
-    "Serverless task credits are exact per task; warehouse credits cover "
-    "everything that runs on that warehouse, including the app itself."
+    "Health of the background tasks and what they cost to run. Only "
+    "serverless task credits are counted — they are attributable exactly to "
+    "this solution. The query warehouse is shared with other processes, so "
+    "its usage is not included here."
     "</span>", unsafe_allow_html=True)
 st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -238,111 +240,59 @@ except Exception:
         st.warning(f"Could not load serverless task credits — the database "
                    f"reported: {ex}")
 
-# ── Warehouse credits: per warehouse (app queries + any warehouse tasks) ─────
-_whs = {config.WAREHOUSE, config.DT_WH}
-for t in _tasks:
-    if (t.get("warehouse") or "").strip():
-        _whs.add(t["warehouse"].strip())
-_wh_list = ", ".join(f"'{_esc(w)}'" for w in sorted(_whs))
-
-df_wh, wh_src = pd.DataFrame(), ""
-try:
-    df_wh = run_query_df(f"""
-        SELECT WAREHOUSE_NAME AS WAREHOUSE, DATE(START_TIME) AS DAY,
-               SUM(CREDITS_USED) AS CREDITS
-        FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
-        WHERE WAREHOUSE_NAME IN ({_wh_list})
-          AND START_TIME >= DATEADD(day, -{int(days)}, CURRENT_TIMESTAMP())
-        GROUP BY 1, 2""")
-    wh_src = "ACCOUNT_USAGE (complete window, ~2h behind)"
-except Exception:
-    _parts = []
-    for w in sorted(_whs):
-        try:
-            _parts.append(run_query_df(f"""
-                SELECT '{_esc(w)}' AS WAREHOUSE, DATE(START_TIME) AS DAY,
-                       SUM(CREDITS_USED) AS CREDITS
-                FROM TABLE({config.DATABASE}.INFORMATION_SCHEMA.WAREHOUSE_METERING_HISTORY(
-                    DATE_RANGE_START => DATEADD(day, -{int(days)}, CURRENT_TIMESTAMP()),
-                    WAREHOUSE_NAME => '{_esc(w)}'))
-                GROUP BY 1, 2"""))
-        except Exception:
-            pass
-    if _parts:
-        df_wh = pd.concat(_parts, ignore_index=True)
-        wh_src = "INFORMATION_SCHEMA (live)"
-    else:
-        st.warning("Could not load warehouse credits from ACCOUNT_USAGE or "
-                   "INFORMATION_SCHEMA — the app role may need MONITOR on the "
-                   "warehouses or IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE.")
-
 # ── Tag filter: keep only serverless tasks carrying the selected tag ─────────
 if sel_tag != "All" and not df_srv.empty:
     _tagged = {name for name, v in _tag_map.items() if v == sel_tag}
     df_srv = df_srv[df_srv["TASK"].isin(_tagged)]
-    st.caption(f"Serverless costs filtered to SOLUTION = **{sel_tag}** "
-               f"({len(_tagged)} task(s)). Warehouse metering is not filtered.")
+    st.caption(f"Costs filtered to SOLUTION = **{sel_tag}** "
+               f"({len(_tagged)} task(s)).")
 
-# ── KPIs ─────────────────────────────────────────────────────────────────────
+# ── KPIs — task usage only ──────────────────────────────────────────────────
 srv_credits = float(pd.to_numeric(df_srv.get("CREDITS"), errors="coerce").sum()) if not df_srv.empty else 0.0
-wh_credits = float(pd.to_numeric(df_wh.get("CREDITS"), errors="coerce").sum()) if not df_wh.empty else 0.0
-total_cost = (srv_credits + wh_credits) * float(price or 0)
+total_cost = srv_credits * float(price or 0)
 monthly = total_cost / int(days) * 30.44 if days else 0.0
+_top_task, _top_cost = "—", ""
+if not df_srv.empty:
+    _g = df_srv.groupby("TASK")["CREDITS"].sum()
+    _top_task = str(_g.idxmax()).replace("TASK_PROCESS_", "").replace("TASK_", "")
+    _top_cost = f"${_g.max() * float(price or 0):,.2f} in the window"
 
 st.markdown("<br/>", unsafe_allow_html=True)
 m1, m2, m3, m4 = st.columns(4)
-m1.markdown(kpi_card("Serverless credits", f"{srv_credits:,.2f}",
-                     f"tasks, last {days}d"), unsafe_allow_html=True)
-m2.markdown(kpi_card("Warehouse credits", f"{wh_credits:,.2f}",
-                     f"{len(_whs)} warehouse(s), last {days}d"), unsafe_allow_html=True)
-m3.markdown(kpi_card("Cost", f"${total_cost:,.2f}",
+m1.markdown(kpi_card("Task credits", f"{srv_credits:,.3f}",
+                     f"serverless, last {days}d"), unsafe_allow_html=True)
+m2.markdown(kpi_card("Task cost", f"${total_cost:,.2f}",
                      f"at ${price:,.2f}/credit"), unsafe_allow_html=True)
-m4.markdown(kpi_card("Monthly run-rate", f"${monthly:,.2f}",
+m3.markdown(kpi_card("Monthly run-rate", f"${monthly:,.2f}",
                      "extrapolated from the window"), unsafe_allow_html=True)
+m4.markdown(kpi_card("Biggest consumer", _top_task, _top_cost),
+            unsafe_allow_html=True)
 st.markdown("<br/>", unsafe_allow_html=True)
 
-# ── Breakdown tables + daily trend ───────────────────────────────────────────
-b1, b2 = st.columns(2)
-with b1:
-    st.markdown("**Per task (serverless — exact attribution)**")
-    if df_srv.empty:
-        st.caption("No serverless task usage in the window.")
-    else:
-        g = (df_srv.groupby("TASK", as_index=False)["CREDITS"].sum()
-             .sort_values("CREDITS", ascending=False))
-        g["COST_USD"] = g["CREDITS"] * float(price or 0)
-        render_df_table(g, formats={"CREDITS": "{:,.3f}", "COST_USD": "${:,.2f}"})
-        if srv_src:
-            st.caption(f"Source: {srv_src}")
-with b2:
-    st.markdown("**Per warehouse (whole-warehouse metering)**")
-    if df_wh.empty:
-        st.caption("No warehouse usage in the window.")
-    else:
-        g = (df_wh.groupby("WAREHOUSE", as_index=False)["CREDITS"].sum()
-             .sort_values("CREDITS", ascending=False))
-        g["COST_USD"] = g["CREDITS"] * float(price or 0)
-        render_df_table(g, formats={"CREDITS": "{:,.3f}", "COST_USD": "${:,.2f}"})
-        if wh_src:
-            st.caption(f"Source: {wh_src}")
-        st.caption("Warehouse credits include everything on the warehouse "
-                   "(the app's queries too). If a task is ever moved from "
-                   "serverless onto a warehouse, its cost appears HERE under "
-                   "that warehouse — not in the per-task table.")
+# ── Per-task breakdown + daily trend ─────────────────────────────────────────
+if df_srv.empty:
+    st.caption("No serverless task usage in the window.")
+else:
+    g = (df_srv.groupby("TASK", as_index=False)["CREDITS"].sum()
+         .sort_values("CREDITS", ascending=False))
+    g["COST_USD"] = g["CREDITS"] * float(price or 0)
+    g["SHARE"] = g["CREDITS"] / g["CREDITS"].sum()
+    render_df_table(g, formats={"CREDITS": "{:,.4f}", "COST_USD": "${:,.2f}",
+                                "SHARE": "{:.1%}"})
+    if srv_src:
+        st.caption(f"Source: {srv_src}")
 
-_trend = []
-if not df_srv.empty:
-    t = df_srv.groupby("DAY", as_index=False)["CREDITS"].sum()
-    t["KIND"] = "Serverless tasks"
-    _trend.append(t)
-if not df_wh.empty:
-    t = df_wh.groupby("DAY", as_index=False)["CREDITS"].sum()
-    t["KIND"] = "Warehouses"
-    _trend.append(t)
-if _trend:
     st.markdown("<br/>", unsafe_allow_html=True)
-    st.markdown("**Daily credits**")
-    tr = pd.concat(_trend, ignore_index=True)
-    pivot = tr.pivot_table(index="DAY", columns="KIND", values="CREDITS",
-                           aggfunc="sum").fillna(0).sort_index()
+    st.markdown("**Daily credits per task**")
+    pivot = (df_srv.pivot_table(index="DAY", columns="TASK", values="CREDITS",
+                                aggfunc="sum").fillna(0).sort_index())
+    pivot.columns = [c.replace("TASK_PROCESS_", "").replace("TASK_", "")
+                     for c in pivot.columns]
     st.bar_chart(pivot)
+
+st.caption("Why no warehouse figures: the Streamlit query / dynamic-table "
+           "warehouse is shared with other processes, so its metering is not "
+           "attributable to this solution and is deliberately excluded. If a "
+           "task is ever moved from serverless onto a shared warehouse, its "
+           "cost disappears from this page for the same reason — keep the "
+           "tasks serverless to keep their cost visible.")
