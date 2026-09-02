@@ -512,21 +512,21 @@ with tab_hist:
         st.caption("No sign-off activity recorded yet.")
     else:
         def _nz(v):
-            """NaN/None-safe string ('' for empty), whitespace-NORMALIZED: a
-            newline inside a user comment ends the markdown HTML block and the
-            whole table renders as an empty white box — collapse all runs of
-            whitespace to single spaces before the value enters the HTML."""
+            """NaN/None-safe string ('' for empty), whitespace-normalized."""
             if v is None or (isinstance(v, float) and pd.isna(v)):
                 return ""
             return " ".join(str(v).split())
 
         def _cell(v):
-            """User text → safe HTML cell: NaN-safe, whitespace-normalized,
-            HTML-escaped, and with '$' neutralized to &#36; — Streamlit's
-            markdown treats a $...$ pair as LaTeX math and a comment mentioning
-            two amounts ('moved $2m ... $ risk') swallows the table markup
-            between them, blanking the whole day-grid."""
+            """User text → safe HTML: escaped + '$' neutralized (a $…$ pair
+            would trigger Streamlit's LaTeX and eat the markup)."""
             return _hesc.escape(_nz(v)).replace("$", "&#36;")
+
+        def _cob(v):
+            try:
+                return str(int(v))
+            except (TypeError, ValueError):
+                return _cell(v) or "—"
 
         _EVENT_META = {
             "SIGNED_OFF":        ("SIGNED OFF",         P["success"]),
@@ -545,52 +545,61 @@ with tab_hist:
             cfg = SCOPE_CONFIG.get(str(scope), {})
             return _pill(str(scope) or "—", cfg.get("color", P["grey_700"]))
 
-        def _hist_table(headers, rows_):
-            th = "".join(
-                f'<th style="text-align:left;padding:6px 10px;font-size:0.72rem;'
-                f'text-transform:uppercase;letter-spacing:.05em;color:{P["grey_700"]};'
-                f'border-bottom:2px solid {P["border"]};white-space:nowrap">{h}</th>'
-                for h in headers)
-            trs = "".join(
-                "<tr>" + "".join(
-                    f'<td style="padding:5px 10px;font-size:0.82rem;'
-                    f'border-bottom:1px solid {P["border"]};vertical-align:middle;'
-                    f'font-variant-numeric:tabular-nums">{c}</td>'
-                    for c in r) + "</tr>"
-                for r in rows_)
-            return (f'<div style="overflow-x:auto;background:{P["white"]};'
-                    f'border:1px solid {P["border"]};border-radius:8px">'
-                    f'<table style="width:100%;border-collapse:collapse">'
-                    f'<thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table></div>')
-
+        # ONE table, ONE st.markdown call. Day changes are divider ROWS inside
+        # the single table rather than separate markdown blocks — many small
+        # raw-HTML blocks rendered blank until scrolled (lazy height/reflow).
+        # A fixed-height scroll container keeps the DOM a single predictable
+        # element regardless of row count.
         _df = df_hist.copy()
         _df["_DAY"] = _df["ACTION_AT"].apply(lambda v: fmt_user_dt(v, "%A %d %b %Y"))
-        for day, day_df in _df.groupby("_DAY", sort=False):
-            st.markdown(
-                f'<div style="font-size:0.78rem;font-weight:700;'
-                f'text-transform:uppercase;letter-spacing:.06em;'
-                f'color:{P["grey_700"]};margin:0.9rem 0 0.3rem 0">{day}</div>',
-                unsafe_allow_html=True)
-            feed_rows = []
-            for _, h in day_df.iterrows():
-                sub = _nz(h.get("SUB_TYPE"))
-                ent = (_cell(h.get("ENTITY_CODE")) or "*") + (
-                    f' <span style="color:{P["grey_700"]}">/ '
-                    f'{_cell(sub)}</span>' if sub else "")
-                _old = _nz(h.get("OLD_STATUS")).upper()
-                frm = (_ev_pill(_old) if _old else
-                       f'<span style="color:{P["grey_700"]}">—</span>')
-                feed_rows.append([
-                    fmt_user_dt(h.get("ACTION_AT"), "%H:%M:%S"),
-                    _ev_pill(h.get("NEW_STATUS")),
-                    f'<strong>{int(h["COBID"])}</strong>',
-                    _scope_pill(h.get("PROCESS_TYPE")),
-                    ent,
-                    frm,
-                    _cell(h.get("ACTION_BY")) or "—",
-                    f'<span style="color:{P["grey_700"]}">'
-                    f'{_cell(_nz(h.get("COMMENT"))[:160])}</span>',
-                ])
-            st.markdown(_hist_table(
-                ["Time", "Event", "COB", "Scope", "Entity", "From", "By",
-                 "Comment"], feed_rows), unsafe_allow_html=True)
+
+        _th = (f'style="position:sticky;top:0;background:{P["white"]};'
+               f'text-align:left;padding:7px 10px;font-size:0.72rem;'
+               f'text-transform:uppercase;letter-spacing:.05em;'
+               f'color:{P["grey_700"]};border-bottom:2px solid {P["border"]};'
+               f'white-space:nowrap;z-index:1"')
+        _td = (f'padding:5px 10px;font-size:0.82rem;'
+               f'border-bottom:1px solid {P["border"]};vertical-align:middle;'
+               f'font-variant-numeric:tabular-nums')
+
+        parts = []
+        _cur_day = None
+        for _, h in _df.iterrows():
+            if h["_DAY"] != _cur_day:
+                _cur_day = h["_DAY"]
+                parts.append(
+                    f'<tr><td colspan="8" style="padding:9px 10px 3px;'
+                    f'font-size:0.72rem;font-weight:700;text-transform:uppercase;'
+                    f'letter-spacing:.06em;color:{P["grey_700"]};'
+                    f'background:{P["bg"]}">{_hesc.escape(str(_cur_day))}</td></tr>')
+            sub = _nz(h.get("SUB_TYPE"))
+            ent = (_cell(h.get("ENTITY_CODE")) or "*") + (
+                f' <span style="color:{P["grey_700"]}">/ {_cell(sub)}</span>'
+                if sub else "")
+            _old = _nz(h.get("OLD_STATUS")).upper()
+            frm = (_ev_pill(_old) if _old
+                   else f'<span style="color:{P["grey_700"]}">—</span>')
+            cells = [
+                fmt_user_dt(h.get("ACTION_AT"), "%H:%M:%S"),
+                _ev_pill(h.get("NEW_STATUS")),
+                f'<strong>{_cob(h.get("COBID"))}</strong>',
+                _scope_pill(h.get("PROCESS_TYPE")),
+                ent, frm,
+                _cell(h.get("ACTION_BY")) or "—",
+                f'<span style="color:{P["grey_700"]}">'
+                f'{_cell(_nz(h.get("COMMENT"))[:160])}</span>',
+            ]
+            parts.append(
+                "<tr>" + "".join(f'<td style="{_td}">{c}</td>' for c in cells)
+                + "</tr>")
+
+        _headers = ["Time", "Event", "COB", "Scope", "Entity", "From", "By",
+                    "Comment"]
+        st.markdown(
+            f'<div style="max-height:560px;overflow:auto;background:{P["white"]};'
+            f'border:1px solid {P["border"]};border-radius:8px">'
+            f'<table style="width:100%;border-collapse:collapse">'
+            f'<thead><tr>{"".join(f"<th {_th}>{h}</th>" for h in _headers)}'
+            f'</tr></thead><tbody>{"".join(parts)}</tbody></table></div>',
+            unsafe_allow_html=True)
+        st.caption(f"{len(_df)} event(s), newest first.")

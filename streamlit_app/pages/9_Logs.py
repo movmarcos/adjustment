@@ -523,43 +523,63 @@ with tab_signoff:
                                          (str(status) or "—", P["grey_700"]))
                 return _pill(lbl, col)
 
-            # Day-grouped feed with badges — same style as the Activity tab.
+            def _cob_str(v):
+                try:
+                    return str(int(v))
+                except (TypeError, ValueError):
+                    return _esc_html(v) or "—"
+
+            # ONE table, ONE st.markdown, day dividers as ROWS inside it.
+            # (Many separate raw-HTML blocks render blank until scrolled —
+            # lazy height/reflow; a single scroll container is stable.)
             _df = _df.head(300).copy()
             _df["_DAY"] = _df["ACTION_AT"].apply(
                 lambda v: fmt_user_dt(v, "%A %d %b %Y"))
-            for day, day_df in _df.groupby("_DAY", sort=False):
-                st.markdown(
-                    f'<div style="font-size:0.78rem;font-weight:700;'
-                    f'text-transform:uppercase;letter-spacing:.06em;'
-                    f'color:{P["grey_700"]};margin:0.9rem 0 0.3rem 0">{day}</div>',
-                    unsafe_allow_html=True)
-                feed_rows = []
-                for _, ev in day_df.iterrows():
-                    _sub = ev.get("SUB_TYPE")
-                    _sub = "" if (_sub is None or pd.isna(_sub)) else str(_sub)
-                    ent = _esc_html(ev.get("ENTITY_CODE") or "*") + (
-                        f' <span style="color:{P["grey_700"]}">/ '
-                        f'{_esc_html(_sub)}</span>' if _sub else "")
-                    _old = str(ev.get("OLD_STATUS") or "").upper()
-                    frm = (_so_pill(_old) if _old else
-                           f'<span style="color:{P["grey_700"]}">—</span>')
-                    feed_rows.append([
-                        fmt_user_dt(ev.get("ACTION_AT"), "%H:%M:%S"),
-                        _so_pill(ev.get("NEW_STATUS")),
-                        f'<strong>{int(ev.get("COBID"))}</strong>',
-                        _scope_pill(ev.get("PROCESS_TYPE")),
-                        ent,
-                        frm,
-                        _esc_html(ev.get("ACTION_BY") or "—"),
-                        f'<span style="color:{P["grey_700"]}">'
-                        f'{_esc_html(ev.get("COMMENT") or "")}</span>',
-                    ])
-                st.markdown(_table(
-                    ["Time", "Event", "COB", "Scope", "Entity", "From",
-                     "By", "Comment"],
-                    feed_rows,
-                    aligns=["right", "left", "left", "left", "left", "left",
-                            "left", "left"]),
-                    unsafe_allow_html=True)
+            _th = (f'style="position:sticky;top:0;background:{P["white"]};'
+                   f'text-align:left;padding:7px 10px;font-size:0.72rem;'
+                   f'text-transform:uppercase;letter-spacing:.05em;'
+                   f'color:{P["grey_700"]};border-bottom:2px solid {P["border"]};'
+                   f'white-space:nowrap;z-index:1"')
+            _td = (f'padding:5px 10px;font-size:0.82rem;'
+                   f'border-bottom:1px solid {P["border"]};vertical-align:middle;'
+                   f'font-variant-numeric:tabular-nums')
+            parts, _cur = [], None
+            for _, ev in _df.iterrows():
+                if ev["_DAY"] != _cur:
+                    _cur = ev["_DAY"]
+                    parts.append(
+                        f'<tr><td colspan="8" style="padding:9px 10px 3px;'
+                        f'font-size:0.72rem;font-weight:700;text-transform:uppercase;'
+                        f'letter-spacing:.06em;color:{P["grey_700"]}">'
+                        f'{_esc_html(_cur)}</td></tr>')
+                _sub = ev.get("SUB_TYPE")
+                _sub = "" if (_sub is None or pd.isna(_sub)) else str(_sub)
+                ent = _esc_html(ev.get("ENTITY_CODE") or "*") + (
+                    f' <span style="color:{P["grey_700"]}">/ '
+                    f'{_esc_html(_sub)}</span>' if _sub else "")
+                _old = str(ev.get("OLD_STATUS") or "").upper()
+                frm = (_so_pill(_old) if _old else
+                       f'<span style="color:{P["grey_700"]}">—</span>')
+                cells = [
+                    fmt_user_dt(ev.get("ACTION_AT"), "%H:%M:%S"),
+                    _so_pill(ev.get("NEW_STATUS")),
+                    f'<strong>{_cob_str(ev.get("COBID"))}</strong>',
+                    _scope_pill(ev.get("PROCESS_TYPE")),
+                    ent, frm,
+                    _esc_html(ev.get("ACTION_BY") or "—"),
+                    f'<span style="color:{P["grey_700"]}">'
+                    f'{_esc_html(ev.get("COMMENT") or "")}</span>',
+                ]
+                parts.append("<tr>" + "".join(
+                    f'<td style="{_td}">{c}</td>' for c in cells) + "</tr>")
+            _headers = ["Time", "Event", "COB", "Scope", "Entity", "From",
+                        "By", "Comment"]
+            st.markdown(
+                f'<div style="max-height:560px;overflow:auto;background:{P["white"]};'
+                f'border:1px solid {P["border"]};border-radius:8px">'
+                f'<table style="width:100%;border-collapse:collapse">'
+                f'<thead><tr>{"".join(f"<th {_th}>{h}</th>" for h in _headers)}'
+                f'</tr></thead><tbody>{"".join(parts)}</tbody></table></div>',
+                unsafe_allow_html=True)
     except Exception as _ex:
         st.info(f"Sign-off history not available: {_ex}")
