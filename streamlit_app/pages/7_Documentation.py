@@ -34,8 +34,9 @@ st.set_page_config(
 
 from utils.styles import (
     inject_css, render_sidebar, section_title,
-    P, SCOPE_CONFIG, STATUS_COLORS, icon,
+    P, SCOPE_CONFIG, STATUS_COLORS, icon, bordered_container,
 )
+from utils.snowflake_conn import run_query, run_query_df, friendly_error
 
 inject_css()
 render_sidebar()
@@ -98,6 +99,257 @@ def _pill(text, color) -> str:
     return (f'<span style="background:{color}18;color:{color};border:1px solid {color}55;'
             f'border-radius:99px;padding:1px 10px;font-size:0.74rem;font-weight:700;'
             f'white-space:nowrap">{text}</span>')
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AI ASSISTANT — Snowflake Cortex, grounded in a live snapshot of the engine.
+# Runs entirely inside Snowflake (SNOWFLAKE.CORTEX.COMPLETE): the data never
+# leaves the account. Answers are constrained to the injected context so it
+# reports real status instead of guessing.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _cfg(key, default=""):
+    try:
+        r = run_query(f"""SELECT CONFIG_VALUE FROM ADJUSTMENT_APP.ADJ_APP_CONFIG
+                          WHERE CONFIG_KEY = '{key}'""")
+        return str(r[0][0]) if r and r[0][0] is not None else default
+    except Exception:
+        return default
+
+
+def _sql_lit(s: str) -> str:
+    """Escape a Python string for a Snowflake single-quoted literal."""
+    return str(s).replace("\\", "\\\\").replace("'", "''")
+
+
+# What the system IS — a compact, always-true description so the model can
+# explain processes even when the question is not about live data.
+_KNOWLEDGE = """
+The MUFG Adjustment Engine lets the risk team correct/override published risk
+numbers for four scopes — VaR, Stress, Sensitivity, FRTB (FRTB has sub-types
+FRTB=SBM, FRTBDRC, FRTBRRAO, processed by one shared FRTB pipeline). Base fact
+data is NEVER modified; adjustments live in separate adjustment tables and
+reports combine them.
+
+Adjustment categories:
+- Scaling: Flatten (zero the scope), Scale (multiply by a factor), Roll (carry
+  another COB's adjusted values forward).
+- Direct: paste/upload a CSV of exact values (Stress/Sensitivity/FRTB); each
+  row is its own adjustment.
+- VaR Upload: one CSV in VaR legacy layout = one adjustment; re-upload with the
+  same COB+Reference replaces the previous one.
+- Entity Roll: destructive replace of an entity's figures at a COB; always
+  needs approval.
+
+Lifecycle statuses: Pending (queued for the 1-min poll), Pending Approval,
+Approved, Running, Processed (applied; report refresh queued), Failed (see the
+error; Retry re-queues and cleans up first), Rejected, Rejected - SignedOff
+(COB was signed off), Replaced, Superseded, Deleted.
+
+Processing: four scope tasks run every minute (serverless) and call
+SP_RUN_PIPELINE which polls ADJ_HEADER — reap dead runs (stuck >4h -> Failed),
+serialise overlapping rows, claim eligible rows with a token, process, release
+blocked rows. Overlapping adjustments are serialised and the newest wins
+(superseded, never double-counted).
+
+Sign-off: owned by the upstream publish feed (synced every 30 min; also checked
+live at submit). Granularity is COB+entity+scope (+optional SUB_TYPE). Once
+signed off, no new adjustments can be submitted for that entity. Sign-off can
+apply immediately (approval optional); re-open ALWAYS needs 4-eyes approval.
+
+Reports hand-off: VaR/Stress -> Power BI refresh (~5 min); Sensitivity/FRTB ->
+dbt rebuild via Control-M. If hand-off fails the numbers are still applied but
+reports may be stale.
+
+Pages: Home (dashboard), New Adjustment (create/submit), Adjustments (pipeline
+status boxes + stage board + full list with Retry/Delete/Recall), Approval
+Queue (approve/reject, 4-eyes), Sign-Off (sign off / re-open, sync), Admin
+(config, approvers, admins), Logs (runs, activity, errors, sign-off audit),
+Tasks & Cost (task health + serverless cost). Approvers never approve their own
+requests.
+""".strip()
+
+
+def _live_snapshot(question: str) -> str:
+    """Compact, current facts pulled from the engine so answers are grounded in
+    real state. Each query is best-effort — a missing grant never breaks it."""
+    import re
+    parts = []
+
+    def _try(label, sql, fmt):
+        try:
+            df = run_query_df(sql)
+            if df is not None and not df.empty:
+                parts.append(label + "\n" + fmt(df))
+        except Exception:
+            pass
+
+    _try("Adjustment counts by status (not deleted):",
+         """SELECT RUN_STATUS, COUNT(*) AS N FROM ADJUSTMENT_APP.ADJ_HEADER
+            WHERE COALESCE(IS_DELETED, FALSE) = FALSE GROUP BY RUN_STATUS
+            ORDER BY N DESC""",
+         lambda d: "; ".join(f"{r.RUN_STATUS}: {int(r.N)}"
+                             for r in d.itertuples()))
+
+    _try("Most recent adjustments (id, COB, scope, type, status, entity, by):",
+         """SELECT DIMENSION_ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_TYPE,
+                   RUN_STATUS, ENTITY_CODE, USERNAME
+            FROM ADJUSTMENT_APP.ADJ_HEADER
+            WHERE COALESCE(IS_DELETED, FALSE) = FALSE
+            ORDER BY CREATED_DATE DESC LIMIT 15""",
+         lambda d: "\n".join(
+             f"  #{r.DIMENSION_ADJ_ID} COB {r.COBID} {r.PROCESS_TYPE} "
+             f"{r.ADJUSTMENT_TYPE} {r.RUN_STATUS} "
+             f"entity={r.ENTITY_CODE or '-'} by {r.USERNAME}"
+             for r in d.itertuples()))
+
+    _try("Recent failures (id, scope, error):",
+         """SELECT DIMENSION_ADJ_ID, PROCESS_TYPE,
+                   LEFT(COALESCE(ERRORMESSAGE,''),140) AS ERR
+            FROM ADJUSTMENT_APP.VW_ERRORS ORDER BY ERROR_TIME DESC LIMIT 8""",
+         lambda d: "\n".join(f"  #{r.DIMENSION_ADJ_ID} {r.PROCESS_TYPE}: {r.ERR}"
+                             for r in d.itertuples()))
+
+    _try("Sign-off status (recent COBs):",
+         """SELECT COBID, PROCESS_TYPE, COALESCE(ENTITY_CODE,'*') AS ENTITY_CODE,
+                   SIGN_OFF_STATUS
+            FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+            ORDER BY COBID DESC, PROCESS_TYPE LIMIT 25""",
+         lambda d: "\n".join(
+             f"  COB {r.COBID} {r.PROCESS_TYPE} {r.ENTITY_CODE}: {r.SIGN_OFF_STATUS}"
+             for r in d.itertuples()))
+
+    # If the question names a specific adjustment id (#123) or a COB (8 digits),
+    # pull that row's full lifecycle so the answer can be specific.
+    _ids = re.findall(r"#?\b(\d{1,7})\b", question or "")
+    _cobs = [i for i in _ids if len(i) == 8]
+    _adj = [i for i in _ids if len(i) < 8]
+    if _adj:
+        _in = ",".join(str(int(x)) for x in _adj[:5])
+        _try(f"Details for adjustment id(s) {_in}:",
+             f"""SELECT DIMENSION_ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_TYPE,
+                        CURRENT_STAGE, RUN_STATUS, ENTITY_CODE, SUBMITTED_BY,
+                        APPROVED_BY, PROCESSING_ENDED_AT, REPORT_STATUS,
+                        LEFT(COALESCE(ERRORMESSAGE,''),160) AS ERR
+                 FROM ADJUSTMENT_APP.VW_ADJUSTMENT_TRACK
+                 WHERE DIMENSION_ADJ_ID IN ({_in})""",
+             lambda d: "\n".join(
+                 f"  #{r.DIMENSION_ADJ_ID} COB {r.COBID} {r.PROCESS_TYPE} "
+                 f"{r.ADJUSTMENT_TYPE} stage={r.CURRENT_STAGE} status={r.RUN_STATUS} "
+                 f"entity={r.ENTITY_CODE or '-'} by {r.SUBMITTED_BY} "
+                 f"approved_by={r.APPROVED_BY or '-'} report={r.REPORT_STATUS or '-'} "
+                 f"err={r.ERR or '-'}"
+                 for r in d.itertuples()))
+    if _cobs:
+        _in = ",".join(str(int(x)) for x in _cobs[:3])
+        _try(f"Adjustments on COB(s) {_in}:",
+             f"""SELECT DIMENSION_ADJ_ID, PROCESS_TYPE, ADJUSTMENT_TYPE,
+                        RUN_STATUS, ENTITY_CODE
+                 FROM ADJUSTMENT_APP.ADJ_HEADER
+                 WHERE COBID IN ({_in}) AND COALESCE(IS_DELETED,FALSE)=FALSE
+                 ORDER BY CREATED_DATE DESC LIMIT 30""",
+             lambda d: "\n".join(
+                 f"  #{r.DIMENSION_ADJ_ID} {r.PROCESS_TYPE} {r.ADJUSTMENT_TYPE} "
+                 f"{r.RUN_STATUS} entity={r.ENTITY_CODE or '-'}"
+                 for r in d.itertuples()))
+
+    return "\n\n".join(parts) if parts else "(no live data available right now)"
+
+
+def _ask_cortex(question: str, model: str) -> str:
+    """Ground the question in the knowledge + live snapshot and answer via
+    Snowflake Cortex COMPLETE (in-account LLM — data stays in Snowflake)."""
+    context = _live_snapshot(question)
+    prompt = (
+        "You are the assistant for MUFG's Risk Adjustment Engine, a Snowflake "
+        "and Streamlit system for adjusting published risk numbers (VaR, "
+        "Stress, Sensitivity, FRTB) in a fully audited way.\n\n"
+        "Answer the user's question using ONLY the information below. If the "
+        "answer is not present, say you don't have that information and point "
+        "to the app page where they can find it. Be concise and precise. Never "
+        "invent adjustment IDs, numbers, statuses, or names — this is a "
+        "regulated financial system. Use plain language for non-technical "
+        "users.\n\n"
+        "=== HOW THE SYSTEM WORKS ===\n" + _KNOWLEDGE + "\n\n"
+        "=== CURRENT STATE (live snapshot) ===\n" + context + "\n\n"
+        "=== USER QUESTION ===\n" + (question or "") + "\n\nAnswer:")
+    sql = (f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{_sql_lit(model)}', "
+           f"'{_sql_lit(prompt[:24000])}') AS ANSWER")
+    rows = run_query(sql)
+    return str(rows[0][0]).strip() if rows and rows[0][0] is not None else \
+        "The assistant returned no answer."
+
+
+def _render_ai_assistant() -> None:
+    if _cfg("AI_ASSISTANT_ENABLED", "true").strip().lower() != "true":
+        return
+    model = _cfg("AI_ASSISTANT_MODEL", "llama3.1-70b").strip() or "llama3.1-70b"
+
+    section_title("Ask the Assistant (AI)", "zap")
+    st.markdown(
+        f"<span style='color:{P['grey_700']};font-size:0.85rem'>"
+        "Ask about an adjustment's status, why something is blocked, how a "
+        "process works, or what to do next. Powered by Snowflake Cortex — it "
+        "runs inside Snowflake, so your data never leaves the account, and it "
+        "answers from the engine's live state.</span>", unsafe_allow_html=True)
+
+    with bordered_container():
+        _ex = st.session_state.get("_ai_example", "")
+        q = st.text_input(
+            "Your question", value=_ex, key="ai_q",
+            placeholder="e.g. What is the status of adjustment #1234? "
+                        "Why is my VaR adjustment blocked? Which COBs are signed off?")
+        c1, c2, _ = st.columns([1, 2, 3])
+        with c1:
+            _go = st.button("Ask", type="primary", use_container_width=True,
+                            disabled=not q.strip())
+        with c2:
+            st.caption(f"Model: {model}")
+
+        # Quick-start example chips.
+        st.markdown(
+            f"<div style='font-size:0.72rem;color:{P['grey_700']};margin:2px 0'>"
+            "Try:</div>", unsafe_allow_html=True)
+        _examples = [
+            "How many adjustments failed and why?",
+            "Which COBs are currently signed off?",
+            "How does the sign-off re-open process work?",
+            "What should I do if an adjustment is stuck in Running?",
+        ]
+        ec = st.columns(len(_examples))
+        for _c, _q in zip(ec, _examples):
+            if _c.button(_q, key=f"ai_ex_{hash(_q) & 0xffff}",
+                         use_container_width=True):
+                st.session_state["_ai_example"] = _q
+                try:
+                    st.rerun()
+                except AttributeError:
+                    st.experimental_rerun()
+
+        if _go and q.strip():
+            with st.spinner("Thinking… (querying the engine and asking Cortex)"):
+                try:
+                    answer = _ask_cortex(q.strip(), model)
+                    st.markdown(
+                        f'<div style="background:{P["info_lt"]};border:1px solid '
+                        f'{P["info"]}44;border-left:4px solid {P["info"]};'
+                        f'border-radius:8px;padding:0.9rem 1.1rem;margin-top:0.6rem;'
+                        f'font-size:0.9rem;line-height:1.6;white-space:pre-wrap">'
+                        f'{__import__("html").escape(answer)}</div>',
+                        unsafe_allow_html=True)
+                    st.caption("AI-generated from the engine's live state — "
+                               "verify anything critical against the source page.")
+                except Exception as ex:
+                    st.warning(
+                        "The assistant is unavailable. This usually means "
+                        "Snowflake Cortex is not enabled for this account/region "
+                        "or the app role lacks the SNOWFLAKE.CORTEX_USER role. "
+                        f"An admin can turn it off in Admin config. "
+                        f"({friendly_error(ex)})")
+
+
+_render_ai_assistant()
+st.markdown("<br/>", unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -198,7 +450,11 @@ with tab_overview:
         ["<strong>Admin</strong>",
          "Restricted: scope config, approvers, page administrators, "
          "notifications, reference."],
-        ["<strong>Logs</strong>", "Processing runs, activity feed, and errors."],
+        ["<strong>Logs</strong>",
+         "Processing runs, activity feed, errors, and the sign-off audit trail."],
+        ["<strong>Tasks &amp; Cost</strong>",
+         "Serverless task health (runs, failures, duration) and the system's "
+         "cost — credits and money per task, with daily and monthly charts."],
     ]))
 
 # ╔════════════════════════════════════════════════════════════════════════════╗
@@ -521,7 +777,7 @@ with tab_reports:
         f'fails (queueing the PBI refresh, or writing the dbt trigger), the '
         f'adjustment stays <em>Processed</em> (its numbers ARE applied) but '
         f'the failure is stamped on the ticket\'s error field and shown on '
-        f'the Adjustments / Pipeline pages — reports may show stale data '
+        f'the Adjustments page — reports may show stale data '
         f'until the next scheduled refresh. PBI refresh actions are only '
         f'queued for recent COBs (~3 business days); older back-dated '
         f'adjustments rely on the next scheduled full refresh.', "#B45309"))
@@ -536,9 +792,9 @@ with tab_trouble:
         ["Adjustment sits in <strong>Pending</strong> for minutes",
          "Usually it is <em>blocked</em> behind another adjustment touching "
          "the same data, or awaiting approval.",
-         "Pipeline page → the item shows who it is waiting for. Blocked rows "
-         "start automatically. If it is genuinely stranded, use "
-         "<em>Force process</em>."],
+         "Adjustments page → the row shows who it is waiting for. Blocked rows "
+         "start automatically when the blocker finishes. If it is genuinely "
+         "stranded, contact support with the ADJ id."],
         ["Adjustment shows <strong>Failed</strong>",
          "The processing run hit an error (message shown on the ticket).",
          "Adjustments page → select it → <strong>Retry</strong>. Retries are "
@@ -548,8 +804,8 @@ with tab_trouble:
          "The run that claimed it died (timeout, kill). Big Entity Rolls "
          "legitimately run ~20 min — hours means dead.",
          "Nothing required: the pipeline auto-resets it to Failed after 4 "
-         "hours and frees anything queued behind it; then Retry. Past the "
-         "4-hour mark you can also Force process it immediately."],
+         "hours and frees anything queued behind it; then Retry from the "
+         "Adjustments page."],
         ["Submission returns <strong>Rejected - SignedOff</strong>",
          "The COB is signed off for that scope (upstream publish sign-off or "
          "in-app).",
@@ -568,8 +824,8 @@ with tab_trouble:
          "Refresh still queued/running, or refresh queueing failed (error "
          "shown on the ticket), or the COB is older than the ~3-business-day "
          "refresh window.",
-         "Pipeline page → deep dive → PowerBI Refresh section shows queued / "
-         "started / completed times."],
+         "Adjustments page → the pipeline status boxes and the row's report "
+         "status show whether the refresh is queued, running or ready."],
     ]))
 
     section_title("Escalation data to include", "clipboard")
@@ -630,8 +886,8 @@ with tab_reference:
          "Core engine: Scale / Direct / Upload / Entity Roll application, "
          "netting and supersede, run log, PowerBI hand-off."],
         ["<code>SP_FORCE_PROCESS_ADJUSTMENT</code>",
-         "Manual escape hatch — pushes one stuck adjustment through now "
-         "(refuses to bypass a live blocker)."],
+         "Maintainer escape hatch (run directly in Snowflake) — pushes one "
+         "stuck adjustment through now; refuses to bypass a live blocker."],
         ["<code>SP_SYNC_SIGNOFF_STATUS</code> + <code>TASK_SYNC_SIGNOFF</code>",
          "30-minute sync of upstream publish sign-offs into the app."],
         ["<code>SP_PREVIEW_ADJUSTMENT</code>", "Read-only impact preview for the New Adjustment page."],

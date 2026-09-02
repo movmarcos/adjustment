@@ -981,6 +981,12 @@ USING (
     UNION ALL
     SELECT 'COST_PER_CREDIT_USD', '3.00',
            'Price of one Snowflake credit in USD. Editable on the Tasks & Cost page; converts credit usage into money.'
+    UNION ALL
+    SELECT 'AI_ASSISTANT_ENABLED', 'true',
+           'Master switch for the Cortex-powered assistant on the Documentation page. Set false to hide it if Cortex is not available for this account.'
+    UNION ALL
+    SELECT 'AI_ASSISTANT_MODEL', 'llama3.1-70b',
+           'Snowflake Cortex COMPLETE model the Documentation assistant uses (e.g. llama3.1-70b, mistral-large2, llama3.1-8b).'
 ) s
 ON t.CONFIG_KEY = s.CONFIG_KEY
 WHEN NOT MATCHED THEN INSERT (CONFIG_KEY, CONFIG_VALUE, DESCRIPTION)
