@@ -10,9 +10,12 @@
 -- rows that arrived mid-run and silently dropped them.)
 --
 -- Compute: serverless (USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE). Snowflake
--- provisions and right-sizes the compute and bills only for the time each run
--- actually executes — so polling every minute costs only the sub-second of
--- each empty run, not a warehouse kept warm.
+-- bills the time each run actually executes. An empty poll is NOT free by
+-- itself: SP_RUN_PIPELINE is a Python proc with ~7-16s sandbox cold-start,
+-- billed at task size every minute. Each pipeline task body therefore gates
+-- the CALL behind a sub-second Snowflake-Scripting EXISTS probe (2026-09) —
+-- Python only starts when there is work. Do NOT replace the gate with a
+-- stream WHEN clause: tried before, adjustments did not start (Marcos).
 -- VaR and Sensitivity are LARGE: a VaR Entity Roll (e.g. entity MUSI) moves
 -- ~900M rows per leg — on MEDIUM it overran the task timeout and was killed
 -- mid-run, leaving the adjustment stuck in Running.
@@ -62,7 +65,19 @@ CREATE TASK ADJUSTMENT_APP.TASK_PROCESS_VAR
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible VaR adjustments. LARGE: VaR Entity Rolls move ~900M rows/leg.'
 AS
-    CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('VaR', '["VaR"]');
+BEGIN
+    -- COST GATE: the Python proc pays ~7-16s of sandbox cold-start per call,
+    -- billed at this task's compute size — even when the queue is empty.
+    -- This Snowflake-Scripting probe (same predicate as the proc's own fast
+    -- exit, incl. 'Running' so the stale-run reaper still fires) costs
+    -- sub-second; Python only runs when there is actual work.
+    IF (EXISTS (SELECT 1 FROM ADJUSTMENT_APP.ADJ_HEADER
+                WHERE PROCESS_TYPE IN ('VaR')
+                  AND RUN_STATUS IN ('Pending', 'Approved', 'Running')
+                  AND IS_DELETED = FALSE)) THEN
+        CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('VaR', '["VaR"]');
+    END IF;
+END;
 
 
 -- ─── Stress ────────────────────────────────────────────────────────────────
@@ -76,7 +91,19 @@ CREATE TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible Stress adjustments.'
 AS
-    CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('Stress', '["Stress"]');
+BEGIN
+    -- COST GATE: the Python proc pays ~7-16s of sandbox cold-start per call,
+    -- billed at this task's compute size — even when the queue is empty.
+    -- This Snowflake-Scripting probe (same predicate as the proc's own fast
+    -- exit, incl. 'Running' so the stale-run reaper still fires) costs
+    -- sub-second; Python only runs when there is actual work.
+    IF (EXISTS (SELECT 1 FROM ADJUSTMENT_APP.ADJ_HEADER
+                WHERE PROCESS_TYPE IN ('Stress')
+                  AND RUN_STATUS IN ('Pending', 'Approved', 'Running')
+                  AND IS_DELETED = FALSE)) THEN
+        CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('Stress', '["Stress"]');
+    END IF;
+END;
 
 
 -- ─── FRTB (all sub-types) ───────────────────────────────────────────────────
@@ -90,7 +117,19 @@ CREATE TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible FRTB-pipeline adjustments (FRTB, FRTBDRC, FRTBRRAO).'
 AS
-    CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('FRTB', '["FRTB","FRTBDRC","FRTBRRAO"]');
+BEGIN
+    -- COST GATE: the Python proc pays ~7-16s of sandbox cold-start per call,
+    -- billed at this task's compute size — even when the queue is empty.
+    -- This Snowflake-Scripting probe (same predicate as the proc's own fast
+    -- exit, incl. 'Running' so the stale-run reaper still fires) costs
+    -- sub-second; Python only runs when there is actual work.
+    IF (EXISTS (SELECT 1 FROM ADJUSTMENT_APP.ADJ_HEADER
+                WHERE PROCESS_TYPE IN ('FRTB', 'FRTBDRC', 'FRTBRRAO')
+                  AND RUN_STATUS IN ('Pending', 'Approved', 'Running')
+                  AND IS_DELETED = FALSE)) THEN
+        CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('FRTB', '["FRTB","FRTBDRC","FRTBRRAO"]');
+    END IF;
+END;
 
 
 -- ─── Sensitivity ───────────────────────────────────────────────────────────
@@ -104,7 +143,19 @@ CREATE TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible Sensitivity adjustments.'
 AS
-    CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('Sensitivity', '["Sensitivity"]');
+BEGIN
+    -- COST GATE: the Python proc pays ~7-16s of sandbox cold-start per call,
+    -- billed at this task's compute size — even when the queue is empty.
+    -- This Snowflake-Scripting probe (same predicate as the proc's own fast
+    -- exit, incl. 'Running' so the stale-run reaper still fires) costs
+    -- sub-second; Python only runs when there is actual work.
+    IF (EXISTS (SELECT 1 FROM ADJUSTMENT_APP.ADJ_HEADER
+                WHERE PROCESS_TYPE IN ('Sensitivity')
+                  AND RUN_STATUS IN ('Pending', 'Approved', 'Running')
+                  AND IS_DELETED = FALSE)) THEN
+        CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('Sensitivity', '["Sensitivity"]');
+    END IF;
+END;
 
 
 -- ─── Sign-off sync — every 30 minutes ───────────────────────────────────────
