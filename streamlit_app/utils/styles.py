@@ -356,6 +356,15 @@ def inject_css():
         background: rgba(255,255,255,0.10) !important;
         border-color: rgba(255,255,255,0.28) !important;
     }}
+    /* Force the SELECTED VALUE text light — BaseWeb sets its own color on the
+       value element, which out-specifies the sidebar-wide * rule, leaving
+       "London" dark-on-dark. Cover the value div and every descendant. */
+    [data-testid="stSidebar"] [data-baseweb="select"] > div div,
+    [data-testid="stSidebar"] [data-baseweb="select"] [data-baseweb="select"] *,
+    [data-testid="stSidebar"] [data-baseweb="select"] span {{
+        color: #E2E5EA !important;
+        -webkit-text-fill-color: #E2E5EA !important;
+    }}
     [data-testid="stSidebar"] [data-baseweb="select"] svg {{
         fill: #E2E5EA !important;
     }}
