@@ -473,7 +473,7 @@ with col_alerts:
             f'</div>'
             f'<div style="max-height:220px;overflow-y:auto">'
             f'<table style="width:100%;border-collapse:collapse">'
-            f'<thead><tr style="background:#FAFAFA;position:sticky;top:0">'
+            f'<thead><tr style="background:#FAFAFA">'
             f'<th style="padding:6px 8px;font-size:0.65rem;font-weight:700;text-transform:uppercase;'
             f'letter-spacing:.06em;color:{P["grey_700"]};text-align:left;white-space:nowrap">ADJ IDs</th>'
             f'<th style="padding:6px 6px;font-size:0.65rem;font-weight:700;text-transform:uppercase;'

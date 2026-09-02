@@ -1847,12 +1847,16 @@ def render_df_table(df, max_rows=200, height=None, highlight=None, formats=None)
             return fmt_user_dt(v)
         return _hm.escape(str(v))
 
+    # No position:sticky on the header: a frozen header paints its own
+    # background OVER the rows while the PAGE scrolls (the white-box bug).
+    # Plain header; when a bounded scroll box is requested (height) the header
+    # simply scrolls with its content.
     th = "".join(
         f'<th style="text-align:{"right" if c in numeric else "left"};'
         f'padding:6px 10px;font-size:0.72rem;text-transform:uppercase;'
         f'letter-spacing:.05em;color:{P["grey_700"]};white-space:nowrap;'
-        f'border-bottom:2px solid {P["border"]};position:sticky;top:0;'
-        f'background:{P["card"]};z-index:1">{_hm.escape(str(c))}</th>'
+        f'border-bottom:2px solid {P["border"]};'
+        f'background:{P["card"]}">{_hm.escape(str(c))}</th>'
         for c in show.columns)
     trs = ""
     for _, row in show.iterrows():
@@ -1869,9 +1873,13 @@ def render_df_table(df, max_rows=200, height=None, highlight=None, formats=None)
             for c in show.columns)
         trs += f"<tr>{tds}</tr>"
 
-    hstyle = f"max-height:{int(height)}px;" if height else ""
+    # Bounded scroll box only when a height is explicitly asked for; otherwise
+    # the table flows in the page (horizontal scroll only for wide content) so
+    # there is no nested vertical scroll context to misbehave.
+    hstyle = (f"max-height:{int(height)}px;overflow:auto;" if height
+              else "overflow-x:auto;")
     st.markdown(
-        f'<div style="{hstyle}overflow:auto;background:{P["card"]};'
+        f'<div style="{hstyle}background:{P["card"]};'
         f'border:1px solid {P["border"]};border-radius:8px">'
         f'<table style="width:100%;border-collapse:separate;border-spacing:0">'
         f'<thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table></div>',
