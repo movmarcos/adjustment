@@ -6,3 +6,4 @@ __pycache__/
 
 # Local deploy marker — last successfully-deployed commit (per machine)
 .last_deploy_commit
+.gstack/
