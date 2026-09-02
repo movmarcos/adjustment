@@ -585,12 +585,23 @@ def inject_css():
     .step-line.done {{ background: {P["success"]}; }}
 
     /* Section headers */
+    /* Section headers — real chapter breaks, not captions (Marcos 2026-09:
+       the old 0.72rem uppercase style made pages with many sections blur
+       together). A full-width rule ABOVE marks where the previous section
+       ends, generous top spacing separates the blocks, a short brand-red
+       tick anchors the eye, and the title reads at heading size. */
     .section-title {{
-        font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
-        letter-spacing: .08em; color: var(--ink-2); margin: 1rem 0 0.6rem 0;
-        display: flex; align-items: center; gap: 7px;
+        font-size: 1.05rem; font-weight: 700; color: var(--ink);
+        letter-spacing: 0; text-transform: none;
+        margin: 2.2rem 0 0.85rem 0; padding-top: 1.15rem;
+        border-top: 1px solid var(--border);
+        display: flex; align-items: center; gap: 9px;
     }}
-    .section-title::after {{ content: ""; flex: 1; height: 1px; background: var(--border); }}
+    .section-title::before {{
+        content: ""; width: 4px; height: 1.05em; border-radius: 2px;
+        background: var(--brand); flex-shrink: 0;
+    }}
+    .section-title svg {{ color: var(--ink-2); }}
 
     /* Home KPI cards — clickable */
     .kpi-link {{ text-decoration: none; color: inherit; display: block; }}
