@@ -1805,78 +1805,16 @@ def resolve_selected_adjustment(df_source, selection_rows):
 SELECTION_UNSUPPORTED = object()
 
 
-def _grid_cell_text(v):
-    """Display text for one grid cell, safe for a st.markdown HTML block.
-    Escapes HTML, then neutralises the two things that historically blanked
-    HTML grids in this app: '$' (Streamlit's markdown runs KaTeX over $...$
-    even inside HTML — commit e4927e9) and newlines (a newline inside the
-    block ends raw-HTML mode and the rest renders as text — commit c360960)."""
-    import html as _hm
-    import pandas as _pd
-    try:
-        if v is None or (isinstance(v, float) and v != v) or _pd.isna(v):
-            return "—"
-    except (TypeError, ValueError):
-        pass
-    s = _hm.escape(str(v))
-    s = s.replace("$", "&#36;")
-    return " ".join(s.split())
-
-
-def _render_mgrid(show, *, height=None, right_cols=(), fmt=None,
-                  cell_css=None, row_css=None):
-    """Emit a DataFrame as the canonical .mgrid HTML table via st.markdown.
-    Server-rendered DOM — cannot render as a white box (st.dataframe's canvas
-    can, on the live SiS runtime). The table FLOWS IN THE PAGE: no sticky
-    header, no internal vertical scroll box, horizontal scroll only when the
-    table is wider than the page. Menlo Security browser isolation (the
-    users' network path) paints white tiles over sticky elements and nested
-    scroll regions — a flat single-scroll document is the one shape it
-    renders reliably. `height` is accepted for API compatibility and ignored.
-
-    show:       DataFrame of raw values (display order).
-    right_cols: column names to right-align.
-    fmt:        callable(col, value) -> display string (pre-escape), optional.
-    cell_css:   {col: callable(raw_value) -> css declaration string}.
-    row_css:    callable(raw_row_dict) -> css declaration string for all tds.
-    """
-    import streamlit as st
-
-    cols = list(show.columns)
-    right = set(right_cols)
-    th = "".join(
-        f'<th class="r">{_grid_cell_text(c)}</th>' if c in right
-        else f"<th>{_grid_cell_text(c)}</th>"
-        for c in cols)
-    body = []
-    for rec in show.to_dict("records"):
-        rcss = ""
-        if row_css:
-            try:
-                rcss = row_css(rec) or ""
-            except Exception:
-                rcss = ""
-        tds = []
-        for c in cols:
-            raw = rec.get(c)
-            txt = _grid_cell_text(fmt(c, raw) if fmt else raw)
-            css = rcss
-            if cell_css and c in cell_css:
-                try:
-                    extra = cell_css[c](raw) or ""
-                except Exception:
-                    extra = ""
-                if extra:
-                    css = f"{css};{extra}" if css else extra
-            klass = ' class="r"' if c in right else ""
-            style = f' style="{css}"' if css else ""
-            tds.append(f"<td{klass}{style}>{txt}</td>")
-        body.append("<tr>" + "".join(tds) + "</tr>")
-    st.markdown(
-        f'<div class="mgrid-wrap"><table class="mgrid">'
-        f"<thead><tr>{th}</tr></thead>"
-        f'<tbody>{"".join(body)}</tbody></table></div>',
-        unsafe_allow_html=True)
+def _styler_cellmap(styler, func, subset):
+    """Version-safe per-cell CSS map: Styler.map (pandas >= 2.1) or the older
+    Styler.applymap. Keeps grids working across the SiS pandas versions."""
+    _m = getattr(styler, "map", None)
+    if _m is not None:
+        try:
+            return _m(func, subset=subset)
+        except TypeError:
+            pass
+    return styler.applymap(func, subset=subset)
 
 
 def _supports_df_selection(st):
@@ -1891,13 +1829,15 @@ def _supports_df_selection(st):
 
 
 def render_activity_grid(df_source, *, selectable=False, key=None,
-                         height=440, empty_msg="No adjustments yet."):
-    """Shared 19-column activity grid as server-rendered .mgrid HTML that
-    flows in the page (no sticky header, no nested scroll box — the shapes
-    Menlo browser isolation paints white tiles over), and — being plain DOM,
-    not st.dataframe's canvas — physically cannot render as a white box.
-    Status text is colour-coded inline. Selection is via the caller's picker —
-    returns SELECTION_UNSUPPORTED when selectable, else None."""
+                         height=380, empty_msg="No adjustments yet."):
+    """Shared 19-column activity grid via st.dataframe at a FIXED height —
+    the one presentation the Grid Lab A/B test proved renders cleanly under
+    the users' Menlo browser-isolation network path (2026-09-02, style A:
+    internal scroll keeps the page short, and the canvas streams like an
+    image). Do not swap this for HTML tables or flowing layouts — every such
+    variant showed white blocks under Menlo. Status text is colour-coded via
+    a version-safe Styler. Selection is via the caller's picker — returns
+    SELECTION_UNSUPPORTED when selectable, else None."""
     import streamlit as st
 
     if df_source is None or df_source.empty:
@@ -1905,9 +1845,12 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
         return None
 
     grid_df = build_activity_grid_df(df_source)
-    _render_mgrid(grid_df, height=height,
-                  right_cols=("COB", "Source COB", "Records"),
-                  cell_css={"Status": lambda v: STATUS_STYLE.get(v, "")})
+    try:
+        shown = _styler_cellmap(grid_df.style.hide(axis="index"),
+                                lambda v: STATUS_STYLE.get(v, ""), ["Status"])
+    except Exception:
+        shown = grid_df   # very old pandas: plain values beat no grid
+    st.dataframe(shown, use_container_width=True, height=height)
     return SELECTION_UNSUPPORTED if selectable else None
 
 
@@ -1930,58 +1873,55 @@ def bordered_container():
 
 def render_df_table(df, max_rows=1000, height=440, highlight=None,
                     formats=None, color_cols=None, column_config=None):
-    """CANONICAL grid — server-rendered .mgrid HTML (NOT st.dataframe, whose
-    canvas renders as a permanent white box on the live SiS runtime). The
-    table flows in the page — no sticky header, no internal scroll box —
-    because Menlo browser isolation white-tiles those; height is ignored.
+    """CANONICAL grid — st.dataframe at a FIXED height (internal scroll).
+    The Grid Lab A/B test (2026-09-02) proved this is the only presentation
+    that renders without white blocks under the users' Menlo browser
+    isolation: the page stays short and the canvas streams like an image.
+    Do not replace with HTML tables / flowing layouts — every such variant
+    white-tiled under Menlo.
 
     highlight:  callable(row_dict)->bool; True tints the row red.
     formats:    {column: python_format}, e.g. {"COST": "${:,.2f}"}.
     color_cols: {column: {value: css-or-hex}} or {column: callable(value)->
                 css-or-hex} — colours that column's TEXT by value.
-    column_config: accepted for signature compatibility; unused here.
     """
     import pandas as _pd
     if df is None or len(df) == 0:
         st.caption("No rows.")
         return
     show = df.head(int(max_rows)).reset_index(drop=True)
-
-    fmts = {c: f for c, f in (formats or {}).items() if c in show.columns}
-
-    def _fmt(col, v):
-        if col in fmts and _pd.notna(v):
-            try:
-                return fmts[col].format(v)
-            except (ValueError, TypeError):
-                return v
-        return v
-
-    right = tuple(c for c in show.columns
-                  if c in fmts or _pd.api.types.is_numeric_dtype(show[c]))
-
-    cell_css = {}
-    for _col, _spec in (color_cols or {}).items():
-        if _col not in show.columns:
-            continue
-        def _css(v, spec=_spec):
-            got = spec(v) if callable(spec) else spec.get(str(v), "")
-            if not got:
-                return ""
-            return got if ":" in got else f"color:{got};font-weight:700"
-        cell_css[_col] = _css
-
-    row_css = None
-    if highlight:
-        def row_css(rec):
-            try:
-                hot = bool(highlight(rec))
-            except Exception:
-                hot = False
-            return f"background-color:{P['danger_lt']}" if hot else ""
-
-    _render_mgrid(show, height=height, right_cols=right, fmt=_fmt,
-                  cell_css=cell_css, row_css=row_css)
+    try:
+        sty = show.style.hide(axis="index")
+        if formats:
+            def _mk(fmt):
+                return lambda v: (fmt.format(v) if _pd.notna(v) else "—")
+            sty = sty.format({c: _mk(f) for c, f in formats.items()
+                              if c in show.columns})
+        for _col, _spec in (color_cols or {}).items():
+            if _col not in show.columns:
+                continue
+            def _css(v, spec=_spec):
+                got = spec(v) if callable(spec) else spec.get(str(v), "")
+                if not got:
+                    return ""
+                return got if ":" in got else f"color:{got};font-weight:700"
+            sty = _styler_cellmap(sty, _css, [_col])
+        if highlight:
+            def _rowcss(row):
+                try:
+                    hot = bool(highlight(row.to_dict()))
+                except Exception:
+                    hot = False
+                return ([f"background-color:{P['danger_lt']}" if hot else ""]
+                        * len(row))
+            sty = sty.apply(_rowcss, axis=1)
+    except Exception:
+        sty = show   # very old pandas: plain values beat no grid
+    try:
+        st.dataframe(sty, use_container_width=True, height=height,
+                     column_config=column_config)
+    except TypeError:
+        st.dataframe(sty, use_container_width=True, height=height)
     if len(df) > max_rows:
         st.caption(f"Showing the first {int(max_rows)} of {len(df):,} rows.")
 
