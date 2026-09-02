@@ -35,7 +35,9 @@ PROD_DB    = "PROD_RAPTOR"            # cross-DB validation compare target
 
 # ─── Connection (deploy.py, tests/, scratch scripts) ────────────────────────
 SF_CONN_ENV = ENV.lower()             # MufgSnowflakeConn environment name
-DEPLOY_USER = "apd_raptor_sfk_depl@mufgsecurities.com"
+# Service-account prefix is per environment: apd/apt/apr/app.
+_USER_PREFIX = {"DVLP": "apd", "TEST": "apt", "RLSE": "apr", "PROD": "app"}[ENV]
+DEPLOY_USER = f"{_USER_PREFIX}_raptor_sfk_depl@mufgsecurities.com"
 
 
 # ─── SQL placeholder substitution ───────────────────────────────────────────
