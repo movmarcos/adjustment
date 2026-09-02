@@ -35,6 +35,16 @@
 
 USE SCHEMA ADJUSTMENT_APP;
 
+-- ─── Cost-attribution tag ───────────────────────────────────────────────────
+-- SOLUTION tag on every task: slices serverless-task spend per solution in
+-- ACCOUNT_USAGE (join SERVERLESS_TASK_HISTORY to TAG_REFERENCES — see VERIFY).
+-- Applied INLINE via WITH TAG below on purpose: these tasks are CREATE OR
+-- REPLACE, which drops any tag applied out-of-band on every redeploy.
+-- Requires Enterprise Edition; the owner role needs CREATE TAG once.
+CREATE TAG IF NOT EXISTS ADJUSTMENT_APP.SOLUTION
+    ALLOWED_VALUES 'ADJUSTMENT_ENGINE'
+    COMMENT = 'Cost/governance attribution: which solution owns this object.';
+
 -- ─── VaR ───────────────────────────────────────────────────────────────────
 
 CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_VAR
@@ -43,6 +53,7 @@ CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_VAR
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible VaR adjustments. LARGE: VaR Entity Rolls move ~900M rows/leg.'
+    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'ADJUSTMENT_ENGINE')
 AS
     CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('VaR', '["VaR"]');
 
@@ -55,6 +66,7 @@ CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible Stress adjustments.'
+    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'ADJUSTMENT_ENGINE')
 AS
     CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('Stress', '["Stress"]');
 
@@ -67,6 +79,7 @@ CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible FRTB-pipeline adjustments (FRTB, FRTBDRC, FRTBRRAO).'
+    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'ADJUSTMENT_ENGINE')
 AS
     CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('FRTB', '["FRTB","FRTBDRC","FRTBRRAO"]');
 
@@ -79,6 +92,7 @@ CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible Sensitivity adjustments.'
+    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'ADJUSTMENT_ENGINE')
 AS
     CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('Sensitivity', '["Sensitivity"]');
 
@@ -95,6 +109,7 @@ CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_SYNC_SIGNOFF
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
     SCHEDULE  = '30 MINUTE'
     COMMENT   = 'Every 30 min: sync upstream publish sign-offs into ADJ_SIGNOFF_STATUS.'
+    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'ADJUSTMENT_ENGINE')
 AS
     CALL ADJUSTMENT_APP.SP_SYNC_SIGNOFF_STATUS();
 
@@ -113,3 +128,19 @@ ALTER TASK ADJUSTMENT_APP.TASK_SYNC_SIGNOFF        RESUME;
 -- VERIFY
 -- ═══════════════════════════════════════════════════════════════════════════
 SHOW TASKS LIKE 'TASK_%' IN SCHEMA ADJUSTMENT_APP;
+
+-- Tags applied (live, no lag):
+SELECT OBJECT_NAME, TAG_VALUE
+FROM TABLE(ADJUSTMENT_APP.INFORMATION_SCHEMA.TAG_REFERENCES_ALL_COLUMNS(
+    'ADJUSTMENT_APP.TASK_SYNC_SIGNOFF', 'TASK'));
+
+-- Cost attribution per solution (ACCOUNT_USAGE, up to ~2h behind):
+-- serverless task credits for the last 30 days, grouped by SOLUTION tag.
+-- SELECT tr.TAG_VALUE AS SOLUTION,
+--        SUM(sth.CREDITS_USED) AS CREDITS_30D
+-- FROM SNOWFLAKE.ACCOUNT_USAGE.SERVERLESS_TASK_HISTORY sth
+-- JOIN SNOWFLAKE.ACCOUNT_USAGE.TAG_REFERENCES tr
+--   ON tr.OBJECT_ID = sth.TASK_ID AND tr.DOMAIN = 'TASK'
+--  AND tr.TAG_NAME = 'SOLUTION'
+-- WHERE sth.START_TIME >= DATEADD(day, -30, CURRENT_TIMESTAMP())
+-- GROUP BY tr.TAG_VALUE;
