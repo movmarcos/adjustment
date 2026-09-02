@@ -1196,10 +1196,10 @@ def inject_css():
        All HTML grids (render_df_table, render_grid, the page tables) emit
        <div class="mgrid-wrap"><table class="mgrid"> so they are visually
        identical regardless of which page or helper built them.
-       Pure server-rendered HTML on purpose: st.dataframe on the SiS 1.26
-       runtime paints onto a <canvas> that can mount at zero size inside the
-       Snowflake iframe (worst inside tabs/expanders) and stay a blank white
-       box forever. Plain DOM cannot fail to paint.
+       Pure server-rendered HTML on purpose: st.dataframe on the SiS runtime
+       (1.22.0 live) paints onto a <canvas> that can mount at zero size inside
+       the Snowflake iframe (worst inside tabs/expanders) and stay a blank
+       white box forever. Plain DOM cannot fail to paint.
        overflow:auto on the wrapper makes IT the scroll container, so the
        sticky header below can only stick within the wrapper — it can never
        overlay the page like the old page-scroll sticky headers did. */
@@ -1905,8 +1905,8 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
 
 def bordered_container():
     """Version-safe st.container(border=True): the border kwarg needs
-    Streamlit ≥ 1.29, but SiS runs 1.26 (the minimum that supports
-    st.file_uploader). On older runtimes the fallback container gets a hidden
+    Streamlit ≥ 1.29, but the live SiS runtime is 1.22.0 (confirmed 2026-09).
+    On older runtimes the fallback container gets a hidden
     .sec-card-flag marker; CSS `:has()` (inject_css) then paints the container
     as a bordered card — so sections look like cards on 1.26 too. Browsers
     without :has() (pre-Chrome 105) just see a plain container.

@@ -2,8 +2,11 @@ name: adjustment-engine
 channels:
   - snowflake
 dependencies:
-  # 1.26.0 is the minimum SiS version that supports st.file_uploader
-  # (Direct upload). Keep any future bump in sync with the API guards in
-  # the app (bordered_container, safe_rerun, grid-selection fallback).
-  - streamlit=1.26.0
+  # 1.22.0 is the newest Streamlit this Snowflake account's SiS actually
+  # supports (confirmed live 2026-09; st.toggle/1.23+ APIs raise there).
+  # Requesting a version the snowflake channel cannot resolve can leave the
+  # app on a stale/fallback environment — keep this pin at a supported
+  # version, and keep the API guards in the app (bordered_container,
+  # safe_rerun, grid-selection fallback, no st.toggle/st.dataframe).
+  - streamlit=1.22.0
   - plotly

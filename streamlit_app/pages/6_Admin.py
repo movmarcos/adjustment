@@ -777,8 +777,10 @@ with tab_notify:
 
     nc1, nc2, nc3 = st.columns([1, 2, 1])
     with nc1:
-        n_enabled = st.toggle("Notifications enabled", value=_enabled_now,
-                              key="ntf_enabled")
+        # st.checkbox, not st.toggle: the SiS runtime is 1.22 and st.toggle
+        # (1.23+) raises AttributeError there, killing the page mid-render.
+        n_enabled = st.checkbox("Notifications enabled", value=_enabled_now,
+                                key="ntf_enabled")
     with nc2:
         n_integ = st.text_input("Email integration name", value=_integ_now,
                                 key="ntf_integration",
