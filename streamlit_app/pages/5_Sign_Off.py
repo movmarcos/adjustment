@@ -173,24 +173,49 @@ _all_cobs = sorted(df_all["COBID"].astype(int).unique().tolist(), reverse=True)
 # COCKPIT — the sign-off state of ONE COB, per scope, at a glance
 # ══════════════════════════════════════════════════════════════════════════════
 
-_ck1, _ck2 = st.columns([1, 3])
-with _ck1:
+# Prominent business-date picker. A segmented radio makes the choice (and the
+# available dates) evident at a glance; it degrades to a selectbox only when
+# there are too many dates to lay out as a row.
+st.markdown(
+    f'<div style="font-size:0.75rem;font-weight:700;text-transform:uppercase;'
+    f'letter-spacing:.07em;color:{P["grey_700"]};margin-bottom:1px">'
+    f'{icon("calendar", size=13)} &nbsp;Business date (COB) — everything below '
+    f'covers the selected date</div>', unsafe_allow_html=True)
+
+_COB_RADIO_MAX = 15
+if len(_all_cobs) <= _COB_RADIO_MAX:
+    sel_cob = st.radio("COB", _all_cobs, index=0, horizontal=True,
+                       format_func=lambda v: str(v), key="so_cob_radio",
+                       label_visibility="collapsed")
+else:
     sel_cob = st.selectbox("COB", _all_cobs, index=0, key="so_cob",
                            format_func=lambda v: str(v),
-                           help="Latest COB by default — every panel below "
-                                "covers this COB.")
+                           label_visibility="collapsed")
+
 df_cob = df_all[df_all["COBID"].astype(int) == int(sel_cob)]
-with _ck2:
-    _n_blocked = int(df_cob["_SU"].isin(
-        [s for s, (_, _, b) in _STATUS_META.items() if b]).sum())
-    _n_pending = int(df_cob["_SU"].isin(
-        ["SIGNOFF_REQUESTED", "REOPEN_REQUESTED"]).sum())
-    st.markdown(
-        f'<div style="margin-top:1.85rem;font-size:0.85rem;color:{P["grey_700"]}">'
-        f'{len(df_cob)} entr(ies) on COB {sel_cob} · '
-        f'{_n_blocked} blocking submissions · '
-        f'{_n_pending} awaiting approval</div>',
-        unsafe_allow_html=True)
+
+# Summary as colored chips right under the picker.
+_n_blocked = int(df_cob["_SU"].isin(
+    [s for s, (_, _, b) in _STATUS_META.items() if b]).sum())
+_n_pending = int(df_cob["_SU"].isin(
+    ["SIGNOFF_REQUESTED", "REOPEN_REQUESTED"]).sum())
+_n_signed = int((df_cob["_SU"] == "SIGNED_OFF").sum())
+_n_open = int(df_cob["_SU"].isin(["OPEN", "REOPENED"]).sum())
+
+
+def _chip(txt, col):
+    return (f'<span style="background:{col}14;color:{col};border:1px solid {col}44;'
+            f'border-radius:99px;padding:2px 11px;font-size:0.76rem;font-weight:700;'
+            f'white-space:nowrap">{txt}</span>')
+
+
+st.markdown(
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 2px">'
+    + _chip(f'{len(df_cob)} on COB {sel_cob}', P["grey_700"])
+    + _chip(f'{_n_open} open', P["danger"])
+    + _chip(f'{_n_signed} signed off', P["success"])
+    + (_chip(f'{_n_pending} awaiting approval', "#B45309") if _n_pending else "")
+    + '</div>', unsafe_allow_html=True)
 
 def _fmt_ts(v):
     return fmt_user_dt(v, "%d %b %H:%M")
@@ -308,7 +333,8 @@ def _row_label(t):
     return f"{t[0]} · {t[1]}" + (f" / {t[2]}" if t[2] else "")
 
 
-def _request(scope_, entity_, sub_, action, verb, reason, requires_approval):
+def _request(scope_, entity_, sub_, action, verb, reason, requires_approval,
+             reset_keys=()):
     _appr = "TRUE" if requires_approval else "FALSE"
     res = run_query(
         f"CALL ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE("
@@ -337,6 +363,10 @@ def _request(scope_, entity_, sub_, action, verb, reason, requires_approval):
         st.session_state["so_flash"] = (
             "warning", f"{verb} was NOT applied — "
                        f"{out.get('message', 'no detail')}")
+    # Clear the form so the selection is empty again after the rerun — the
+    # user must explicitly pick the next thing to sign off / re-open.
+    for _rk in reset_keys:
+        st.session_state.pop(_rk, None)
     safe_rerun()
 
 
@@ -375,9 +405,13 @@ with tab_act:
                 st.info("Nothing to sign off — everything on this COB is already "
                         "signed off or awaiting approval.")
             else:
-                _sel_s = st.selectbox("What to sign off", _elig_s,
-                                      key="so_signoff_target",
-                                      format_func=_row_label)
+                # Empty by default — the user must explicitly choose what to
+                # sign off (None sentinel first, shown as a placeholder).
+                _sel_s = st.selectbox(
+                    "What to sign off", [None] + _elig_s,
+                    key="so_signoff_target",
+                    format_func=lambda t: "— choose a scope / entity —"
+                    if t is None else _row_label(t))
                 _rsn_s = st.text_input(
                     "Reason *", key="so_signoff_reason",
                     placeholder="e.g. all adjustments for this COB are done")
@@ -390,7 +424,8 @@ with tab_act:
                              use_container_width=True,
                              disabled=not (_sel_s and _rsn_s.strip())):
                     _request(_sel_s[0], _sel_s[1], _sel_s[2], "SIGNOFF",
-                             "Sign-off", _rsn_s, _appr_s)
+                             "Sign-off", _rsn_s, _appr_s,
+                             reset_keys=("so_signoff_target", "so_signoff_reason"))
 
     with _act_r:
         with bordered_container():
@@ -406,9 +441,12 @@ with tab_act:
             if not _elig_r:
                 st.info("Nothing to re-open — nothing on this COB is signed off.")
             else:
-                _sel_r = st.selectbox("What to re-open", _elig_r,
-                                      key="so_reopen_target",
-                                      format_func=_row_label)
+                # Empty by default — force an explicit choice of what to re-open.
+                _sel_r = st.selectbox(
+                    "What to re-open", [None] + _elig_r,
+                    key="so_reopen_target",
+                    format_func=lambda t: "— choose a scope / entity —"
+                    if t is None else _row_label(t))
                 _rsn_r = st.text_input(
                     "Reason *", key="so_reopen_reason",
                     placeholder="e.g. late booking needs an adjustment on this COB")
@@ -419,7 +457,8 @@ with tab_act:
                              use_container_width=True,
                              disabled=not (_sel_r and _rsn_r.strip())):
                     _request(_sel_r[0], _sel_r[1], _sel_r[2], "REOPEN",
-                             "Re-open", _rsn_r, True)
+                             "Re-open", _rsn_r, True,
+                             reset_keys=("so_reopen_target", "so_reopen_reason"))
 
     st.markdown("<br/>", unsafe_allow_html=True)
 

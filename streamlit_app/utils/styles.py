@@ -1160,17 +1160,37 @@ def inject_css():
     }}
     .stButton button:disabled p {{ color: var(--ink-3) !important; }}
 
-    /* Tabs */
-    .stTabs [data-baseweb="tab"] {{ color: var(--ink-2) !important; }}
+    /* Tabs — a clear SEGMENTED CONTROL so it reads unmistakably as tabs:
+       a bordered track holding pill tabs; the active tab is a raised white
+       pill with brand text. */
+    .stTabs [data-baseweb="tab-list"] {{
+        gap: 4px !important;
+        background: {P["grey_100"]} !important;
+        padding: 4px !important;
+        border-radius: 10px !important;
+        border: 1px solid {P["border"]} !important;
+        display: inline-flex !important;
+        width: auto !important;
+    }}
+    .stTabs [data-baseweb="tab"] {{
+        height: auto !important;
+        padding: 7px 20px !important;
+        border-radius: 7px !important;
+        color: {P["grey_700"]} !important;
+        font-weight: 600 !important;
+        font-size: 0.86rem !important;
+    }}
+    .stTabs [data-baseweb="tab"]:hover {{
+        background: rgba(0,0,0,0.035) !important;
+    }}
     .stTabs [data-baseweb="tab"][aria-selected="true"] {{
-        color: var(--brand) !important;
+        background: {P["white"]} !important;
+        color: {P["primary"]} !important;
+        box-shadow: 0 1px 3px rgba(15,23,42,0.14) !important;
     }}
-    .stTabs [data-baseweb="tab-highlight"] {{
-        background-color: var(--brand) !important;
-    }}
-    .stTabs [data-baseweb="tab-border"] {{
-        background-color: var(--border) !important;
-    }}
+    /* The default underline/border indicators are redundant with the pill. */
+    .stTabs [data-baseweb="tab-highlight"],
+    .stTabs [data-baseweb="tab-border"] {{ display: none !important; }}
 
     /* Expanders + bordered containers */
     [data-testid="stExpander"] {{
