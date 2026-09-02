@@ -674,6 +674,44 @@ def inject_css():
     div[class*="st-key-submit"] button[data-testid="stBaseButton-primary"]:hover {{
         background: var(--brand-dk) !important; border-color: var(--brand-dk) !important;
     }}
+    /* ── Compact grid pager (render_pager) — the user wants small clickable
+       page NUMBERS, not full-size buttons. render_pager drops a hidden
+       .pager-flag in its container; these :has() rules shrink every button
+       inside to a quiet text-like number. Current page = disabled primary,
+       painted brand red and kept fully opaque. */
+    .pager-flag {{ display: none; }}
+    [data-testid="stVerticalBlock"]:has(> :is(
+        [data-testid="element-container"],
+        [data-testid="stElementContainer"],
+        .element-container) .pager-flag) .stButton > button {{
+        padding: 0 0.35rem !important; font-size: 0.72rem !important;
+        min-height: 1.45rem !important; height: 1.45rem !important;
+        line-height: 1.45rem !important; border: none !important;
+        background: transparent !important; box-shadow: none !important;
+        color: var(--ink-2) !important; font-weight: 500 !important;
+    }}
+    [data-testid="stVerticalBlock"]:has(> :is(
+        [data-testid="element-container"],
+        [data-testid="stElementContainer"],
+        .element-container) .pager-flag) .stButton > button:hover:enabled {{
+        color: var(--brand) !important; background: {P["grey_100"]} !important;
+        border-radius: 4px !important;
+    }}
+    [data-testid="stVerticalBlock"]:has(> :is(
+        [data-testid="element-container"],
+        [data-testid="stElementContainer"],
+        .element-container) .pager-flag) .stButton > button:is(
+        [kind="primary"], [data-testid="baseButton-primary"],
+        [data-testid="stBaseButton-primary"]) {{
+        color: var(--brand) !important; font-weight: 700 !important;
+        background: transparent !important; opacity: 1 !important;
+    }}
+    [data-testid="stVerticalBlock"]:has(> :is(
+        [data-testid="element-container"],
+        [data-testid="stElementContainer"],
+        .element-container) .pager-flag) .stButton > button:disabled {{
+        opacity: 1 !important;
+    }}
     [data-testid="stDataFrame"] {{
         border-radius: var(--r-sm); overflow: hidden;
         border: 1px solid var(--border);
@@ -1206,28 +1244,28 @@ def inject_css():
        (1.22.0 live) paints onto a <canvas> that can mount at zero size inside
        the Snowflake iframe and stay a blank white box forever. Plain DOM
        cannot fail to paint.
-       DELIBERATELY no position:sticky and no internal vertical scroll box:
-       the user's traffic goes through Menlo Security remote browser
-       isolation, whose compositor paints white tiles over regions it must
-       re-render live — sticky elements and nested scroll containers are its
-       worst cases. A flat table in a single page scroll is what it renders
-       reliably (the pre-redesign grids worked for exactly this reason). */
+       ZERO SCROLLBARS by design (user-confirmed 2026-09-02: under Menlo
+       browser isolation the white block appears exactly on grids WITH a
+       scrollbar). No sticky, no scroll box, no overflow-x — the table WRAPS
+       to fit the page width, and long grids paginate (render_df_table)
+       instead of scrolling. */
     .mgrid-wrap {{
-        overflow-x: auto; background: {P["card"]};
+        overflow: visible; background: {P["card"]};
         border: 1px solid {P["border"]}; border-radius: 8px;
     }}
     .mgrid {{ width: 100%; border-collapse: separate; border-spacing: 0; }}
     .mgrid th {{
-        text-align: left; padding: 8px 12px; font-size: 0.7rem;
-        font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+        text-align: left; padding: 8px 10px; font-size: 0.68rem;
+        font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
         color: {P["grey_700"]}; background: {P["card"]};
-        border-bottom: 2px solid {P["border"]}; white-space: nowrap;
+        border-bottom: 2px solid {P["border"]}; vertical-align: bottom;
     }}
     .mgrid td {{
-        padding: 7px 12px; font-size: 0.82rem; color: {P["grey_900"]};
+        padding: 7px 10px; font-size: 0.8rem; color: {P["grey_900"]};
         border-bottom: 1px solid {P["border"]}; vertical-align: middle;
-        font-variant-numeric: tabular-nums;
+        font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
     }}
+    .mgrid td.nw {{ white-space: nowrap; }}
     .mgrid tbody tr:last-child td {{ border-bottom: none; }}
     .mgrid tbody tr:hover td {{ background: {P["grey_100"]}; }}
     .mgrid th.r, .mgrid td.r {{ text-align: right; }}
@@ -1805,6 +1843,13 @@ def resolve_selected_adjustment(df_source, selection_rows):
 SELECTION_UNSUPPORTED = object()
 
 
+# The user's grid rules (2026-09-02): a grid shows at most this many rows
+# per page, and only paginates once it exceeds PAGINATE_OVER rows — so a
+# 13–15 row table still renders whole, without a pager.
+GRID_PAGE_ROWS = 12
+PAGINATE_OVER = 15
+
+
 def grid_pager(total_rows, per_page=25, key="pager"):
     """Current page for a paginated grid. Call BEFORE rendering the slice:
         cur, pages = grid_pager(len(df), 25, key="mygrid_pg")
@@ -1817,11 +1862,14 @@ def grid_pager(total_rows, per_page=25, key="pager"):
     return cur, pages
 
 
-def render_pager(pages, key="pager"):
-    """Clickable page-number bar (« 1 2 [3] … 12 ») rendered BELOW a grid.
-    Windowed to at most 9 numbers with ellipses; the current page is the
-    highlighted (primary, disabled) button. Uses on_click callbacks so the
-    grid above reflects the new page in the same rerun."""
+def render_pager(pages, key="pager", caption=None):
+    """COMPACT clickable page numbers below a grid (‹ 1 2 [3] … 12 ›) — the
+    user wants small number links, not full-size buttons: a hidden
+    .pager-flag marker plus :has() CSS shrinks the buttons in this container
+    to quiet text-like numbers, current page in brand red. Windowed to at
+    most 9 numbers with ellipses. on_click callbacks update the page BEFORE
+    the rerun renders, so the grid above changes in the same click.
+    `caption` (e.g. 'Rows 13–24 of 200') renders greyed at the row's end."""
     pages = int(pages)
     if pages <= 1:
         return
@@ -1843,46 +1891,108 @@ def render_pager(pages, key="pager"):
         items.append(p)
         prev_p = p
 
-    slots = [0.9] + [0.8] * len(items) + [0.9]
-    spacer = max(0.5, 12 - sum(slots))
-    cols = st.columns(slots + [spacer])
-    with cols[0]:
-        st.button("‹", key=f"{key}_prev", disabled=cur <= 0,
-                  on_click=_go, args=(cur - 1,), use_container_width=True)
-    for i, p in enumerate(items):
-        with cols[i + 1]:
-            if p is None:
-                st.markdown("<div style='text-align:center;padding-top:6px;"
-                            "color:#8A94A6'>…</div>", unsafe_allow_html=True)
-            else:
-                st.button(str(p + 1), key=f"{key}_p{p}",
-                          type="primary" if p == cur else "secondary",
-                          disabled=p == cur,
-                          on_click=_go, args=(p,), use_container_width=True)
-    with cols[len(items) + 1]:
-        st.button("›", key=f"{key}_next", disabled=cur >= pages - 1,
-                  on_click=_go, args=(cur + 1,), use_container_width=True)
+    box = st.container()
+    box.markdown('<span class="pager-flag"></span>', unsafe_allow_html=True)
+    with box:
+        slots = [0.42] * (len(items) + 2)
+        spacer = max(0.5, 12 - sum(slots))
+        cols = st.columns(slots + [spacer])
+        with cols[0]:
+            st.button("‹", key=f"{key}_prev", disabled=cur <= 0,
+                      on_click=_go, args=(cur - 1,), use_container_width=True)
+        for i, p in enumerate(items):
+            with cols[i + 1]:
+                if p is None:
+                    st.markdown("<div style='text-align:center;color:#8A94A6;"
+                                "font-size:0.72rem;padding-top:3px'>…</div>",
+                                unsafe_allow_html=True)
+                else:
+                    st.button(str(p + 1), key=f"{key}_p{p}",
+                              type="primary" if p == cur else "secondary",
+                              disabled=p == cur,
+                              on_click=_go, args=(p,),
+                              use_container_width=True)
+        with cols[len(items) + 1]:
+            st.button("›", key=f"{key}_next", disabled=cur >= pages - 1,
+                      on_click=_go, args=(cur + 1,), use_container_width=True)
+        if caption:
+            with cols[-1]:
+                st.markdown(f"<div style='text-align:right;color:#8A94A6;"
+                            f"font-size:0.72rem;padding-top:4px'>"
+                            f"{caption}</div>", unsafe_allow_html=True)
 
 
-def _df_height(n_rows, cap):
-    """st.dataframe height that FITS n_rows exactly (~35px per row + header),
-    capped so large tables scroll internally instead of growing the page
-    (short pages are what keeps Menlo isolation from white-tiling). Small
-    tables get no empty filler rows."""
-    fit = 35 * (int(n_rows) + 1) + 3
-    return min(fit, int(cap)) if cap else fit
+def _grid_cell_text(v):
+    """Display text for one grid cell, safe for a st.markdown HTML block.
+    Escapes HTML, then neutralises the two things that historically blanked
+    HTML grids in this app: '$' (Streamlit's markdown runs KaTeX over $...$
+    even inside HTML — commit e4927e9) and newlines (a newline inside the
+    block ends raw-HTML mode and the rest renders as text — commit c360960)."""
+    import html as _hm
+    import pandas as _pd
+    try:
+        if v is None or (isinstance(v, float) and v != v) or _pd.isna(v):
+            return "—"
+    except (TypeError, ValueError):
+        pass
+    s = _hm.escape(str(v))
+    s = s.replace("$", "&#36;")
+    return " ".join(s.split())
 
 
-def _styler_cellmap(styler, func, subset):
-    """Version-safe per-cell CSS map: Styler.map (pandas >= 2.1) or the older
-    Styler.applymap. Keeps grids working across the SiS pandas versions."""
-    _m = getattr(styler, "map", None)
-    if _m is not None:
-        try:
-            return _m(func, subset=subset)
-        except TypeError:
-            pass
-    return styler.applymap(func, subset=subset)
+def _render_mgrid(show, *, right_cols=(), fmt=None, cell_css=None,
+                  row_css=None):
+    """Emit a DataFrame as one flat .mgrid HTML table via st.markdown — the
+    Logs-page look the user chose as the canonical grid style. Flat on
+    purpose: no sticky header, no scroll box, no canvas — small flat tables
+    are what renders reliably under the users' Menlo browser isolation.
+    Callers keep tables small via pagination (see render_df_table).
+
+    show:       DataFrame of raw values (display order).
+    right_cols: column names to right-align.
+    fmt:        callable(col, value) -> display string (pre-escape), optional.
+    cell_css:   {col: callable(raw_value) -> css declaration string}.
+    row_css:    callable(raw_row_dict) -> css declaration string for all tds.
+    """
+    cols = list(show.columns)
+    right = set(right_cols)
+    th = "".join(
+        f'<th class="r">{_grid_cell_text(c)}</th>' if c in right
+        else f"<th>{_grid_cell_text(c)}</th>"
+        for c in cols)
+    body = []
+    for rec in show.to_dict("records"):
+        rcss = ""
+        if row_css:
+            try:
+                rcss = row_css(rec) or ""
+            except Exception:
+                rcss = ""
+        tds = []
+        for c in cols:
+            raw = rec.get(c)
+            txt = _grid_cell_text(fmt(c, raw) if fmt else raw)
+            css = rcss
+            if cell_css and c in cell_css:
+                try:
+                    extra = cell_css[c](raw) or ""
+                except Exception:
+                    extra = ""
+                if extra:
+                    css = f"{css};{extra}" if css else extra
+            # Short values (ids, dates, statuses) must never break mid-word;
+            # only genuinely long text (emails, simulation names) may wrap.
+            classes = (["r"] if c in right else []) + \
+                      (["nw"] if len(txt) <= 14 else [])
+            klass = f' class="{" ".join(classes)}"' if classes else ""
+            style = f' style="{css}"' if css else ""
+            tds.append(f"<td{klass}{style}>{txt}</td>")
+        body.append("<tr>" + "".join(tds) + "</tr>")
+    st.markdown(
+        f'<div class="mgrid-wrap"><table class="mgrid">'
+        f"<thead><tr>{th}</tr></thead>"
+        f'<tbody>{"".join(body)}</tbody></table></div>',
+        unsafe_allow_html=True)
 
 
 def _supports_df_selection(st):
@@ -1898,14 +2008,12 @@ def _supports_df_selection(st):
 
 def render_activity_grid(df_source, *, selectable=False, key=None,
                          height=380, empty_msg="No adjustments yet."):
-    """Shared 19-column activity grid via st.dataframe at a FIXED height —
-    the one presentation the Grid Lab A/B test proved renders cleanly under
-    the users' Menlo browser-isolation network path (2026-09-02, style A:
-    internal scroll keeps the page short, and the canvas streams like an
-    image). Do not swap this for HTML tables or flowing layouts — every such
-    variant showed white blocks under Menlo. Status text is colour-coded via
-    a version-safe Styler. Selection is via the caller's picker — returns
-    SELECTION_UNSUPPORTED when selectable, else None."""
+    """Shared 19-column activity grid in the user's chosen 'dream grid'
+    style (2026-09-02): the Logs-page .mgrid HTML look, height adapting to
+    the rows, and — when there are more than 15 rows — 12 rows per page
+    with a compact click-a-number pager below (see render_df_table).
+    Status text is colour-coded inline. Selection is via the caller's
+    picker — returns SELECTION_UNSUPPORTED when selectable, else None."""
     import streamlit as st
 
     if df_source is None or df_source.empty:
@@ -1913,13 +2021,10 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
         return None
 
     grid_df = build_activity_grid_df(df_source)
-    try:
-        shown = _styler_cellmap(grid_df.style.hide(axis="index"),
-                                lambda v: STATUS_STYLE.get(v, ""), ["Status"])
-    except Exception:
-        shown = grid_df   # very old pandas: plain values beat no grid
-    st.dataframe(shown, use_container_width=True,
-                 height=_df_height(len(grid_df), height))
+    render_df_table(grid_df, max_rows=len(grid_df),
+                    color_cols={"Status": STATUS_STYLE},
+                    right_cols=("COB", "Source COB", "Records"),
+                    key=f"{key or 'activity'}_pg")
     return SELECTION_UNSUPPORTED if selectable else None
 
 
@@ -1940,58 +2045,82 @@ def bordered_container():
         return c
 
 
-def render_df_table(df, max_rows=1000, height=440, highlight=None,
-                    formats=None, color_cols=None, column_config=None):
-    """CANONICAL grid — st.dataframe at a FIXED height (internal scroll).
-    The Grid Lab A/B test (2026-09-02) proved this is the only presentation
-    that renders without white blocks under the users' Menlo browser
-    isolation: the page stays short and the canvas streams like an image.
-    Do not replace with HTML tables / flowing layouts — every such variant
-    white-tiled under Menlo.
+def render_df_table(df, max_rows=1000, height=None, highlight=None,
+                    formats=None, color_cols=None, column_config=None,
+                    right_cols=(), key=None):
+    """CANONICAL grid — the user's chosen 'dream grid' (2026-09-02):
+    the Logs-page .mgrid HTML look, flat and sized to its rows. Up to 15
+    rows render as one table; beyond that the grid paginates at 12 rows per
+    page with a compact click-a-number pager below. Small flat HTML tables
+    are exactly what renders reliably under the users' Menlo browser
+    isolation (the Logs page proved it live); never reintroduce canvases,
+    sticky headers, nested scroll boxes, or unbounded flowing tables.
 
     highlight:  callable(row_dict)->bool; True tints the row red.
     formats:    {column: python_format}, e.g. {"COST": "${:,.2f}"}.
     color_cols: {column: {value: css-or-hex}} or {column: callable(value)->
                 css-or-hex} — colours that column's TEXT by value.
+    right_cols: extra column names to right-align (numerics are automatic).
+    key:        session key for the pager when the grid paginates; derived
+                from the column names when omitted (pass one when two grids
+                with identical columns share a page).
+    height, column_config: accepted for compatibility; unused.
     """
     import pandas as _pd
     if df is None or len(df) == 0:
         st.caption("No rows.")
         return
     show = df.head(int(max_rows)).reset_index(drop=True)
-    try:
-        sty = show.style.hide(axis="index")
-        if formats:
-            def _mk(fmt):
-                return lambda v: (fmt.format(v) if _pd.notna(v) else "—")
-            sty = sty.format({c: _mk(f) for c, f in formats.items()
-                              if c in show.columns})
-        for _col, _spec in (color_cols or {}).items():
-            if _col not in show.columns:
-                continue
-            def _css(v, spec=_spec):
-                got = spec(v) if callable(spec) else spec.get(str(v), "")
-                if not got:
-                    return ""
-                return got if ":" in got else f"color:{got};font-weight:700"
-            sty = _styler_cellmap(sty, _css, [_col])
-        if highlight:
-            def _rowcss(row):
-                try:
-                    hot = bool(highlight(row.to_dict()))
-                except Exception:
-                    hot = False
-                return ([f"background-color:{P['danger_lt']}" if hot else ""]
-                        * len(row))
-            sty = sty.apply(_rowcss, axis=1)
-    except Exception:
-        sty = show   # very old pandas: plain values beat no grid
-    _h = _df_height(len(show), height)
-    try:
-        st.dataframe(sty, use_container_width=True, height=_h,
-                     column_config=column_config)
-    except TypeError:
-        st.dataframe(sty, use_container_width=True, height=_h)
+
+    fmts = {c: f for c, f in (formats or {}).items() if c in show.columns}
+
+    def _fmt(col, v):
+        if col in fmts and _pd.notna(v):
+            try:
+                return fmts[col].format(v)
+            except (ValueError, TypeError):
+                return v
+        return v
+
+    right = set(right_cols or ())
+    for c in show.columns:
+        if c in fmts or _pd.api.types.is_numeric_dtype(show[c]):
+            right.add(c)
+
+    cell_css = {}
+    for _col, _spec in (color_cols or {}).items():
+        if _col not in show.columns:
+            continue
+        def _css(v, spec=_spec):
+            got = spec(v) if callable(spec) else spec.get(str(v), "")
+            if not got:
+                return ""
+            return got if ":" in got else f"color:{got};font-weight:700"
+        cell_css[_col] = _css
+
+    row_css = None
+    if highlight:
+        def row_css(rec):
+            try:
+                hot = bool(highlight(rec))
+            except Exception:
+                hot = False
+            return f"background-color:{P['danger_lt']}" if hot else ""
+
+    total = len(show)
+    if total <= PAGINATE_OVER:
+        _render_mgrid(show, right_cols=right, fmt=_fmt,
+                      cell_css=cell_css, row_css=row_css)
+    else:
+        pkey = key or f"pg_{abs(hash(tuple(show.columns))) % 100000}"
+        cur, pages = grid_pager(total, GRID_PAGE_ROWS, key=pkey)
+        chunk = show.iloc[cur * GRID_PAGE_ROWS:(cur + 1) * GRID_PAGE_ROWS]
+        _render_mgrid(chunk, right_cols=right, fmt=_fmt,
+                      cell_css=cell_css, row_css=row_css)
+        render_pager(pages, key=pkey,
+                     caption=f"Rows {cur * GRID_PAGE_ROWS + 1}–"
+                             f"{min((cur + 1) * GRID_PAGE_ROWS, total)} "
+                             f"of {total:,}")
     if len(df) > max_rows:
         st.caption(f"Showing the first {int(max_rows)} of {len(df):,} rows.")
 

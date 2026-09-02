@@ -1,12 +1,8 @@
-"""Tests for the canonical grid renderers.
-
-Grid Lab verdict (2026-09-02, tested live under the users' Menlo browser
-isolation): fixed-height st.dataframe (style A) is the ONLY presentation
-free of white blocks. These tests lock the renderers to that shape:
-- grids go through st.dataframe with a bounded height (internal scroll,
-  short pages) — never through flowing HTML tables;
-- the truncation caption still appears past max_rows;
-- selection stays on the fallback-picker contract (runtime is 1.22 < 1.35).
+"""Tests for the canonical 'dream grid' (user-specified 2026-09-02):
+Logs-style .mgrid HTML, sized to its rows; up to 15 rows render whole,
+beyond that 12 rows per page with a compact click-a-number pager.
+Also locks the safety invariants of the HTML emitter: single-line output,
+'$' neutralised (KaTeX), content HTML-escaped.
 """
 import os
 import sys
@@ -19,87 +15,109 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import streamlit
 from utils import styles
 from utils.styles import (render_df_table, render_activity_grid,
-                          SELECTION_UNSUPPORTED)
+                          SELECTION_UNSUPPORTED, GRID_PAGE_ROWS,
+                          PAGINATE_OVER)
 
 
 @pytest.fixture
-def captured(monkeypatch):
-    """Capture every st.dataframe call the grid helpers make."""
-    calls = []
+def harness(monkeypatch):
+    """Capture st.markdown + st.button; isolate session_state."""
+    md, buttons = [], []
 
-    def fake_dataframe(data, *a, **k):
-        calls.append((data, k))
+    def fake_markdown(body, *a, **k):
+        md.append(str(body))
 
-    monkeypatch.setattr(streamlit, "dataframe", fake_dataframe)
-    monkeypatch.setattr(styles.st, "dataframe", fake_dataframe, raising=False)
-    return calls
+    def fake_button(label, *a, **k):
+        buttons.append(str(label))
+        return False
+
+    for mod in (streamlit, styles.st):
+        monkeypatch.setattr(mod, "markdown", fake_markdown, raising=False)
+        monkeypatch.setattr(mod, "button", fake_button, raising=False)
+    monkeypatch.setattr(styles.st, "session_state", {}, raising=False)
+    return md, buttons
 
 
-def test_render_df_table_small_table_fits_content(captured):
-    df = pd.DataFrame({"Comment": ["cost is $5", "plain"],
+def _grids(md):
+    return [h for h in md if "mgrid-wrap" in h]
+
+
+def test_small_table_renders_whole_no_pager(harness):
+    md, buttons = harness
+    render_df_table(pd.DataFrame({"A": range(PAGINATE_OVER)}))  # 15 rows
+    html = _grids(md)[0]
+    assert html.count("<tr>") == 1 + PAGINATE_OVER   # header + all rows
+    assert buttons == []                              # no pager
+
+
+def test_large_table_paginates_at_12(harness):
+    md, buttons = harness
+    render_df_table(pd.DataFrame({"A": range(50)}))   # > 15 → paginate
+    html = _grids(md)[0]
+    assert html.count("<tr>") == 1 + GRID_PAGE_ROWS   # header + 12 rows
+    # 50/12 → 5 pages; pager shows ‹ 1..5 › and a rows caption
+    assert {"1", "2", "3", "4", "5"} <= set(buttons)
+    assert any("Rows 1–12 of 50" in h for h in md)
+
+
+def test_pager_second_page_slices_rows(harness):
+    md, _ = harness
+    styles.st.session_state["k2"] = 1                 # page 2 preselected
+    render_df_table(pd.DataFrame({"A": range(50)}), key="k2")
+    html = _grids(md)[0]
+    assert ">12<" in html and ">23<" in html          # rows 12..23 shown
+    assert ">0<" not in html
+
+
+def test_html_is_single_line_escaped_and_dollar_safe(harness):
+    md, _ = harness
+    df = pd.DataFrame({"Comment": ["cost is $5\ntwo lines",
+                                   "<script>alert(1)</script>"],
                        "Amount": [1234.5, None]})
-    render_df_table(df, formats={"Amount": "{:,.2f}"}, height=300)
-    assert len(captured) == 1
-    _, kwargs = captured[0]
-    # 2 rows fit in 35*(2+1)+3 = 108px — no empty filler rows below.
-    assert kwargs.get("height") == 108
-    assert kwargs.get("use_container_width") is True
+    render_df_table(df, formats={"Amount": "{:,.2f}"})
+    html = _grids(md)[0]
+    assert "\n" not in html
+    assert "$" not in html and "&#36;5" in html
+    assert "<script>" not in html and "&lt;script&gt;" in html
+    assert "1,234.50" in html and "—" in html
+    assert 'class="r"' in html                        # numeric right-aligned
 
 
-def test_render_df_table_large_table_capped(captured):
-    render_df_table(pd.DataFrame({"A": range(200)}), height=300)
-    _, kwargs = captured[0]
-    assert kwargs.get("height") == 300          # cap → internal scroll
+def test_color_and_highlight_inline_css(harness):
+    md, _ = harness
+    df = pd.DataFrame({"Status": ["Failed", "Processed"], "N": [1, 2]})
+    render_df_table(df, color_cols={"Status": {"Failed": "#D50032"}},
+                    highlight=lambda r: r["Status"] == "Failed")
+    html = _grids(md)[0]
+    assert "color:#D50032" in html and "background-color:" in html
 
 
-def test_render_df_table_max_rows_caption(captured, monkeypatch):
-    caps = []
-    monkeypatch.setattr(streamlit, "caption", lambda *a, **k: caps.append(a))
-    monkeypatch.setattr(styles.st, "caption", lambda *a, **k: caps.append(a),
-                        raising=False)
-    render_df_table(pd.DataFrame({"A": range(50)}), max_rows=10)
-    data, _ = captured[0]
-    # Styler wraps the truncated frame; count rows on the underlying data.
-    frame = getattr(data, "data", data)
-    assert len(frame) == 10
-    assert any("Showing the first 10" in str(c) for c in caps)
+def test_grid_pager_math(monkeypatch):
+    from utils.styles import grid_pager
+    monkeypatch.setattr(styles.st, "session_state", {}, raising=False)
+    assert grid_pager(0, 12, key="t1") == (0, 1)
+    assert grid_pager(120, 12, key="t2") == (0, 10)
+    styles.st.session_state["t3"] = 99                 # stale page clamps
+    assert grid_pager(50, 12, key="t3") == (4, 5)
 
 
-def test_render_df_table_empty_shows_caption(captured, monkeypatch):
-    caps = []
-    monkeypatch.setattr(streamlit, "caption", lambda *a, **k: caps.append(a))
-    monkeypatch.setattr(styles.st, "caption", lambda *a, **k: caps.append(a),
-                        raising=False)
-    render_df_table(pd.DataFrame())
-    assert not captured and caps
-
-
-def test_activity_grid_fixed_height_and_selection_sentinel(captured):
+def test_activity_grid_sentinel_and_status_colour(harness):
+    md, _ = harness
     src = pd.DataFrame([{
         "DIMENSION_ADJ_ID": 101, "COBID": 20231231, "PROCESS_TYPE": "VaR",
         "RUN_STATUS": "Failed", "USERNAME": "alice",
     }])
     got = render_activity_grid(src, selectable=True)
     assert got is SELECTION_UNSUPPORTED
-    _, kwargs = captured[0]
-    # 1 row fits in 35*(1+1)+3 = 73px; the 380px style-A cap applies only
-    # to tables taller than that.
-    assert kwargs.get("height") == 73
+    html = _grids(md)[0]
+    assert "Adj ID" in html and "Failed" in html
+    assert "font-weight:600" in html                  # STATUS_STYLE inline
 
 
-def test_grid_pager_math(monkeypatch):
-    from utils.styles import grid_pager
-    monkeypatch.setattr(styles.st, "session_state", {}, raising=False)
-    assert grid_pager(0, 25, key="t1") == (0, 1)       # empty → one page
-    assert grid_pager(120, 25, key="t2") == (0, 5)     # 120/25 → 5 pages
-    styles.st.session_state["t3"] = 99                  # stale page clamps
-    assert grid_pager(50, 25, key="t3") == (1, 2)
-
-
-def test_activity_grid_empty_shows_info(captured, monkeypatch):
+def test_activity_grid_empty_shows_info(harness, monkeypatch):
     infos = []
     monkeypatch.setattr(streamlit, "info", lambda *a, **k: infos.append(a))
     monkeypatch.setattr(styles.st, "info", lambda *a, **k: infos.append(a),
                         raising=False)
     assert render_activity_grid(pd.DataFrame()) is None
-    assert infos and not captured
+    assert infos
