@@ -63,6 +63,20 @@ try:
 except Exception as ex:
     st.warning(f"Could not list tasks — the database reported: {ex}")
 
+# SOLUTION tag per task (live TAG_REFERENCES; includes inherited tags).
+_tag_map = {}
+for t in _tasks:
+    try:
+        tr = run_query(
+            f"""SELECT TAG_VALUE
+                FROM TABLE({config.DATABASE}.INFORMATION_SCHEMA.TAG_REFERENCES(
+                    '{config.DATABASE}.ADJUSTMENT_APP."{t["name"]}"', 'TASK'))
+                WHERE TAG_NAME = 'SOLUTION' LIMIT 1""")
+        if tr and tr[0][0]:
+            _tag_map[t["name"]] = str(tr[0][0])
+    except Exception:
+        pass
+
 if _tasks:
     rows_out = []
     for t in _tasks:
@@ -84,6 +98,7 @@ if _tasks:
             compute = f"Serverless ({size})"
         rows_out.append({
             "TASK": t.get("name"),
+            "SOLUTION": _tag_map.get(t.get("name"), "—"),
             "STATE": t.get("state"),
             "SCHEDULE": t.get("schedule"),
             "COMPUTE": compute,
@@ -164,10 +179,17 @@ try:
 except Exception:
     pass
 
-c1, c2, c3 = st.columns([1, 1, 2])
+c1, c1b, c2, c3 = st.columns([1, 1, 1, 1.4])
 with c1:
     days = st.selectbox("Window", [7, 14, 30, 60, 90], index=2,
                         format_func=lambda d: f"Last {d} days", key="cost_days")
+with c1b:
+    _tag_values = sorted({v for v in _tag_map.values() if v})
+    sel_tag = st.selectbox(
+        "Solution tag", ["All"] + _tag_values, index=0, key="cost_tag",
+        help="Filters the per-task serverless costs to tasks carrying this "
+             "SOLUTION tag value. Warehouses are metered whole and are not "
+             "filtered.")
 with c2:
     price = st.number_input(
         "Price per credit (USD)", min_value=0.0, step=0.05,
@@ -253,6 +275,13 @@ except Exception:
         st.warning("Could not load warehouse credits from ACCOUNT_USAGE or "
                    "INFORMATION_SCHEMA — the app role may need MONITOR on the "
                    "warehouses or IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE.")
+
+# ── Tag filter: keep only serverless tasks carrying the selected tag ─────────
+if sel_tag != "All" and not df_srv.empty:
+    _tagged = {name for name, v in _tag_map.items() if v == sel_tag}
+    df_srv = df_srv[df_srv["TASK"].isin(_tagged)]
+    st.caption(f"Serverless costs filtered to SOLUTION = **{sel_tag}** "
+               f"({len(_tagged)} task(s)). Warehouse metering is not filtered.")
 
 # ── KPIs ─────────────────────────────────────────────────────────────────────
 srv_credits = float(pd.to_numeric(df_srv.get("CREDITS"), errors="coerce").sum()) if not df_srv.empty else 0.0

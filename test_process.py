@@ -8,7 +8,7 @@ import time
 import config
 from mufg_snowflakeconn import sfconnection as m_sf
 
-mufgconn = m_sf.MufgSnowflakeConn('dvlp', 'apd_raptor_sfk_depl@mufgsecurities.com')
+mufgconn = m_sf.MufgSnowflakeConn(config.SF_CONN_ENV, config.DEPLOY_USER)
 session = mufgconn.get_snowflake_session()
 session.use_role(config.ROLE_OWNER)
 session.use_warehouse(config.DT_WH)

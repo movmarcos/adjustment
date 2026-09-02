@@ -1,23 +1,41 @@
 """
 config.py — single source of truth for environment-specific Snowflake names.
 ================================================================================
-Change these values once to retarget the whole solution at a different database,
-warehouse, or set of roles. Every consumer (deploy.py, test_process.py, the SQL
-files, and the Streamlit app) reads from here — there are no DB names hardcoded
-anywhere else outside the _OLD/ archive.
+Every name derives from ENV — nothing else in the repo hardcodes an
+environment prefix. Environments: DVLP | TEST | RLSE | PROD.
 
-To deploy to a new environment: edit the constants below, then run
-    python deploy.py
+To target another environment either:
+    set ADJ_ENV=TEST            # env var, wins when present
+or edit the ENV default below. Every consumer (deploy.py, tests/, the SQL
+files via {{TOKEN}} rendering, and the Streamlit app) reads from here.
+In Streamlit-in-Snowflake ADJ_ENV is not set, so the deployed app uses the
+ENV default — deploy each environment with its own value.
+
+To deploy: python deploy.py
 """
+import os
 
-# ─── Environment identifiers ────────────────────────────────────────────────
-DATABASE   = "DVLP_RAPTOR_NEWADJ"   # app database (deploy session + app + tests)
-SCHEMA     = "ADJUSTMENT_APP"       # app schema (same name in every environment)
-WAREHOUSE  = "DVLP_RAVEN_WH_M"      # deploy session + Streamlit QUERY_WAREHOUSE
-DT_WH      = "DVLP_RAPTOR_WH_XS"    # dynamic-table refresh warehouse
-ROLE_OWNER = "DVLP_RAPTOR_OWNER"    # owning role (deploy + grants)
-ROLE_RO    = "DVLP_RAPTOR_RO"       # read-only role (grants)
-PROD_DB    = "PROD_RAPTOR"          # cross-DB validation compare target
+# ─── Environment ────────────────────────────────────────────────────────────
+ENV = os.environ.get("ADJ_ENV", "DVLP").upper()   # DVLP | TEST | RLSE | PROD
+
+_VALID_ENVS = {"DVLP", "TEST", "RLSE", "PROD"}
+if ENV not in _VALID_ENVS:
+    raise ValueError(f"ADJ_ENV '{ENV}' is not one of {sorted(_VALID_ENVS)}")
+
+# ─── Derived names ──────────────────────────────────────────────────────────
+DATABASE   = f"{ENV}_RAPTOR_NEWADJ"   # app database (deploy session + app + tests)
+SCHEMA     = "ADJUSTMENT_APP"         # app schema (same name in every environment)
+WAREHOUSE  = f"{ENV}_RAPTOR_WH"       # THE warehouse: deploy session, Streamlit
+                                      # QUERY_WAREHOUSE and dynamic tables all use
+                                      # this one (RAVEN_WH_M / RAPTOR_WH_XS retired)
+DT_WH      = WAREHOUSE                # kept as a separate token for the SQL files
+ROLE_OWNER = f"{ENV}_RAPTOR_OWNER"    # owning role (deploy + grants)
+ROLE_RO    = f"{ENV}_RAPTOR_RO"       # read-only role (grants)
+PROD_DB    = "PROD_RAPTOR"            # cross-DB validation compare target
+
+# ─── Connection (deploy.py, tests/, scratch scripts) ────────────────────────
+SF_CONN_ENV = ENV.lower()             # MufgSnowflakeConn environment name
+DEPLOY_USER = "apd_raptor_sfk_depl@mufgsecurities.com"
 
 
 # ─── SQL placeholder substitution ───────────────────────────────────────────

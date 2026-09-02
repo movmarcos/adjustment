@@ -86,8 +86,8 @@ def call_sp(session, name, *args):
 @pytest.fixture(scope="session")
 def session():
     from mufg_snowflakeconn import sfconnection as m_sf
-    env = os.environ.get("UAT_SF_ENV", "dvlp")
-    usr = os.environ.get("UAT_SF_USER", "apd_raptor_sfk_depl@mufgsecurities.com")
+    env = os.environ.get("UAT_SF_ENV", config.SF_CONN_ENV)
+    usr = os.environ.get("UAT_SF_USER", config.DEPLOY_USER)
     conn = m_sf.MufgSnowflakeConn(env, usr)
     sess = conn.get_snowflake_session()
     sess.use_role(config.ROLE_OWNER)
