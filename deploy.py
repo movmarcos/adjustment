@@ -250,6 +250,24 @@ def deploy_streamlit_app(session):
 
     # utils/ directory
     utils_dir = app_dir / 'utils'
+
+    # Build stamp — regenerated on every deploy so the running app can PROVE
+    # which commit it is (shown in the sidebar footer). Ends the "is the fix
+    # actually deployed?" ambiguity for good.
+    try:
+        import subprocess
+        from datetime import datetime, timezone
+        _sha = subprocess.run(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            capture_output=True, text=True,
+            cwd=Path(__file__).parent).stdout.strip() or 'unknown'
+        _when = datetime.now(timezone.utc).strftime('%d %b %Y %H:%M UTC')
+        (utils_dir / 'build_info.py').write_text(
+            f'BUILD = "{_sha} · {_when}"\n', encoding='utf-8')
+        print(f"     🏷️  Build stamp: {_sha} · {_when}")
+    except Exception as e:
+        print(f"     ⚠️ Build stamp skipped: {e}")
+
     if utils_dir.exists():
         for fpath in utils_dir.glob('*.py'):
             files_to_upload.append((fpath, 'utils'))

@@ -2097,3 +2097,13 @@ def render_sidebar():
             f'</div>'
             f'</div>',
             unsafe_allow_html=True)
+
+        # ── Build stamp — written by deploy.py; proves which commit is live.
+        try:
+            from utils.build_info import BUILD as _build
+        except Exception:
+            _build = "local dev"
+        st.markdown(
+            f'<div style="font-size:0.62rem;color:rgba(255,255,255,0.30);'
+            f'padding:2px 1rem 8px;letter-spacing:.03em">build {_build}</div>',
+            unsafe_allow_html=True)
