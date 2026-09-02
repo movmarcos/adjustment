@@ -1,12 +1,7 @@
 """
-Tasks & Cost — pipeline task health and system cost dashboard
+Tasks & Cost — system cost dashboard and pipeline task health
 ==============================================================
-Three panels:
-  • Scheduled tasks — every task in the schema with its compute model:
-    "Serverless (SIZE)" when USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE drives
-    it (SHOW TASKS returns an empty warehouse column), or "Warehouse: NAME"
-    if a task is ever moved onto a dedicated warehouse.
-  • Recent runs — INFORMATION_SCHEMA.TASK_HISTORY (live, last 7 days).
+Three panels, COST FIRST (Marcos: the money is the headline):
   • Cost — SERVERLESS TASK USAGE ONLY, attributed exactly per task
     (SERVERLESS_TASK_HISTORY) × the configurable credit price (ADJ_APP_CONFIG
     key COST_PER_CREDIT_USD). The Streamlit/dynamic-table warehouse is
@@ -15,6 +10,11 @@ Three panels:
     warehouse would likewise stop being attributable — keep tasks serverless.
     ACCOUNT_USAGE preferred (long history, ~2h lag); INFORMATION_SCHEMA
     fallback (live, ≤14 days).
+  • Scheduled tasks — every task in the schema with its compute model:
+    "Serverless (SIZE)" when USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE drives
+    it (SHOW TASKS returns an empty warehouse column), or "Warehouse: NAME"
+    if a task is ever moved onto a dedicated warehouse.
+  • Recent runs — INFORMATION_SCHEMA.TASK_HISTORY (live, last 7 days).
 All queries are plain run_query/run_query_df with loud warnings on failure —
 no caching, no async (SiS runtime).
 """
@@ -39,7 +39,7 @@ user = current_user_name()
 st.markdown("## Tasks & Cost")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
-    "Health of the background tasks and what they cost to run. Only "
+    "What the background tasks cost to run, and their health. Only "
     "serverless task credits are counted — they are attributable exactly to "
     "this solution. The query warehouse is shared with other processes, so "
     "its usage is not included here."
@@ -51,11 +51,7 @@ def _esc(v):
     return str(v).replace("\\", "\\\\").replace("'", "''")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 1 · SCHEDULED TASKS — compute model per task
-# ══════════════════════════════════════════════════════════════════════════════
-section_title("Scheduled Tasks", "clock")
-
+# ── Data fetch (no rendering): task list + SOLUTION tag per task ─────────────
 _tasks = []
 try:
     for r in run_query(f"SHOW TASKS IN SCHEMA {config.DATABASE}.ADJUSTMENT_APP"):
@@ -65,7 +61,7 @@ try:
 except Exception as ex:
     st.warning(f"Could not list tasks — the database reported: {ex}")
 
-# SOLUTION tag per task (live TAG_REFERENCES; includes inherited tags).
+# Live TAG_REFERENCES per task (includes inherited tags).
 _tag_map = {}
 for t in _tasks:
     try:
@@ -79,99 +75,13 @@ for t in _tasks:
     except Exception:
         pass
 
-if _tasks:
-    rows_out = []
-    for t in _tasks:
-        wh = (t.get("warehouse") or "").strip()
-        if wh:
-            compute = f"Warehouse: {wh}"
-        else:
-            # Serverless — the size is a task parameter, not a SHOW TASKS col.
-            size = "auto"
-            try:
-                p = run_query(
-                    "SHOW PARAMETERS LIKE 'USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE' "
-                    f"IN TASK {config.DATABASE}.ADJUSTMENT_APP.\"{t['name']}\"")
-                if p:
-                    pd_ = p[0].as_dict() if hasattr(p[0], "as_dict") else dict(p[0])
-                    size = {str(k).lower(): v for k, v in pd_.items()}.get("value") or "auto"
-            except Exception:
-                pass
-            compute = f"Serverless ({size})"
-        rows_out.append({
-            "TASK": t.get("name"),
-            "SOLUTION": _tag_map.get(t.get("name"), "—"),
-            "STATE": t.get("state"),
-            "SCHEDULE": t.get("schedule"),
-            "COMPUTE": compute,
-            "COMMENT": (t.get("comment") or "")[:90],
-        })
-    df_tasks = pd.DataFrame(rows_out)
-    n_susp = int((df_tasks["STATE"].str.upper() != "STARTED").sum())
-    if n_susp:
-        st.warning(f"**{n_susp} task(s) are not running** — the pipeline or "
-                   "sign-off sync is stopped. Resume them or redeploy 06_tasks.sql.")
-    render_df_table(df_tasks,
-                    highlight=lambda r: str(r.get("STATE", "")).upper() != "STARTED")
-else:
-    st.caption("No tasks found in the schema.")
-
-st.markdown("<br/>", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 2 · RECENT RUNS — live task history
-# ══════════════════════════════════════════════════════════════════════════════
-section_title("Recent Runs", "activity")
-
-df_hist = pd.DataFrame()
-try:
-    df_hist = run_query_df(f"""
-        SELECT NAME AS TASK, STATE,
-               CONVERT_TIMEZONE('Europe/London', SCHEDULED_TIME)::TIMESTAMP_NTZ AS SCHEDULED,
-               CONVERT_TIMEZONE('Europe/London', COMPLETED_TIME)::TIMESTAMP_NTZ AS COMPLETED,
-               ROUND(TIMESTAMPDIFF('millisecond', QUERY_START_TIME, COMPLETED_TIME) / 1000, 1)
-                   AS DURATION_S,
-               LEFT(COALESCE(ERROR_MESSAGE, ''), 160) AS ERROR
-        FROM TABLE({config.DATABASE}.INFORMATION_SCHEMA.TASK_HISTORY(RESULT_LIMIT => 200))
-        WHERE DATABASE_NAME = '{config.DATABASE}'
-          AND STATE <> 'SKIPPED'
-        ORDER BY SCHEDULED_TIME DESC
-    """)
-except Exception as ex:
-    st.warning(f"Could not load task history — the database reported: {ex}")
-
-if not df_hist.empty:
-    _su = df_hist["STATE"].astype(str).str.upper()
-    _last24 = pd.Timestamp.now() - pd.Timedelta(hours=24)
-    _recent = df_hist[pd.to_datetime(df_hist["SCHEDULED"], errors="coerce") >= _last24]
-    k1, k2, k3, k4 = st.columns(4)
-    k1.markdown(kpi_card("Runs (24h)", len(_recent)), unsafe_allow_html=True)
-    _fails = int((_recent["STATE"].astype(str).str.upper() == "FAILED").sum())
-    k2.markdown(kpi_card("Failed (24h)", _fails,
-                         variant="danger" if _fails else "primary"),
-                unsafe_allow_html=True)
-    k3.markdown(kpi_card("Executing now", int((_su == "EXECUTING").sum())),
-                unsafe_allow_html=True)
-    _avg = pd.to_numeric(_recent["DURATION_S"], errors="coerce").mean()
-    k4.markdown(kpi_card("Avg duration (24h)",
-                         f"{_avg:.1f}s" if pd.notna(_avg) else "—"),
-                unsafe_allow_html=True)
-    st.markdown("<br/>", unsafe_allow_html=True)
-    render_df_table(df_hist, max_rows=100,
-                    highlight=lambda r: str(r.get("STATE", "")).upper() == "FAILED")
-    st.caption("Times shown in London. Source: INFORMATION_SCHEMA.TASK_HISTORY "
-               "(live, last 7 days).")
-else:
-    st.caption("No task runs found.")
-
-st.markdown("<br/>", unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 3 · COST — credits per task / warehouse, × configurable credit price
+# 1 · COST — serverless task credits × configurable credit price
 # ══════════════════════════════════════════════════════════════════════════════
 section_title("Cost", "dollar-sign")
 
-# ── Controls: window + credit price (persisted in ADJ_APP_CONFIG) ────────────
+# ── Controls: window + tag filter + credit price (persisted) ─────────────────
 _cfg_price = None
 try:
     _r = run_query("""SELECT CONFIG_VALUE FROM ADJUSTMENT_APP.ADJ_APP_CONFIG
@@ -190,8 +100,7 @@ with c1b:
     sel_tag = st.selectbox(
         "Solution tag", ["All"] + _tag_values, index=0, key="cost_tag",
         help="Filters the per-task serverless costs to tasks carrying this "
-             "SOLUTION tag value. Warehouses are metered whole and are not "
-             "filtered.")
+             "SOLUTION tag value.")
 with c2:
     price = st.number_input(
         "Price per credit (USD)", min_value=0.0, step=0.05,
@@ -296,3 +205,95 @@ st.caption("Why no warehouse figures: the Streamlit query / dynamic-table "
            "task is ever moved from serverless onto a shared warehouse, its "
            "cost disappears from this page for the same reason — keep the "
            "tasks serverless to keep their cost visible.")
+
+st.markdown("<br/>", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 2 · SCHEDULED TASKS — compute model per task
+# ══════════════════════════════════════════════════════════════════════════════
+section_title("Scheduled Tasks", "clock")
+
+if _tasks:
+    rows_out = []
+    for t in _tasks:
+        wh = (t.get("warehouse") or "").strip()
+        if wh:
+            compute = f"Warehouse: {wh}"
+        else:
+            # Serverless — the size is a task parameter, not a SHOW TASKS col.
+            size = "auto"
+            try:
+                p = run_query(
+                    "SHOW PARAMETERS LIKE 'USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE' "
+                    f"IN TASK {config.DATABASE}.ADJUSTMENT_APP.\"{t['name']}\"")
+                if p:
+                    pd_ = p[0].as_dict() if hasattr(p[0], "as_dict") else dict(p[0])
+                    size = {str(k).lower(): v for k, v in pd_.items()}.get("value") or "auto"
+            except Exception:
+                pass
+            compute = f"Serverless ({size})"
+        rows_out.append({
+            "TASK": t.get("name"),
+            "SOLUTION": _tag_map.get(t.get("name"), "—"),
+            "STATE": t.get("state"),
+            "SCHEDULE": t.get("schedule"),
+            "COMPUTE": compute,
+            "COMMENT": (t.get("comment") or "")[:90],
+        })
+    df_tasks = pd.DataFrame(rows_out)
+    n_susp = int((df_tasks["STATE"].str.upper() != "STARTED").sum())
+    if n_susp:
+        st.warning(f"**{n_susp} task(s) are not running** — the pipeline or "
+                   "sign-off sync is stopped. Resume them or redeploy 06_tasks.sql.")
+    render_df_table(df_tasks,
+                    highlight=lambda r: str(r.get("STATE", "")).upper() != "STARTED")
+else:
+    st.caption("No tasks found in the schema.")
+
+st.markdown("<br/>", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 3 · RECENT RUNS — live task history
+# ══════════════════════════════════════════════════════════════════════════════
+section_title("Recent Runs", "activity")
+
+df_hist = pd.DataFrame()
+try:
+    df_hist = run_query_df(f"""
+        SELECT NAME AS TASK, STATE,
+               CONVERT_TIMEZONE('Europe/London', SCHEDULED_TIME)::TIMESTAMP_NTZ AS SCHEDULED,
+               CONVERT_TIMEZONE('Europe/London', COMPLETED_TIME)::TIMESTAMP_NTZ AS COMPLETED,
+               ROUND(TIMESTAMPDIFF('millisecond', QUERY_START_TIME, COMPLETED_TIME) / 1000, 1)
+                   AS DURATION_S,
+               LEFT(COALESCE(ERROR_MESSAGE, ''), 160) AS ERROR
+        FROM TABLE({config.DATABASE}.INFORMATION_SCHEMA.TASK_HISTORY(RESULT_LIMIT => 200))
+        WHERE DATABASE_NAME = '{config.DATABASE}'
+          AND STATE <> 'SKIPPED'
+        ORDER BY SCHEDULED_TIME DESC
+    """)
+except Exception as ex:
+    st.warning(f"Could not load task history — the database reported: {ex}")
+
+if not df_hist.empty:
+    _su = df_hist["STATE"].astype(str).str.upper()
+    _last24 = pd.Timestamp.now() - pd.Timedelta(hours=24)
+    _recent = df_hist[pd.to_datetime(df_hist["SCHEDULED"], errors="coerce") >= _last24]
+    k1, k2, k3, k4 = st.columns(4)
+    k1.markdown(kpi_card("Runs (24h)", len(_recent)), unsafe_allow_html=True)
+    _fails = int((_recent["STATE"].astype(str).str.upper() == "FAILED").sum())
+    k2.markdown(kpi_card("Failed (24h)", _fails,
+                         variant="danger" if _fails else "primary"),
+                unsafe_allow_html=True)
+    k3.markdown(kpi_card("Executing now", int((_su == "EXECUTING").sum())),
+                unsafe_allow_html=True)
+    _avg = pd.to_numeric(_recent["DURATION_S"], errors="coerce").mean()
+    k4.markdown(kpi_card("Avg duration (24h)",
+                         f"{_avg:.1f}s" if pd.notna(_avg) else "—"),
+                unsafe_allow_html=True)
+    st.markdown("<br/>", unsafe_allow_html=True)
+    render_df_table(df_hist, max_rows=100,
+                    highlight=lambda r: str(r.get("STATE", "")).upper() == "FAILED")
+    st.caption("Times shown in London. Source: INFORMATION_SCHEMA.TASK_HISTORY "
+               "(live, last 7 days).")
+else:
+    st.caption("No task runs found.")
