@@ -38,12 +38,12 @@ USE SCHEMA ADJUSTMENT_APP;
 -- ─── Cost-attribution tag ───────────────────────────────────────────────────
 -- SOLUTION tag on every task: slices serverless-task spend per solution in
 -- ACCOUNT_USAGE (join SERVERLESS_TASK_HISTORY to TAG_REFERENCES — see VERIFY).
--- CREATE TASK does not accept an inline WITH TAG clause on this Snowflake
--- edition (deploy 2026-09: all five CREATE TASKs failed with it), so the tag
--- is applied via ALTER TASK ... SET TAG in the block AFTER the creates.
--- CREATE OR REPLACE drops tags — reapplying in this same file on every
--- deploy is what keeps them. Requires Enterprise Edition; owner needs
--- CREATE TAG once.
+-- Mechanism (settled by trial on this environment, 2026-09): the tag clause
+-- is REJECTED combined with CREATE OR REPLACE, and ALTER TASK ... SET TAG is
+-- refused too — so each task is DROP IF EXISTS + CREATE ... WITH TAG (clause
+-- directly after the task name). Same end state as OR REPLACE; acceptable
+-- because a replaced task loses no state either way. Requires Enterprise
+-- Edition; owner needs CREATE TAG once.
 -- Values are display-ready ("Adjustment App") — they surface as-is in cost
 -- dashboards — so the tag is deliberately free-text (no ALLOWED_VALUES).
 CREATE TAG IF NOT EXISTS ADJUSTMENT_APP.SOLUTION
@@ -53,7 +53,9 @@ ALTER TAG ADJUSTMENT_APP.SOLUTION UNSET ALLOWED_VALUES;
 
 -- ─── VaR ───────────────────────────────────────────────────────────────────
 
-CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_VAR
+DROP TASK IF EXISTS ADJUSTMENT_APP.TASK_PROCESS_VAR;
+CREATE TASK ADJUSTMENT_APP.TASK_PROCESS_VAR
+    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'Adjustment App')
     USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'LARGE'
     USER_TASK_TIMEOUT_MS = 10800000
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
@@ -65,7 +67,9 @@ AS
 
 -- ─── Stress ────────────────────────────────────────────────────────────────
 
-CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS
+DROP TASK IF EXISTS ADJUSTMENT_APP.TASK_PROCESS_STRESS;
+CREATE TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS
+    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'Adjustment App')
     USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'MEDIUM'
     USER_TASK_TIMEOUT_MS = 10800000
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
@@ -77,7 +81,9 @@ AS
 
 -- ─── FRTB (all sub-types) ───────────────────────────────────────────────────
 
-CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB
+DROP TASK IF EXISTS ADJUSTMENT_APP.TASK_PROCESS_FRTB;
+CREATE TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB
+    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'Adjustment App')
     USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'MEDIUM'
     USER_TASK_TIMEOUT_MS = 10800000
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
@@ -89,7 +95,9 @@ AS
 
 -- ─── Sensitivity ───────────────────────────────────────────────────────────
 
-CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY
+DROP TASK IF EXISTS ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY;
+CREATE TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY
+    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'Adjustment App')
     USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'LARGE'
     USER_TASK_TIMEOUT_MS = 10800000
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
@@ -106,7 +114,9 @@ AS
 -- The task resolves its CALL target at execution time, so 06 deploying before
 -- 10 is fine — deploy.py resumes all tasks after every object is deployed.
 
-CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_SYNC_SIGNOFF
+DROP TASK IF EXISTS ADJUSTMENT_APP.TASK_SYNC_SIGNOFF;
+CREATE TASK ADJUSTMENT_APP.TASK_SYNC_SIGNOFF
+    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'Adjustment App')
     USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'XSMALL'
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
     SCHEDULE  = '30 MINUTE'
@@ -115,18 +125,7 @@ AS
     CALL ADJUSTMENT_APP.SP_SYNC_SIGNOFF_STATUS();
 
 
--- Cost-attribution tag (see header): applied while the tasks are still
--- SUSPENDED (fresh from CREATE OR REPLACE — some ALTER TASK operations
--- refuse a started task), reapplied every deploy because the replace above
--- wiped it. Display-ready value — shows as-is in cost dashboards.
-ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_VAR         SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
-ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS      SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
-ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB        SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
-ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
-ALTER TASK ADJUSTMENT_APP.TASK_SYNC_SIGNOFF        SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
-
-
--- Self-resume: CREATE OR REPLACE always leaves a task SUSPENDED — running
+-- Self-resume: a freshly created task is always SUSPENDED — running
 -- this file standalone (worksheet hotfix, partial deploy) used to silently
 -- halt every pipeline until someone remembered the separate resume step.
 -- deploy.py's resume_pipeline_tasks step is now a harmless double-resume.
