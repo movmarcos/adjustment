@@ -535,11 +535,12 @@ with tab_signoff:
             _df = _df.head(300).copy()
             _df["_DAY"] = _df["ACTION_AT"].apply(
                 lambda v: fmt_user_dt(v, "%A %d %b %Y"))
-            _th = (f'style="position:sticky;top:0;background:{P["white"]};'
-                   f'text-align:left;padding:7px 10px;font-size:0.72rem;'
+            # No position:sticky — a frozen header overlays the rows with its
+            # white background while the PAGE scrolls. Plain header instead.
+            _th = (f'style="text-align:left;padding:7px 10px;font-size:0.72rem;'
                    f'text-transform:uppercase;letter-spacing:.05em;'
                    f'color:{P["grey_700"]};border-bottom:2px solid {P["border"]};'
-                   f'white-space:nowrap;z-index:1"')
+                   f'white-space:nowrap"')
             _td = (f'padding:5px 10px;font-size:0.82rem;'
                    f'border-bottom:1px solid {P["border"]};vertical-align:middle;'
                    f'font-variant-numeric:tabular-nums')
@@ -575,7 +576,7 @@ with tab_signoff:
             _headers = ["Time", "Event", "COB", "Scope", "Entity", "From",
                         "By", "Comment"]
             st.markdown(
-                f'<div style="max-height:560px;overflow:auto;background:{P["white"]};'
+                f'<div style="overflow-x:auto;background:{P["white"]};'
                 f'border:1px solid {P["border"]};border-radius:8px">'
                 f'<table style="width:100%;border-collapse:collapse">'
                 f'<thead><tr>{"".join(f"<th {_th}>{h}</th>" for h in _headers)}'
