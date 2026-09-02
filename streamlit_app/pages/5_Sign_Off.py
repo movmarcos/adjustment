@@ -343,8 +343,8 @@ def _request(scope_, entity_, sub_, action, verb, reason, requires_approval):
 # ── Three working areas as TABS (Marcos 2026-09: everything stacked made
 # the page crowded). The cockpit above stays always visible; actions, the
 # cross-COB grid and the audit feed each get their own room.
-tab_act, tab_grid, tab_hist = st.tabs(
-    ["Sign Off / Re-Open", "Status Grid", "Latest Changes"])
+tab_act, tab_hist = st.tabs(
+    ["Sign Off & Status", "Latest Changes"])
 
 with tab_act:
     # Pending requests: a read-only strip — decisions live on the Approval Queue.
@@ -424,11 +424,13 @@ with tab_act:
     st.markdown("<br/>", unsafe_allow_html=True)
 
 
-with tab_grid:
     # ══════════════════════════════════════════════════════════════════════════════
-    # STATUS GRID — filterable; defaults to the selected (latest) COB
+    # STATUS GRID — filterable; defaults to the selected (latest) COB.
+    # Same tab as the actions (Marcos): sign off / re-open and the resulting
+    # status live together; only the audit feed is a separate tab.
     # ══════════════════════════════════════════════════════════════════════════════
 
+    st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Sign-Off Status", "table")
     st.caption("One line per COB and scope — the entity chips show the per-entity "
                "state when a scope is split. Defaults to the selected COB.")
