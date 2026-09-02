@@ -115,6 +115,17 @@ AS
     CALL ADJUSTMENT_APP.SP_SYNC_SIGNOFF_STATUS();
 
 
+-- Cost-attribution tag (see header): applied while the tasks are still
+-- SUSPENDED (fresh from CREATE OR REPLACE — some ALTER TASK operations
+-- refuse a started task), reapplied every deploy because the replace above
+-- wiped it. Display-ready value — shows as-is in cost dashboards.
+ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_VAR         SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
+ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS      SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
+ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB        SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
+ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
+ALTER TASK ADJUSTMENT_APP.TASK_SYNC_SIGNOFF        SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
+
+
 -- Self-resume: CREATE OR REPLACE always leaves a task SUSPENDED — running
 -- this file standalone (worksheet hotfix, partial deploy) used to silently
 -- halt every pipeline until someone remembered the separate resume step.
@@ -124,14 +135,6 @@ ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS      RESUME;
 ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB        RESUME;
 ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY RESUME;
 ALTER TASK ADJUSTMENT_APP.TASK_SYNC_SIGNOFF        RESUME;
-
--- Cost-attribution tag (see header): reapplied every deploy because the
--- CREATE OR REPLACE above wiped it. Display-ready value — shows in dashboards.
-ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_VAR         SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
-ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS      SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
-ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB        SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
-ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
-ALTER TASK ADJUSTMENT_APP.TASK_SYNC_SIGNOFF        SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- VERIFY
