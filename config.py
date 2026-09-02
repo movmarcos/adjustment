@@ -31,7 +31,6 @@ WAREHOUSE  = f"{ENV}_RAPTOR_WH"       # THE warehouse: deploy session, Streamlit
 DT_WH      = WAREHOUSE                # kept as a separate token for the SQL files
 ROLE_OWNER = f"{ENV}_RAPTOR_OWNER"    # owning role (deploy + grants)
 ROLE_RO    = f"{ENV}_RAPTOR_RO"       # read-only role (grants)
-PROD_DB    = "PROD_RAPTOR"            # cross-DB validation compare target
 
 # ─── Connection (deploy.py, tests/, scratch scripts) ────────────────────────
 SF_CONN_ENV = ENV.lower()             # MufgSnowflakeConn environment name
@@ -51,7 +50,6 @@ _TOKENS = {
     "DT_WH":      DT_WH,
     "ROLE_OWNER": ROLE_OWNER,
     "ROLE_RO":    ROLE_RO,
-    "PROD_DB":    PROD_DB,
 }
 
 
