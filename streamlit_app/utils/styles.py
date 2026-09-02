@@ -324,6 +324,12 @@ def inject_css():
         -webkit-font-smoothing: antialiased;
     }}
     h1, h2, h3 {{ letter-spacing: -0.01em; }}
+    /* Streamlit's own chrome header: position:fixed, SOLID WHITE, 46px,
+       z-index ~1e6. Page content scrolls UNDER it, which reads as a white
+       block covering the grids — the recurring "white box" bug, independent
+       of how any grid is rendered. Snowsight supplies its own chrome, so
+       remove Streamlit's entirely. */
+    header[data-testid="stHeader"] {{ display: none !important; }}
     [data-testid="stAppViewContainer"] {{ background: var(--bg) !important; }}
     [data-testid="stMainBlockContainer"] {{ padding-top: 1.5rem; padding-bottom: 3rem; }}
     [data-testid="stVerticalBlock"] {{ gap: 0.75rem; }}
