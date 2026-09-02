@@ -3,3 +3,6 @@ __pycache__/
 *.pyo
 .DS_Store
 .venv/
+
+# Local deploy marker — last successfully-deployed commit (per machine)
+.last_deploy_commit
