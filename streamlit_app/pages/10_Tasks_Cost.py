@@ -191,13 +191,27 @@ else:
     if srv_src:
         st.caption(f"Source: {srv_src}")
 
+    _short = lambda c: c.replace("TASK_PROCESS_", "").replace("TASK_", "")
+
     st.markdown("<br/>", unsafe_allow_html=True)
     st.markdown("**Daily credits per task**")
-    pivot = (df_srv.pivot_table(index="DAY", columns="TASK", values="CREDITS",
-                                aggfunc="sum").fillna(0).sort_index())
-    pivot.columns = [c.replace("TASK_PROCESS_", "").replace("TASK_", "")
-                     for c in pivot.columns]
-    st.bar_chart(pivot)
+    _daily = (df_srv.pivot_table(index="DAY", columns="TASK", values="CREDITS",
+                                 aggfunc="sum").fillna(0).sort_index())
+    _daily.columns = [_short(c) for c in _daily.columns]
+    st.bar_chart(_daily)
+
+    st.markdown("<br/>", unsafe_allow_html=True)
+    st.markdown(f"**Monthly cost per task** (credits × ${price:,.2f})")
+    _m = df_srv.copy()
+    _m["MONTH"] = pd.to_datetime(_m["DAY"], errors="coerce").dt.strftime("%Y-%m")
+    _m["COST"] = pd.to_numeric(_m["CREDITS"], errors="coerce") * float(price or 0)
+    _monthly = (_m.pivot_table(index="MONTH", columns="TASK", values="COST",
+                               aggfunc="sum").fillna(0).sort_index())
+    _monthly.columns = [_short(c) for c in _monthly.columns]
+    st.bar_chart(_monthly)
+    if len(_monthly) <= 1:
+        st.caption("Only one month in the current window — widen the window "
+                   "(top of this section) to compare months.")
 
 st.caption("Why no warehouse figures: the Streamlit query / dynamic-table "
            "warehouse is shared with other processes, so its metering is not "
