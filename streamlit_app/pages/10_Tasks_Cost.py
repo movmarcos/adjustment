@@ -172,10 +172,15 @@ m1.markdown(kpi_card("Task credits", f"{srv_credits:,.3f}",
                      f"serverless, last {days}d"), unsafe_allow_html=True)
 m2.markdown(kpi_card("Task cost", f"${total_cost:,.2f}",
                      f"at ${price:,.2f}/credit"), unsafe_allow_html=True)
-m3.markdown(kpi_card("Monthly run-rate", f"${monthly:,.2f}",
-                     "extrapolated from the window"), unsafe_allow_html=True)
+m3.markdown(kpi_card("Projected monthly cost", f"${monthly:,.2f}",
+                     f"if the last {days}d pace continues"),
+            unsafe_allow_html=True)
 m4.markdown(kpi_card("Biggest consumer", _top_task, _top_cost),
             unsafe_allow_html=True)
+st.caption(
+    f"“Projected monthly cost” takes the ${total_cost:,.2f} spent in the last "
+    f"{days} days and scales it to a full 30-day month — an estimate of the "
+    f"monthly run-rate at the current pace, not a billed amount.")
 st.markdown("<br/>", unsafe_allow_html=True)
 
 # ── Per-task breakdown + daily trend ─────────────────────────────────────────
@@ -195,25 +200,29 @@ else:
     _short = lambda c: str(c).replace("TASK_PROCESS_", "").replace("TASK_", "")
 
     # ── Daily credits per task ───────────────────────────────────────────────
-    # Altair temporal X with an explicit date format — st.bar_chart's auto
-    # axis showed weekday/month labels that read strangely across many months.
+    # ORDINAL (categorical) date axis: exactly one bar and one label per date
+    # that actually has data. A temporal axis instead spread ticks across the
+    # whole domain, so 7 days of data looked like "all the dates, only 7 bars".
     st.markdown("<br/>", unsafe_allow_html=True)
     st.markdown("**Daily credits per task**")
     _dl = df_srv.copy()
     _dl["Task"] = _dl["TASK"].map(_short)
-    _dl["Date"] = pd.to_datetime(_dl["DAY"], errors="coerce")
+    _dl["_D"] = pd.to_datetime(_dl["DAY"], errors="coerce")
     _dl["Credits"] = pd.to_numeric(_dl["CREDITS"], errors="coerce")
+    _dl = _dl.dropna(subset=["_D"]).sort_values("_D")
+    _dl["Date"] = _dl["_D"].dt.strftime("%d %b %Y")
+    _date_order = _dl.drop_duplicates("_D")["Date"].tolist()
     _daily_chart = (
-        alt.Chart(_dl.dropna(subset=["Date"]))
+        alt.Chart(_dl)
         .mark_bar()
         .encode(
-            x=alt.X("Date:T", title="Date",
-                    axis=alt.Axis(format="%d %b %Y", labelAngle=-40,
-                                  labelFontSize=12, titleFontSize=12)),
+            x=alt.X("Date:N", title="Date", sort=_date_order,
+                    axis=alt.Axis(labelAngle=-40, labelFontSize=12,
+                                  titleFontSize=12)),
             y=alt.Y("sum(Credits):Q", title="Credits",
                     axis=alt.Axis(labelFontSize=12, titleFontSize=12)),
-            color=alt.Color("Task:N", title="Task"),
-            tooltip=["Date:T", "Task:N", alt.Tooltip("sum(Credits):Q", format=",.3f")],
+            color=alt.Color("Task:N", title="Scope / task"),
+            tooltip=["Date:N", "Task:N", alt.Tooltip("sum(Credits):Q", format=",.3f")],
         )
         .properties(height=300))
     st.altair_chart(_daily_chart, use_container_width=True)
