@@ -2974,7 +2974,7 @@ def _render_signoff_panel() -> bool:
                      f"adjustment has no entity filter, so it touches those "
                      f"entities and is blocked. Set the **Entity Code** field "
                      f"to work on one entity (and request its re-open), or "
-                     f"manage sign-offs per entity on the COB Cockpit page.")
+                     f"manage sign-offs per entity on the Sign-Off page.")
         elif status == "SIGNED_OFF":
             src = ("the upstream publish system"
                    if (state.get("SIGNOFF_SOURCE") or "EXTERNAL") == "EXTERNAL"

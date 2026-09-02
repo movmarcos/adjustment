@@ -198,9 +198,6 @@ with tab_overview:
         ["<strong>Admin</strong>",
          "Restricted: scope config, approvers, page administrators, "
          "notifications, reference."],
-        ["<strong>COB Cockpit</strong>",
-         "The close-of-business run sheet: per-scope status, sign-off "
-         "lifecycle and report freshness for one COB."],
         ["<strong>Logs</strong>", "Processing runs, activity feed, and errors."],
     ]))
 

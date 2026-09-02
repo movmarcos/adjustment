@@ -1,5 +1,5 @@
 """
-Sign-Off — COB Sign-Off Cockpit & Lifecycle
+Sign-Off — COB Sign-Off Status & Lifecycle
 ============================================
 Redesigned 2026-08 (Marcos):
   • Sync sits at the TOP — open COBs come from the upstream publish feed
@@ -289,7 +289,7 @@ def _entity_chips(rows):
     return '<span style="line-height:1.9">' + " ".join(chips) + "</span>"
 
 
-section_title(f"Sign-Off Cockpit — COB {sel_cob}", "lock")
+section_title(f"Scope status — COB {sel_cob}", "lock")
 
 _scopes_shown = [s for s in ALL_SCOPES if s != "FRTBALL"]
 _cols = st.columns(len(_scopes_shown))
