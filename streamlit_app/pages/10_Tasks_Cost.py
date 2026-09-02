@@ -227,60 +227,74 @@ else:
         .properties(height=300))
     st.altair_chart(_daily_chart, use_container_width=True)
 
-    # ── Monthly cost — LAST 3 MONTHS, horizontal, split by task, totals shown.
-    # Manager view: one bar per month, stacked by task, the month's total in $
-    # labelled at the end, and an exact-numbers table beneath.
-    st.markdown("<br/>", unsafe_allow_html=True)
-    st.markdown(f"**Monthly cost — last 3 months** (credits × ${price:,.2f})")
-    _ml = df_srv.copy()
-    _ml["Task"] = _ml["TASK"].map(_short)
+# ── Monthly cost — ALWAYS the last 3 months, independent of the window above.
+# Its own query (last 3 calendar months) so the daily Window selector never
+# shrinks it. Needs ACCOUNT_USAGE (INFORMATION_SCHEMA caps at 14 days).
+st.markdown("<br/>", unsafe_allow_html=True)
+st.markdown(f"**Monthly cost — last 3 months** (credits × ${price:,.2f})")
+_df_3m = pd.DataFrame()
+try:
+    _df_3m = run_query_df(f"""
+        SELECT TASK_NAME AS TASK, DATE(START_TIME) AS DAY,
+               SUM(CREDITS_USED) AS CREDITS
+        FROM SNOWFLAKE.ACCOUNT_USAGE.SERVERLESS_TASK_HISTORY
+        WHERE DATABASE_NAME = '{config.DATABASE}'
+          AND START_TIME >= DATEADD(month, -3, DATE_TRUNC('month', CURRENT_TIMESTAMP()))
+        GROUP BY 1, 2""")
+except Exception:
+    pass
+if sel_tag != "All" and not _df_3m.empty:
+    _tagged3 = {name for name, v in _tag_map.items() if v == sel_tag}
+    _df_3m = _df_3m[_df_3m["TASK"].isin(_tagged3)]
+
+if _df_3m.empty:
+    st.caption("No 3-month task data available — this view needs ACCOUNT_USAGE "
+               "(grant IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE to the app role).")
+else:
+    import altair as alt
+    _short3 = lambda c: str(c).replace("TASK_PROCESS_", "").replace("TASK_", "")
+    _ml = _df_3m.copy()
+    _ml["Task"] = _ml["TASK"].map(_short3)
     _ml["Month"] = pd.to_datetime(_ml["DAY"], errors="coerce").dt.strftime("%Y-%m")
     _ml["Cost"] = pd.to_numeric(_ml["CREDITS"], errors="coerce") * float(price or 0)
     _ml = _ml.dropna(subset=["Month"])
+    _last3 = sorted(_ml["Month"].unique())[-3:]
+    _m3 = _ml[_ml["Month"].isin(_last3)]
+    _order = _last3[::-1]  # newest month on top
 
-    if _ml.empty:
-        st.caption("No monthly data in the current window.")
-    else:
-        _last3 = sorted(_ml["Month"].unique())[-3:]
-        _m3 = _ml[_ml["Month"].isin(_last3)]
-        _order = _last3[::-1]  # newest month on top
+    _bar = (
+        alt.Chart(_m3).mark_bar().encode(
+            y=alt.Y("Month:N", sort=_order, title=None,
+                    axis=alt.Axis(labelFontSize=15, labelFontWeight="bold",
+                                  labelPadding=8)),
+            x=alt.X("sum(Cost):Q", title="Cost (USD)", stack="zero",
+                    axis=alt.Axis(format="$,.0f", labelFontSize=12,
+                                  titleFontSize=12)),
+            color=alt.Color("Task:N", title="Scope / task",
+                            legend=alt.Legend(labelFontSize=12, titleFontSize=12)),
+            tooltip=["Month:N", "Task:N",
+                     alt.Tooltip("sum(Cost):Q", title="Cost", format="$,.2f")],
+        ))
+    _tot = _m3.groupby("Month", as_index=False)["Cost"].sum()
+    _lbl = (
+        alt.Chart(_tot).mark_text(
+            align="left", dx=6, fontSize=15, fontWeight="bold")
+        .encode(
+            y=alt.Y("Month:N", sort=_order),
+            x=alt.X("Cost:Q"),
+            text=alt.Text("Cost:Q", format="$,.0f"),
+        ))
+    st.altair_chart(
+        (_bar + _lbl).properties(height=max(150, 74 * len(_last3))),
+        use_container_width=True)
 
-        _bar = (
-            alt.Chart(_m3).mark_bar().encode(
-                y=alt.Y("Month:N", sort=_order, title=None,
-                        axis=alt.Axis(labelFontSize=15, labelFontWeight="bold",
-                                      labelPadding=8)),
-                x=alt.X("sum(Cost):Q", title="Cost (USD)", stack="zero",
-                        axis=alt.Axis(format="$,.0f", labelFontSize=12,
-                                      titleFontSize=12)),
-                color=alt.Color("Task:N", title="Scope / task",
-                                legend=alt.Legend(labelFontSize=12, titleFontSize=12)),
-                tooltip=["Month:N", "Task:N",
-                         alt.Tooltip("sum(Cost):Q", title="Cost", format="$,.2f")],
-            ))
-        _tot = _m3.groupby("Month", as_index=False)["Cost"].sum()
-        _lbl = (
-            alt.Chart(_tot).mark_text(
-                align="left", dx=6, fontSize=15, fontWeight="bold")
-            .encode(
-                y=alt.Y("Month:N", sort=_order),
-                x=alt.X("Cost:Q"),
-                text=alt.Text("Cost:Q", format="$,.0f"),
-            ))
-        st.altair_chart(
-            (_bar + _lbl).properties(height=max(150, 74 * len(_last3))),
-            use_container_width=True)
-
-        # Exact numbers: month × task, with a Total column.
-        _piv = (_m3.pivot_table(index="Month", columns="Task", values="Cost",
-                                aggfunc="sum").fillna(0).reindex(_order))
-        _piv["Total"] = _piv.sum(axis=1)
-        _piv = _piv.reset_index()
-        _fmts = {c: "${:,.2f}" for c in _piv.columns if c != "Month"}
-        render_df_table(_piv, formats=_fmts)
-        if len(_last3) < 3:
-            st.caption(f"Only {len(_last3)} month(s) of data — widen the window "
-                       "(top of this section) to see three.")
+    # Exact numbers: month × task, with a Total column.
+    _piv = (_m3.pivot_table(index="Month", columns="Task", values="Cost",
+                            aggfunc="sum").fillna(0).reindex(_order))
+    _piv["Total"] = _piv.sum(axis=1)
+    _piv = _piv.reset_index()
+    _fmts = {c: "${:,.2f}" for c in _piv.columns if c != "Month"}
+    render_df_table(_piv, formats=_fmts)
 
 st.caption("Why no warehouse figures: the Streamlit query / dynamic-table "
            "warehouse is shared with other processes, so its metering is not "
