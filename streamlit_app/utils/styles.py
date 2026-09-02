@@ -1801,9 +1801,11 @@ def _supports_df_selection(st):
 
 
 def render_activity_grid(df_source, *, selectable=False, key=None,
-                         height=380, empty_msg="No adjustments yet."):
+                         height=None, empty_msg="No adjustments yet."):
     """Render the shared 19-column activity grid through the canonical
     render_grid (.mgrid look) so it matches every other table in the app.
+    Flows in the page by default (no nested scroll box) exactly like every
+    other grid; pass height only for a deliberately bounded box.
     Selection is always done by the caller's picker: this returns
     SELECTION_UNSUPPORTED when selectable=True (the runtimes we target lack
     native st.dataframe selection anyway), else None."""
