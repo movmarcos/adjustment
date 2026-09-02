@@ -38,9 +38,12 @@ USE SCHEMA ADJUSTMENT_APP;
 -- ─── Cost-attribution tag ───────────────────────────────────────────────────
 -- SOLUTION tag on every task: slices serverless-task spend per solution in
 -- ACCOUNT_USAGE (join SERVERLESS_TASK_HISTORY to TAG_REFERENCES — see VERIFY).
--- Applied INLINE via WITH TAG below on purpose: these tasks are CREATE OR
--- REPLACE, which drops any tag applied out-of-band on every redeploy.
--- Requires Enterprise Edition; the owner role needs CREATE TAG once.
+-- CREATE TASK does not accept an inline WITH TAG clause on this Snowflake
+-- edition (deploy 2026-09: all five CREATE TASKs failed with it), so the tag
+-- is applied via ALTER TASK ... SET TAG in the block AFTER the creates.
+-- CREATE OR REPLACE drops tags — reapplying in this same file on every
+-- deploy is what keeps them. Requires Enterprise Edition; owner needs
+-- CREATE TAG once.
 -- Values are display-ready ("Adjustment App") — they surface as-is in cost
 -- dashboards — so the tag is deliberately free-text (no ALLOWED_VALUES).
 CREATE TAG IF NOT EXISTS ADJUSTMENT_APP.SOLUTION
@@ -56,7 +59,6 @@ CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_VAR
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible VaR adjustments. LARGE: VaR Entity Rolls move ~900M rows/leg.'
-    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'Adjustment App')
 AS
     CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('VaR', '["VaR"]');
 
@@ -69,7 +71,6 @@ CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible Stress adjustments.'
-    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'Adjustment App')
 AS
     CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('Stress', '["Stress"]');
 
@@ -82,7 +83,6 @@ CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible FRTB-pipeline adjustments (FRTB, FRTBDRC, FRTBRRAO).'
-    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'Adjustment App')
 AS
     CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('FRTB', '["FRTB","FRTBDRC","FRTBRRAO"]');
 
@@ -95,7 +95,6 @@ CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
     SCHEDULE  = '1 MINUTE'
     COMMENT   = 'Every 1 min: SP_RUN_PIPELINE polls and processes eligible Sensitivity adjustments.'
-    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'Adjustment App')
 AS
     CALL ADJUSTMENT_APP.SP_RUN_PIPELINE('Sensitivity', '["Sensitivity"]');
 
@@ -112,7 +111,6 @@ CREATE OR REPLACE TASK ADJUSTMENT_APP.TASK_SYNC_SIGNOFF
     SUSPEND_TASK_AFTER_NUM_FAILURES = 0
     SCHEDULE  = '30 MINUTE'
     COMMENT   = 'Every 30 min: sync upstream publish sign-offs into ADJ_SIGNOFF_STATUS.'
-    WITH TAG (ADJUSTMENT_APP.SOLUTION = 'Adjustment App')
 AS
     CALL ADJUSTMENT_APP.SP_SYNC_SIGNOFF_STATUS();
 
@@ -127,14 +125,22 @@ ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB        RESUME;
 ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY RESUME;
 ALTER TASK ADJUSTMENT_APP.TASK_SYNC_SIGNOFF        RESUME;
 
+-- Cost-attribution tag (see header): reapplied every deploy because the
+-- CREATE OR REPLACE above wiped it. Display-ready value — shows in dashboards.
+ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_VAR         SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
+ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_STRESS      SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
+ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_FRTB        SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
+ALTER TASK ADJUSTMENT_APP.TASK_PROCESS_SENSITIVITY SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
+ALTER TASK ADJUSTMENT_APP.TASK_SYNC_SIGNOFF        SET TAG ADJUSTMENT_APP.SOLUTION = 'Adjustment App';
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- VERIFY
 -- ═══════════════════════════════════════════════════════════════════════════
 SHOW TASKS LIKE 'TASK_%' IN SCHEMA ADJUSTMENT_APP;
 
 -- Tags applied (live, no lag):
-SELECT OBJECT_NAME, TAG_VALUE
-FROM TABLE(ADJUSTMENT_APP.INFORMATION_SCHEMA.TAG_REFERENCES_ALL_COLUMNS(
+SELECT TAG_NAME, TAG_VALUE
+FROM TABLE(INFORMATION_SCHEMA.TAG_REFERENCES(
     'ADJUSTMENT_APP.TASK_SYNC_SIGNOFF', 'TASK'));
 
 -- Cost attribution per solution (ACCOUNT_USAGE, up to ~2h behind):

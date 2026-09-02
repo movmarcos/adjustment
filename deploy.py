@@ -186,7 +186,9 @@ def deploy_db_objects(session):
                 print(f"     ✅ [{i}] {short_desc}")
                 file_stmts += 1
             except Exception as e:
-                err_msg = str(e).split('\n')[0][:120]
+                # Full message, whitespace-normalized — Snowflake often puts
+                # the real error on line 2+, so first-line-only hid it.
+                err_msg = " ".join(str(e).split())[:600]
                 print(f"     ❌ [{i}] {short_desc}")
                 print(f"           Error: {err_msg}")
                 file_errors += 1
