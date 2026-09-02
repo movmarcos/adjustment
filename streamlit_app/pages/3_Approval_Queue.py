@@ -13,7 +13,7 @@ st.set_page_config(page_title="Approval Queue · MUFG", page_icon="✅", layout=
 from utils.styles import (
     inject_css, render_sidebar, render_filter_chips, fmt_user_dt,
     section_title, status_badge, P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, icon, bordered_container,
-    render_df_table, fmt_adj_id,
+    render_grid, fmt_adj_id,
 )
 from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
                                   safe_rerun, friendly_error)
@@ -602,10 +602,27 @@ else:
 st.markdown("<br/>", unsafe_allow_html=True)
 section_title("Recently Approved / Rejected", "file-text")
 
+def _rc_pill(text, color):
+    return (f'<span style="background:{color}18;color:{color};'
+            f'border:1px solid {color}55;border-radius:99px;padding:1px 10px;'
+            f'font-size:0.74rem;font-weight:700;white-space:nowrap">{text}</span>')
+
+
+def _rc_scope_pill(scope):
+    cfg = SCOPE_CONFIG.get(str(scope), {})
+    return _rc_pill(_htmlmod.escape(str(scope) or "—"),
+                    cfg.get("color", P["grey_700"]))
+
+
+def _rc_cell(v):
+    s = "" if v is None else " ".join(str(v).split())
+    return _htmlmod.escape(s).replace("$", "&#36;")
+
+
 try:
     df_recent = run_query_df("""
-        SELECT h.ADJ_ID, h.DIMENSION_ADJ_ID, h.COBID, h.PROCESS_TYPE,
-               h.ADJUSTMENT_TYPE, h.ENTITY_CODE, h.RUN_STATUS,
+        SELECT h.DIMENSION_ADJ_ID, h.COBID, h.PROCESS_TYPE,
+               h.ADJUSTMENT_TYPE, h.ENTITY_CODE,
                h.USERNAME AS SUBMITTED_BY,
                sh.NEW_STATUS, sh.CHANGED_BY AS ACTIONED_BY, sh.CHANGED_AT,
                sh.COMMENT
@@ -614,75 +631,62 @@ try:
         WHERE sh.NEW_STATUS IN ('Approved', 'Rejected')
           AND sh.OLD_STATUS = 'Pending Approval'
         ORDER BY sh.CHANGED_AT DESC
-        LIMIT 20
+        LIMIT 200
     """)
 
-    if not df_recent.empty:
-        df_recent = df_recent.reset_index(drop=True)
-        st.caption("Select a row below to see the full detail.")
-
-        # Basic grid — one line per decision, newest first.
-        _grid = pd.DataFrame({
-            "Adj":      df_recent["DIMENSION_ADJ_ID"].apply(fmt_adj_id),
-            "Outcome":  df_recent["NEW_STATUS"].fillna("—").astype(str),
-            "COB":      df_recent["COBID"],
-            "Scope":    df_recent["PROCESS_TYPE"].fillna("—").astype(str),
-            "Type":     df_recent["ADJUSTMENT_TYPE"].fillna("—").astype(str),
-            "Entity":   df_recent["ENTITY_CODE"].fillna("—").astype(str),
-            "Submitted by": df_recent["SUBMITTED_BY"].fillna("—").astype(str),
-            "Decided by":   df_recent["ACTIONED_BY"].fillna("—").astype(str),
-            "When":     df_recent["CHANGED_AT"].apply(
-                lambda v: fmt_user_dt(v, "%d %b %Y %H:%M")),
-        })
-        render_df_table(
-            _grid, max_rows=20,
-            highlight=lambda r: str(r.get("Outcome", "")).lower().startswith("reject"))
-
-        # Detail picker — same idea as the Adjustments page's fallback: pick a
-        # row, see its full information below.
-        def _lbl(i):
-            if i is None:
-                return "— select a decision to see details —"
-            r = df_recent.iloc[i]
-            return (f'{r.get("NEW_STATUS")} · {r.get("PROCESS_TYPE")} · '
-                    f'{r.get("ADJUSTMENT_TYPE")} · COB {r.get("COBID")} · '
-                    f'{r.get("ENTITY_CODE") or "—"}')
-
-        pick = st.selectbox(
-            "View details", options=[None] + list(range(len(df_recent))),
-            format_func=_lbl, key="recent_detail_pick",
-            label_visibility="collapsed")
-
-        if pick is not None:
-            r = df_recent.iloc[pick]
-            outcome = str(r.get("NEW_STATUS") or "")
-            color = STATUS_COLORS.get(outcome, "#9E9E9E")
-            when = fmt_user_dt(r.get("CHANGED_AT"), "%d %b %Y %H:%M:%S")
-            comment = str(r.get("COMMENT") or "").strip()
-            with bordered_container():
-                st.markdown(
-                    f'<div style="display:flex;justify-content:space-between;'
-                    f'align-items:center;flex-wrap:wrap;gap:8px">'
-                    f'<span style="font-weight:700;font-size:1rem">'
-                    f'ADJ {fmt_adj_id(r.get("DIMENSION_ADJ_ID"))}</span>'
-                    f'<span style="background:{color}18;color:{color};'
-                    f'border:1px solid {color}55;border-radius:99px;'
-                    f'padding:2px 12px;font-size:0.78rem;font-weight:700">'
-                    f'{_htmlmod.escape(outcome.upper())}</span></div>',
-                    unsafe_allow_html=True)
-                d1, d2, d3 = st.columns(3)
-                d1.markdown(f"**Scope**  \n{r.get('PROCESS_TYPE') or '—'}")
-                d1.markdown(f"**Type**  \n{r.get('ADJUSTMENT_TYPE') or '—'}")
-                d2.markdown(f"**COB**  \n{r.get('COBID')}")
-                d2.markdown(f"**Entity**  \n{r.get('ENTITY_CODE') or '—'}")
-                d3.markdown(f"**Submitted by**  \n{r.get('SUBMITTED_BY') or '—'}")
-                d3.markdown(f"**Decided by**  \n{r.get('ACTIONED_BY') or '—'} · {when}")
-                st.markdown(
-                    f'<div style="font-size:0.82rem;margin-top:6px">'
-                    f'<span style="color:{P["grey_700"]}">Comment:</span> '
-                    f'{_htmlmod.escape(comment) if comment else "<em>none</em>"}'
-                    f'</div>', unsafe_allow_html=True)
-    else:
+    if df_recent.empty:
         st.info("No recent approval/rejection activity.")
+    else:
+        df_recent = df_recent.reset_index(drop=True)
+
+        # Filters — same idea as the Sign-Off status grid.
+        _rc1, _rc2, _rc3 = st.columns(3)
+        with _rc1:
+            _cobs = sorted(df_recent["COBID"].dropna().astype(int).unique().tolist(),
+                           reverse=True)
+            f_cob = st.multiselect("COB", _cobs, default=[], key="rc_f_cob",
+                                   format_func=lambda v: str(v),
+                                   help="Empty = all COBs.")
+        with _rc2:
+            f_scope = st.multiselect(
+                "Scope", sorted(df_recent["PROCESS_TYPE"].dropna().unique().tolist()),
+                default=[], key="rc_f_scope")
+        with _rc3:
+            f_out = st.multiselect("Outcome", ["Approved", "Rejected"],
+                                   default=[], key="rc_f_out")
+
+        _d = df_recent
+        if f_cob:
+            _d = _d[_d["COBID"].astype("Int64").isin(f_cob)]
+        if f_scope:
+            _d = _d[_d["PROCESS_TYPE"].isin(f_scope)]
+        if f_out:
+            _d = _d[_d["NEW_STATUS"].isin(f_out)]
+
+        if _d.empty:
+            st.info("Nothing matches the filters.")
+        else:
+            _rows = []
+            for _, r in _d.iterrows():
+                _out = str(r.get("NEW_STATUS") or "")
+                _oc = STATUS_COLORS.get(_out, P["grey_700"])
+                _rows.append([
+                    f'<strong>{_htmlmod.escape(str(fmt_adj_id(r.get("DIMENSION_ADJ_ID"))))}</strong>',
+                    _rc_pill(_htmlmod.escape(_out.upper()), _oc),
+                    f'<strong>{"" if pd.isna(r.get("COBID")) else int(r.get("COBID"))}</strong>',
+                    _rc_scope_pill(r.get("PROCESS_TYPE")),
+                    _rc_cell(r.get("ADJUSTMENT_TYPE")) or "—",
+                    _rc_cell(r.get("ENTITY_CODE")) or "—",
+                    _rc_cell(r.get("SUBMITTED_BY")) or "—",
+                    _rc_cell(r.get("ACTIONED_BY")) or "—",
+                    fmt_user_dt(r.get("CHANGED_AT"), "%d %b %Y %H:%M"),
+                    f'<span style="color:{P["grey_700"]}">'
+                    f'{_rc_cell(r.get("COMMENT"))[:160]}</span>',
+                ])
+            render_grid(
+                ["Adj", "Outcome", "COB", "Scope", "Type", "Entity",
+                 "Submitted by", "Decided by", "When", "Comment"],
+                _rows)
+            st.caption(f"{len(_d)} decision(s), newest first.")
 except Exception as _ex:
     st.info(f"No approval history available yet. ({_ex})")
