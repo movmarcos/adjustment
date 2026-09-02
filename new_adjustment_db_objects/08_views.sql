@@ -70,9 +70,17 @@ SELECT
     AVG(CASE WHEN h.RUN_STATUS = 'Processed'
              THEN DATEDIFF('SECOND', h.CREATED_DATE, h.PROCESS_DATE) END) AS AVG_PROCESSING_SECONDS,
     COUNT(DISTINCT h.USERNAME)                                         AS UNIQUE_USERS,
-    -- Overlap count for this COB
-    (SELECT COUNT(*) FROM ADJUSTMENT_APP.DT_OVERLAP_ALERTS o WHERE o.COBID = h.COBID) AS OVERLAP_ALERTS
+    -- Overlap count for this COB. Pre-aggregated LEFT JOIN, not a correlated
+    -- scalar subquery: even correlated only on the GROUP BY key it is the same
+    -- "Unsupported subquery type" risk that broke VW_ADJUSTMENT_TRACK. ov is
+    -- one row per COBID, so MAX() just surfaces that single value.
+    MAX(ov.OVERLAP_ALERTS)                                             AS OVERLAP_ALERTS
 FROM ADJUSTMENT_APP.ADJ_HEADER h
+LEFT JOIN (
+    SELECT o.COBID, COUNT(*) AS OVERLAP_ALERTS
+    FROM ADJUSTMENT_APP.DT_OVERLAP_ALERTS o
+    GROUP BY o.COBID
+) ov ON ov.COBID = h.COBID
 WHERE h.IS_DELETED = FALSE
 GROUP BY h.COBID;
 
@@ -517,10 +525,12 @@ SELECT
     -- Error info
     h.ERRORMESSAGE,
 
-    -- Blocking (overlap serialisation): who this row is waiting for
+    -- Blocking (overlap serialisation): who this row is waiting for.
+    -- LEFT JOIN (blk) not a correlated scalar subquery — Snowflake rejects
+    -- correlated subqueries in the select list ("Unsupported subquery type");
+    -- ADJ_ID is ADJ_HEADER's PK so the join is 1:0/1:1 and cannot fan out.
     h.BLOCKED_BY_ADJ_ID,
-    (SELECT b.DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER b
-      WHERE b.ADJ_ID = h.BLOCKED_BY_ADJ_ID)                  AS BLOCKED_BY_DIM_ID,
+    blk.DIMENSION_ADJ_ID                                     AS BLOCKED_BY_DIM_ID,
 
     -- Computed: current lifecycle stage
     CASE
@@ -549,7 +559,8 @@ SELECT
 
 FROM ADJUSTMENT_APP.ADJ_HEADER h
 LEFT JOIN status_milestones sm ON sm.ADJ_ID = h.ADJ_ID
-LEFT JOIN ADJUSTMENT_APP.VW_REPORT_REFRESH_STATUS r ON r.ADJ_ID = h.ADJ_ID;
+LEFT JOIN ADJUSTMENT_APP.VW_REPORT_REFRESH_STATUS r ON r.ADJ_ID = h.ADJ_ID
+LEFT JOIN ADJUSTMENT_APP.ADJ_HEADER blk ON blk.ADJ_ID = h.BLOCKED_BY_ADJ_ID;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
