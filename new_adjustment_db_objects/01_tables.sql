@@ -904,9 +904,9 @@ COMMENT = 'Per-user display preferences (display timezone; default Europe/London
 --          to run it, ROLE rows are ignored (USER rows keep working).
 -- While this table is EMPTY the app runs in bootstrap mode (page open to all,
 -- with a prominent warning) so the first admin can be registered.
--- Only the BI_DEVELOPER role row is seeded (idempotent MERGE); user
--- membership is operational data owned by the admins themselves and is never
--- wiped on redeploy.
+-- Seeded rows (idempotent MERGEs): the BI_DEVELOPER role and the standing
+-- named admins below. All other user membership is operational data owned by
+-- the admins themselves and is never wiped on redeploy.
 -- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_ADMINS (
@@ -928,6 +928,16 @@ COMMENT = 'Users (ADMIN_TYPE=USER) and Snowflake roles (ADMIN_TYPE=ROLE, direct 
 MERGE INTO ADJUSTMENT_APP.ADJ_ADMINS t
 USING (SELECT 'BI_DEVELOPER' AS USERNAME, 'ROLE' AS ADMIN_TYPE) s
 ON UPPER(t.USERNAME) = s.USERNAME AND t.ADMIN_TYPE = s.ADMIN_TYPE
+WHEN NOT MATCHED THEN INSERT (USERNAME, ADMIN_TYPE, IS_ACTIVE, ADDED_BY)
+VALUES (s.USERNAME, s.ADMIN_TYPE, TRUE, 'SEED');
+
+-- Standing named admin (Marcos, 2026-09): Michelangelo Aliberti. Seeded as
+-- the email; the app matches identities on both the full string and the
+-- local part before '@', so a MICHELANGELO.ALIBERTI username also matches.
+MERGE INTO ADJUSTMENT_APP.ADJ_ADMINS t
+USING (SELECT 'MICHELANGELO.ALIBERTI@MUFGSECURITIES.COM' AS USERNAME,
+              'USER' AS ADMIN_TYPE) s
+ON UPPER(t.USERNAME) = s.USERNAME AND COALESCE(t.ADMIN_TYPE, 'USER') = s.ADMIN_TYPE
 WHEN NOT MATCHED THEN INSERT (USERNAME, ADMIN_TYPE, IS_ACTIVE, ADDED_BY)
 VALUES (s.USERNAME, s.ADMIN_TYPE, TRUE, 'SEED');
 

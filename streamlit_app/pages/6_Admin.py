@@ -29,27 +29,83 @@ user = current_user_name()
 # ADJ_ADMINS is empty the page runs in bootstrap mode (open, with a warning)
 # so the first admin can be registered in the Approvers tab.
 # ──────────────────────────────────────────────────────────────────────────────
-def _role_members(role: str) -> set:
-    """Usernames DIRECTLY granted a Snowflake role, via SHOW GRANTS OF ROLE.
-    Cached per session. Returns None (not empty set) when the command fails —
-    the app's owner role may lack the privilege — so the caller can tell
-    'no members' apart from 'could not resolve'."""
+def _role_members(role: str):
+    """Usernames holding a Snowflake role — INCLUDING through nested role
+    grants (role granted to role granted to user), which is how AD/SCIM group
+    membership usually lands. Two sources, tried in order:
+      1. SHOW GRANTS OF ROLE, walked recursively — live, but the app's
+         owner's-rights session may not be allowed to run SHOW at all;
+      2. SNOWFLAKE.ACCOUNT_USAGE grant views with a recursive CTE — needs
+         IMPORTED PRIVILEGES on the SNOWFLAKE database and lags up to ~2h,
+         which is fine for admin membership.
+    Cached per session. Returns None only when BOTH sources fail; each
+    source's error is kept in _admin_role_diag for the diagnostics expander."""
     cache = st.session_state.setdefault("_admin_role_members", {})
+    diag = st.session_state.setdefault("_admin_role_diag", {})
     if role in cache:
         return cache[role]
+    safe = str(role).replace('"', "").strip().upper()
+    errors = {}
+
+    # Source 1 — SHOW GRANTS OF ROLE, expanded through the role hierarchy:
+    # users of the role itself, plus users of every role this role has been
+    # granted TO (those users inherit it). Depth-capped for safety.
     try:
-        rows = run_query(f'SHOW GRANTS OF ROLE "{role.replace(chr(34), "")}"')
-        members = set()
-        for r in rows or []:
-            d = r.as_dict() if hasattr(r, "as_dict") else dict(r)
-            granted_to = str(d.get("granted_to") or d.get("GRANTED_TO") or "")
-            grantee    = str(d.get("grantee_name") or d.get("GRANTEE_NAME") or "")
-            if granted_to.upper() == "USER" and grantee:
-                members.add(grantee.strip().upper())
+        members, to_visit, visited = set(), [safe], set()
+        while to_visit and len(visited) < 25:
+            r = to_visit.pop()
+            if r in visited:
+                continue
+            visited.add(r)
+            for row in run_query(f'SHOW GRANTS OF ROLE "{r}"') or []:
+                d = row.as_dict() if hasattr(row, "as_dict") else dict(row)
+                granted_to = str(d.get("granted_to") or d.get("GRANTED_TO") or "").upper()
+                grantee = str(d.get("grantee_name") or d.get("GRANTEE_NAME") or "").strip()
+                if not grantee:
+                    continue
+                if granted_to == "USER":
+                    members.add(grantee.upper())
+                elif granted_to == "ROLE":
+                    to_visit.append(grantee.replace('"', "").upper())
         cache[role] = members
-    except Exception:
-        cache[role] = None
-    return cache[role]
+        diag[role] = {"source": "SHOW GRANTS OF ROLE (nested roles expanded)",
+                      "count": len(members), "errors": errors}
+        return members
+    except Exception as ex:
+        errors["SHOW GRANTS OF ROLE"] = str(ex).split("\n")[0][:200]
+
+    # Source 2 — ACCOUNT_USAGE grant views: same expansion as a recursive
+    # CTE (roles the target was granted to, then every user holding any
+    # role in that set).
+    try:
+        _lit = safe.replace("'", "''")
+        rows = run_query(f"""
+            WITH RECURSIVE holders AS (
+                SELECT '{_lit}' AS ROLE_NAME
+                UNION ALL
+                SELECT g.GRANTEE_NAME
+                FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES g
+                JOIN holders h ON UPPER(g.NAME) = h.ROLE_NAME
+                WHERE g.GRANTED_ON = 'ROLE' AND g.GRANTED_TO = 'ROLE'
+                  AND g.PRIVILEGE = 'USAGE' AND g.DELETED_ON IS NULL
+            )
+            SELECT DISTINCT UPPER(u.GRANTEE_NAME) AS USERNAME
+            FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS u
+            JOIN holders h ON UPPER(u.ROLE) = h.ROLE_NAME
+            WHERE u.DELETED_ON IS NULL
+        """)
+        members = {str(r["USERNAME"]).strip().upper()
+                   for r in rows or [] if r["USERNAME"]}
+        cache[role] = members
+        diag[role] = {"source": "ACCOUNT_USAGE grant views (nested roles, ≤2h behind)",
+                      "count": len(members), "errors": errors}
+        return members
+    except Exception as ex:
+        errors["ACCOUNT_USAGE"] = str(ex).split("\n")[0][:200]
+
+    cache[role] = None
+    diag[role] = {"source": None, "count": None, "errors": errors}
+    return None
 
 
 _admin_bootstrap = False
@@ -134,22 +190,30 @@ else:
             st.markdown(
                 f"- Your resolved identity: **{user}** "
                 f"(compared as: {', '.join(sorted(_me_keys)) or '—'})")
+            _diag_all = st.session_state.get("_admin_role_diag", {})
             for _role in _admin_roles:
                 _n = _role_report.get(_role, "not checked")
+                _d = _diag_all.get(_role) or {}
+                _errs = _d.get("errors") or {}
                 if _n is None:
+                    _why = "; ".join(f"`{k}` failed: {v}"
+                                     for k, v in _errs.items()) or "no detail"
                     st.markdown(
                         f"- Role **{_role}**: membership could **not** be "
-                        f"verified — the app cannot run `SHOW GRANTS OF ROLE "
-                        f"{_role}`. Fix: grant the app owner role the "
-                        f"{_role} role (or MANAGE GRANTS), or add yourself "
-                        f"as a USER administrator.")
+                        f"verified by any method ({_why}). Fix: grant the "
+                        f"app owner role MANAGE GRANTS, or IMPORTED "
+                        f"PRIVILEGES on the SNOWFLAKE database (for the "
+                        f"ACCOUNT_USAGE fallback) — or add yourself as a "
+                        f"USER administrator.")
                 else:
+                    _src = _d.get("source") or "SHOW GRANTS OF ROLE"
                     st.markdown(
-                        f"- Role **{_role}**: {_n} directly-granted user(s) "
-                        f"resolved — your identity did not match any of "
-                        f"them. Note: only DIRECT grants count; membership "
-                        f"through another role is not visible to "
-                        f"`SHOW GRANTS OF ROLE`.")
+                        f"- Role **{_role}**: {_n} user(s) resolved via "
+                        f"{_src}, nested role grants included — your "
+                        f"identity did not match any of them. If you were "
+                        f"granted the role in the last ~2 hours and the "
+                        f"source above is ACCOUNT_USAGE, the lag may "
+                        f"explain it.")
         st.stop()
 
 st.markdown("## Admin — Configuration")
