@@ -24,7 +24,7 @@ st.set_page_config(page_title="Sign-Off · MUFG", page_icon="🔒", layout="wide
 
 from utils.styles import (inject_css, render_sidebar, section_title, P,
                           ALL_SCOPES, icon, bordered_container, fmt_user_dt,
-                          SCOPE_CONFIG)
+                          SCOPE_CONFIG, render_grid)
 from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
 
 
@@ -503,36 +503,21 @@ with tab_act:
     if not _groups:
         st.info("Nothing matches the filters.")
     else:
-        _th = (f'style="text-align:left;padding:7px 12px;font-size:0.7rem;'
-               f'text-transform:uppercase;letter-spacing:.05em;'
-               f'color:{P["grey_700"]};border-bottom:2px solid {P["border"]};'
-               f'white-space:nowrap"')
-        _td = (f'style="padding:7px 12px;font-size:0.82rem;'
-               f'border-bottom:1px solid {P["border"]};vertical-align:middle"')
-        _rows_html = []
+        _rows = []
         for (g_cob, g_scope), g_rows in _groups:
             eff, col, sub, sub_col, detail = _scope_summary(g_rows)
-            _rows_html.append(
-                f'<tr>'
-                f'<td {_td}><strong>{int(g_cob)}</strong></td>'
-                f'<td {_td}><strong>{_hesc.escape(str(g_scope))}</strong></td>'
-                f'<td {_td}>{_pill(eff, col)}</td>'
-                f'<td {_td}><span style="color:{sub_col};font-weight:700;'
-                f'font-size:0.78rem">{sub}</span></td>'
-                f'<td {_td}>{_entity_chips(g_rows)}</td>'
-                f'<td {_td}><span style="color:{P["grey_700"]};font-size:0.8rem">'
-                f'{_hesc.escape(" ".join(str(detail).split())).replace("$", "&#36;")}</span></td>'
-                f'</tr>')
-        st.markdown(
-            f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
-            f'border-radius:10px;overflow-x:auto">'
-            f'<table style="width:100%;border-collapse:collapse">'
-            f'<tr><th {_th}>COB</th><th {_th}>Scope</th><th {_th}>Sign-off</th>'
-            f'<th {_th}>Submissions</th><th {_th}>Entities</th>'
-            f'<th {_th}>Detail</th></tr>'
-            + "".join(_rows_html)
-            + '</table></div>',
-            unsafe_allow_html=True)
+            _detail = _hesc.escape(" ".join(str(detail).split())).replace("$", "&#36;")
+            _rows.append([
+                f'<strong>{int(g_cob)}</strong>',
+                f'<strong>{_hesc.escape(str(g_scope))}</strong>',
+                _pill(eff, col),
+                f'<span style="color:{sub_col};font-weight:700;font-size:0.78rem">{sub}</span>',
+                _entity_chips(g_rows),
+                f'<span style="color:{P["grey_700"]};font-size:0.8rem">{_detail}</span>',
+            ])
+        render_grid(
+            ["COB", "Scope", "Sign-off", "Submissions", "Entities", "Detail"],
+            _rows)
         st.caption(f"{len(_groups)} COB/scope line(s) · "
                    f"{len(df_grid)} underlying entit(y/ies)")
 
@@ -586,34 +571,15 @@ with tab_hist:
             cfg = SCOPE_CONFIG.get(str(scope), {})
             return _pill(str(scope) or "—", cfg.get("color", P["grey_700"]))
 
-        # ONE table, ONE st.markdown call. Day changes are divider ROWS inside
-        # the single table rather than separate markdown blocks — many small
-        # raw-HTML blocks rendered blank until scrolled (lazy height/reflow).
-        # A fixed-height scroll container keeps the DOM a single predictable
-        # element regardless of row count.
+        # Build rows for the canonical grid: day changes become divider rows.
         _df = df_hist.copy()
         _df["_DAY"] = _df["ACTION_AT"].apply(lambda v: fmt_user_dt(v, "%A %d %b %Y"))
-
-        # No position:sticky — a frozen header paints its white background
-        # OVER the rows while the PAGE scrolls. Plain header, plain flow.
-        _th = (f'style="text-align:left;padding:7px 10px;font-size:0.72rem;'
-               f'text-transform:uppercase;letter-spacing:.05em;'
-               f'color:{P["grey_700"]};border-bottom:2px solid {P["border"]};'
-               f'white-space:nowrap"')
-        _td = (f'padding:5px 10px;font-size:0.82rem;'
-               f'border-bottom:1px solid {P["border"]};vertical-align:middle;'
-               f'font-variant-numeric:tabular-nums')
-
-        parts = []
+        _rows = []
         _cur_day = None
         for _, h in _df.iterrows():
             if h["_DAY"] != _cur_day:
                 _cur_day = h["_DAY"]
-                parts.append(
-                    f'<tr><td colspan="8" style="padding:9px 10px 3px;'
-                    f'font-size:0.72rem;font-weight:700;text-transform:uppercase;'
-                    f'letter-spacing:.06em;color:{P["grey_700"]};'
-                    f'background:{P["bg"]}">{_hesc.escape(str(_cur_day))}</td></tr>')
+                _rows.append({"divider": _hesc.escape(str(_cur_day))})
             sub = _nz(h.get("SUB_TYPE"))
             ent = (_cell(h.get("ENTITY_CODE")) or "*") + (
                 f' <span style="color:{P["grey_700"]}">/ {_cell(sub)}</span>'
@@ -621,7 +587,7 @@ with tab_hist:
             _old = _nz(h.get("OLD_STATUS")).upper()
             frm = (_ev_pill(_old) if _old
                    else f'<span style="color:{P["grey_700"]}">—</span>')
-            cells = [
+            _rows.append([
                 fmt_user_dt(h.get("ACTION_AT"), "%H:%M:%S"),
                 _ev_pill(h.get("NEW_STATUS")),
                 f'<strong>{_cob(h.get("COBID"))}</strong>',
@@ -630,18 +596,8 @@ with tab_hist:
                 _cell(h.get("ACTION_BY")) or "—",
                 f'<span style="color:{P["grey_700"]}">'
                 f'{_cell(_nz(h.get("COMMENT"))[:160])}</span>',
-            ]
-            parts.append(
-                "<tr>" + "".join(f'<td style="{_td}">{c}</td>' for c in cells)
-                + "</tr>")
-
-        _headers = ["Time", "Event", "COB", "Scope", "Entity", "From", "By",
-                    "Comment"]
-        st.markdown(
-            f'<div style="overflow-x:auto;background:{P["white"]};'
-            f'border:1px solid {P["border"]};border-radius:8px">'
-            f'<table style="width:100%;border-collapse:collapse">'
-            f'<thead><tr>{"".join(f"<th {_th}>{h}</th>" for h in _headers)}'
-            f'</tr></thead><tbody>{"".join(parts)}</tbody></table></div>',
-            unsafe_allow_html=True)
+            ])
+        render_grid(
+            ["Time", "Event", "COB", "Scope", "Entity", "From", "By", "Comment"],
+            _rows)
         st.caption(f"{len(_df)} event(s), newest first.")

@@ -23,7 +23,7 @@ st.set_page_config(
 from utils.styles import (
     inject_css, render_sidebar, section_title,
     P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, fmt_adj_id, icon,
-    fmt_user_dt,
+    fmt_user_dt, render_grid,
 )
 from utils.snowflake_conn import run_query, run_query_df
 
@@ -100,25 +100,10 @@ def _status_pill(status) -> str:
 
 
 def _table(headers, rows, aligns=None) -> str:
-    """Styled, aligned HTML table — much easier to scan than expander lines."""
-    aligns = aligns or ["left"] * len(headers)
-    th = "".join(
-        f'<th style="text-align:{a};padding:6px 10px;font-size:0.72rem;'
-        f'text-transform:uppercase;letter-spacing:.05em;color:{P["grey_700"]};'
-        f'border-bottom:2px solid {P["border"]};white-space:nowrap">{h}</th>'
-        for h, a in zip(headers, aligns))
-    trs = ""
-    for r in rows:
-        tds = "".join(
-            f'<td style="text-align:{a};padding:5px 10px;font-size:0.82rem;'
-            f'border-bottom:1px solid {P["border"]};vertical-align:middle;'
-            f'font-variant-numeric:tabular-nums">{c}</td>'
-            for c, a in zip(r, aligns))
-        trs += f"<tr>{tds}</tr>"
-    return (f'<div style="overflow-x:auto;background:{P["white"]};'
-            f'border:1px solid {P["border"]};border-radius:8px">'
-            f'<table style="width:100%;border-collapse:collapse">'
-            f'<thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table></div>')
+    """Canonical grid (shared .mgrid look) as an HTML string, so existing
+    `st.markdown(_table(...))` callers keep working."""
+    return render_grid(list(headers), list(rows), aligns=aligns,
+                       return_html=True)
 
 
 # ── filters ───────────────────────────────────────────────────────────────────
@@ -529,30 +514,14 @@ with tab_signoff:
                 except (TypeError, ValueError):
                     return _esc_html(v) or "—"
 
-            # ONE table, ONE st.markdown, day dividers as ROWS inside it.
-            # (Many separate raw-HTML blocks render blank until scrolled —
-            # lazy height/reflow; a single scroll container is stable.)
             _df = _df.head(300).copy()
             _df["_DAY"] = _df["ACTION_AT"].apply(
                 lambda v: fmt_user_dt(v, "%A %d %b %Y"))
-            # No position:sticky — a frozen header overlays the rows with its
-            # white background while the PAGE scrolls. Plain header instead.
-            _th = (f'style="text-align:left;padding:7px 10px;font-size:0.72rem;'
-                   f'text-transform:uppercase;letter-spacing:.05em;'
-                   f'color:{P["grey_700"]};border-bottom:2px solid {P["border"]};'
-                   f'white-space:nowrap"')
-            _td = (f'padding:5px 10px;font-size:0.82rem;'
-                   f'border-bottom:1px solid {P["border"]};vertical-align:middle;'
-                   f'font-variant-numeric:tabular-nums')
-            parts, _cur = [], None
+            _rows, _cur = [], None
             for _, ev in _df.iterrows():
                 if ev["_DAY"] != _cur:
                     _cur = ev["_DAY"]
-                    parts.append(
-                        f'<tr><td colspan="8" style="padding:9px 10px 3px;'
-                        f'font-size:0.72rem;font-weight:700;text-transform:uppercase;'
-                        f'letter-spacing:.06em;color:{P["grey_700"]}">'
-                        f'{_esc_html(_cur)}</td></tr>')
+                    _rows.append({"divider": _esc_html(_cur)})
                 _sub = ev.get("SUB_TYPE")
                 _sub = "" if (_sub is None or pd.isna(_sub)) else str(_sub)
                 ent = _esc_html(ev.get("ENTITY_CODE") or "*") + (
@@ -561,7 +530,7 @@ with tab_signoff:
                 _old = str(ev.get("OLD_STATUS") or "").upper()
                 frm = (_so_pill(_old) if _old else
                        f'<span style="color:{P["grey_700"]}">—</span>')
-                cells = [
+                _rows.append([
                     fmt_user_dt(ev.get("ACTION_AT"), "%H:%M:%S"),
                     _so_pill(ev.get("NEW_STATUS")),
                     f'<strong>{_cob_str(ev.get("COBID"))}</strong>',
@@ -570,17 +539,9 @@ with tab_signoff:
                     _esc_html(ev.get("ACTION_BY") or "—"),
                     f'<span style="color:{P["grey_700"]}">'
                     f'{_esc_html(ev.get("COMMENT") or "")}</span>',
-                ]
-                parts.append("<tr>" + "".join(
-                    f'<td style="{_td}">{c}</td>' for c in cells) + "</tr>")
-            _headers = ["Time", "Event", "COB", "Scope", "Entity", "From",
-                        "By", "Comment"]
-            st.markdown(
-                f'<div style="overflow-x:auto;background:{P["white"]};'
-                f'border:1px solid {P["border"]};border-radius:8px">'
-                f'<table style="width:100%;border-collapse:collapse">'
-                f'<thead><tr>{"".join(f"<th {_th}>{h}</th>" for h in _headers)}'
-                f'</tr></thead><tbody>{"".join(parts)}</tbody></table></div>',
-                unsafe_allow_html=True)
+                ])
+            render_grid(
+                ["Time", "Event", "COB", "Scope", "Entity", "From", "By",
+                 "Comment"], _rows)
     except Exception as _ex:
         st.info(f"Sign-off history not available: {_ex}")

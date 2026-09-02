@@ -1192,6 +1192,37 @@ def inject_css():
     .stTabs [data-baseweb="tab-highlight"],
     .stTabs [data-baseweb="tab-border"] {{ display: none !important; }}
 
+    /* ── Canonical GRID (.mgrid) — one look for every table in the app.
+       All HTML grids (render_df_table, render_grid, the page tables) emit
+       <div class="mgrid-wrap"><table class="mgrid"> so they are visually
+       identical regardless of which page or helper built them. */
+    .mgrid-wrap {{
+        overflow-x: auto; background: {P["card"]};
+        border: 1px solid {P["border"]}; border-radius: 8px;
+    }}
+    .mgrid {{ width: 100%; border-collapse: collapse; }}
+    .mgrid th {{
+        text-align: left; padding: 8px 12px; font-size: 0.7rem;
+        font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+        color: {P["grey_700"]}; background: {P["card"]};
+        border-bottom: 2px solid {P["border"]}; white-space: nowrap;
+    }}
+    .mgrid td {{
+        padding: 7px 12px; font-size: 0.82rem; color: {P["grey_900"]};
+        border-bottom: 1px solid {P["border"]}; vertical-align: middle;
+        font-variant-numeric: tabular-nums;
+    }}
+    .mgrid tbody tr:last-child td {{ border-bottom: none; }}
+    .mgrid tbody tr:hover td {{ background: {P["grey_100"]}; }}
+    .mgrid th.r, .mgrid td.r {{ text-align: right; }}
+    /* full-width day/section divider row inside a grid */
+    .mgrid tr.mgrid-div td {{
+        padding: 9px 12px 3px; font-size: 0.7rem; font-weight: 700;
+        text-transform: uppercase; letter-spacing: .06em;
+        color: {P["grey_700"]}; background: {P["bg"]};
+    }}
+    .mgrid tr.mgrid-div:hover td {{ background: {P["bg"]}; }}
+
     /* Expanders + bordered containers */
     [data-testid="stExpander"] {{
         background-color: var(--card) !important;
@@ -1771,11 +1802,12 @@ def _supports_df_selection(st):
 
 def render_activity_grid(df_source, *, selectable=False, key=None,
                          height=380, empty_msg="No adjustments yet."):
-    """Render the shared 19-column activity grid. Display-only by default.
-    When selectable=True: on Streamlit >= 1.35 a single-row click returns that
-    adjustment as a dict (else None); on older runtimes the grid renders plain
-    and SELECTION_UNSUPPORTED is returned so the caller can show a fallback
-    picker."""
+    """Render the shared 19-column activity grid through the canonical
+    render_grid (.mgrid look) so it matches every other table in the app.
+    Selection is always done by the caller's picker: this returns
+    SELECTION_UNSUPPORTED when selectable=True (the runtimes we target lack
+    native st.dataframe selection anyway), else None."""
+    import html as _hm
     import streamlit as st
 
     if df_source is None or df_source.empty:
@@ -1783,30 +1815,24 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
         return None
 
     grid_df = build_activity_grid_df(df_source)
-    styler = (grid_df.style
-              .map(lambda v: STATUS_STYLE.get(v, ""), subset=["Status"])
-              .hide(axis="index"))
 
-    if not selectable:
-        st.dataframe(styler, use_container_width=True, height=height)
-        return None
-
-    if not _supports_df_selection(st):
-        st.dataframe(styler, use_container_width=True, height=height)
-        return SELECTION_UNSUPPORTED
-
-    event = st.dataframe(
-        styler, use_container_width=True, height=height,
-        on_select="rerun", selection_mode="single-row", key=key,
-    )
-    sel = getattr(event, "selection", None)
-    if sel is None and isinstance(event, dict):
-        sel = event.get("selection")
-    if isinstance(sel, dict):
-        rows = sel.get("rows", []) or []
-    else:
-        rows = list(getattr(sel, "rows", []) or [])
-    return resolve_selected_adjustment(df_source, rows)
+    rows = []
+    for _, row in grid_df.iterrows():
+        cells = []
+        for c in grid_df.columns:
+            v = "" if row[c] is None else str(row[c])
+            if c == "Status":
+                sty = STATUS_STYLE.get(v, f"color:{P['grey_700']}")
+                cells.append(f'<span style="{sty}">{_hm.escape(v)}</span>')
+            else:
+                cells.append(_hm.escape(v))
+        rows.append(cells)
+    # Numeric-ish columns right-aligned for scan-ability.
+    _right = {"COB", "Source COB", "Records"}
+    aligns = ["right" if c in _right else "left" for c in grid_df.columns]
+    render_grid([_hm.escape(str(c)) for c in grid_df.columns], rows,
+                aligns=aligns, height=height)
+    return SELECTION_UNSUPPORTED if selectable else None
 
 
 def bordered_container():
@@ -1826,10 +1852,55 @@ def bordered_container():
         return c
 
 
+def render_grid(headers, rows, *, aligns=None, height=None, caption=None,
+                return_html=False):
+    """THE canonical grid renderer — one look for every table in the app.
+
+    headers : list[str] — column headers.
+    rows    : list — each item is one of
+                • a list/tuple of cell HTML strings (a normal row), or
+                • {"divider": "text"} for a full-width section/day divider, or
+                • {"cells": [...], "hot": bool} to tint a row red.
+              Cell content is emitted AS-IS (already-safe HTML — pills, links,
+              escaped text). Callers escape their own user text.
+    aligns  : optional list of "left"/"right" per column.
+    height  : optional px; bounds the grid in a vertical scroll box.
+    All styling comes from the shared .mgrid CSS classes, so grids are
+    visually identical across pages regardless of who calls this."""
+    aligns = aligns or ["left"] * len(headers)
+    _rcls = [" r" if a == "right" else "" for a in aligns]
+    thead = "".join(f'<th class="{("r" if a=="right" else "")}">{h}</th>'
+                    for h, a in zip(headers, aligns))
+    body = []
+    for row in rows:
+        if isinstance(row, dict) and "divider" in row:
+            body.append(f'<tr class="mgrid-div"><td colspan="{len(headers)}">'
+                        f'{row["divider"]}</td></tr>')
+            continue
+        if isinstance(row, dict):
+            cells = row.get("cells", [])
+            hot = row.get("hot", False)
+        else:
+            cells, hot = row, False
+        _bg = f' style="background:{P["danger_lt"]}"' if hot else ""
+        tds = "".join(f'<td class="{_rcls[i] if i < len(_rcls) else ""}">{c}</td>'
+                      for i, c in enumerate(cells))
+        body.append(f"<tr{_bg}>{tds}</tr>")
+    # Bounded vertical scroll only when a height is asked for; otherwise the
+    # grid flows in the page (horizontal scroll only) — no nested scroll.
+    _wrap_style = (f' style="max-height:{int(height)}px;overflow:auto"'
+                   if height else "")
+    html = (f'<div class="mgrid-wrap"{_wrap_style}>'
+            f'<table class="mgrid"><thead><tr>{thead}</tr></thead>'
+            f'<tbody>{"".join(body)}</tbody></table></div>')
+    if return_html:
+        return html
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def render_df_table(df, max_rows=200, height=None, highlight=None, formats=None):
-    """Theme-proof READ-ONLY table: renders a DataFrame as styled HTML so it
-    never depends on the viewer's Streamlit theme (st.dataframe draws on a
-    canvas that CSS cannot reach and follows browser/Snowsight dark mode).
+    """Theme-proof READ-ONLY table for a DataFrame. Delegates to render_grid,
+    so it shares the one canonical .mgrid look with every other table.
     Use render_activity_grid where row SELECTION is needed.
 
     highlight: optional callable(row_dict) -> bool; True tints the row red.
@@ -1867,43 +1938,17 @@ def render_df_table(df, max_rows=200, height=None, highlight=None, formats=None)
             return fmt_user_dt(v)
         return _hm.escape(str(v))
 
-    # No position:sticky on the header: a frozen header paints its own
-    # background OVER the rows while the PAGE scrolls (the white-box bug).
-    # Plain header; when a bounded scroll box is requested (height) the header
-    # simply scrolls with its content.
-    th = "".join(
-        f'<th style="text-align:{"right" if c in numeric else "left"};'
-        f'padding:6px 10px;font-size:0.72rem;text-transform:uppercase;'
-        f'letter-spacing:.05em;color:{P["grey_700"]};white-space:nowrap;'
-        f'border-bottom:2px solid {P["border"]};'
-        f'background:{P["card"]}">{_hm.escape(str(c))}</th>'
-        for c in show.columns)
-    trs = ""
+    aligns = ["right" if c in numeric else "left" for c in show.columns]
+    rows = []
     for _, row in show.iterrows():
         try:
             hot = bool(highlight(row.to_dict())) if highlight else False
         except Exception:
             hot = False
-        row_bg = f'background:{P["danger_lt"]};' if hot else ""
-        tds = "".join(
-            f'<td style="{row_bg}text-align:{"right" if c in numeric else "left"};'
-            f'padding:5px 10px;font-size:0.8rem;color:{P["grey_900"]};'
-            f'border-bottom:1px solid {P["border"]};'
-            f'font-variant-numeric:tabular-nums">{_fmt(c, row[c])}</td>'
-            for c in show.columns)
-        trs += f"<tr>{tds}</tr>"
-
-    # Bounded scroll box only when a height is explicitly asked for; otherwise
-    # the table flows in the page (horizontal scroll only for wide content) so
-    # there is no nested vertical scroll context to misbehave.
-    hstyle = (f"max-height:{int(height)}px;overflow:auto;" if height
-              else "overflow-x:auto;")
-    st.markdown(
-        f'<div style="{hstyle}background:{P["card"]};'
-        f'border:1px solid {P["border"]};border-radius:8px">'
-        f'<table style="width:100%;border-collapse:separate;border-spacing:0">'
-        f'<thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table></div>',
-        unsafe_allow_html=True)
+        rows.append({"cells": [_fmt(c, row[c]) for c in show.columns],
+                     "hot": hot})
+    render_grid([_hm.escape(str(c)) for c in show.columns], rows,
+                aligns=aligns, height=height)
     if len(df) > max_rows:
         st.caption(f"Showing the first {int(max_rows)} of {len(df):,} rows.")
 
