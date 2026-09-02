@@ -13,7 +13,8 @@ st.set_page_config(page_title="Adjustments · MUFG", page_icon="📋", layout="w
 from utils.styles import (
     inject_css, render_sidebar, render_filter_chips, render_status_timeline,
     render_lifecycle_bar, fmt_user_dt,
-    status_badge, section_title, P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, STATUS_ICONS,
+    status_badge, section_title, P, SCOPE_CONFIG, STAGE_CONFIG, ALL_SCOPES,
+    STATUS_COLORS, STATUS_ICONS,
     fmt_adj_id, icon, render_activity_grid, SELECTION_UNSUPPORTED, bordered_container,
 )
 from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
@@ -27,10 +28,102 @@ user = current_user_name()
 st.markdown("## Adjustments")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
-    f"All adjustments, with full history and available actions. "
-    f"Tick <em>Only my adjustments</em> to see just yours.</span>",
+    f"Pipeline status at a glance, then all adjustments with full history and "
+    f"actions. Tick <em>Only my adjustments</em> to see just yours.</span>",
     unsafe_allow_html=True)
 st.markdown("<br/>", unsafe_allow_html=True)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PIPELINE OVERVIEW — count boxes + stage board (merged in from the retired
+# Adjustment Pipeline page). ONE lean query over VW_ADJUSTMENT_TRACK — just the
+# columns the boxes and board need — so it stays fast (the old page pulled 500
+# full rows plus many extra sections, which is why it was slow).
+# ──────────────────────────────────────────────────────────────────────────────
+df_pipe = pd.DataFrame()
+try:
+    df_pipe = run_query_df("""
+        SELECT CURRENT_STAGE, RUN_STATUS, BLOCKED_BY_ADJ_ID,
+               PROCESS_TYPE, ENTITY_CODE, BOOK_CODE
+        FROM ADJUSTMENT_APP.VW_ADJUSTMENT_TRACK
+        WHERE COALESCE(IS_DELETED, FALSE) = FALSE
+        ORDER BY SUBMITTED_AT DESC
+        LIMIT 500
+    """)
+except Exception as _pe:
+    st.warning(f"Could not load pipeline overview: {_pe}")
+
+if not df_pipe.empty:
+    _st = df_pipe["RUN_STATUS"].fillna("")
+    _blk = (df_pipe["BLOCKED_BY_ADJ_ID"].notna()
+            if "BLOCKED_BY_ADJ_ID" in df_pipe.columns
+            else pd.Series(False, index=df_pipe.index))
+    _stage = df_pipe["CURRENT_STAGE"].fillna("")
+    _boxes = [
+        ("Awaiting Approval", int((_st == "Pending Approval").sum()), "#B45309", "clipboard"),
+        ("In Queue",  int((_st.isin(["Pending", "Approved"]) & ~_blk).sum()), P["warning"], "clock"),
+        ("Blocked",   int((_st.isin(["Pending", "Approved"]) & _blk).sum()),  "#B45309", "pause-circle"),
+        ("Running",   int((_st == "Running").sum()),  P["info"],    "zap"),
+        ("Failed",    int((_st == "Failed").sum()),   P["danger"],  "x-circle"),
+        ("Reports Ready", int(_stage.isin(["Reports Ready", "Rebuild Triggered"]).sum()),
+         P["success"], "check-circle"),
+    ]
+    _bcols = st.columns(len(_boxes))
+    for _c, (_lbl, _val, _col, _ic) in zip(_bcols, _boxes):
+        _c.markdown(
+            f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
+            f'border-top:3px solid {_col};border-radius:8px;padding:0.8rem;text-align:center">'
+            f'<div style="font-size:1.6rem;font-weight:800;color:{_col};'
+            f'font-variant-numeric:tabular-nums">'
+            f'{icon(_ic, size=15, color=_col)} {_val}</div>'
+            f'<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.06em;'
+            f'color:{P["grey_700"]};margin-top:3px">{_lbl}</div></div>',
+            unsafe_allow_html=True)
+
+    # Awaiting Approval links to the Approval Queue page (decisions live there).
+    if int((_st == "Pending Approval").sum()) > 0:
+        try:
+            st.page_link("pages/3_Approval_Queue.py",
+                         label="→ Go to the Approval Queue to approve or reject",
+                         icon="✅")
+        except Exception:
+            st.caption("Approve or reject pending items on the Approval Queue page.")
+
+    st.markdown("<br/>", unsafe_allow_html=True)
+
+    # ── Pipeline board — a column per stage with counts + a few items ─────────
+    with st.expander("Pipeline board — where everything is right now", expanded=False):
+        _BOARD_STAGES = [
+            "Submitted", "Pending Approval", "Approved", "Processing",
+            "PBI Queued", "PBI Refreshing", "Reports Ready",
+            "Rebuild Pending", "Rebuild Triggered",
+        ]
+        _bh = '<div class="tracker-board">'
+        for _stg in _BOARD_STAGES:
+            _cfg = STAGE_CONFIG.get(_stg, {"color": "#9E9E9E", "icon": "", "bg": "#F5F5F5"})
+            _items = df_pipe[df_pipe["CURRENT_STAGE"] == _stg]
+            _cnt = int(_items.shape[0])
+            _ih = ""
+            for _, _r in _items.head(10).iterrows():
+                _sc = str(_r.get("PROCESS_TYPE", "") or "")
+                _sccfg = SCOPE_CONFIG.get(_sc, {})
+                _dp = [x for x in [str(_r.get("ENTITY_CODE", "") or ""),
+                                   str(_r.get("BOOK_CODE", "") or "")] if x]
+                _det = " · ".join(_dp) if _dp else "All"
+                _ih += (f'<div class="board-item">'
+                        f'<div class="bi-scope">{icon(_sccfg.get("icon", ""), size=11)} {_sc}</div>'
+                        f'<div class="bi-detail">{_det}</div></div>')
+            if _cnt > 10:
+                _ih += (f'<div style="font-size:0.65rem;color:{P["grey_700"]};'
+                        f'text-align:center;padding:4px">+ {_cnt - 10} more</div>')
+            _bh += (f'<div class="board-col" style="border-top-color:{_cfg["color"]}">'
+                    f'<div class="board-col-header" style="color:{_cfg["color"]}">'
+                    f'{icon(_cfg["icon"], size=13)} {_stg}'
+                    f'<span class="board-col-count" style="color:{_cfg["color"]}">{_cnt}</span>'
+                    f'</div>{_ih}</div>')
+        _bh += '</div>'
+        st.markdown(_bh, unsafe_allow_html=True)
+
+    st.markdown("<br/>", unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # FILTERS

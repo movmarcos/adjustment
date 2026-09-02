@@ -186,14 +186,12 @@ with tab_overview:
          "Create and submit adjustments; request a COB re-open; sign a "
          "re-opened COB off again."],
         ["<strong>Adjustments</strong>",
-         "Browse everything, view history, and act: Retry failed, Delete, "
-         "Submit for approval, Recall."],
+         "Pipeline status boxes and stage board at the top, then browse "
+         "everything with history, filters, and per-row actions (Retry "
+         "failed, Delete, Submit for approval, Recall)."],
         ["<strong>Approval Queue</strong>",
          "Approvers approve/reject adjustments and COB sign-off / re-open "
          "requests (4-eyes: never your own)."],
-        ["<strong>Adjustment Pipeline</strong>",
-         "Live processing view: what needs attention, what is in flight, "
-         "per-adjustment deep dive, force-process."],
         ["<strong>Sign-Off</strong>",
          "COB sign-off status for everyone; request a sign-off or re-open "
          "(both approval-gated); sync from the upstream feed."],
