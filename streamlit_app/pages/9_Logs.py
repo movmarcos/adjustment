@@ -74,8 +74,11 @@ def _fmt_int(v):
 
 
 def _esc_html(v) -> str:
+    """HTML-escape AND whitespace-normalize: newlines inside user text
+    (reasons, comments, error messages) end the markdown HTML block and
+    blank the whole table — collapse them to single spaces."""
     import html
-    return html.escape(str(v)) if v is not None else ""
+    return html.escape(" ".join(str(v).split())) if v is not None else ""
 
 
 def _pill(text, color) -> str:

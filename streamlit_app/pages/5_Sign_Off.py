@@ -465,7 +465,7 @@ else:
             f'font-size:0.78rem">{sub}</span></td>'
             f'<td {_td}>{_entity_chips(g_rows)}</td>'
             f'<td {_td}><span style="color:{P["grey_700"]};font-size:0.8rem">'
-            f'{_hesc.escape(str(detail))}</span></td>'
+            f'{_hesc.escape(" ".join(str(detail).split()))}</span></td>'
             f'</tr>')
     st.markdown(
         f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
@@ -495,9 +495,13 @@ if df_hist.empty:
     st.caption("No sign-off activity recorded yet.")
 else:
     def _nz(v):
-        """NaN/None-safe string ('' for empty)."""
-        return "" if (v is None or (isinstance(v, float) and pd.isna(v))) \
-            else str(v)
+        """NaN/None-safe string ('' for empty), whitespace-NORMALIZED: a
+        newline inside a user comment ends the markdown HTML block and the
+        whole table renders as an empty white box — collapse all runs of
+        whitespace to single spaces before the value enters the HTML."""
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return ""
+        return " ".join(str(v).split())
 
     _EVENT_META = {
         "SIGNED_OFF":        ("SIGNED OFF",         P["success"]),
