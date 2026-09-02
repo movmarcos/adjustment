@@ -347,33 +347,28 @@ def inject_css():
     [data-testid="stSidebar"] * {{ color: #E2E5EA !important; }}
     [data-testid="stSidebar"] hr {{ border-color: rgba(255,255,255,0.10) !important; }}
 
-    /* Sidebar selectbox (Timezone): the light-text rule above lands on the
-       control's LIGHT BaseWeb background — light-on-white, unreadable. Give
-       the closed control a dark ground so the light text reads. The open
-       dropdown menu renders in a portal OUTSIDE the sidebar, so it keeps the
-       app's normal light theme with dark text — leave it alone. */
+    /* Sidebar Timezone selectbox. Two different grounds, two text colors:
+       - the LABEL ("Timezone") sits on the DARK sidebar → light text;
+       - the CONTROL box keeps its default LIGHT background → DARK value text.
+       The sidebar-wide * rule above forces everything light, which made the
+       value white-on-white; these rules put the value (and chevron) back to
+       dark on the light box. The open dropdown renders in a portal outside
+       the sidebar (normal light theme) — untouched. */
     [data-testid="stSidebar"] [data-baseweb="select"] > div {{
-        background: rgba(255,255,255,0.10) !important;
-        border-color: rgba(255,255,255,0.28) !important;
+        background: #FFFFFF !important;
+        border-color: rgba(0,0,0,0.15) !important;
     }}
-    /* Force the SELECTED VALUE text light — BaseWeb sets its own color on the
-       value element, which out-specifies the sidebar-wide * rule, leaving
-       "London" dark-on-dark. Cover the value div and every descendant. */
     [data-testid="stSidebar"] [data-baseweb="select"] > div div,
-    [data-testid="stSidebar"] [data-baseweb="select"] [data-baseweb="select"] *,
     [data-testid="stSidebar"] [data-baseweb="select"] span {{
-        color: #E2E5EA !important;
-        -webkit-text-fill-color: #E2E5EA !important;
+        color: #1F2937 !important;
+        -webkit-text-fill-color: #1F2937 !important;
     }}
     [data-testid="stSidebar"] [data-baseweb="select"] svg {{
-        fill: #E2E5EA !important;
+        fill: #1F2937 !important;
     }}
-    /* The widget LABEL word ("Timezone"): Streamlit's stWidgetLabel sets its
-       own color that out-specifies the sidebar * rule, so it stays dark.
-       Force the label and its inner <p> light. */
+    /* The LABEL word ("Timezone") on the dark sidebar → light. */
     [data-testid="stSidebar"] [data-testid="stWidgetLabel"],
     [data-testid="stSidebar"] [data-testid="stWidgetLabel"] * ,
-    [data-testid="stSidebar"] label,
     [data-testid="stSidebar"] label p {{
         color: #E2E5EA !important;
         -webkit-text-fill-color: #E2E5EA !important;
