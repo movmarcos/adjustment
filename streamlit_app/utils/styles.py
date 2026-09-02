@@ -347,6 +347,19 @@ def inject_css():
     [data-testid="stSidebar"] * {{ color: #E2E5EA !important; }}
     [data-testid="stSidebar"] hr {{ border-color: rgba(255,255,255,0.10) !important; }}
 
+    /* Sidebar selectbox (Timezone): the light-text rule above lands on the
+       control's LIGHT BaseWeb background — light-on-white, unreadable. Give
+       the closed control a dark ground so the light text reads. The open
+       dropdown menu renders in a portal OUTSIDE the sidebar, so it keeps the
+       app's normal light theme with dark text — leave it alone. */
+    [data-testid="stSidebar"] [data-baseweb="select"] > div {{
+        background: rgba(255,255,255,0.10) !important;
+        border-color: rgba(255,255,255,0.28) !important;
+    }}
+    [data-testid="stSidebar"] [data-baseweb="select"] svg {{
+        fill: #E2E5EA !important;
+    }}
+
     /* Logo area red top-stripe */
     [data-testid="stSidebar"] > div:first-child::before {{
         content: "";
