@@ -864,27 +864,31 @@ with bordered_container():
             use_container_width=True,
             help="Download the filtered list for Excel.")
 
-    selected = render_activity_grid(
-        view_df, selectable=True, key="adj_grid",
-        empty_msg="No adjustments match the current filter.")
+# The grid renders BARE on the page, outside the card: Grid Lab proved the
+# fixed-height st.dataframe is clean under Menlo when unwrapped (style A),
+# and the card's box-shadow/border-radius/overflow-clip around a live canvas
+# is the remaining difference vs the page where it still white-tiled.
+selected = render_activity_grid(
+    view_df, selectable=True, key="adj_grid",
+    empty_msg="No adjustments match the current filter.")
 
-    # Older Streamlit-in-Snowflake runtimes lack native row-selection; fall back to
-    # a selectbox picker (same no-tabs single-grid design, just a different control).
-    if selected is SELECTION_UNSUPPORTED:
-        def _opt_label(i):
-            if i is None:
-                return "— select an adjustment to view details / actions —"
-            r = view_df.iloc[i]
-            return (f'{fmt_adj_id(r.get("DIMENSION_ADJ_ID"))} · {r.get("PROCESS_TYPE")} · '
-                    f'{r.get("ADJUSTMENT_TYPE")} · {r.get("RUN_STATUS")} · '
-                    f'{r.get("ENTITY_CODE") or "—"}')
-        # Breathing room between the grid and the picker so they don't crowd.
-        st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
-        choice = st.selectbox(
-            "Open an adjustment for details / actions",
-            options=[None] + list(range(len(view_df))),
-            format_func=_opt_label, key="adj_pick")
-        selected = view_df.iloc[choice].to_dict() if choice is not None else None
+# Older Streamlit-in-Snowflake runtimes lack native row-selection; fall back to
+# a selectbox picker (same no-tabs single-grid design, just a different control).
+if selected is SELECTION_UNSUPPORTED:
+    def _opt_label(i):
+        if i is None:
+            return "— select an adjustment to view details / actions —"
+        r = view_df.iloc[i]
+        return (f'{fmt_adj_id(r.get("DIMENSION_ADJ_ID"))} · {r.get("PROCESS_TYPE")} · '
+                f'{r.get("ADJUSTMENT_TYPE")} · {r.get("RUN_STATUS")} · '
+                f'{r.get("ENTITY_CODE") or "—"}')
+    # Breathing room between the grid and the picker so they don't crowd.
+    st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+    choice = st.selectbox(
+        "Open an adjustment for details / actions",
+        options=[None] + list(range(len(view_df))),
+        format_func=_opt_label, key="adj_pick")
+    selected = view_df.iloc[choice].to_dict() if choice is not None else None
 
 # ── Bulk retry — all FAILED rows in the current filtered view ────────────────
 _bulk_flash = st.session_state.pop("adj_bulk_flash", None)

@@ -21,6 +21,7 @@ st.set_page_config(
 
 from utils.styles import (
     inject_css, render_sidebar, P, build_activity_grid_df, render_df_table,
+    bordered_container,
 )
 
 inject_css()
@@ -89,6 +90,9 @@ STYLES = {
         "The simplest possible table — plain markdown, no custom HTML.",
     "G — st.dataframe sized to show ALL rows (long page)":
         "Canvas like A but full height, so you scroll the page past it.",
+    "H — Style A inside a section card (like the Adjustments page)":
+        "Same grid as A, but wrapped in the white card with border, shadow "
+        "and rounded corners — exactly how the Adjustments page framed it.",
 }
 
 c1, c2 = st.columns([3, 1])
@@ -148,6 +152,12 @@ elif letter == "F":
 elif letter == "G":
     st.dataframe(grid, use_container_width=True,
                  height=min(35 * (len(grid) + 1) + 10, 12000))
+
+elif letter == "H":
+    with bordered_container():
+        st.markdown("**Results — a card header like Adjustments**")
+        st.caption("Select a row to view its details and actions.")
+        st.dataframe(grid, use_container_width=True, height=380)
 
 # Content below the grid, so there is always something to scroll TO.
 st.markdown("<br/>", unsafe_allow_html=True)
