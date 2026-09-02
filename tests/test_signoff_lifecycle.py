@@ -12,6 +12,8 @@ then blocked-submission check), ZUATC (reject/revert), ZUATD (SUB_TYPE pair).
 """
 import pytest
 
+AREA = "Sign-Off"
+
 from conftest import (FAKE_COB, ENT_A, ENT_B, ENT_C, ENT_D,
                       U_SUBMIT, U_APPROVE, call_sp, lit)
 

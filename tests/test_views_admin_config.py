@@ -5,6 +5,8 @@ resolution. Safe to run any time — they write nothing.
 """
 import pytest
 
+AREA = "Views, Admin & Config"
+
 from conftest import FAKE_COB
 
 # Every app-facing view: a SELECT ... LIMIT 1 forces full compilation, which

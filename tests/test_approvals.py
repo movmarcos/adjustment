@@ -10,6 +10,8 @@ import json
 
 import pytest
 
+AREA = "Approval Workflow"
+
 from conftest import FAKE_COB, U_SUBMIT, U_APPROVE, call_sp
 
 SP_SUBMIT = "ADJUSTMENT_APP.SP_SUBMIT_ADJUSTMENT"

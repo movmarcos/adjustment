@@ -189,6 +189,20 @@ def pytest_configure(config):  # noqa: F811 — pytest requires this exact name
         "uat(id, title=..., priority=...): map a test to a UAT test-plan case")
 
 
+def pytest_itemcollected(item):
+    """Friendly display names: every test shows as
+    'Adjustment App · <area> · <UAT-ID> — <title>' in the console and the
+    report, instead of the raw file::function nodeid. The area comes from
+    each test module's AREA constant."""
+    m = item.get_closest_marker("uat")
+    if not m:
+        return
+    uid = m.args[0] if m.args else "—"
+    title = m.kwargs.get("title", item.name)
+    area = getattr(item.module, "AREA", pathlib.Path(str(item.fspath)).stem)
+    item._nodeid = f"Adjustment App · {area} · {uid} — {title}"
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
@@ -232,7 +246,7 @@ def pytest_sessionfinish(session, exitstatus):
                   if r.get("outcome") in ("SKIPPED", "ERROR"))
 
     lines = [
-        "# UAT Automation Report — Adjustment Engine",
+        "# Adjustment App — UAT Automation Report",
         "",
         f"Generated {now} local · environment `{config.DATABASE}` "
         f"(role `{config.ROLE_OWNER}`, warehouse `{config.WAREHOUSE}`) · "

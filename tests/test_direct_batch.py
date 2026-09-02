@@ -13,6 +13,8 @@ import uuid
 
 import pytest
 
+AREA = "Direct Upload"
+
 from conftest import (FAKE_COB, U_SUBMIT, STAGE_BATCH_PREFIX,
                       ADJ_ID_NAMESPACE, call_sp, esc)
 
