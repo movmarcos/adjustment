@@ -2042,7 +2042,7 @@ def render_sidebar():
     with st.sidebar:
         # ── MUFG Logo (SVG inline, white text for dark background) ──────────
         st.markdown("""
-        <div style="padding:0.8rem 1rem 0.6rem;border-bottom:1px solid rgba(255,255,255,0.08);pointer-events:none">
+        <div style="padding:0.8rem 1rem 0.6rem;margin-bottom:0.85rem;border-bottom:1px solid rgba(255,255,255,0.08);pointer-events:none">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 80"
                style="width:100%;max-width:170px;height:auto;display:block">
             <circle cx="40" cy="40" r="34" fill="#D50032"/>
