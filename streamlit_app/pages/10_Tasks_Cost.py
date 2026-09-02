@@ -191,25 +191,56 @@ else:
     if srv_src:
         st.caption(f"Source: {srv_src}")
 
-    _short = lambda c: c.replace("TASK_PROCESS_", "").replace("TASK_", "")
+    import altair as alt
+    _short = lambda c: str(c).replace("TASK_PROCESS_", "").replace("TASK_", "")
 
+    # ── Daily credits per task ───────────────────────────────────────────────
+    # Altair temporal X with an explicit date format — st.bar_chart's auto
+    # axis showed weekday/month labels that read strangely across many months.
     st.markdown("<br/>", unsafe_allow_html=True)
     st.markdown("**Daily credits per task**")
-    _daily = (df_srv.pivot_table(index="DAY", columns="TASK", values="CREDITS",
-                                 aggfunc="sum").fillna(0).sort_index())
-    _daily.columns = [_short(c) for c in _daily.columns]
-    st.bar_chart(_daily)
+    _dl = df_srv.copy()
+    _dl["Task"] = _dl["TASK"].map(_short)
+    _dl["Date"] = pd.to_datetime(_dl["DAY"], errors="coerce")
+    _dl["Credits"] = pd.to_numeric(_dl["CREDITS"], errors="coerce")
+    _daily_chart = (
+        alt.Chart(_dl.dropna(subset=["Date"]))
+        .mark_bar()
+        .encode(
+            x=alt.X("Date:T", title="Date",
+                    axis=alt.Axis(format="%d %b %Y", labelAngle=-40,
+                                  labelFontSize=12, titleFontSize=12)),
+            y=alt.Y("sum(Credits):Q", title="Credits",
+                    axis=alt.Axis(labelFontSize=12, titleFontSize=12)),
+            color=alt.Color("Task:N", title="Task"),
+            tooltip=["Date:T", "Task:N", alt.Tooltip("sum(Credits):Q", format=",.3f")],
+        )
+        .properties(height=300))
+    st.altair_chart(_daily_chart, use_container_width=True)
 
+    # ── Monthly cost per task ────────────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
     st.markdown(f"**Monthly cost per task** (credits × ${price:,.2f})")
-    _m = df_srv.copy()
-    _m["MONTH"] = pd.to_datetime(_m["DAY"], errors="coerce").dt.strftime("%Y-%m")
-    _m["COST"] = pd.to_numeric(_m["CREDITS"], errors="coerce") * float(price or 0)
-    _monthly = (_m.pivot_table(index="MONTH", columns="TASK", values="COST",
-                               aggfunc="sum").fillna(0).sort_index())
-    _monthly.columns = [_short(c) for c in _monthly.columns]
-    st.bar_chart(_monthly)
-    if len(_monthly) <= 1:
+    _ml = df_srv.copy()
+    _ml["Task"] = _ml["TASK"].map(_short)
+    _ml["Month"] = pd.to_datetime(_ml["DAY"], errors="coerce").dt.strftime("%Y-%m")
+    _ml["Cost"] = pd.to_numeric(_ml["CREDITS"], errors="coerce") * float(price or 0)
+    _ml = _ml.dropna(subset=["Month"])
+    _monthly_chart = (
+        alt.Chart(_ml)
+        .mark_bar()
+        .encode(
+            x=alt.X("Month:N", title="Month", sort="ascending",
+                    axis=alt.Axis(labelAngle=0, labelFontSize=14,
+                                  titleFontSize=13, labelPadding=6)),
+            y=alt.Y("sum(Cost):Q", title="Cost (USD)",
+                    axis=alt.Axis(labelFontSize=12, titleFontSize=13, format="$,.0f")),
+            color=alt.Color("Task:N", title="Task"),
+            tooltip=["Month:N", "Task:N", alt.Tooltip("sum(Cost):Q", format="$,.2f")],
+        )
+        .properties(height=340))
+    st.altair_chart(_monthly_chart, use_container_width=True)
+    if _ml["Month"].nunique() <= 1:
         st.caption("Only one month in the current window — widen the window "
                    "(top of this section) to compare months.")
 
