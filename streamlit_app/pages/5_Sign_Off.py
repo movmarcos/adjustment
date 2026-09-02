@@ -340,240 +340,257 @@ def _request(scope_, entity_, sub_, action, verb, reason, requires_approval):
     safe_rerun()
 
 
-# Pending requests: a read-only strip — decisions live on the Approval Queue.
-_pending_rows = df_cob[df_cob["_SU"].isin(["SIGNOFF_REQUESTED",
-                                           "REOPEN_REQUESTED"])]
-if not _pending_rows.empty:
-    _plist = " · ".join(
-        f"{r['PROCESS_TYPE']} {r['_ENT_LBL']} "
-        f"({'sign-off' if r['_SU'] == 'SIGNOFF_REQUESTED' else 're-open'} "
-        f"by {r.get('REOPEN_REQUESTED_BY') or '—'})"
-        for _, r in _pending_rows.iterrows())
-    st.warning(f"**Awaiting approval on the Approval Queue page:** {_plist}")
+# ── Three working areas as TABS (Marcos 2026-09: everything stacked made
+# the page crowded). The cockpit above stays always visible; actions, the
+# cross-COB grid and the audit feed each get their own room.
+tab_act, tab_grid, tab_hist = st.tabs(
+    ["Sign Off / Re-Open", "Status Grid", "Latest Changes"])
 
-_act_l, _act_r = st.columns(2)
+with tab_act:
+    # Pending requests: a read-only strip — decisions live on the Approval Queue.
+    _pending_rows = df_cob[df_cob["_SU"].isin(["SIGNOFF_REQUESTED",
+                                               "REOPEN_REQUESTED"])]
+    if not _pending_rows.empty:
+        _plist = " · ".join(
+            f"{r['PROCESS_TYPE']} {r['_ENT_LBL']} "
+            f"({'sign-off' if r['_SU'] == 'SIGNOFF_REQUESTED' else 're-open'} "
+            f"by {r.get('REOPEN_REQUESTED_BY') or '—'})"
+            for _, r in _pending_rows.iterrows())
+        st.warning(f"**Awaiting approval on the Approval Queue page:** {_plist}")
 
-with _act_l:
-    with bordered_container():
-        section_title("Sign Off", "check-circle")
-        st.caption("Close a scope for this COB — new adjustments are blocked "
-                   "once signed off.")
-        _elig_s = sorted({(r["PROCESS_TYPE"], r["ENTITY_CODE"], r["SUB_TYPE"])
-                          for _, r in df_cob[df_cob["_SU"].isin(
-                              ["OPEN", "REOPENED"])].iterrows()})
-        if not _elig_s:
-            st.info("Nothing to sign off — everything on this COB is already "
-                    "signed off or awaiting approval.")
-        else:
-            _sel_s = st.selectbox("What to sign off", _elig_s,
-                                  key="so_signoff_target",
-                                  format_func=_row_label)
-            _rsn_s = st.text_input(
-                "Reason *", key="so_signoff_reason",
-                placeholder="e.g. all adjustments for this COB are done")
-            # Sign-off approval is OPTIONAL: unchecked = applies immediately.
-            _appr_s = st.checkbox(
-                "Request approval first (optional)", value=False,
-                key="so_signoff_appr")
-            if st.button(("Request sign-off" if _appr_s else "Sign off now"),
-                         key="so_signoff_btn", type="primary",
-                         use_container_width=True,
-                         disabled=not (_sel_s and _rsn_s.strip())):
-                _request(_sel_s[0], _sel_s[1], _sel_s[2], "SIGNOFF",
-                         "Sign-off", _rsn_s, _appr_s)
+    _act_l, _act_r = st.columns(2)
 
-with _act_r:
-    with bordered_container():
-        section_title("Re-Open", "unlock")
-        st.caption("Allow adjustments again on a signed-off scope — always "
-                   "needs an approver (4-eyes).")
-        _elig_r = sorted({(r["PROCESS_TYPE"], r["ENTITY_CODE"], r["SUB_TYPE"])
-                          for _, r in df_cob[df_cob["_SU"] == "SIGNED_OFF"]
-                          .iterrows()})
-        if not _elig_r:
-            st.info("Nothing to re-open — nothing on this COB is signed off.")
-        else:
-            _sel_r = st.selectbox("What to re-open", _elig_r,
-                                  key="so_reopen_target",
-                                  format_func=_row_label)
-            _rsn_r = st.text_input(
-                "Reason *", key="so_reopen_reason",
-                placeholder="e.g. late booking needs an adjustment on this COB")
-            # Re-open approval is REQUIRED by policy — ticked and locked.
-            st.checkbox("Request approval (required by policy)", value=True,
-                        disabled=True, key="so_reopen_appr")
-            if st.button("Request re-open", key="so_reopen_btn",
-                         use_container_width=True,
-                         disabled=not (_sel_r and _rsn_r.strip())):
-                _request(_sel_r[0], _sel_r[1], _sel_r[2], "REOPEN",
-                         "Re-open", _rsn_r, True)
+    with _act_l:
+        with bordered_container():
+            st.markdown(
+                f'<div style="font-size:0.95rem;font-weight:700;display:flex;'
+                f'align-items:center;gap:7px">{icon("check-circle", size=15)}'
+                f' Sign Off</div>', unsafe_allow_html=True)
+            st.caption("Close a scope for this COB — new adjustments are blocked "
+                       "once signed off.")
+            _elig_s = sorted({(r["PROCESS_TYPE"], r["ENTITY_CODE"], r["SUB_TYPE"])
+                              for _, r in df_cob[df_cob["_SU"].isin(
+                                  ["OPEN", "REOPENED"])].iterrows()})
+            if not _elig_s:
+                st.info("Nothing to sign off — everything on this COB is already "
+                        "signed off or awaiting approval.")
+            else:
+                _sel_s = st.selectbox("What to sign off", _elig_s,
+                                      key="so_signoff_target",
+                                      format_func=_row_label)
+                _rsn_s = st.text_input(
+                    "Reason *", key="so_signoff_reason",
+                    placeholder="e.g. all adjustments for this COB are done")
+                # Sign-off approval is OPTIONAL: unchecked = applies immediately.
+                _appr_s = st.checkbox(
+                    "Request approval first (optional)", value=False,
+                    key="so_signoff_appr")
+                if st.button(("Request sign-off" if _appr_s else "Sign off now"),
+                             key="so_signoff_btn", type="primary",
+                             use_container_width=True,
+                             disabled=not (_sel_s and _rsn_s.strip())):
+                    _request(_sel_s[0], _sel_s[1], _sel_s[2], "SIGNOFF",
+                             "Sign-off", _rsn_s, _appr_s)
 
-st.markdown("<br/>", unsafe_allow_html=True)
+    with _act_r:
+        with bordered_container():
+            st.markdown(
+                f'<div style="font-size:0.95rem;font-weight:700;display:flex;'
+                f'align-items:center;gap:7px">{icon("unlock", size=15)}'
+                f' Re-Open</div>', unsafe_allow_html=True)
+            st.caption("Allow adjustments again on a signed-off scope — always "
+                       "needs an approver (4-eyes).")
+            _elig_r = sorted({(r["PROCESS_TYPE"], r["ENTITY_CODE"], r["SUB_TYPE"])
+                              for _, r in df_cob[df_cob["_SU"] == "SIGNED_OFF"]
+                              .iterrows()})
+            if not _elig_r:
+                st.info("Nothing to re-open — nothing on this COB is signed off.")
+            else:
+                _sel_r = st.selectbox("What to re-open", _elig_r,
+                                      key="so_reopen_target",
+                                      format_func=_row_label)
+                _rsn_r = st.text_input(
+                    "Reason *", key="so_reopen_reason",
+                    placeholder="e.g. late booking needs an adjustment on this COB")
+                # Re-open approval is REQUIRED by policy — ticked and locked.
+                st.checkbox("Request approval (required by policy)", value=True,
+                            disabled=True, key="so_reopen_appr")
+                if st.button("Request re-open", key="so_reopen_btn",
+                             use_container_width=True,
+                             disabled=not (_sel_r and _rsn_r.strip())):
+                    _request(_sel_r[0], _sel_r[1], _sel_r[2], "REOPEN",
+                             "Re-open", _rsn_r, True)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STATUS GRID — filterable; defaults to the selected (latest) COB
-# ══════════════════════════════════════════════════════════════════════════════
+    st.markdown("<br/>", unsafe_allow_html=True)
 
-section_title("Sign-Off Status", "table")
-st.caption("One line per COB and scope — the entity chips show the per-entity "
-           "state when a scope is split. Defaults to the selected COB.")
-g1, g2, g3 = st.columns(3)
-with g1:
-    f_cobs = st.multiselect("COB", _all_cobs, default=[int(sel_cob)],
-                            key="so_f_cob", format_func=lambda v: str(v),
-                            help="Empty = all COBs.")
-with g2:
-    f_scopes = st.multiselect("Scope",
-                              sorted(df_all["PROCESS_TYPE"].unique().tolist()),
-                              default=[], key="so_f_scope")
-with g3:
-    f_status = st.multiselect(
-        "Status", list(_STATUS_META.keys()), default=[], key="so_f_status",
-        format_func=lambda v: _STATUS_META[v][0].title(),
-        help="Keeps a COB/scope line when ANY of its entities has one of "
-             "the selected statuses.")
 
-df_grid = df_all
-if f_cobs:
-    df_grid = df_grid[df_grid["COBID"].astype(int).isin(f_cobs)]
-if f_scopes:
-    df_grid = df_grid[df_grid["PROCESS_TYPE"].isin(f_scopes)]
-if f_status:
-    _keep = df_grid[df_grid["_SU"].isin(f_status)][["COBID", "PROCESS_TYPE"]]
-    df_grid = df_grid.merge(_keep.drop_duplicates(),
-                            on=["COBID", "PROCESS_TYPE"], how="inner")
+with tab_grid:
+    # ══════════════════════════════════════════════════════════════════════════════
+    # STATUS GRID — filterable; defaults to the selected (latest) COB
+    # ══════════════════════════════════════════════════════════════════════════════
 
-_groups = list(df_grid.groupby(["COBID", "PROCESS_TYPE"], sort=False))
-if not _groups:
-    st.info("Nothing matches the filters.")
-else:
-    _th = (f'style="text-align:left;padding:7px 12px;font-size:0.7rem;'
-           f'text-transform:uppercase;letter-spacing:.05em;'
-           f'color:{P["grey_700"]};border-bottom:2px solid {P["border"]};'
-           f'white-space:nowrap"')
-    _td = (f'style="padding:7px 12px;font-size:0.82rem;'
-           f'border-bottom:1px solid {P["border"]};vertical-align:middle"')
-    _rows_html = []
-    for (g_cob, g_scope), g_rows in _groups:
-        eff, col, sub, sub_col, detail = _scope_summary(g_rows)
-        _rows_html.append(
-            f'<tr>'
-            f'<td {_td}><strong>{int(g_cob)}</strong></td>'
-            f'<td {_td}><strong>{_hesc.escape(str(g_scope))}</strong></td>'
-            f'<td {_td}>{_pill(eff, col)}</td>'
-            f'<td {_td}><span style="color:{sub_col};font-weight:700;'
-            f'font-size:0.78rem">{sub}</span></td>'
-            f'<td {_td}>{_entity_chips(g_rows)}</td>'
-            f'<td {_td}><span style="color:{P["grey_700"]};font-size:0.8rem">'
-            f'{_hesc.escape(" ".join(str(detail).split())).replace("$", "&#36;")}</span></td>'
-            f'</tr>')
-    st.markdown(
-        f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
-        f'border-radius:10px;overflow-x:auto">'
-        f'<table style="width:100%;border-collapse:collapse">'
-        f'<tr><th {_th}>COB</th><th {_th}>Scope</th><th {_th}>Sign-off</th>'
-        f'<th {_th}>Submissions</th><th {_th}>Entities</th>'
-        f'<th {_th}>Detail</th></tr>'
-        + "".join(_rows_html)
-        + '</table></div>',
-        unsafe_allow_html=True)
-    st.caption(f"{len(_groups)} COB/scope line(s) · "
-               f"{len(df_grid)} underlying entit(y/ies)")
+    section_title("Sign-Off Status", "table")
+    st.caption("One line per COB and scope — the entity chips show the per-entity "
+               "state when a scope is split. Defaults to the selected COB.")
+    g1, g2, g3 = st.columns(3)
+    with g1:
+        f_cobs = st.multiselect("COB", _all_cobs, default=[int(sel_cob)],
+                                key="so_f_cob", format_func=lambda v: str(v),
+                                help="Empty = all COBs.")
+    with g2:
+        f_scopes = st.multiselect("Scope",
+                                  sorted(df_all["PROCESS_TYPE"].unique().tolist()),
+                                  default=[], key="so_f_scope")
+    with g3:
+        f_status = st.multiselect(
+            "Status", list(_STATUS_META.keys()), default=[], key="so_f_status",
+            format_func=lambda v: _STATUS_META[v][0].title(),
+            help="Keeps a COB/scope line when ANY of its entities has one of "
+                 "the selected statuses.")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# LATEST CHANGES — sign-off lifecycle events, newest first. SAME grid as the
-# Logs page's Sign-Off tab: day-grouped, pill-badged rows.
-# ══════════════════════════════════════════════════════════════════════════════
-st.markdown("<br/>", unsafe_allow_html=True)
-section_title("Latest Changes", "file-text")
-st.caption("Sign-offs, re-opens and pending requests — newest first, with who "
-           "and why. Times in your selected timezone.")
+    df_grid = df_all
+    if f_cobs:
+        df_grid = df_grid[df_grid["COBID"].astype(int).isin(f_cobs)]
+    if f_scopes:
+        df_grid = df_grid[df_grid["PROCESS_TYPE"].isin(f_scopes)]
+    if f_status:
+        _keep = df_grid[df_grid["_SU"].isin(f_status)][["COBID", "PROCESS_TYPE"]]
+        df_grid = df_grid.merge(_keep.drop_duplicates(),
+                                on=["COBID", "PROCESS_TYPE"], how="inner")
 
-df_hist = df_hist_cached
-
-if df_hist.empty:
-    st.caption("No sign-off activity recorded yet.")
-else:
-    def _nz(v):
-        """NaN/None-safe string ('' for empty), whitespace-NORMALIZED: a
-        newline inside a user comment ends the markdown HTML block and the
-        whole table renders as an empty white box — collapse all runs of
-        whitespace to single spaces before the value enters the HTML."""
-        if v is None or (isinstance(v, float) and pd.isna(v)):
-            return ""
-        return " ".join(str(v).split())
-
-    def _cell(v):
-        """User text → safe HTML cell: NaN-safe, whitespace-normalized,
-        HTML-escaped, and with '$' neutralized to &#36; — Streamlit's
-        markdown treats a $...$ pair as LaTeX math and a comment mentioning
-        two amounts ('moved $2m ... $ risk') swallows the table markup
-        between them, blanking the whole day-grid."""
-        return _hesc.escape(_nz(v)).replace("$", "&#36;")
-
-    _EVENT_META = {
-        "SIGNED_OFF":        ("SIGNED OFF",         P["success"]),
-        "REOPENED":          ("RE-OPENED",          P["danger"]),
-        "OPEN":              ("OPEN",               P["danger"]),
-        "SIGNOFF_REQUESTED": ("SIGN-OFF REQUESTED", "#B45309"),
-        "REOPEN_REQUESTED":  ("RE-OPEN REQUESTED",  "#B45309"),
-    }
-
-    def _ev_pill(status):
-        lbl, col = _EVENT_META.get(str(status).upper(),
-                                   (str(status) or "—", P["grey_700"]))
-        return _pill(lbl, col)
-
-    def _scope_pill(scope):
-        cfg = SCOPE_CONFIG.get(str(scope), {})
-        return _pill(str(scope) or "—", cfg.get("color", P["grey_700"]))
-
-    def _hist_table(headers, rows_):
-        th = "".join(
-            f'<th style="text-align:left;padding:6px 10px;font-size:0.72rem;'
-            f'text-transform:uppercase;letter-spacing:.05em;color:{P["grey_700"]};'
-            f'border-bottom:2px solid {P["border"]};white-space:nowrap">{h}</th>'
-            for h in headers)
-        trs = "".join(
-            "<tr>" + "".join(
-                f'<td style="padding:5px 10px;font-size:0.82rem;'
-                f'border-bottom:1px solid {P["border"]};vertical-align:middle;'
-                f'font-variant-numeric:tabular-nums">{c}</td>'
-                for c in r) + "</tr>"
-            for r in rows_)
-        return (f'<div style="overflow-x:auto;background:{P["white"]};'
-                f'border:1px solid {P["border"]};border-radius:8px">'
-                f'<table style="width:100%;border-collapse:collapse">'
-                f'<thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table></div>')
-
-    _df = df_hist.copy()
-    _df["_DAY"] = _df["ACTION_AT"].apply(lambda v: fmt_user_dt(v, "%A %d %b %Y"))
-    for day, day_df in _df.groupby("_DAY", sort=False):
+    _groups = list(df_grid.groupby(["COBID", "PROCESS_TYPE"], sort=False))
+    if not _groups:
+        st.info("Nothing matches the filters.")
+    else:
+        _th = (f'style="text-align:left;padding:7px 12px;font-size:0.7rem;'
+               f'text-transform:uppercase;letter-spacing:.05em;'
+               f'color:{P["grey_700"]};border-bottom:2px solid {P["border"]};'
+               f'white-space:nowrap"')
+        _td = (f'style="padding:7px 12px;font-size:0.82rem;'
+               f'border-bottom:1px solid {P["border"]};vertical-align:middle"')
+        _rows_html = []
+        for (g_cob, g_scope), g_rows in _groups:
+            eff, col, sub, sub_col, detail = _scope_summary(g_rows)
+            _rows_html.append(
+                f'<tr>'
+                f'<td {_td}><strong>{int(g_cob)}</strong></td>'
+                f'<td {_td}><strong>{_hesc.escape(str(g_scope))}</strong></td>'
+                f'<td {_td}>{_pill(eff, col)}</td>'
+                f'<td {_td}><span style="color:{sub_col};font-weight:700;'
+                f'font-size:0.78rem">{sub}</span></td>'
+                f'<td {_td}>{_entity_chips(g_rows)}</td>'
+                f'<td {_td}><span style="color:{P["grey_700"]};font-size:0.8rem">'
+                f'{_hesc.escape(" ".join(str(detail).split())).replace("$", "&#36;")}</span></td>'
+                f'</tr>')
         st.markdown(
-            f'<div style="font-size:0.78rem;font-weight:700;'
-            f'text-transform:uppercase;letter-spacing:.06em;'
-            f'color:{P["grey_700"]};margin:0.9rem 0 0.3rem 0">{day}</div>',
+            f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
+            f'border-radius:10px;overflow-x:auto">'
+            f'<table style="width:100%;border-collapse:collapse">'
+            f'<tr><th {_th}>COB</th><th {_th}>Scope</th><th {_th}>Sign-off</th>'
+            f'<th {_th}>Submissions</th><th {_th}>Entities</th>'
+            f'<th {_th}>Detail</th></tr>'
+            + "".join(_rows_html)
+            + '</table></div>',
             unsafe_allow_html=True)
-        feed_rows = []
-        for _, h in day_df.iterrows():
-            sub = _nz(h.get("SUB_TYPE"))
-            ent = (_cell(h.get("ENTITY_CODE")) or "*") + (
-                f' <span style="color:{P["grey_700"]}">/ '
-                f'{_cell(sub)}</span>' if sub else "")
-            _old = _nz(h.get("OLD_STATUS")).upper()
-            frm = (_ev_pill(_old) if _old else
-                   f'<span style="color:{P["grey_700"]}">—</span>')
-            feed_rows.append([
-                fmt_user_dt(h.get("ACTION_AT"), "%H:%M:%S"),
-                _ev_pill(h.get("NEW_STATUS")),
-                f'<strong>{int(h["COBID"])}</strong>',
-                _scope_pill(h.get("PROCESS_TYPE")),
-                ent,
-                frm,
-                _cell(h.get("ACTION_BY")) or "—",
-                f'<span style="color:{P["grey_700"]}">'
-                f'{_cell(_nz(h.get("COMMENT"))[:160])}</span>',
-            ])
-        st.markdown(_hist_table(
-            ["Time", "Event", "COB", "Scope", "Entity", "From", "By",
-             "Comment"], feed_rows), unsafe_allow_html=True)
+        st.caption(f"{len(_groups)} COB/scope line(s) · "
+                   f"{len(df_grid)} underlying entit(y/ies)")
+
+
+with tab_hist:
+    # ══════════════════════════════════════════════════════════════════════════════
+    # LATEST CHANGES — sign-off lifecycle events, newest first. SAME grid as the
+    # Logs page's Sign-Off tab: day-grouped, pill-badged rows.
+    # ══════════════════════════════════════════════════════════════════════════════
+    st.markdown("<br/>", unsafe_allow_html=True)
+    section_title("Latest Changes", "file-text")
+    st.caption("Sign-offs, re-opens and pending requests — newest first, with who "
+               "and why. Times in your selected timezone.")
+
+    df_hist = df_hist_cached
+
+    if df_hist.empty:
+        st.caption("No sign-off activity recorded yet.")
+    else:
+        def _nz(v):
+            """NaN/None-safe string ('' for empty), whitespace-NORMALIZED: a
+            newline inside a user comment ends the markdown HTML block and the
+            whole table renders as an empty white box — collapse all runs of
+            whitespace to single spaces before the value enters the HTML."""
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return ""
+            return " ".join(str(v).split())
+
+        def _cell(v):
+            """User text → safe HTML cell: NaN-safe, whitespace-normalized,
+            HTML-escaped, and with '$' neutralized to &#36; — Streamlit's
+            markdown treats a $...$ pair as LaTeX math and a comment mentioning
+            two amounts ('moved $2m ... $ risk') swallows the table markup
+            between them, blanking the whole day-grid."""
+            return _hesc.escape(_nz(v)).replace("$", "&#36;")
+
+        _EVENT_META = {
+            "SIGNED_OFF":        ("SIGNED OFF",         P["success"]),
+            "REOPENED":          ("RE-OPENED",          P["danger"]),
+            "OPEN":              ("OPEN",               P["danger"]),
+            "SIGNOFF_REQUESTED": ("SIGN-OFF REQUESTED", "#B45309"),
+            "REOPEN_REQUESTED":  ("RE-OPEN REQUESTED",  "#B45309"),
+        }
+
+        def _ev_pill(status):
+            lbl, col = _EVENT_META.get(str(status).upper(),
+                                       (str(status) or "—", P["grey_700"]))
+            return _pill(lbl, col)
+
+        def _scope_pill(scope):
+            cfg = SCOPE_CONFIG.get(str(scope), {})
+            return _pill(str(scope) or "—", cfg.get("color", P["grey_700"]))
+
+        def _hist_table(headers, rows_):
+            th = "".join(
+                f'<th style="text-align:left;padding:6px 10px;font-size:0.72rem;'
+                f'text-transform:uppercase;letter-spacing:.05em;color:{P["grey_700"]};'
+                f'border-bottom:2px solid {P["border"]};white-space:nowrap">{h}</th>'
+                for h in headers)
+            trs = "".join(
+                "<tr>" + "".join(
+                    f'<td style="padding:5px 10px;font-size:0.82rem;'
+                    f'border-bottom:1px solid {P["border"]};vertical-align:middle;'
+                    f'font-variant-numeric:tabular-nums">{c}</td>'
+                    for c in r) + "</tr>"
+                for r in rows_)
+            return (f'<div style="overflow-x:auto;background:{P["white"]};'
+                    f'border:1px solid {P["border"]};border-radius:8px">'
+                    f'<table style="width:100%;border-collapse:collapse">'
+                    f'<thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table></div>')
+
+        _df = df_hist.copy()
+        _df["_DAY"] = _df["ACTION_AT"].apply(lambda v: fmt_user_dt(v, "%A %d %b %Y"))
+        for day, day_df in _df.groupby("_DAY", sort=False):
+            st.markdown(
+                f'<div style="font-size:0.78rem;font-weight:700;'
+                f'text-transform:uppercase;letter-spacing:.06em;'
+                f'color:{P["grey_700"]};margin:0.9rem 0 0.3rem 0">{day}</div>',
+                unsafe_allow_html=True)
+            feed_rows = []
+            for _, h in day_df.iterrows():
+                sub = _nz(h.get("SUB_TYPE"))
+                ent = (_cell(h.get("ENTITY_CODE")) or "*") + (
+                    f' <span style="color:{P["grey_700"]}">/ '
+                    f'{_cell(sub)}</span>' if sub else "")
+                _old = _nz(h.get("OLD_STATUS")).upper()
+                frm = (_ev_pill(_old) if _old else
+                       f'<span style="color:{P["grey_700"]}">—</span>')
+                feed_rows.append([
+                    fmt_user_dt(h.get("ACTION_AT"), "%H:%M:%S"),
+                    _ev_pill(h.get("NEW_STATUS")),
+                    f'<strong>{int(h["COBID"])}</strong>',
+                    _scope_pill(h.get("PROCESS_TYPE")),
+                    ent,
+                    frm,
+                    _cell(h.get("ACTION_BY")) or "—",
+                    f'<span style="color:{P["grey_700"]}">'
+                    f'{_cell(_nz(h.get("COMMENT"))[:160])}</span>',
+                ])
+            st.markdown(_hist_table(
+                ["Time", "Event", "COB", "Scope", "Entity", "From", "By",
+                 "Comment"], feed_rows), unsafe_allow_html=True)
