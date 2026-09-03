@@ -1871,6 +1871,35 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
     return SELECTION_UNSUPPORTED if selectable else None
 
 
+def download_csv_link(data, filename, label="⬇ Download CSV",
+                      help_text=None):
+    """CSV download as an inline data: link instead of st.download_button.
+
+    st.download_button serves the file from Snowflake's presigned Azure
+    media URL — and the users' browser-isolation proxy rewrites the query
+    string, breaking the SAS signature (live failure 2026-09-03:
+    'AuthenticationFailed / Signature fields not well formed'). A data:
+    URI embeds the bytes in the page itself: the click saves the file with
+    NO network request, so there is no signature to break. Only for small
+    extracts (the callers cap at ~1,000 rows); Streamlit trims markdown
+    over a few MB.
+
+    data: bytes or str (the CSV content). filename: the save-as name."""
+    import base64 as _b64
+
+    raw = data.encode("utf-8-sig") if isinstance(data, str) else bytes(data)
+    b64 = _b64.b64encode(raw).decode("ascii")
+    tip = f' title="{help_text}"' if help_text else ""
+    st.markdown(
+        f'<a download="{filename}" href="data:text/csv;base64,{b64}"{tip} '
+        f'style="display:inline-block;width:100%;text-align:center;'
+        f'padding:0.45rem 0.9rem;border:1px solid {P["border"]};'
+        f'border-radius:8px;background:{P["card"]};color:{P["grey_900"]};'
+        f'font-weight:600;font-size:0.86rem;text-decoration:none">'
+        f"{label}</a>",
+        unsafe_allow_html=True)
+
+
 def render_data_grid(df, height=380, empty_msg="No rows."):
     """Data-preview grid for wide/long frames (Direct upload previews).
 

@@ -30,7 +30,8 @@ st.set_page_config(
 )
 
 from utils.styles import (inject_css, render_sidebar, section_title, P,
-                          bordered_container, render_data_grid, kpi_card)
+                          bordered_container, render_data_grid, kpi_card,
+                          download_csv_link)
 from utils.snowflake_conn import run_query_df
 
 inject_css()
@@ -238,10 +239,11 @@ with h1:
     section_title(f"Results — {min(n_rows, MAX_ROWS):,} of {n_rows:,} rows",
                   "table")
 with h2:
-    st.download_button(
-        "⬇ Download CSV", df_data.to_csv(index=False).encode("utf-8-sig"),
-        file_name=fname, mime="text/csv", use_container_width=True,
-        help=f"Downloads exactly what is shown below ({fname}).")
+    # data: link, NOT st.download_button — the presigned media URL breaks
+    # under the corporate proxy (Azure 'Signature fields not well formed').
+    download_csv_link(
+        df_data.to_csv(index=False), fname,
+        help_text=f"Downloads exactly what is shown below ({fname}).")
 
 render_data_grid(df_data, height=440)
 st.caption(f"Source: {cfg['table']} · COB {int(cobid)} · file: {fname}")
