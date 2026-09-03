@@ -133,9 +133,9 @@ def test_data_grid_large_uses_capped_canvas(harness):
     assert _grids(md) == []
     _, kwargs = dfs[0]
     assert kwargs.get("height") == 380            # fit (3538) capped at 380
-    render_data_grid(pd.DataFrame({"A": range(16)}), height=380)
+    render_data_grid(pd.DataFrame({"A": range(20)}), height=1000)
     _, kwargs = dfs[1]
-    assert kwargs.get("height") == 35 * 17 + 3    # 16 rows fit exactly, no cap
+    assert kwargs.get("height") == 35 * 21 + 3    # fits under the cap → exact
 
 
 def test_activity_grid_empty_shows_info(harness, monkeypatch):
