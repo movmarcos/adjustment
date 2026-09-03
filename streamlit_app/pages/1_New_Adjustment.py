@@ -1995,6 +1995,7 @@ def render_var_upload_form() -> None:
     expected_cols = _direct_expected_columns(wiz["process_type"])
     _csv_card = _card()
     _csv_card.__enter__()
+    _preview_after = None
     _sec(2, f"CSV Upload — {wiz['process_type']}", "Paste exact adjustment values.")
     if expected_cols:
         _info_banner('Provide a CSV of exact adjustment values — paste the '
@@ -2091,7 +2092,10 @@ def render_var_upload_form() -> None:
         else:
             wiz["_upval"] = None
 
-        render_data_grid(df, height=320)
+        # Grid rendered AFTER the card closes (see below): a dataframe
+        # inside the styled card triggers a resize-observer loop in the
+        # users' environment (grid grows unbounded, page locks).
+        _preview_after = df
 
         if "COBId" in df.columns and len(df):
             try:
@@ -2107,6 +2111,8 @@ def render_var_upload_form() -> None:
         wiz["_upval"] = None
 
     _csv_card.__exit__(None, None, None)
+    if _preview_after is not None:
+        render_data_grid(_preview_after, height=320)
 
     with _card():
         _sec(3, "Upload Details", "COB and entity are auto-detected from the CSV when present.")
@@ -2258,6 +2264,7 @@ def _render_frtb_direct_body(scope: str) -> None:
 
     _csv_card = _card()
     _csv_card.__enter__()
+    _frtb_preview_after = None
     _sec(3, f"CSV Upload — {_FRTB_LABELS[scope]}",
          "One file = one adjustment. Column order and case don't matter; "
          "business header names (e.g. EVALUATION_DATE, TRADE_ID) are accepted.")
@@ -2426,7 +2433,9 @@ def _render_frtb_direct_body(scope: str) -> None:
                 .encode("utf-8-sig"),
                 file_name="frtb_direct_rejects.csv", mime="text/csv",
                 key=_k("frtb_rejects_dl"))
-        render_data_grid(_prev, height=380)
+        # Rendered AFTER the card closes (see _csv_card.__exit__ below) —
+        # dataframe-inside-card loops in the users' environment.
+        _frtb_preview_after = _prev
     else:
         # CSV cleared: the previous parse must not stay submittable, and the
         # rules gate must not report clean for a file that no longer exists.
@@ -2437,6 +2446,8 @@ def _render_frtb_direct_body(scope: str) -> None:
         wiz["_frtb_cob_bad"] = False
 
     _csv_card.__exit__(None, None, None)
+    if _frtb_preview_after is not None:
+        render_data_grid(_frtb_preview_after, height=380)
 
     with _card():
         _sec(4, "Upload Details", "COB is taken from the file when present.")

@@ -1381,18 +1381,23 @@ def inject_css():
         .stTextInput, .stTextArea, .stNumberInput, .stDateInput,
         .stSelectbox, .stMultiSelect, .stCheckbox, .stRadio,
         .stButton, .stDownloadButton, .stFileUploader,
-        [style*="width"]:not(:is(
-            [data-testid="stDataFrame"], [data-testid="stDataFrameResizable"],
-            [data-testid="stDataFrame"] *,
-            [data-testid="stDataFrameResizable"] *))) {{
+        [style*="width"]):not(:is(
+        [data-testid="stDataFrame"], [data-testid="stDataFrameResizable"],
+        [data-testid="stDataFrame"] *, [data-testid="stDataFrameResizable"] *,
+        :has([data-testid="stDataFrame"]),
+        :has([data-testid="stDataFrameResizable"]))) {{
         width: auto !important;
         max-width: 100% !important;
     }}
-    /* st.dataframe MUST keep its own inline widths (testid is
-       stDataFrameResizable on the live 1.22 runtime): its resize observer
-       writes an inline pixel width; overriding it to auto makes the
-       observer re-measure and re-write forever — the grid grows unbounded
-       and locks the page (hit live on the Direct preview inside a card). */
+    /* NOTHING width-related may touch st.dataframe or anything around it:
+       its resize observer writes inline pixel widths on itself AND its
+       wrapper element-containers, so forcing ANY of that lineage to
+       width:auto makes the observer re-measure and re-write forever — the
+       grid grows unbounded and locks the page (hit live on the Direct
+       preview inside a card). The :not() above therefore excludes the
+       widget (both testids — the live 1.22 runtime uses
+       stDataFrameResizable), its descendants, AND every ancestor that
+       contains one. */
     [data-testid="stDataFrameResizable"] {{
         max-width: 100% !important;
     }}
