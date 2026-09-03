@@ -1944,12 +1944,16 @@ def _supports_df_selection(st):
 
 def render_activity_grid(df_source, *, selectable=False, key=None,
                          height=380, empty_msg="No adjustments yet."):
-    """Shared 19-column activity grid — the SAME .mgrid HTML family as every
-    other page (user demand 2026-09-03: ONE grid type across the app, and
-    NO frozen header anywhere — st.dataframe's canvas header is always
-    frozen, so the canvas is out). Full values, no truncation, flows in the
-    page. Selection is via the caller's picker — returns
-    SELECTION_UNSUPPORTED when selectable, else None."""
+    """Shared 19-column activity grid (Home + Adjustments) — st.dataframe at
+    a FIXED height with internal scroll, BY THE USER'S EXPLICIT CHOICE
+    (2026-09-03): these two pages list hundreds of rows, and the user asked
+    to keep 'the other type of grid' for them after seeing both live. This
+    is the deliberate exception to the app-wide .mgrid HTML family (which
+    every other page uses) — it was also the presentation the Grid Lab
+    verified clean in their environment (style A). Do not 'unify' it away
+    again. Status colour via a version-safe Styler. Selection is via the
+    caller's picker — returns SELECTION_UNSUPPORTED when selectable, else
+    None."""
     import streamlit as st
 
     if df_source is None or df_source.empty:
@@ -1957,19 +1961,12 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
         return None
 
     grid_df = build_activity_grid_df(df_source)
-    render_df_table(
-        grid_df, max_rows=len(grid_df),
-        color_cols={"Status": STATUS_COLORS},
-        # Dates/ids/statuses never wrap; only the two genuinely long text
-        # columns wrap, bounded, so the table never grows a horizontal
-        # scrollbar (HTML grids with scrollbars white-tile in the users'
-        # environment) and rows stay at most two lines tall.
-        # (Timestamps are absent on purpose: they wrap at the date/time
-        # space — '17 Aug 2026' / '17:18' — only when width demands it.)
-        nowrap_cols=("Adj ID", "COB", "Source COB", "Scope", "Type",
-                     "Status", "Entity", "Book", "Records",
-                     "Processing Time"),
-        wrap_cols={"Simulation": 230, "User": 230})
+    try:
+        shown = _styler_cellmap(grid_df.style.hide(axis="index"),
+                                lambda v: STATUS_STYLE.get(v, ""), ["Status"])
+    except Exception:
+        shown = grid_df   # very old pandas: plain values beat no grid
+    st.dataframe(shown, use_container_width=True, height=height)
     return SELECTION_UNSUPPORTED if selectable else None
 
 

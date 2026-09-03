@@ -101,21 +101,21 @@ def test_render_grid_return_html_returns_string(harness):
     assert "mgrid-wrap" in out and md == []
 
 
-def test_activity_grid_same_html_family_no_frozen_header(harness):
+def test_activity_grid_is_fixed_height_dataframe(harness):
+    # USER'S EXPLICIT CHOICE (2026-09-03): Home/Adjustments list hundreds of
+    # rows, so these two keep the fixed-height st.dataframe with internal
+    # scroll; every other page uses the .mgrid HTML grid.
     md, dfs, _ = harness
     src = pd.DataFrame([{
         "DIMENSION_ADJ_ID": 101, "COBID": 20231231, "PROCESS_TYPE": "VaR",
-        "RUN_STATUS": "Failed",
-        "USERNAME": "MARCOS.MAGRI@MUFGSECURITIES.COM",
-        "SIMULATION_NAME": "mrm_2011_eurozone_crisis_equityprice",
+        "RUN_STATUS": "Failed", "USERNAME": "alice",
     }])
     got = render_activity_grid(src, selectable=True)
     assert got is SELECTION_UNSUPPORTED
-    assert dfs == []                              # NO canvas anywhere —
-    html = _grids(md)[0]                          # one grid type app-wide
-    assert "Adj ID" in html and "sticky" not in html
-    assert "color:#DC2626;font-weight:700" in html   # STATUS_COLORS Failed
-    assert "MARCOS.MAGRI@MUFGSECURITIES.COM" in html  # full text kept
+    assert _grids(md) == []                       # canvas, not HTML
+    _, kwargs = dfs[0]
+    assert kwargs.get("height") == 380
+    assert kwargs.get("use_container_width") is True
 
 
 def test_activity_grid_empty_shows_info(harness, monkeypatch):
