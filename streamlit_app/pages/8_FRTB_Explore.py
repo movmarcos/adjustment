@@ -1,18 +1,20 @@
 """
 FRTB Explore — browse and export the FRTB fact data
 ===================================================
-Read-only explorer over the BASE FRTB fact tables (the same tables the
-adjustments write to, without the _ADJUSTMENT suffix):
+Read-only explorer over the OFFICIAL FRTB fact tables (the adjusted/
+published data the platform reports from):
 
-    SBM  → FACT.FRTBSA_SENSITIVITY_MEASURES
-    DRC  → FACT.FRTBSA_DRC_MEASURES
-    RRAO → FACT.FRTBSA_RRAO_MEASURES
+    SBM  → FACT.FRTBSA_SENSITIVITY_MEASURES_OFFICIAL
+    DRC  → FACT.FRTBSA_DRC_MEASURES_OFFICIAL
+    RRAO → FACT.FRTBSA_RRAO_MEASURES_OFFICIAL
 
-Pick the FRTB type, then filter by COB, entity, risk class (RRAO: product
-type), book and trade — the same shape as the Adjustments page. A summary
-strip shows what matched; the grid and the CSV download are capped at
-1,000 rows (the cap is a hard requirement). The download file name encodes
-the selection, e.g. FRTB_DRC_COB20260626_MUSI_GIRR.csv.
+Pick the FRTB type, then COB and ENTITY first — nothing else loads until
+both are chosen, because SBM holds far too much data to summarize
+unfiltered. Then narrow by risk class (+ sensitivity type for SBM; RRAO:
+product type), book and trade. A summary strip shows what matched; the
+grid and the CSV download are capped at 1,000 rows (hard requirement).
+The download name encodes the selection, e.g.
+FRTB_DRC_COB20260626_MUSI_GIRR.csv.
 
 Columns shown are the fields used to report the adjustment (mirrors the
 _ADJUSTMENT fact layout), not every raw column.
@@ -48,8 +50,9 @@ MAX_ROWS = 1000
 # report the adjustment — mirrors the _ADJUSTMENT fact layout).
 _TYPES = {
     "SBM (Sensitivities)": dict(
-        code="SBM", table="FACT.FRTBSA_SENSITIVITY_MEASURES",
+        code="SBM", table="FACT.FRTBSA_SENSITIVITY_MEASURES_OFFICIAL",
         risk_col="RISK_CLASS", risk_label="Risk class",
+        sens_col="SENSITIVITY_TYPE",
         measure="AMOUNT_IN_USD", measure_label="Amount (USD)",
         columns=["COBID", "ENTITY_CODE", "BOOK_CODE", "RAPTOR_TRADE_CODE",
                  "RISK_CLASS", "SENSITIVITY_TYPE", "BUCKET", "CURVE_CODE",
@@ -57,7 +60,7 @@ _TYPES = {
                  "CURRENCY_CODE", "AMOUNT", "AMOUNT_IN_USD",
                  "LOAD_SET", "RAVEN_DATASET_NAME"]),
     "DRC (Default Risk Charge)": dict(
-        code="DRC", table="FACT.FRTBSA_DRC_MEASURES",
+        code="DRC", table="FACT.FRTBSA_DRC_MEASURES_OFFICIAL",
         risk_col="RISK_CLASS", risk_label="Risk class",
         measure="JTD_LOSS_USD", measure_label="JTD loss (USD)",
         columns=["COBID", "ENTITY_CODE", "BOOK_CODE", "RAPTOR_TRADE_CODE",
@@ -66,7 +69,7 @@ _TYPES = {
                  "NOTIONAL_AMOUNT", "JTD_LOSS", "JTD_LOSS_USD",
                  "MEASURE_TYPE_CODE", "LOAD_SET"]),
     "RRAO (Residual Risk Add-On)": dict(
-        code="RRAO", table="FACT.FRTBSA_RRAO_MEASURES",
+        code="RRAO", table="FACT.FRTBSA_RRAO_MEASURES_OFFICIAL",
         risk_col="SA_RRAO_PRODUCT_TYPE", risk_label="RRAO product type",
         measure="NOTIONAL_AMOUNT_USD", measure_label="Notional (USD)",
         columns=["COBID", "ENTITY_CODE", "BOOK_CODE", "RAPTOR_TRADE_CODE",
@@ -104,46 +107,69 @@ with bordered_container():
     cob_opts = ([int(c) for c in df_cobs["COBID"].dropna().tolist()]
                 if not df_cobs.empty else [])
     with f2:
-        cobid = st.selectbox("COB", cob_opts, key=f"fx_cob_{cfg['code']}") \
+        cobid = st.selectbox("COB *", cob_opts, key=f"fx_cob_{cfg['code']}") \
             if cob_opts else None
         if not cob_opts:
             st.caption("No data found in this table.")
+
+    ents = []
+    if cobid is not None:
+        df_ent = _q(f"SELECT DISTINCT ENTITY_CODE FROM {cfg['table']} "
+                    f"WHERE COBID = {int(cobid)} ORDER BY 1")
+        ents = (df_ent["ENTITY_CODE"].dropna().tolist()
+                if not df_ent.empty else [])
     with f3:
+        sel_ent = st.multiselect("Entity *", ents,
+                                 key=f"fx_ent_{cfg['code']}",
+                                 help="Required — the data only loads for "
+                                      "the entities you pick.")
+
+# COB + entity are the gate: nothing else queries until both are set
+# (SBM holds far too much data to scan unfiltered).
+if cobid is None or not sel_ent:
+    st.info("Pick a **COB** and at least one **Entity** to load the data.")
+    st.stop()
+
+_ent_in = ",".join(f"'{_esc(e)}'" for e in sel_ent)
+_gate = f"COBID = {int(cobid)} AND ENTITY_CODE IN ({_ent_in})"
+
+with bordered_container():
+    section_title("Narrow down", "filter")
+    df_dim = _q(f"""
+        SELECT DISTINCT {cfg['risk_col']} AS RISK,
+               {cfg.get('sens_col') or 'NULL'} AS SENS, BOOK_CODE
+        FROM {cfg['table']}
+        WHERE {_gate}
+        LIMIT 5000""")
+    risks, senss, books = [], [], []
+    if not df_dim.empty:
+        risks = sorted(df_dim["RISK"].dropna().unique().tolist())
+        senss = sorted(df_dim["SENS"].dropna().unique().tolist())
+        books = sorted(df_dim["BOOK_CODE"].dropna().unique().tolist())
+    n_narrow = 4 if cfg.get("sens_col") else 3
+    gcols = st.columns(n_narrow)
+    with gcols[0]:
+        sel_risk = st.multiselect(cfg["risk_label"], risks,
+                                  key=f"fx_risk_{cfg['code']}")
+    sel_sens = []
+    if cfg.get("sens_col"):
+        with gcols[1]:
+            sel_sens = st.multiselect("Sensitivity type", senss,
+                                      key=f"fx_sens_{cfg['code']}")
+    with gcols[-2]:
+        sel_book = st.multiselect("Book", books, key=f"fx_book_{cfg['code']}")
+    with gcols[-1]:
         trade = st.text_input("Trade code (contains)", key="fx_trade",
                               help="Matches RAPTOR_TRADE_CODE, case-"
                                    "insensitive. Leave empty for all trades.")
 
-    ents, risks, books = [], [], []
-    if cobid is not None:
-        df_dim = _q(f"""
-            SELECT DISTINCT ENTITY_CODE, {cfg['risk_col']} AS RISK,
-                   BOOK_CODE
-            FROM {cfg['table']}
-            WHERE COBID = {int(cobid)}
-            LIMIT 5000""")
-        if not df_dim.empty:
-            ents = sorted(df_dim["ENTITY_CODE"].dropna().unique().tolist())
-            risks = sorted(df_dim["RISK"].dropna().unique().tolist())
-            books = sorted(df_dim["BOOK_CODE"].dropna().unique().tolist())
-    g1, g2, g3 = st.columns(3)
-    with g1:
-        sel_ent = st.multiselect("Entity", ents, key=f"fx_ent_{cfg['code']}")
-    with g2:
-        sel_risk = st.multiselect(cfg["risk_label"], risks,
-                                  key=f"fx_risk_{cfg['code']}")
-    with g3:
-        sel_book = st.multiselect("Book", books, key=f"fx_book_{cfg['code']}")
-
-if cobid is None:
-    st.stop()
-
-where = [f"COBID = {int(cobid)}"]
-if sel_ent:
-    where.append("ENTITY_CODE IN (" +
-                 ",".join(f"'{_esc(e)}'" for e in sel_ent) + ")")
+where = [_gate]
 if sel_risk:
     where.append(f"{cfg['risk_col']} IN (" +
                  ",".join(f"'{_esc(r)}'" for r in sel_risk) + ")")
+if sel_sens:
+    where.append(f"{cfg['sens_col']} IN (" +
+                 ",".join(f"'{_esc(x)}'" for x in sel_sens) + ")")
 if sel_book:
     where.append("BOOK_CODE IN (" +
                  ",".join(f"'{_esc(b)}'" for b in sel_book) + ")")
@@ -203,6 +229,7 @@ def _tag(values, all_count):
 fname = (f"FRTB_{cfg['code']}_COB{int(cobid)}"
          f"_{_tag(sel_ent, len(ents))}"
          f"_{_tag(sel_risk, len(risks))}"
+         + (f"_{_tag(sel_sens, len(senss))}" if sel_sens else "")
          + (f"_{re.sub(r'[^A-Za-z0-9]+', '-', trade.strip())}" if trade.strip() else "")
          + ".csv")
 
