@@ -1251,19 +1251,20 @@ def inject_css():
     }}
     .mgrid {{ width: 100%; border-collapse: separate; border-spacing: 0; }}
     .mgrid th {{
-        text-align: left; padding: 8px 12px; font-size: 0.7rem;
+        text-align: left; padding: 8px 10px; font-size: 0.7rem;
         font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
         color: {P["grey_700"]}; background: {P["card"]};
         border-bottom: 2px solid {P["border"]}; white-space: nowrap;
     }}
     .mgrid td {{
-        padding: 7px 12px; font-size: 0.82rem; color: {P["grey_900"]};
+        padding: 7px 10px; font-size: 0.82rem; color: {P["grey_900"]};
         border-bottom: 1px solid {P["border"]}; vertical-align: middle;
         font-variant-numeric: tabular-nums;
     }}
     .mgrid tbody tr:last-child td {{ border-bottom: none; }}
     .mgrid tbody tr:hover td {{ background: {P["grey_100"]}; }}
     .mgrid th.r, .mgrid td.r {{ text-align: right; }}
+    .mgrid td.nw {{ white-space: nowrap; }}
     /* full-width day/section divider row inside a grid */
     .mgrid tr.mgrid-div td {{
         padding: 9px 12px 3px; font-size: 0.7rem; font-weight: 700;
@@ -1943,13 +1944,12 @@ def _supports_df_selection(st):
 
 def render_activity_grid(df_source, *, selectable=False, key=None,
                          height=380, empty_msg="No adjustments yet."):
-    """Shared 19-column activity grid RESTORED to the pre-redesign (26 Aug)
-    presentation the user asked to return to — and the one the Grid Lab
-    verified clean under their environment (style A): st.dataframe at a
-    fixed height, scrolling internally, full values, no truncation, no
-    pagination. Status colour via a version-safe Styler. Selection is via
-    the caller's picker — returns SELECTION_UNSUPPORTED when selectable,
-    else None."""
+    """Shared 19-column activity grid — the SAME .mgrid HTML family as every
+    other page (user demand 2026-09-03: ONE grid type across the app, and
+    NO frozen header anywhere — st.dataframe's canvas header is always
+    frozen, so the canvas is out). Full values, no truncation, flows in the
+    page. Selection is via the caller's picker — returns
+    SELECTION_UNSUPPORTED when selectable, else None."""
     import streamlit as st
 
     if df_source is None or df_source.empty:
@@ -1957,12 +1957,19 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
         return None
 
     grid_df = build_activity_grid_df(df_source)
-    try:
-        shown = _styler_cellmap(grid_df.style.hide(axis="index"),
-                                lambda v: STATUS_STYLE.get(v, ""), ["Status"])
-    except Exception:
-        shown = grid_df   # very old pandas: plain values beat no grid
-    st.dataframe(shown, use_container_width=True, height=height)
+    render_df_table(
+        grid_df, max_rows=len(grid_df),
+        color_cols={"Status": STATUS_COLORS},
+        # Dates/ids/statuses never wrap; only the two genuinely long text
+        # columns wrap, bounded, so the table never grows a horizontal
+        # scrollbar (HTML grids with scrollbars white-tile in the users'
+        # environment) and rows stay at most two lines tall.
+        # (Timestamps are absent on purpose: they wrap at the date/time
+        # space — '17 Aug 2026' / '17:18' — only when width demands it.)
+        nowrap_cols=("Adj ID", "COB", "Source COB", "Scope", "Type",
+                     "Status", "Entity", "Book", "Records",
+                     "Processing Time"),
+        wrap_cols={"Simulation": 230, "User": 230})
     return SELECTION_UNSUPPORTED if selectable else None
 
 
@@ -1985,7 +1992,7 @@ def bordered_container():
 
 def render_df_table(df, max_rows=200, height=None, highlight=None,
                     formats=None, color_cols=None, column_config=None,
-                    right_cols=(), key=None):
+                    right_cols=(), key=None, wrap_cols=None, nowrap_cols=()):
     """READ-ONLY table restored to the pre-redesign (26 Aug) behaviour the
     user asked to return to: full values (NO truncation), no pagination, the
     table flows in the page. The ONLY change from 26 Aug is that the header
@@ -1996,6 +2003,10 @@ def render_df_table(df, max_rows=200, height=None, highlight=None,
     formats:    {column: python_format}, e.g. {"COST": "${:,.2f}"}.
     color_cols: {column: {value: '#hex'}} or {column: callable(value)->'#hex'}
                 — colours that column's TEXT by value.
+    wrap_cols:  {column: max_px} — that column's text wraps within a bounded
+                width instead of widening the table (a too-wide table grows
+                a horizontal scrollbar, and scrollbars are where the white
+                block appears in the users' environment). Full text kept.
     height/column_config/key: accepted for compatibility; unused.
     """
     import html as _hm
@@ -2056,11 +2067,21 @@ def render_df_table(df, max_rows=200, height=None, highlight=None,
         except Exception:
             hot = False
         row_bg = f'background:{P["danger_lt"]};' if hot else ""
-        tds = "".join(
-            f'<td class="{"r" if c in numeric else ""}" '
-            f'style="{row_bg}{_colour(c, row[c])}">{_fmt(c, row[c])}</td>'
-            for c in show.columns)
-        trs += f"<tr>{tds}</tr>"
+        cells = []
+        for c in show.columns:
+            content = _fmt(c, row[c])
+            px = (wrap_cols or {}).get(c)
+            if px and len(str(content)) > 20:
+                content = (f'<span style="display:inline-block;'
+                           f'max-width:{int(px)}px;white-space:normal;'
+                           f'overflow-wrap:anywhere;vertical-align:middle">'
+                           f"{content}</span>")
+            klass = " ".join((["r"] if c in numeric else [])
+                             + (["nw"] if c in (nowrap_cols or ()) else []))
+            cells.append(
+                f'<td class="{klass}" '
+                f'style="{row_bg}{_colour(c, row[c])}">{content}</td>')
+        trs += f"<tr>{''.join(cells)}</tr>"
 
     st.markdown(
         f'<div class="mgrid-wrap"><table class="mgrid">'

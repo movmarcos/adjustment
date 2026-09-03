@@ -708,7 +708,13 @@ try:
                     _rc_cell(r.get("SUBMITTED_BY")) or "—",
                     _rc_cell(r.get("ACTIONED_BY")) or "—",
                     fmt_user_dt(r.get("CHANGED_AT"), "%d %b %Y %H:%M"),
-                    f'<span style="color:{P["grey_700"]}">'
+                    # Bounded width so a long comment WRAPS instead of
+                    # widening the table past the page (a wide table grows a
+                    # horizontal scrollbar — the one structural difference
+                    # vs the clean grids, and scrollbars are where the white
+                    # block appears in the users' environment).
+                    f'<span style="color:{P["grey_700"]};display:inline-block;'
+                    f'max-width:340px;white-space:normal">'
                     f'{_rc_cell(r.get("COMMENT"))[:160]}</span>',
                 ])
             render_grid(

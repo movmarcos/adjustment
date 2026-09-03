@@ -101,18 +101,21 @@ def test_render_grid_return_html_returns_string(harness):
     assert "mgrid-wrap" in out and md == []
 
 
-def test_activity_grid_is_fixed_height_dataframe(harness):
+def test_activity_grid_same_html_family_no_frozen_header(harness):
     md, dfs, _ = harness
     src = pd.DataFrame([{
         "DIMENSION_ADJ_ID": 101, "COBID": 20231231, "PROCESS_TYPE": "VaR",
-        "RUN_STATUS": "Failed", "USERNAME": "alice",
+        "RUN_STATUS": "Failed",
+        "USERNAME": "MARCOS.MAGRI@MUFGSECURITIES.COM",
+        "SIMULATION_NAME": "mrm_2011_eurozone_crisis_equityprice",
     }])
     got = render_activity_grid(src, selectable=True)
     assert got is SELECTION_UNSUPPORTED
-    assert _grids(md) == []                       # canvas, not HTML
-    _, kwargs = dfs[0]
-    assert kwargs.get("height") == 380            # Grid Lab style A geometry
-    assert kwargs.get("use_container_width") is True
+    assert dfs == []                              # NO canvas anywhere —
+    html = _grids(md)[0]                          # one grid type app-wide
+    assert "Adj ID" in html and "sticky" not in html
+    assert "color:#DC2626;font-weight:700" in html   # STATUS_COLORS Failed
+    assert "MARCOS.MAGRI@MUFGSECURITIES.COM" in html  # full text kept
 
 
 def test_activity_grid_empty_shows_info(harness, monkeypatch):
