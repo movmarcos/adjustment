@@ -1,8 +1,10 @@
-"""Tests for the canonical 'dream grid' (user-specified 2026-09-02):
-Logs-style .mgrid HTML, sized to its rows; up to 15 rows render whole,
-beyond that 12 rows per page with a compact click-a-number pager.
-Also locks the safety invariants of the HTML emitter: single-line output,
-'$' neutralised (KaTeX), content HTML-escaped.
+"""Tests for the RESTORED pre-redesign grids (user request 2026-09-03:
+'we had a quite decent grid except when we freeze the header').
+
+- render_activity_grid: st.dataframe at a fixed height (Grid Lab style A).
+- render_df_table: flowing .mgrid HTML, FULL values (no truncation), no
+  pagination, escaped + $-guarded single-line output, no sticky header.
+- render_grid: cells render AS AUTHORED (pills/entity chips preserved).
 """
 import os
 import sys
@@ -14,114 +16,103 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import streamlit
 from utils import styles
-from utils.styles import (render_df_table, render_activity_grid,
-                          SELECTION_UNSUPPORTED, GRID_PAGE_ROWS,
-                          PAGINATE_OVER)
+from utils.styles import (render_df_table, render_activity_grid, render_grid,
+                          SELECTION_UNSUPPORTED)
 
 
 @pytest.fixture
 def harness(monkeypatch):
-    """Capture st.markdown + st.button; isolate session_state."""
-    md, buttons = [], []
-
-    def fake_markdown(body, *a, **k):
-        md.append(str(body))
-
-    def fake_button(label, *a, **k):
-        buttons.append(str(label))
-        return False
-
+    """Capture st.markdown, st.dataframe and st.caption calls."""
+    md, dfs, caps = [], [], []
     for mod in (streamlit, styles.st):
-        monkeypatch.setattr(mod, "markdown", fake_markdown, raising=False)
-        monkeypatch.setattr(mod, "button", fake_button, raising=False)
-    monkeypatch.setattr(styles.st, "session_state", {}, raising=False)
-    return md, buttons
+        monkeypatch.setattr(mod, "markdown",
+                            lambda b, *a, **k: md.append(str(b)),
+                            raising=False)
+        monkeypatch.setattr(mod, "dataframe",
+                            lambda d, *a, **k: dfs.append((d, k)),
+                            raising=False)
+        monkeypatch.setattr(mod, "caption",
+                            lambda *a, **k: caps.append(a), raising=False)
+    return md, dfs, caps
 
 
 def _grids(md):
     return [h for h in md if "mgrid-wrap" in h]
 
 
-def test_small_table_renders_whole_no_pager(harness):
-    md, buttons = harness
-    render_df_table(pd.DataFrame({"A": range(PAGINATE_OVER)}))  # 15 rows
-    html = _grids(md)[0]
-    assert html.count("<tr>") == 1 + PAGINATE_OVER   # header + all rows
-    assert buttons == []                              # no pager
-
-
-def test_large_table_paginates_css_only(harness):
-    md, buttons = harness
-    render_df_table(pd.DataFrame({"A": range(50)}), key="k1")  # > 15 rows
-    html = _grids(md)[0]
-    # ALL rows ship in the HTML, chunked into 12-row tbodys; hidden radio
-    # inputs + labels switch pages purely in the browser — NO Streamlit
-    # buttons (a button pager forced a slow full rerun per click on SiS).
-    assert buttons == []
-    assert html.count("<tr>") == 1 + 50               # header + every row
-    assert html.count("<tbody>") == 5                 # 50/12 → 5 pages
-    assert html.count('type="radio"') == 5 and "checked" in html
-    assert '<label for="k1_4">5</label>' in html
-    assert "Rows 1–12 of 50" in html and "\n" not in html
-
-
-def test_long_values_truncate_with_tooltip(harness):
-    md, _ = harness
+def test_df_table_full_values_no_truncation_no_pagination(harness):
+    md, dfs, _ = harness
     long = "MARCOS.MAGRI@MUFGSECURITIES.COM"
-    render_df_table(pd.DataFrame({"User": [long], "N": [1]}))
+    render_df_table(pd.DataFrame({"User": [long] * 20, "N": range(20)}))
     html = _grids(md)[0]
-    assert "…" in html                                # truncated display
-    assert f'title="{long}"' in html                  # full value on hover
-    assert f">{long}<" not in html
+    assert dfs == []                              # HTML, not canvas
+    assert f">{long}<" in html                    # full value, no ellipsis
+    assert "…" not in html
+    assert 'type="radio"' not in html             # no pagination
+    assert html.count("<tr>") == 1 + 20           # all rows in one table
+    assert "position:sticky" not in html and "position: sticky" not in html
 
 
-def test_html_is_single_line_escaped_and_dollar_safe(harness):
-    md, _ = harness
-    df = pd.DataFrame({"Comment": ["cost is $5\ntwo lines",
-                                   "<script>alert(1)</script>"],
+def test_df_table_escaping_and_markdown_guards(harness):
+    md, _, _ = harness
+    df = pd.DataFrame({"Comment": ["cost is $5\ntwo", "<script>x</script>"],
                        "Amount": [1234.5, None]})
     render_df_table(df, formats={"Amount": "{:,.2f}"})
     html = _grids(md)[0]
-    assert "\n" not in html
-    assert "$" not in html and "&#36;5" in html
+    assert "\n" not in html                       # raw-HTML block guard
+    assert "$" not in html and "&#36;5" in html   # KaTeX guard
     assert "<script>" not in html and "&lt;script&gt;" in html
     assert "1,234.50" in html and "—" in html
-    assert 'class="r"' in html                        # numeric right-aligned
+    assert 'class="r"' in html                    # numeric right-aligned
 
 
-def test_color_cols_render_logs_style_pills(harness):
-    md, _ = harness
-    df = pd.DataFrame({"Status": ["Failed", "Processed"], "N": [1, 2]})
+def test_df_table_colour_and_highlight(harness):
+    md, _, _ = harness
+    df = pd.DataFrame({"Status": ["Failed", "OK"], "N": [1, 2]})
     render_df_table(df, color_cols={"Status": {"Failed": "#D50032"}},
                     highlight=lambda r: r["Status"] == "Failed")
     html = _grids(md)[0]
-    # oval tinted chip identical to the Logs page _pill markup
-    assert "border-radius:99px" in html
-    assert "background:#D5003218" in html and "color:#D50032" in html
-    assert "background-color:" in html               # row highlight kept
+    assert "color:#D50032;font-weight:700" in html
+    assert f"background:{styles.P['danger_lt']}" in html
 
 
-def test_grid_pager_math(monkeypatch):
-    from utils.styles import grid_pager
-    monkeypatch.setattr(styles.st, "session_state", {}, raising=False)
-    assert grid_pager(0, 12, key="t1") == (0, 1)
-    assert grid_pager(120, 12, key="t2") == (0, 10)
-    styles.st.session_state["t3"] = 99                 # stale page clamps
-    assert grid_pager(50, 12, key="t3") == (4, 5)
+def test_df_table_max_rows_caption(harness):
+    md, _, caps = harness
+    render_df_table(pd.DataFrame({"A": range(300)}), max_rows=200)
+    assert _grids(md)[0].count("<tr>") == 1 + 200
+    assert any("Showing the first 200" in str(c) for c in caps)
 
 
-def test_activity_grid_sentinel_and_status_colour(harness):
-    md, _ = harness
+def test_render_grid_keeps_authored_markup_and_dividers(harness):
+    md, _, _ = harness
+    pill = '<span style="border-radius:99px">Stress</span>'
+    render_grid(["COB", "Scope"],
+                [{"divider": "Monday"}, [20260626, pill]],
+                aligns=["right", "left"])
+    html = _grids(md)[0]
+    assert pill in html                           # pills NOT stripped
+    assert 'class="mgrid-div"' in html and "Monday" in html
+    assert '<td class="r">20260626</td>' in html
+
+
+def test_render_grid_return_html_returns_string(harness):
+    md, _, _ = harness
+    out = render_grid(["A"], [["x"]], return_html=True)
+    assert "mgrid-wrap" in out and md == []
+
+
+def test_activity_grid_is_fixed_height_dataframe(harness):
+    md, dfs, _ = harness
     src = pd.DataFrame([{
         "DIMENSION_ADJ_ID": 101, "COBID": 20231231, "PROCESS_TYPE": "VaR",
         "RUN_STATUS": "Failed", "USERNAME": "alice",
     }])
     got = render_activity_grid(src, selectable=True)
     assert got is SELECTION_UNSUPPORTED
-    html = _grids(md)[0]
-    assert "Adj ID" in html and "Failed" in html
-    assert "border-radius:99px" in html               # status/scope pills
-    assert "color:#DC2626" in html                    # STATUS_COLORS Failed
+    assert _grids(md) == []                       # canvas, not HTML
+    _, kwargs = dfs[0]
+    assert kwargs.get("height") == 380            # Grid Lab style A geometry
+    assert kwargs.get("use_container_width") is True
 
 
 def test_activity_grid_empty_shows_info(harness, monkeypatch):

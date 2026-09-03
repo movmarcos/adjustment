@@ -1240,33 +1240,26 @@ def inject_css():
        All HTML grids (render_df_table, render_grid, the page tables) emit
        <div class="mgrid-wrap"><table class="mgrid"> so they are visually
        identical regardless of which page or helper built them.
-       Pure server-rendered HTML on purpose: st.dataframe on the SiS runtime
-       (1.22.0 live) paints onto a <canvas> that can mount at zero size inside
-       the Snowflake iframe and stay a blank white box forever. Plain DOM
-       cannot fail to paint.
-       ZERO SCROLLBARS by design (user-confirmed 2026-09-02: under Menlo
-       browser isolation the white block appears exactly on grids WITH a
-       scrollbar). No sticky, no scroll box, no overflow-x — the table WRAPS
-       to fit the page width, and long grids paginate (render_df_table)
-       instead of scrolling. */
+       This is the ORIGINAL Logs-table styling, restored 2026-09-03 at the
+       user's request ('we had a quite decent grid except when we freeze the
+       header'). The ONLY deliberate difference from the original is that
+       headers are NOT sticky — frozen headers were the confirmed white-box
+       overlay. Do not add sticky, truncation, or pagination back. */
     .mgrid-wrap {{
-        overflow: visible; background: {P["card"]};
+        overflow-x: auto; background: {P["card"]};
         border: 1px solid {P["border"]}; border-radius: 8px;
     }}
     .mgrid {{ width: 100%; border-collapse: separate; border-spacing: 0; }}
     .mgrid th {{
-        text-align: left; padding: 8px 8px; font-size: 0.68rem;
-        font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+        text-align: left; padding: 8px 12px; font-size: 0.7rem;
+        font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
         color: {P["grey_700"]}; background: {P["card"]};
-        border-bottom: 2px solid {P["border"]}; vertical-align: bottom;
+        border-bottom: 2px solid {P["border"]}; white-space: nowrap;
     }}
-    /* One line per row: long values are TRUNCATED with the full text in the
-       cell's hover tooltip (title attr) — wrapping made columns narrow and
-       cells tall, which the user rejected. */
     .mgrid td {{
-        padding: 6px 8px; font-size: 0.8rem; color: {P["grey_900"]};
+        padding: 7px 12px; font-size: 0.82rem; color: {P["grey_900"]};
         border-bottom: 1px solid {P["border"]}; vertical-align: middle;
-        font-variant-numeric: tabular-nums; white-space: nowrap;
+        font-variant-numeric: tabular-nums;
     }}
     .mgrid tbody tr:last-child td {{ border-bottom: none; }}
     .mgrid tbody tr:hover td {{ background: {P["grey_100"]}; }}
@@ -1436,34 +1429,6 @@ def inject_css():
         display: none;
     }}
 
-    /* ── CSS-ONLY grid pagination (.pgrid) — INSTANT page switching.
-       A Streamlit-button pager forces a full rerun (and on SiS a rerun
-       re-runs the page's Snowflake queries — seconds per click). Here every
-       page's rows ship in the HTML as separate <tbody> chunks, hidden
-       radio inputs track the page, and the numbers are <label>s: clicking
-       swaps tbodys purely in the browser. No rerun, no server, no
-       scrollbars. */
-    .pgrid input {{ display: none; }}
-    .pgrid .mgrid tbody {{ display: none; }}
-    .pgrid .pgnav {{
-        display: flex; flex-wrap: wrap; gap: 2px; align-items: center;
-        margin-top: 6px;
-    }}
-    .pgrid .pgnav label {{
-        font-size: 0.72rem; color: {P["grey_700"]}; padding: 1px 7px;
-        border-radius: 4px; cursor: pointer; user-select: none;
-        font-variant-numeric: tabular-nums;
-    }}
-    .pgrid .pgnav label:hover {{ color: var(--brand); background: {P["grey_100"]}; }}
-    .pgrid .pgnav span {{
-        display: none; margin-left: auto; font-size: 0.72rem;
-        color: {P["grey_400"]};
-    }}
-    {"".join(
-        f".pgrid input:nth-of-type({i}):checked ~ .mgrid-wrap table tbody:nth-of-type({i}) {{ display: table-row-group; }}"
-        f".pgrid input:nth-of-type({i}):checked ~ .pgnav label:nth-of-type({i}) {{ color: var(--brand); font-weight: 700; cursor: default; background: transparent; }}"
-        f".pgrid input:nth-of-type({i}):checked ~ .pgnav span:nth-of-type({i}) {{ display: inline; }}"
-        for i in range(1, MAX_GRID_PAGES + 1))}
     </style>
     """, unsafe_allow_html=True)
 
@@ -1850,10 +1815,7 @@ def build_activity_grid_df(df_source):
         "VaR Comp":        col("VAR_COMPONENT_NAME")
                            .combine_first(col("VAR_COMPONENT_ID"))
                            .fillna("—").astype(str),
-        # Display only the local part — every user shares the corp domain,
-        # and the full address ate ~150px of grid width for no information.
-        "User":            pick("USERNAME", "SUBMITTED_BY").fillna("—")
-                           .astype(str).str.split("@").str[0],
+        "User":            pick("USERNAME", "SUBMITTED_BY").fillna("—").astype(str),
         "Records":         col("RECORD_COUNT").apply(lambda v: _grid_int_str(v, commas=True)),
         "Created":         fmt_dt(pick("CREATED_DATE", "SUBMITTED_AT")),
         "Started":         fmt_dt(col("START_DATE")),
@@ -1882,12 +1844,6 @@ SELECTION_UNSUPPORTED = object()
 # 13–15 row table still renders whole, without a pager.
 GRID_PAGE_ROWS = 12
 PAGINATE_OVER = 15
-# CSS-only pagination ships static nth-of-type rules; this caps how many
-# pages a single grid can expose (30 pages x 12 rows = 360 rows shown).
-MAX_GRID_PAGES = 30
-# Cell text longer than this is truncated with an ellipsis; the full value
-# stays available as the cell's hover tooltip.
-GRID_CELL_CHARS = 22
 
 
 def grid_pager(total_rows, per_page=25, key="pager"):
@@ -1962,125 +1918,16 @@ def render_pager(pages, key="pager", caption=None):
                             f"{caption}</div>", unsafe_allow_html=True)
 
 
-def grid_pill(text, color):
-    """The Logs-page value pill — tinted oval chip with coloured text and a
-    soft border. IDENTICAL markup to 9_Logs.py's _pill so every grid in the
-    app shows the same badges (the user's chosen canonical style)."""
-    return (f'<span style="background:{color}18;color:{color};'
-            f'border:1px solid {color}55;border-radius:99px;padding:1px 9px;'
-            f'font-size:0.72rem;font-weight:700;white-space:nowrap">'
-            f"{text}</span>")
-
-
-def _grid_cell_text(v):
-    """Display text for one grid cell, safe for a st.markdown HTML block.
-    Escapes HTML, then neutralises the two things that historically blanked
-    HTML grids in this app: '$' (Streamlit's markdown runs KaTeX over $...$
-    even inside HTML — commit e4927e9) and newlines (a newline inside the
-    block ends raw-HTML mode and the rest renders as text — commit c360960)."""
-    import html as _hm
-    import pandas as _pd
-    try:
-        if v is None or (isinstance(v, float) and v != v) or _pd.isna(v):
-            return "—"
-    except (TypeError, ValueError):
-        pass
-    s = _hm.escape(str(v))
-    s = s.replace("$", "&#36;")
-    return " ".join(s.split())
-
-
-def _render_mgrid(show, *, right_cols=(), fmt=None, cell_css=None,
-                  row_css=None, key="pgrid"):
-    """Emit a DataFrame as the canonical .mgrid HTML table via st.markdown —
-    the Logs-page look the user chose. Flat, zero scrollbars, one line per
-    row (long values truncate with the full text as a hover tooltip).
-
-    More than PAGINATE_OVER rows → CSS-ONLY pagination: each 12-row page is
-    its own <tbody>, hidden radio inputs select which one displays, and the
-    page numbers are <label>s. Clicking a number is instantaneous — pure
-    browser CSS, no Streamlit rerun, no re-query, no server round-trip
-    (a button pager cost seconds per click on SiS).
-
-    show:       DataFrame of raw values (display order).
-    right_cols: column names to right-align.
-    fmt:        callable(col, value) -> display string (pre-escape), optional.
-    cell_css:   {col: callable(raw_value) -> css declaration string}.
-    row_css:    callable(raw_row_dict) -> css declaration string for all tds.
-    key:        unique id root for this grid's radio group.
-    """
-    cols = list(show.columns)
-    right = set(right_cols)
-    th = "".join(
-        f'<th class="r">{_grid_cell_text(c)}</th>' if c in right
-        else f"<th>{_grid_cell_text(c)}</th>"
-        for c in cols)
-    trs = []
-    for rec in show.to_dict("records"):
-        rcss = ""
-        if row_css:
-            try:
-                rcss = row_css(rec) or ""
-            except Exception:
-                rcss = ""
-        tds = []
-        for c in cols:
-            raw = rec.get(c)
-            txt = _grid_cell_text(fmt(c, raw) if fmt else raw)
-            title = ""
-            if len(txt) > GRID_CELL_CHARS:
-                title = f' title="{txt}"'
-                txt = txt[:GRID_CELL_CHARS - 1].rstrip() + "…"
-            deco = ""
-            if cell_css and c in cell_css:
-                try:
-                    deco = cell_css[c](raw) or ""
-                except Exception:
-                    deco = ""
-            css = rcss
-            if deco.startswith("#"):
-                # bare colour → Logs-style oval pill around the value
-                if txt != "—":
-                    txt = grid_pill(txt, deco)
-            elif deco:
-                css = f"{css};{deco}" if css else deco
-            klass = ' class="r"' if c in right else ""
-            style = f' style="{css}"' if css else ""
-            tds.append(f"<td{klass}{style}{title}>{txt}</td>")
-        trs.append("<tr>" + "".join(tds) + "</tr>")
-
-    total = len(trs)
-    if total <= PAGINATE_OVER:
-        st.markdown(
-            f'<div class="mgrid-wrap"><table class="mgrid">'
-            f"<thead><tr>{th}</tr></thead>"
-            f'<tbody>{"".join(trs)}</tbody></table></div>',
-            unsafe_allow_html=True)
-        return
-
-    shown = min(total, GRID_PAGE_ROWS * MAX_GRID_PAGES)
-    chunks = [trs[i:i + GRID_PAGE_ROWS]
-              for i in range(0, shown, GRID_PAGE_ROWS)]
-    radios = "".join(
-        f'<input type="radio" name="{key}" id="{key}_{i}"'
-        f'{" checked" if i == 0 else ""}>'
-        for i in range(len(chunks)))
-    tbodys = "".join(f'<tbody>{"".join(c)}</tbody>' for c in chunks)
-    labels = "".join(f'<label for="{key}_{i}">{i + 1}</label>'
-                     for i in range(len(chunks)))
-    caps = "".join(
-        f"<span>Rows {i * GRID_PAGE_ROWS + 1}–"
-        f"{min((i + 1) * GRID_PAGE_ROWS, shown)} of {total:,}</span>"
-        for i in range(len(chunks)))
-    st.markdown(
-        f'<div class="pgrid">{radios}'
-        f'<div class="mgrid-wrap"><table class="mgrid">'
-        f"<thead><tr>{th}</tr></thead>{tbodys}</table></div>"
-        f'<div class="pgnav">{labels}{caps}</div></div>',
-        unsafe_allow_html=True)
-    if shown < total:
-        st.caption(f"Showing the first {shown:,} of {total:,} rows — "
-                   f"filter to narrow the list.")
+def _styler_cellmap(styler, func, subset):
+    """Version-safe per-cell CSS map: Styler.map (pandas >= 2.1) or the older
+    Styler.applymap. Keeps grids working across the SiS pandas versions."""
+    _m = getattr(styler, "map", None)
+    if _m is not None:
+        try:
+            return _m(func, subset=subset)
+        except TypeError:
+            pass
+    return styler.applymap(func, subset=subset)
 
 
 def _supports_df_selection(st):
@@ -2096,12 +1943,13 @@ def _supports_df_selection(st):
 
 def render_activity_grid(df_source, *, selectable=False, key=None,
                          height=380, empty_msg="No adjustments yet."):
-    """Shared 19-column activity grid in the user's chosen 'dream grid'
-    style (2026-09-02): the Logs-page .mgrid HTML look, height adapting to
-    the rows, and — when there are more than 15 rows — 12 rows per page
-    with a compact click-a-number pager below (see render_df_table).
-    Status text is colour-coded inline. Selection is via the caller's
-    picker — returns SELECTION_UNSUPPORTED when selectable, else None."""
+    """Shared 19-column activity grid RESTORED to the pre-redesign (26 Aug)
+    presentation the user asked to return to — and the one the Grid Lab
+    verified clean under their environment (style A): st.dataframe at a
+    fixed height, scrolling internally, full values, no truncation, no
+    pagination. Status colour via a version-safe Styler. Selection is via
+    the caller's picker — returns SELECTION_UNSUPPORTED when selectable,
+    else None."""
     import streamlit as st
 
     if df_source is None or df_source.empty:
@@ -2109,17 +1957,12 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
         return None
 
     grid_df = build_activity_grid_df(df_source)
-    render_df_table(
-        grid_df, max_rows=len(grid_df),
-        # Logs-style pills: Scope and Status get the oval tinted chips.
-        color_cols={
-            "Status":  STATUS_COLORS,
-            "Scope":   {k: v.get("color", P["grey_700"])
-                        for k, v in SCOPE_CONFIG.items()},
-            "Deleted": {"Deleted": "#64748B"},
-        },
-        right_cols=("COB", "Source COB", "Records"),
-        key=f"{key or 'activity'}_pg")
+    try:
+        shown = _styler_cellmap(grid_df.style.hide(axis="index"),
+                                lambda v: STATUS_STYLE.get(v, ""), ["Status"])
+    except Exception:
+        shown = grid_df   # very old pandas: plain values beat no grid
+    st.dataframe(shown, use_container_width=True, height=height)
     return SELECTION_UNSUPPORTED if selectable else None
 
 
@@ -2140,128 +1983,126 @@ def bordered_container():
         return c
 
 
-def render_df_table(df, max_rows=1000, height=None, highlight=None,
+def render_df_table(df, max_rows=200, height=None, highlight=None,
                     formats=None, color_cols=None, column_config=None,
                     right_cols=(), key=None):
-    """CANONICAL grid — the user's chosen 'dream grid' (2026-09-02):
-    the Logs-page .mgrid HTML look, flat and sized to its rows. Up to 15
-    rows render as one table; beyond that the grid paginates at 12 rows per
-    page with a compact click-a-number pager below. Small flat HTML tables
-    are exactly what renders reliably under the users' Menlo browser
-    isolation (the Logs page proved it live); never reintroduce canvases,
-    sticky headers, nested scroll boxes, or unbounded flowing tables.
+    """READ-ONLY table restored to the pre-redesign (26 Aug) behaviour the
+    user asked to return to: full values (NO truncation), no pagination, the
+    table flows in the page. The ONLY change from 26 Aug is that the header
+    is not sticky — the frozen header was the one confirmed problem
+    ('we had a quite decent grid except when we freeze the header').
 
     highlight:  callable(row_dict)->bool; True tints the row red.
     formats:    {column: python_format}, e.g. {"COST": "${:,.2f}"}.
-    color_cols: {column: {value: css-or-hex}} or {column: callable(value)->
-                css-or-hex} — colours that column's TEXT by value.
-    right_cols: extra column names to right-align (numerics are automatic).
-    key:        session key for the pager when the grid paginates; derived
-                from the column names when omitted (pass one when two grids
-                with identical columns share a page).
-    height, column_config: accepted for compatibility; unused.
+    color_cols: {column: {value: '#hex'}} or {column: callable(value)->'#hex'}
+                — colours that column's TEXT by value.
+    height/column_config/key: accepted for compatibility; unused.
     """
+    import html as _hm
     import pandas as _pd
+
     if df is None or len(df) == 0:
         st.caption("No rows.")
         return
-    show = df.head(int(max_rows)).reset_index(drop=True)
+    show = df.head(int(max_rows))
+    formats = formats or {}
+    numeric = set(right_cols or ()) | {
+        c for c in show.columns
+        if _pd.api.types.is_numeric_dtype(show[c])}
 
-    fmts = {c: f for c, f in (formats or {}).items() if c in show.columns}
+    def _clean(s):
+        # escape, then guard the two markdown killers: '$' triggers KaTeX
+        # (e4927e9) and a newline ends the raw-HTML block (c360960).
+        return " ".join(_hm.escape(str(s)).replace("$", "&#36;").split())
 
     def _fmt(col, v):
-        if col in fmts and _pd.notna(v):
+        try:
+            if v is None or _pd.isna(v):
+                return "—"
+        except (TypeError, ValueError):
+            pass
+        if col in formats:
             try:
-                return fmts[col].format(v)
+                return _clean(formats[col].format(v))
             except (ValueError, TypeError):
-                return v
-        return v
+                pass
+        if isinstance(v, bool):
+            return "TRUE" if v else "FALSE"
+        if isinstance(v, int):
+            return f"{v:,}"
+        if isinstance(v, float):
+            return f"{int(v):,}" if v.is_integer() else f"{v:,.4g}"
+        if hasattr(v, "strftime"):
+            return _clean(fmt_user_dt(v))
+        return _clean(v)
 
-    right = set(right_cols or ())
-    for c in show.columns:
-        if c in fmts or _pd.api.types.is_numeric_dtype(show[c]):
-            right.add(c)
-
-    cell_css = {}
-    for _col, _spec in (color_cols or {}).items():
-        if _col not in show.columns:
-            continue
-        def _css(v, spec=_spec):
-            # bare '#hex' → Logs-style pill (see _render_mgrid);
-            # a full 'prop:val' declaration stays inline text styling.
+    def _colour(col, v):
+        spec = (color_cols or {}).get(col)
+        if not spec:
+            return ""
+        try:
             got = spec(v) if callable(spec) else spec.get(str(v), "")
-            return got or ""
-        cell_css[_col] = _css
+        except Exception:
+            got = ""
+        return f"color:{got};font-weight:700;" if got else ""
 
-    row_css = None
-    if highlight:
-        def row_css(rec):
-            try:
-                hot = bool(highlight(rec))
-            except Exception:
-                hot = False
-            return f"background-color:{P['danger_lt']}" if hot else ""
+    th = "".join(
+        f'<th class="{"r" if c in numeric else ""}">{_clean(c)}</th>'
+        for c in show.columns)
+    trs = ""
+    for _, row in show.iterrows():
+        try:
+            hot = bool(highlight(row.to_dict())) if highlight else False
+        except Exception:
+            hot = False
+        row_bg = f'background:{P["danger_lt"]};' if hot else ""
+        tds = "".join(
+            f'<td class="{"r" if c in numeric else ""}" '
+            f'style="{row_bg}{_colour(c, row[c])}">{_fmt(c, row[c])}</td>'
+            for c in show.columns)
+        trs += f"<tr>{tds}</tr>"
 
-    pkey = key or f"pg_{abs(hash(tuple(show.columns))) % 100000}"
-    _render_mgrid(show, right_cols=right, fmt=_fmt,
-                  cell_css=cell_css, row_css=row_css, key=pkey)
+    st.markdown(
+        f'<div class="mgrid-wrap"><table class="mgrid">'
+        f"<thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table></div>",
+        unsafe_allow_html=True)
     if len(df) > max_rows:
         st.caption(f"Showing the first {int(max_rows)} of {len(df):,} rows.")
 
 
-def render_grid(headers, rows, *, aligns=None, height=440, caption=None,
+def render_grid(headers, rows, *, aligns=None, height=None, caption=None,
                 return_html=False, color_cols=None):
-    """Compatibility wrapper over render_df_table for the legacy
-    (headers, rows) callers. Cells may contain HTML (old pill markup) — it is
-    stripped to plain text because the native grid shows values, not markup.
-    Divider rows ({"divider": text}) become a leading 'Section' column so
-    day/section grouping survives as sortable data.
-    color_cols may name columns to colour by value (see render_df_table)."""
-    import re as _re
-    import html as _hm2
-    import pandas as _pd
-
-    def _plain(x):
-        return _hm2.unescape(_re.sub(r"<[^>]+>", "", str(x))).strip()
-
-    if return_html:
-        # Small composed tables (Logs Runs/Activity per-day chunks) keep the
-        # lightweight inline .mgrid HTML — they were never the problem.
-        _al = aligns or []
-        _rc = ["r" if (i < len(_al) and _al[i] == "right") else ""
-               for i in range(len(headers))]
-        _th = "".join(f'<th class="{_rc[i]}">{h}</th>'
-                      for i, h in enumerate(headers))
-        _body = []
-        for row in rows:
-            if isinstance(row, dict) and "divider" in row:
-                _body.append(f'<tr class="mgrid-div"><td colspan="{len(headers)}">'
-                             f'{row["divider"]}</td></tr>')
-                continue
-            cells = row.get("cells", []) if isinstance(row, dict) else row
-            _body.append("<tr>" + "".join(
-                f'<td class="{_rc[i] if i < len(_rc) else ""}">{c}</td>'
-                for i, c in enumerate(cells)) + "</tr>")
-        return (f'<div class="mgrid-wrap"><table class="mgrid">'
-                f'<thead><tr>{_th}</tr></thead>'
-                f'<tbody>{"".join(_body)}</tbody></table></div>')
-
-    # Direct render -> canonical scrollable .mgrid HTML.
-    hdrs = [_plain(h) for h in headers]
-    has_div = any(isinstance(r, dict) and "divider" in r for r in rows)
-    records, cur = [], None
+    """The legacy (headers, rows) grid — cells are RENDERED AS-IS, so the
+    pill/badge/entity-chip markup pages compose (Sign-Off per-entity detail,
+    Approval history, Logs) shows exactly as authored — the Logs look the
+    user called the canonical style. Divider rows ({"divider": text}) render
+    as full-width section rows. The table flows in the page: no sticky
+    header, no scroll boxes, no truncation, no pagination.
+    return_html=True returns the HTML instead of rendering (Logs per-day
+    chunks). height/color_cols accepted for compatibility; unused."""
+    _al = aligns or []
+    _rc = ["r" if (i < len(_al) and _al[i] == "right") else ""
+           for i in range(len(headers))]
+    _th = "".join(f'<th class="{_rc[i]}">{h}</th>'
+                  for i, h in enumerate(headers))
+    _body = []
     for row in rows:
         if isinstance(row, dict) and "divider" in row:
-            cur = _plain(row["divider"])
+            _body.append(f'<tr class="mgrid-div"><td colspan="{len(headers)}">'
+                         f'{row["divider"]}</td></tr>')
             continue
         cells = row.get("cells", []) if isinstance(row, dict) else row
-        rec = {}
-        if has_div:
-            rec["Section"] = cur or ""
-        for h, c in zip(hdrs, cells):
-            rec[h] = _plain(c)
-        records.append(rec)
-    render_df_table(_pd.DataFrame(records), height=height, color_cols=color_cols)
+        _body.append("<tr>" + "".join(
+            f'<td class="{_rc[i] if i < len(_rc) else ""}">{c}</td>'
+            for i, c in enumerate(cells)) + "</tr>")
+    html = (f'<div class="mgrid-wrap"><table class="mgrid">'
+            f'<thead><tr>{_th}</tr></thead>'
+            f'<tbody>{"".join(_body)}</tbody></table></div>')
+    if return_html:
+        return html
+    st.markdown(html, unsafe_allow_html=True)
+    if caption:
+        st.caption(caption)
 
 
 def render_sidebar():
