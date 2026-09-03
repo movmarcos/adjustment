@@ -225,7 +225,19 @@ else:
             tooltip=["Date:N", "Task:N", alt.Tooltip("sum(Credits):Q", format=",.3f")],
         )
         .properties(height=300))
-    st.altair_chart(_daily_chart, use_container_width=True)
+    # Day total on top of each stacked bar (same pattern as the monthly chart).
+    _dtot = _dl.groupby("Date", as_index=False)["Credits"].sum()
+    _dlbl = (
+        alt.Chart(_dtot).mark_text(
+            align="center", baseline="bottom", dy=-4,
+            fontSize=11, fontWeight="bold")
+        .encode(
+            x=alt.X("Date:N", sort=_date_order),
+            y=alt.Y("Credits:Q"),
+            text=alt.Text("Credits:Q", format=",.2f"),
+        ))
+    st.altair_chart((_daily_chart + _dlbl).properties(height=300),
+                    use_container_width=True)
 
 # ── Monthly cost — ALWAYS the last 3 months, independent of the window above.
 # Its own query (last 3 calendar months) so the daily Window selector never
