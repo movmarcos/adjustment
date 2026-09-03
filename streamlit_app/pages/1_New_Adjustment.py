@@ -21,7 +21,7 @@ st.set_page_config(
 from utils.styles import (
     inject_css, render_sidebar,
     P, SCOPE_CONFIG, TYPE_CONFIG, CATEGORY_CONFIG, render_df_table,
-    fmt_adj_id, icon, bordered_container,
+    render_data_grid, fmt_adj_id, icon, bordered_container,
 )
 from utils.snowflake_conn import (run_query, call_sp_df, current_user_name,
                                   safe_rerun, friendly_error)
@@ -1575,7 +1575,7 @@ def _render_direct_verdict_preview() -> None:
                 key=_k("dadj_rejects_dl"))
         else:
             st.success(f"All {n_valid} row(s) validated — ready to submit.")
-        render_df_table(preview, max_rows=20, wrap_cols="auto")
+        render_data_grid(preview, height=380)
 
 
 def _stage_and_validate(ndf, scope: str):
@@ -2091,7 +2091,7 @@ def render_var_upload_form() -> None:
         else:
             wiz["_upval"] = None
 
-        render_df_table(df, max_rows=20, wrap_cols="auto")
+        render_data_grid(df, height=320)
 
         if "COBId" in df.columns and len(df):
             try:
@@ -2168,6 +2168,41 @@ def render_var_upload_form() -> None:
             wiz["_dup_adj_ids"] = []
     else:
         wiz["_dup_adj_ids"] = []
+
+
+def _frtb_required_errors(df, schema) -> pd.DataFrame:
+    """Per-row DATA validation of the plain schema contract (ROW, COLUMN,
+    ERROR): every required column must hold a value in every row, and typed
+    columns (number/date) must parse. The header banner only proves the
+    COLUMNS exist — it says nothing about the data, so a file with the right
+    headers and empty/garbage cells sailed through (user-reported gap)."""
+    errors = []
+    for col in schema.get("expected") or []:
+        name = col.get("name")
+        if not name or name not in df.columns:
+            continue   # missing columns are the header banner's job
+        s = df[name]
+        blank = s.isna() | s.astype(str).str.strip().str.upper().isin(
+            ("", "NAN", "NONE"))
+        if col.get("required"):
+            for idx in blank[blank].index:
+                errors.append({"ROW": int(idx) + 1, "COLUMN": name,
+                               "ERROR": "required value is empty"})
+        typ = (col.get("type") or "string").lower()
+        if typ == "number":
+            bad = ~blank & pd.to_numeric(s, errors="coerce").isna()
+        elif typ == "date":
+            # accept both month-first and day-first conventions
+            bad = (~blank
+                   & pd.to_datetime(s, errors="coerce").isna()
+                   & pd.to_datetime(s, errors="coerce", dayfirst=True).isna())
+        else:
+            continue
+        for idx in bad[bad].index:
+            errors.append({"ROW": int(idx) + 1, "COLUMN": name,
+                           "ERROR": f"not a valid {typ} "
+                                    f"('{str(s.loc[idx])[:30]}')"})
+    return pd.DataFrame(errors, columns=["ROW", "COLUMN", "ERROR"])
 
 
 def _frtb_rule_errors(df, rules) -> pd.DataFrame:
@@ -2346,27 +2381,52 @@ def _render_frtb_direct_body(scope: str) -> None:
             _render_upload_validation(wiz["_upval"]["result"], len(df))
 
         # Conditional mandatory matrix (risk class / sensitivity type)
+        # Per-row DATA validation: plain schema contract (required values
+        # present, numbers/dates parse) + the conditional mandatory matrix.
+        # The header banners above only prove the COLUMNS exist; every row
+        # gets its own ✓/✗ verdict here (user-requested).
         rule_errs = _frtb_rule_errors(df, schema.get("validation_rules"))
+        req_errs = _frtb_required_errors(df, schema)
+        all_errs = pd.concat([req_errs, rule_errs], ignore_index=True)
         if missing_req:
-            wiz["_frtb_rule_errs"] = max(len(rule_errs), 1)
+            wiz["_frtb_rule_errs"] = max(len(all_errs), 1)
         else:
-            wiz["_frtb_rule_errs"] = len(rule_errs)
-        if not rule_errs.empty:
-            st.error(f"{len(rule_errs)} conditional-rule error(s) — every row "
-                     f"must satisfy the mandatory matrix for its risk class:")
-            # One line per row with ALL of its errors (user-review feedback)
-            _per_row = (rule_errs
-                        .assign(E=rule_errs["COLUMN"] + ": " + rule_errs["ERROR"])
-                        .groupby("ROW")["E"]
-                        .apply(lambda s: " · ".join(s))
-                        .reset_index()
-                        .rename(columns={"E": "ERRORS"}))
-            render_df_table(_per_row, max_rows=50, wrap_cols="auto")
-        elif not missing_req:
-            st.success(f"All {len(df)} row(s) satisfy the "
-                       f"{_FRTB_LABELS[scope]} mandatory matrix.")
+            wiz["_frtb_rule_errs"] = len(all_errs)
 
-        render_df_table(df, max_rows=20, wrap_cols="auto")
+        _err_by_row = {}
+        if not all_errs.empty:
+            _err_by_row = (all_errs
+                           .assign(E=all_errs["COLUMN"] + ": "
+                                     + all_errs["ERROR"])
+                           .groupby("ROW")["E"]
+                           .apply(lambda s: " · ".join(s))
+                           .to_dict())
+        _n_bad = len(_err_by_row)
+        _n_ok = len(df) - _n_bad
+        if _n_bad:
+            st.error(f"**{_n_ok} valid row(s)**, **{_n_bad} invalid "
+                     f"row(s)** — every row must have all required values "
+                     f"(and satisfy the mandatory matrix for its risk "
+                     f"class). See the ✓/✗ and Errors columns below; "
+                     f"submission is blocked until the file is clean.")
+        elif not missing_req:
+            st.success(f"All {len(df)} row(s) validated — required values "
+                       f"present and the {_FRTB_LABELS[scope]} mandatory "
+                       f"matrix satisfied.")
+
+        _prev = df.copy()
+        _prev.insert(0, "✓/✗", ["✗" if (i + 1) in _err_by_row else "✓"
+                                for i in range(len(_prev))])
+        _prev.insert(1, "Errors", [_err_by_row.get(i + 1, "")
+                                   for i in range(len(_prev))])
+        if _n_bad:
+            st.download_button(
+                f"⬇ Download {_n_bad} invalid row(s) (CSV)",
+                _prev[_prev["✓/✗"] == "✗"].to_csv(index=False)
+                .encode("utf-8-sig"),
+                file_name="frtb_direct_rejects.csv", mime="text/csv",
+                key=_k("frtb_rejects_dl"))
+        render_data_grid(_prev, height=380)
     else:
         # CSV cleared: the previous parse must not stay submittable, and the
         # rules gate must not report clean for a file that no longer exists.
@@ -3266,13 +3326,13 @@ if wiz.get("category") == "Scaling Adjustment" and wiz.get("_preview_sum") \
                     df_grp = df_grp.rename(columns={"CURRENT_VALUE": "Original",
                                                     "ADJUSTMENT_DELTA": "Adjustment",
                                                     "PROJECTED_VALUE": "Projected"})
-                    render_df_table(df_grp, max_rows=100, wrap_cols="auto")
+                    render_data_grid(df_grp, height=300)
             except Exception as exc:
                 st.warning(f"Breakdown not available: {exc}")
         with st.expander(f"Sample rows (up to 1,000 of {total_rows:,})", expanded=False):
             try:
                 df_sample = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
                                        json.dumps({**_preview_payload(), "mode": "sample"}))
-                render_df_table(df_sample, max_rows=200, wrap_cols="auto")
+                render_data_grid(df_sample, height=300)
             except Exception as exc:
                 st.warning(f"Sample not available: {exc}")

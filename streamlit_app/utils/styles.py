@@ -1853,6 +1853,20 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
     return SELECTION_UNSUPPORTED if selectable else None
 
 
+def render_data_grid(df, height=380, empty_msg="No rows."):
+    """Data-preview grid for wide/long frames (Direct upload previews):
+    st.dataframe at a fixed height — the same expandable, internally
+    scrolling grid as Home/Adjustments, BY THE USER'S CHOICE for data-heavy
+    tables ('I need the other grid because I want the user to expand').
+    Use render_df_table/render_grid for the styled .mgrid HTML look."""
+    import streamlit as st
+
+    if df is None or len(df) == 0:
+        st.caption(empty_msg)
+        return
+    st.dataframe(df, use_container_width=True, height=height)
+
+
 def bordered_container():
     """Version-safe st.container(border=True): the border kwarg needs
     Streamlit ≥ 1.29, but the live SiS runtime is 1.22.0 (confirmed 2026-09).
