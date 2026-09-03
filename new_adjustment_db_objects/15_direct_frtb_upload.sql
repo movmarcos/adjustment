@@ -338,7 +338,9 @@ WITH base AS (
 ),
 enriched AS (
     SELECT base.*,
-        'SBM' AS LOAD_SET,
+        -- LOAD_SET mirrors the platform loader: for SBM it is the row's
+        -- RISK_CLASS (GIRR/FX/CSR/…); provenance lives in RAVEN_DATASET_NAME.
+        base.RISK_CLASS AS LOAD_SET,
         'DIRECT-SBM' AS RAVEN_DATASET_NAME,
         'NonCVA'     AS LOAD_SOURCE,
         CURRENT_TIMESTAMP()::TIMESTAMP_NTZ(9) AS LOAD_TIMESTAMP,
