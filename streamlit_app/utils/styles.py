@@ -674,44 +674,6 @@ def inject_css():
     div[class*="st-key-submit"] button[data-testid="stBaseButton-primary"]:hover {{
         background: var(--brand-dk) !important; border-color: var(--brand-dk) !important;
     }}
-    /* ── Compact grid pager (render_pager) — the user wants small clickable
-       page NUMBERS, not full-size buttons. render_pager drops a hidden
-       .pager-flag in its container; these :has() rules shrink every button
-       inside to a quiet text-like number. Current page = disabled primary,
-       painted brand red and kept fully opaque. */
-    .pager-flag {{ display: none; }}
-    [data-testid="stVerticalBlock"]:has(> :is(
-        [data-testid="element-container"],
-        [data-testid="stElementContainer"],
-        .element-container) .pager-flag) .stButton > button {{
-        padding: 0 0.35rem !important; font-size: 0.72rem !important;
-        min-height: 1.45rem !important; height: 1.45rem !important;
-        line-height: 1.45rem !important; border: none !important;
-        background: transparent !important; box-shadow: none !important;
-        color: var(--ink-2) !important; font-weight: 500 !important;
-    }}
-    [data-testid="stVerticalBlock"]:has(> :is(
-        [data-testid="element-container"],
-        [data-testid="stElementContainer"],
-        .element-container) .pager-flag) .stButton > button:hover:enabled {{
-        color: var(--brand) !important; background: {P["grey_100"]} !important;
-        border-radius: 4px !important;
-    }}
-    [data-testid="stVerticalBlock"]:has(> :is(
-        [data-testid="element-container"],
-        [data-testid="stElementContainer"],
-        .element-container) .pager-flag) .stButton > button:is(
-        [kind="primary"], [data-testid="baseButton-primary"],
-        [data-testid="stBaseButton-primary"]) {{
-        color: var(--brand) !important; font-weight: 700 !important;
-        background: transparent !important; opacity: 1 !important;
-    }}
-    [data-testid="stVerticalBlock"]:has(> :is(
-        [data-testid="element-container"],
-        [data-testid="stElementContainer"],
-        .element-container) .pager-flag) .stButton > button:disabled {{
-        opacity: 1 !important;
-    }}
     [data-testid="stDataFrame"] {{
         border-radius: var(--r-sm); overflow: hidden;
         border: 1px solid var(--border);
@@ -1838,85 +1800,6 @@ def resolve_selected_adjustment(df_source, selection_rows):
 # Sentinel returned by render_activity_grid when the runtime is too old for
 # native st.dataframe row-selection — the caller renders its own fallback picker.
 SELECTION_UNSUPPORTED = object()
-
-
-# The user's grid rules (2026-09-02): a grid shows at most this many rows
-# per page, and only paginates once it exceeds PAGINATE_OVER rows — so a
-# 13–15 row table still renders whole, without a pager.
-GRID_PAGE_ROWS = 12
-PAGINATE_OVER = 15
-
-
-def grid_pager(total_rows, per_page=25, key="pager"):
-    """Current page for a paginated grid. Call BEFORE rendering the slice:
-        cur, pages = grid_pager(len(df), 25, key="mygrid_pg")
-        render_df_table(df.iloc[cur*25:(cur+1)*25])
-        render_pager(pages, key="mygrid_pg")   # clickable numbers below
-    Returns (current_page_0_based, total_pages)."""
-    pages = max(1, (int(total_rows) + int(per_page) - 1) // int(per_page))
-    cur = min(int(st.session_state.get(key, 0)), pages - 1)
-    st.session_state[key] = cur
-    return cur, pages
-
-
-def render_pager(pages, key="pager", caption=None):
-    """COMPACT clickable page numbers below a grid (‹ 1 2 [3] … 12 ›) — the
-    user wants small number links, not full-size buttons: a hidden
-    .pager-flag marker plus :has() CSS shrinks the buttons in this container
-    to quiet text-like numbers, current page in brand red. Windowed to at
-    most 9 numbers with ellipses. on_click callbacks update the page BEFORE
-    the rerun renders, so the grid above changes in the same click.
-    `caption` (e.g. 'Rows 13–24 of 200') renders greyed at the row's end."""
-    pages = int(pages)
-    if pages <= 1:
-        return
-    cur = min(int(st.session_state.get(key, 0)), pages - 1)
-
-    def _go(p):
-        st.session_state[key] = int(p)
-
-    if pages <= 9:
-        window = list(range(pages))
-    else:
-        window = sorted({0, pages - 1,
-                         *range(max(0, cur - 2), min(pages, cur + 3))})
-    items = []          # page index, or None for an ellipsis gap
-    prev_p = None
-    for p in window:
-        if prev_p is not None and p - prev_p > 1:
-            items.append(None)
-        items.append(p)
-        prev_p = p
-
-    box = st.container()
-    box.markdown('<span class="pager-flag"></span>', unsafe_allow_html=True)
-    with box:
-        slots = [0.42] * (len(items) + 2)
-        spacer = max(0.5, 12 - sum(slots))
-        cols = st.columns(slots + [spacer])
-        with cols[0]:
-            st.button("‹", key=f"{key}_prev", disabled=cur <= 0,
-                      on_click=_go, args=(cur - 1,), use_container_width=True)
-        for i, p in enumerate(items):
-            with cols[i + 1]:
-                if p is None:
-                    st.markdown("<div style='text-align:center;color:#8A94A6;"
-                                "font-size:0.72rem;padding-top:3px'>…</div>",
-                                unsafe_allow_html=True)
-                else:
-                    st.button(str(p + 1), key=f"{key}_p{p}",
-                              type="primary" if p == cur else "secondary",
-                              disabled=p == cur,
-                              on_click=_go, args=(p,),
-                              use_container_width=True)
-        with cols[len(items) + 1]:
-            st.button("›", key=f"{key}_next", disabled=cur >= pages - 1,
-                      on_click=_go, args=(cur + 1,), use_container_width=True)
-        if caption:
-            with cols[-1]:
-                st.markdown(f"<div style='text-align:right;color:#8A94A6;"
-                            f"font-size:0.72rem;padding-top:4px'>"
-                            f"{caption}</div>", unsafe_allow_html=True)
 
 
 def _styler_cellmap(styler, func, subset):
