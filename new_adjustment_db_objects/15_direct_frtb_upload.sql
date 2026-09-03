@@ -338,7 +338,8 @@ WITH base AS (
 ),
 enriched AS (
     SELECT base.*,
-        'DIRECT-SBM' AS LOAD_SET,
+        'SBM' AS LOAD_SET,
+        'DIRECT-SBM' AS RAVEN_DATASET_NAME,
         'NonCVA'     AS LOAD_SOURCE,
         CURRENT_TIMESTAMP()::TIMESTAMP_NTZ(9) AS LOAD_TIMESTAMP,
         COALESCE(NULLIF(base.CCY1, ''), base.CCY_AMT) AS CURRENCY_CODE,
@@ -528,7 +529,8 @@ WITH base AS (
 ),
 enriched AS (
     SELECT base.*,
-        'DIRECT-DRC' AS LOAD_SET,
+        'DRC' AS LOAD_SET,
+        'DIRECT-DRC' AS RAVEN_DATASET_NAME,
         CURRENT_TIMESTAMP()::TIMESTAMP_NTZ(9) AS LOAD_TIMESTAMP,
         COALESCE(NULLIF(base.CCY1, ''), base.CCY2) AS CURRENCY_CODE,
         IFF(LEN(CONCAT(base.CCY1, '-', base.CCY2)) < 7, NULL,
@@ -670,7 +672,8 @@ WITH base AS (
 enriched AS (
     SELECT base.*,
         MD5(base.ADJ_ID || '-' || base.ROW_NUM || '-DIRECT') AS FRTBSA_RRAO_KEY,
-        'DIRECT-RRAO' AS LOAD_SET,
+        'RRAO' AS LOAD_SET,
+        'DIRECT-RRAO' AS RAVEN_DATASET_NAME,
         CURRENT_TIMESTAMP()::TIMESTAMP_NTZ(9) AS LOAD_TIMESTAMP,
         COALESCE(NULLIF(base.CCY1, ''), base.CCY2) AS CURRENCY_CODE,
         IFF(LEN(CONCAT(base.CCY1, '-', base.CCY2)) < 7, NULL,
