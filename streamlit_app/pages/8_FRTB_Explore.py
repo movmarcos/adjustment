@@ -4,7 +4,7 @@ FRTB Explore — browse and export the FRTB fact data
 Read-only explorer over the OFFICIAL FRTB fact tables (the adjusted/
 published data the platform reports from):
 
-    SBM  → FACT.FRTBSA_SENSITIVITY_MEASURES_OFFICIAL
+    SBM  → FACT.FRTBSA_SENSITIVITY_MEASURES_SBM_OFFICIAL
     DRC  → FACT.FRTBSA_DRC_MEASURES_OFFICIAL
     RRAO → FACT.FRTBSA_RRAO_MEASURES_OFFICIAL
 
@@ -51,11 +51,11 @@ MAX_ROWS = 1000
 # report the adjustment — mirrors the _ADJUSTMENT fact layout).
 _TYPES = {
     "SBM (Sensitivities)": dict(
-        code="SBM", table="FACT.FRTBSA_SENSITIVITY_MEASURES_OFFICIAL",
+        code="SBM", table="FACT.FRTBSA_SENSITIVITY_MEASURES_SBM_OFFICIAL",
         risk_col="RISK_CLASS", risk_label="Risk class",
         sens_col="SENSITIVITY_TYPE",
         measure="AMOUNT_IN_USD", measure_label="Amount (USD)",
-        columns=["COBID", "ENTITY_CODE", "BOOK_CODE", "RAPTOR_TRADE_CODE",
+        columns=["COBID", "ENTITY_CODE", "BUSINESS_ORGANIZATION_CODE", "RAPTOR_TRADE_CODE",
                  "RISK_CLASS", "SENSITIVITY_TYPE", "BUCKET", "CURVE_CODE",
                  "VERTEX", "MEASURE_TYPE_CODE", "SIMULATION_NAME",
                  "CURRENCY_CODE", "AMOUNT", "AMOUNT_IN_USD",
@@ -64,7 +64,7 @@ _TYPES = {
         code="DRC", table="FACT.FRTBSA_DRC_MEASURES_OFFICIAL",
         risk_col="RISK_CLASS", risk_label="Risk class",
         measure="JTD_LOSS_USD", measure_label="JTD loss (USD)",
-        columns=["COBID", "ENTITY_CODE", "BOOK_CODE", "RAPTOR_TRADE_CODE",
+        columns=["COBID", "ENTITY_CODE", "BUSINESS_ORGANIZATION_CODE", "RAPTOR_TRADE_CODE",
                  "RISK_CLASS", "BUCKET", "SECURITY_CODE", "ISSUER_CODE",
                  "ISSUER_RATING", "MATURITY_DATE", "JTD_RISK_DIRECTION",
                  "NOTIONAL_AMOUNT", "JTD_LOSS", "JTD_LOSS_USD",
@@ -73,7 +73,7 @@ _TYPES = {
         code="RRAO", table="FACT.FRTBSA_RRAO_MEASURES_OFFICIAL",
         risk_col="SA_RRAO_PRODUCT_TYPE", risk_label="RRAO product type",
         measure="NOTIONAL_AMOUNT_USD", measure_label="Notional (USD)",
-        columns=["COBID", "ENTITY_CODE", "BOOK_CODE", "RAPTOR_TRADE_CODE",
+        columns=["COBID", "ENTITY_CODE", "BUSINESS_ORGANIZATION_CODE", "RAPTOR_TRADE_CODE",
                  "SA_RRAO_PRODUCT_TYPE", "MEASURE_TYPE_CODE",
                  "SIMULATION_NAME", "CURRENCY_CODE", "NOTIONAL_AMOUNT",
                  "NOTIONAL_AMOUNT_USD", "LOAD_SET"]),
@@ -138,7 +138,7 @@ with bordered_container():
     section_title("Narrow down", "filter")
     df_dim = _q(f"""
         SELECT DISTINCT {cfg['risk_col']} AS RISK,
-               {cfg.get('sens_col') or 'NULL'} AS SENS, BOOK_CODE
+               {cfg.get('sens_col') or 'NULL'} AS SENS, BUSINESS_ORGANIZATION_CODE
         FROM {cfg['table']}
         WHERE {_gate}
         LIMIT 5000""")
@@ -146,7 +146,7 @@ with bordered_container():
     if not df_dim.empty:
         risks = sorted(df_dim["RISK"].dropna().unique().tolist())
         senss = sorted(df_dim["SENS"].dropna().unique().tolist())
-        books = sorted(df_dim["BOOK_CODE"].dropna().unique().tolist())
+        books = sorted(df_dim["BUSINESS_ORGANIZATION_CODE"].dropna().unique().tolist())
     n_narrow = 4 if cfg.get("sens_col") else 3
     gcols = st.columns(n_narrow)
     with gcols[0]:
@@ -172,7 +172,7 @@ if sel_sens:
     where.append(f"{cfg['sens_col']} IN (" +
                  ",".join(f"'{_esc(x)}'" for x in sel_sens) + ")")
 if sel_book:
-    where.append("BOOK_CODE IN (" +
+    where.append("BUSINESS_ORGANIZATION_CODE IN (" +
                  ",".join(f"'{_esc(b)}'" for b in sel_book) + ")")
 if trade.strip():
     where.append(f"RAPTOR_TRADE_CODE ILIKE '%{_esc(trade.strip())}%'")
@@ -182,7 +182,7 @@ where_sql = " AND ".join(where)
 df_sum = _q(f"""
     SELECT COUNT(*) AS N_ROWS,
            COUNT(DISTINCT RAPTOR_TRADE_CODE) AS N_TRADES,
-           COUNT(DISTINCT BOOK_CODE) AS N_BOOKS,
+           COUNT(DISTINCT BUSINESS_ORGANIZATION_CODE) AS N_BOOKS,
            SUM({cfg['measure']}) AS TOTAL_USD
     FROM {cfg['table']}
     WHERE {where_sql}""")
@@ -197,7 +197,7 @@ st.markdown(
     + kpi_card("Matching rows", f"{n_rows:,}",
                f"showing/downloading up to {MAX_ROWS:,}")
     + kpi_card("Trades", f"{n_trades:,}", "distinct RAPTOR_TRADE_CODE")
-    + kpi_card("Books", f"{n_books:,}", "distinct BOOK_CODE")
+    + kpi_card("Books", f"{n_books:,}", "distinct BUSINESS_ORGANIZATION_CODE")
     + kpi_card(cfg["measure_label"], f"{total:,.2f}",
                f"sum over all {n_rows:,} matching rows")
     + "</div>", unsafe_allow_html=True)
@@ -216,7 +216,7 @@ df_data = _q(f"""
     SELECT {", ".join(cfg['columns'])}
     FROM {cfg['table']}
     WHERE {where_sql}
-    ORDER BY ENTITY_CODE, BOOK_CODE, RAPTOR_TRADE_CODE
+    ORDER BY ENTITY_CODE, BUSINESS_ORGANIZATION_CODE, RAPTOR_TRADE_CODE
     LIMIT {MAX_ROWS}""")
 
 # File name that encodes the selection: FRTB_DRC_COB20260626_MUSI_GIRR.csv
