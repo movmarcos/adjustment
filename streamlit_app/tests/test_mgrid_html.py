@@ -118,6 +118,26 @@ def test_activity_grid_is_fixed_height_dataframe(harness):
     assert kwargs.get("use_container_width") is True
 
 
+def test_data_grid_small_uses_exact_html_no_filler(harness):
+    from utils.styles import render_data_grid
+    md, dfs, _ = harness
+    render_data_grid(pd.DataFrame({"A": [1]}), height=380)
+    assert dfs == []                              # no canvas → no filler rows
+    assert _grids(md)[0].count("<tr>") == 1 + 1   # header + the single row
+
+
+def test_data_grid_large_uses_capped_canvas(harness):
+    from utils.styles import render_data_grid
+    md, dfs, _ = harness
+    render_data_grid(pd.DataFrame({"A": range(100)}), height=380)
+    assert _grids(md) == []
+    _, kwargs = dfs[0]
+    assert kwargs.get("height") == 380            # fit (3538) capped at 380
+    render_data_grid(pd.DataFrame({"A": range(16)}), height=380)
+    _, kwargs = dfs[1]
+    assert kwargs.get("height") == 35 * 17 + 3    # 16 rows fit exactly, no cap
+
+
 def test_activity_grid_empty_shows_info(harness, monkeypatch):
     infos = []
     monkeypatch.setattr(streamlit, "info", lambda *a, **k: infos.append(a))

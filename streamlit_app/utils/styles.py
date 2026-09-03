@@ -1872,17 +1872,26 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
 
 
 def render_data_grid(df, height=380, empty_msg="No rows."):
-    """Data-preview grid for wide/long frames (Direct upload previews):
-    st.dataframe at a fixed height — the same expandable, internally
-    scrolling grid as Home/Adjustments, BY THE USER'S CHOICE for data-heavy
-    tables ('I need the other grid because I want the user to expand').
-    Use render_df_table/render_grid for the styled .mgrid HTML look."""
+    """Data-preview grid for wide/long frames (Direct upload previews).
+
+    Hybrid, tuned live with the user (2026-09-03):
+    - ≤ 15 rows → the .mgrid HTML table, sized EXACTLY to its rows. A 1-row
+      upload previously sat in a 380px canvas full of empty filler lines,
+      and the canvas repaints on every page interaction (content visibly
+      vanishing/reappearing while typing) — plain HTML does neither.
+    - > 15 rows → st.dataframe (expandable, internal scroll — the user's
+      choice for data-heavy tables), height fitted to the rows and capped
+      at `height` so short-ish sets get no filler either."""
     import streamlit as st
 
     if df is None or len(df) == 0:
         st.caption(empty_msg)
         return
-    st.dataframe(df, use_container_width=True, height=height)
+    if len(df) <= 15:
+        render_df_table(df, max_rows=len(df), wrap_cols="auto")
+        return
+    fit = 35 * (len(df) + 1) + 3
+    st.dataframe(df, use_container_width=True, height=min(fit, int(height)))
 
 
 def bordered_container():
