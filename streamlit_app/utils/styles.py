@@ -1887,6 +1887,8 @@ def render_df_table(df, max_rows=200, height=None, highlight=None,
                 width instead of widening the table (a too-wide table grows
                 a horizontal scrollbar, and scrollbars are where the white
                 block appears in the users' environment). Full text kept.
+                The string "auto" bounds ANY long cell (>26 chars) at 240px —
+                for preview grids whose columns vary by template.
     height/column_config/key: accepted for compatibility; unused.
     """
     import html as _hm
@@ -1950,7 +1952,10 @@ def render_df_table(df, max_rows=200, height=None, highlight=None,
         cells = []
         for c in show.columns:
             content = _fmt(c, row[c])
-            px = (wrap_cols or {}).get(c)
+            if wrap_cols == "auto":
+                px = 240 if len(str(content)) > 26 else None
+            else:
+                px = (wrap_cols or {}).get(c)
             if px and len(str(content)) > 20:
                 content = (f'<span style="display:inline-block;'
                            f'max-width:{int(px)}px;white-space:normal;'

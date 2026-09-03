@@ -1575,7 +1575,7 @@ def _render_direct_verdict_preview() -> None:
                 key=_k("dadj_rejects_dl"))
         else:
             st.success(f"All {n_valid} row(s) validated — ready to submit.")
-        render_df_table(preview, max_rows=20, height=220)
+        render_df_table(preview, max_rows=20, wrap_cols="auto")
 
 
 def _stage_and_validate(ndf, scope: str):
@@ -1733,7 +1733,7 @@ def render_direct_form() -> None:
                         _parse_err = exc
             else:
                 csv_text = st.text_area(
-                    "Paste CSV Data Here", value="", height=160, key=_k("dadj_csv"),
+                    "Paste CSV Data Here", value="", height=380, key=_k("dadj_csv"),
                     help="Paste the full CSV content including the header row.")
                 if csv_text.strip():
                     try:
@@ -2047,7 +2047,7 @@ def render_var_upload_form() -> None:
                 _parse_err = exc
     else:
         csv_text = st.text_area(
-            "Paste CSV Data Here", value="", height=160, key=_k("direct_csv"),
+            "Paste CSV Data Here", value="", height=380, key=_k("direct_csv"),
             help="Paste the full CSV content including the header row.")
         if csv_text.strip():
             try:
@@ -2091,7 +2091,7 @@ def render_var_upload_form() -> None:
         else:
             wiz["_upval"] = None
 
-        render_df_table(df, max_rows=20, height=200)
+        render_df_table(df, max_rows=20, wrap_cols="auto")
 
         if "COBId" in df.columns and len(df):
             try:
@@ -2361,12 +2361,12 @@ def _render_frtb_direct_body(scope: str) -> None:
                         .apply(lambda s: " · ".join(s))
                         .reset_index()
                         .rename(columns={"E": "ERRORS"}))
-            render_df_table(_per_row, max_rows=50, height=220)
+            render_df_table(_per_row, max_rows=50, wrap_cols="auto")
         elif not missing_req:
             st.success(f"All {len(df)} row(s) satisfy the "
                        f"{_FRTB_LABELS[scope]} mandatory matrix.")
 
-        render_df_table(df, max_rows=20, height=200)
+        render_df_table(df, max_rows=20, wrap_cols="auto")
     else:
         # CSV cleared: the previous parse must not stay submittable, and the
         # rules gate must not report clean for a file that no longer exists.
@@ -3266,13 +3266,13 @@ if wiz.get("category") == "Scaling Adjustment" and wiz.get("_preview_sum") \
                     df_grp = df_grp.rename(columns={"CURRENT_VALUE": "Original",
                                                     "ADJUSTMENT_DELTA": "Adjustment",
                                                     "PROJECTED_VALUE": "Projected"})
-                    render_df_table(df_grp, max_rows=100, height=300)
+                    render_df_table(df_grp, max_rows=100, wrap_cols="auto")
             except Exception as exc:
                 st.warning(f"Breakdown not available: {exc}")
         with st.expander(f"Sample rows (up to 1,000 of {total_rows:,})", expanded=False):
             try:
                 df_sample = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
                                        json.dumps({**_preview_payload(), "mode": "sample"}))
-                render_df_table(df_sample, max_rows=200, height=300)
+                render_df_table(df_sample, max_rows=200, wrap_cols="auto")
             except Exception as exc:
                 st.warning(f"Sample not available: {exc}")
