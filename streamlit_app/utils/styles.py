@@ -160,10 +160,11 @@ import pytz as _pytz
 
 STORAGE_TZ = "Europe/London"
 USER_TZ_OPTIONS = {          # label shown → IANA zone
-    "London":   "Europe/London",
-    "New York": "America/New_York",
-    "India":    "Asia/Kolkata",
-    "Japan":    "Asia/Tokyo",
+    "London":    "Europe/London",
+    "New York":  "America/New_York",
+    "India":     "Asia/Kolkata",
+    "Hong Kong": "Asia/Hong_Kong",
+    "Japan":     "Asia/Tokyo",
 }
 
 
