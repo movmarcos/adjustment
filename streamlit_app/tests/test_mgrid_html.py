@@ -50,23 +50,29 @@ def test_small_table_renders_whole_no_pager(harness):
     assert buttons == []                              # no pager
 
 
-def test_large_table_paginates_at_12(harness):
+def test_large_table_paginates_css_only(harness):
     md, buttons = harness
-    render_df_table(pd.DataFrame({"A": range(50)}))   # > 15 → paginate
+    render_df_table(pd.DataFrame({"A": range(50)}), key="k1")  # > 15 rows
     html = _grids(md)[0]
-    assert html.count("<tr>") == 1 + GRID_PAGE_ROWS   # header + 12 rows
-    # 50/12 → 5 pages; pager shows ‹ 1..5 › and a rows caption
-    assert {"1", "2", "3", "4", "5"} <= set(buttons)
-    assert any("Rows 1–12 of 50" in h for h in md)
+    # ALL rows ship in the HTML, chunked into 12-row tbodys; hidden radio
+    # inputs + labels switch pages purely in the browser — NO Streamlit
+    # buttons (a button pager forced a slow full rerun per click on SiS).
+    assert buttons == []
+    assert html.count("<tr>") == 1 + 50               # header + every row
+    assert html.count("<tbody>") == 5                 # 50/12 → 5 pages
+    assert html.count('type="radio"') == 5 and "checked" in html
+    assert '<label for="k1_4">5</label>' in html
+    assert "Rows 1–12 of 50" in html and "\n" not in html
 
 
-def test_pager_second_page_slices_rows(harness):
+def test_long_values_truncate_with_tooltip(harness):
     md, _ = harness
-    styles.st.session_state["k2"] = 1                 # page 2 preselected
-    render_df_table(pd.DataFrame({"A": range(50)}), key="k2")
+    long = "MARCOS.MAGRI@MUFGSECURITIES.COM"
+    render_df_table(pd.DataFrame({"User": [long], "N": [1]}))
     html = _grids(md)[0]
-    assert ">12<" in html and ">23<" in html          # rows 12..23 shown
-    assert ">0<" not in html
+    assert "…" in html                                # truncated display
+    assert f'title="{long}"' in html                  # full value on hover
+    assert f">{long}<" not in html
 
 
 def test_html_is_single_line_escaped_and_dollar_safe(harness):
@@ -83,13 +89,16 @@ def test_html_is_single_line_escaped_and_dollar_safe(harness):
     assert 'class="r"' in html                        # numeric right-aligned
 
 
-def test_color_and_highlight_inline_css(harness):
+def test_color_cols_render_logs_style_pills(harness):
     md, _ = harness
     df = pd.DataFrame({"Status": ["Failed", "Processed"], "N": [1, 2]})
     render_df_table(df, color_cols={"Status": {"Failed": "#D50032"}},
                     highlight=lambda r: r["Status"] == "Failed")
     html = _grids(md)[0]
-    assert "color:#D50032" in html and "background-color:" in html
+    # oval tinted chip identical to the Logs page _pill markup
+    assert "border-radius:99px" in html
+    assert "background:#D5003218" in html and "color:#D50032" in html
+    assert "background-color:" in html               # row highlight kept
 
 
 def test_grid_pager_math(monkeypatch):
@@ -111,7 +120,8 @@ def test_activity_grid_sentinel_and_status_colour(harness):
     assert got is SELECTION_UNSUPPORTED
     html = _grids(md)[0]
     assert "Adj ID" in html and "Failed" in html
-    assert "font-weight:600" in html                  # STATUS_STYLE inline
+    assert "border-radius:99px" in html               # status/scope pills
+    assert "color:#DC2626" in html                    # STATUS_COLORS Failed
 
 
 def test_activity_grid_empty_shows_info(harness, monkeypatch):

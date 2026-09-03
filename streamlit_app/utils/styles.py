@@ -1255,17 +1255,19 @@ def inject_css():
     }}
     .mgrid {{ width: 100%; border-collapse: separate; border-spacing: 0; }}
     .mgrid th {{
-        text-align: left; padding: 8px 10px; font-size: 0.68rem;
+        text-align: left; padding: 8px 8px; font-size: 0.68rem;
         font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
         color: {P["grey_700"]}; background: {P["card"]};
         border-bottom: 2px solid {P["border"]}; vertical-align: bottom;
     }}
+    /* One line per row: long values are TRUNCATED with the full text in the
+       cell's hover tooltip (title attr) — wrapping made columns narrow and
+       cells tall, which the user rejected. */
     .mgrid td {{
-        padding: 7px 10px; font-size: 0.8rem; color: {P["grey_900"]};
+        padding: 6px 8px; font-size: 0.8rem; color: {P["grey_900"]};
         border-bottom: 1px solid {P["border"]}; vertical-align: middle;
-        font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+        font-variant-numeric: tabular-nums; white-space: nowrap;
     }}
-    .mgrid td.nw {{ white-space: nowrap; }}
     .mgrid tbody tr:last-child td {{ border-bottom: none; }}
     .mgrid tbody tr:hover td {{ background: {P["grey_100"]}; }}
     .mgrid th.r, .mgrid td.r {{ text-align: right; }}
@@ -1433,6 +1435,35 @@ def inject_css():
     .element-container:has(.sec-card-flag) {{
         display: none;
     }}
+
+    /* ── CSS-ONLY grid pagination (.pgrid) — INSTANT page switching.
+       A Streamlit-button pager forces a full rerun (and on SiS a rerun
+       re-runs the page's Snowflake queries — seconds per click). Here every
+       page's rows ship in the HTML as separate <tbody> chunks, hidden
+       radio inputs track the page, and the numbers are <label>s: clicking
+       swaps tbodys purely in the browser. No rerun, no server, no
+       scrollbars. */
+    .pgrid input {{ display: none; }}
+    .pgrid .mgrid tbody {{ display: none; }}
+    .pgrid .pgnav {{
+        display: flex; flex-wrap: wrap; gap: 2px; align-items: center;
+        margin-top: 6px;
+    }}
+    .pgrid .pgnav label {{
+        font-size: 0.72rem; color: {P["grey_700"]}; padding: 1px 7px;
+        border-radius: 4px; cursor: pointer; user-select: none;
+        font-variant-numeric: tabular-nums;
+    }}
+    .pgrid .pgnav label:hover {{ color: var(--brand); background: {P["grey_100"]}; }}
+    .pgrid .pgnav span {{
+        display: none; margin-left: auto; font-size: 0.72rem;
+        color: {P["grey_400"]};
+    }}
+    {"".join(
+        f".pgrid input:nth-of-type({i}):checked ~ .mgrid-wrap table tbody:nth-of-type({i}) {{ display: table-row-group; }}"
+        f".pgrid input:nth-of-type({i}):checked ~ .pgnav label:nth-of-type({i}) {{ color: var(--brand); font-weight: 700; cursor: default; background: transparent; }}"
+        f".pgrid input:nth-of-type({i}):checked ~ .pgnav span:nth-of-type({i}) {{ display: inline; }}"
+        for i in range(1, MAX_GRID_PAGES + 1))}
     </style>
     """, unsafe_allow_html=True)
 
@@ -1819,7 +1850,10 @@ def build_activity_grid_df(df_source):
         "VaR Comp":        col("VAR_COMPONENT_NAME")
                            .combine_first(col("VAR_COMPONENT_ID"))
                            .fillna("—").astype(str),
-        "User":            pick("USERNAME", "SUBMITTED_BY").fillna("—").astype(str),
+        # Display only the local part — every user shares the corp domain,
+        # and the full address ate ~150px of grid width for no information.
+        "User":            pick("USERNAME", "SUBMITTED_BY").fillna("—")
+                           .astype(str).str.split("@").str[0],
         "Records":         col("RECORD_COUNT").apply(lambda v: _grid_int_str(v, commas=True)),
         "Created":         fmt_dt(pick("CREATED_DATE", "SUBMITTED_AT")),
         "Started":         fmt_dt(col("START_DATE")),
@@ -1848,6 +1882,12 @@ SELECTION_UNSUPPORTED = object()
 # 13–15 row table still renders whole, without a pager.
 GRID_PAGE_ROWS = 12
 PAGINATE_OVER = 15
+# CSS-only pagination ships static nth-of-type rules; this caps how many
+# pages a single grid can expose (30 pages x 12 rows = 360 rows shown).
+MAX_GRID_PAGES = 30
+# Cell text longer than this is truncated with an ellipsis; the full value
+# stays available as the cell's hover tooltip.
+GRID_CELL_CHARS = 22
 
 
 def grid_pager(total_rows, per_page=25, key="pager"):
@@ -1922,6 +1962,16 @@ def render_pager(pages, key="pager", caption=None):
                             f"{caption}</div>", unsafe_allow_html=True)
 
 
+def grid_pill(text, color):
+    """The Logs-page value pill — tinted oval chip with coloured text and a
+    soft border. IDENTICAL markup to 9_Logs.py's _pill so every grid in the
+    app shows the same badges (the user's chosen canonical style)."""
+    return (f'<span style="background:{color}18;color:{color};'
+            f'border:1px solid {color}55;border-radius:99px;padding:1px 9px;'
+            f'font-size:0.72rem;font-weight:700;white-space:nowrap">'
+            f"{text}</span>")
+
+
 def _grid_cell_text(v):
     """Display text for one grid cell, safe for a st.markdown HTML block.
     Escapes HTML, then neutralises the two things that historically blanked
@@ -1941,18 +1991,23 @@ def _grid_cell_text(v):
 
 
 def _render_mgrid(show, *, right_cols=(), fmt=None, cell_css=None,
-                  row_css=None):
-    """Emit a DataFrame as one flat .mgrid HTML table via st.markdown — the
-    Logs-page look the user chose as the canonical grid style. Flat on
-    purpose: no sticky header, no scroll box, no canvas — small flat tables
-    are what renders reliably under the users' Menlo browser isolation.
-    Callers keep tables small via pagination (see render_df_table).
+                  row_css=None, key="pgrid"):
+    """Emit a DataFrame as the canonical .mgrid HTML table via st.markdown —
+    the Logs-page look the user chose. Flat, zero scrollbars, one line per
+    row (long values truncate with the full text as a hover tooltip).
+
+    More than PAGINATE_OVER rows → CSS-ONLY pagination: each 12-row page is
+    its own <tbody>, hidden radio inputs select which one displays, and the
+    page numbers are <label>s. Clicking a number is instantaneous — pure
+    browser CSS, no Streamlit rerun, no re-query, no server round-trip
+    (a button pager cost seconds per click on SiS).
 
     show:       DataFrame of raw values (display order).
     right_cols: column names to right-align.
     fmt:        callable(col, value) -> display string (pre-escape), optional.
     cell_css:   {col: callable(raw_value) -> css declaration string}.
     row_css:    callable(raw_row_dict) -> css declaration string for all tds.
+    key:        unique id root for this grid's radio group.
     """
     cols = list(show.columns)
     right = set(right_cols)
@@ -1960,7 +2015,7 @@ def _render_mgrid(show, *, right_cols=(), fmt=None, cell_css=None,
         f'<th class="r">{_grid_cell_text(c)}</th>' if c in right
         else f"<th>{_grid_cell_text(c)}</th>"
         for c in cols)
-    body = []
+    trs = []
     for rec in show.to_dict("records"):
         rcss = ""
         if row_css:
@@ -1972,27 +2027,60 @@ def _render_mgrid(show, *, right_cols=(), fmt=None, cell_css=None,
         for c in cols:
             raw = rec.get(c)
             txt = _grid_cell_text(fmt(c, raw) if fmt else raw)
-            css = rcss
+            title = ""
+            if len(txt) > GRID_CELL_CHARS:
+                title = f' title="{txt}"'
+                txt = txt[:GRID_CELL_CHARS - 1].rstrip() + "…"
+            deco = ""
             if cell_css and c in cell_css:
                 try:
-                    extra = cell_css[c](raw) or ""
+                    deco = cell_css[c](raw) or ""
                 except Exception:
-                    extra = ""
-                if extra:
-                    css = f"{css};{extra}" if css else extra
-            # Short values (ids, dates, statuses) must never break mid-word;
-            # only genuinely long text (emails, simulation names) may wrap.
-            classes = (["r"] if c in right else []) + \
-                      (["nw"] if len(txt) <= 14 else [])
-            klass = f' class="{" ".join(classes)}"' if classes else ""
+                    deco = ""
+            css = rcss
+            if deco.startswith("#"):
+                # bare colour → Logs-style oval pill around the value
+                if txt != "—":
+                    txt = grid_pill(txt, deco)
+            elif deco:
+                css = f"{css};{deco}" if css else deco
+            klass = ' class="r"' if c in right else ""
             style = f' style="{css}"' if css else ""
-            tds.append(f"<td{klass}{style}>{txt}</td>")
-        body.append("<tr>" + "".join(tds) + "</tr>")
+            tds.append(f"<td{klass}{style}{title}>{txt}</td>")
+        trs.append("<tr>" + "".join(tds) + "</tr>")
+
+    total = len(trs)
+    if total <= PAGINATE_OVER:
+        st.markdown(
+            f'<div class="mgrid-wrap"><table class="mgrid">'
+            f"<thead><tr>{th}</tr></thead>"
+            f'<tbody>{"".join(trs)}</tbody></table></div>',
+            unsafe_allow_html=True)
+        return
+
+    shown = min(total, GRID_PAGE_ROWS * MAX_GRID_PAGES)
+    chunks = [trs[i:i + GRID_PAGE_ROWS]
+              for i in range(0, shown, GRID_PAGE_ROWS)]
+    radios = "".join(
+        f'<input type="radio" name="{key}" id="{key}_{i}"'
+        f'{" checked" if i == 0 else ""}>'
+        for i in range(len(chunks)))
+    tbodys = "".join(f'<tbody>{"".join(c)}</tbody>' for c in chunks)
+    labels = "".join(f'<label for="{key}_{i}">{i + 1}</label>'
+                     for i in range(len(chunks)))
+    caps = "".join(
+        f"<span>Rows {i * GRID_PAGE_ROWS + 1}–"
+        f"{min((i + 1) * GRID_PAGE_ROWS, shown)} of {total:,}</span>"
+        for i in range(len(chunks)))
     st.markdown(
+        f'<div class="pgrid">{radios}'
         f'<div class="mgrid-wrap"><table class="mgrid">'
-        f"<thead><tr>{th}</tr></thead>"
-        f'<tbody>{"".join(body)}</tbody></table></div>',
+        f"<thead><tr>{th}</tr></thead>{tbodys}</table></div>"
+        f'<div class="pgnav">{labels}{caps}</div></div>',
         unsafe_allow_html=True)
+    if shown < total:
+        st.caption(f"Showing the first {shown:,} of {total:,} rows — "
+                   f"filter to narrow the list.")
 
 
 def _supports_df_selection(st):
@@ -2021,10 +2109,17 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
         return None
 
     grid_df = build_activity_grid_df(df_source)
-    render_df_table(grid_df, max_rows=len(grid_df),
-                    color_cols={"Status": STATUS_STYLE},
-                    right_cols=("COB", "Source COB", "Records"),
-                    key=f"{key or 'activity'}_pg")
+    render_df_table(
+        grid_df, max_rows=len(grid_df),
+        # Logs-style pills: Scope and Status get the oval tinted chips.
+        color_cols={
+            "Status":  STATUS_COLORS,
+            "Scope":   {k: v.get("color", P["grey_700"])
+                        for k, v in SCOPE_CONFIG.items()},
+            "Deleted": {"Deleted": "#64748B"},
+        },
+        right_cols=("COB", "Source COB", "Records"),
+        key=f"{key or 'activity'}_pg")
     return SELECTION_UNSUPPORTED if selectable else None
 
 
@@ -2092,10 +2187,10 @@ def render_df_table(df, max_rows=1000, height=None, highlight=None,
         if _col not in show.columns:
             continue
         def _css(v, spec=_spec):
+            # bare '#hex' → Logs-style pill (see _render_mgrid);
+            # a full 'prop:val' declaration stays inline text styling.
             got = spec(v) if callable(spec) else spec.get(str(v), "")
-            if not got:
-                return ""
-            return got if ":" in got else f"color:{got};font-weight:700"
+            return got or ""
         cell_css[_col] = _css
 
     row_css = None
@@ -2107,20 +2202,9 @@ def render_df_table(df, max_rows=1000, height=None, highlight=None,
                 hot = False
             return f"background-color:{P['danger_lt']}" if hot else ""
 
-    total = len(show)
-    if total <= PAGINATE_OVER:
-        _render_mgrid(show, right_cols=right, fmt=_fmt,
-                      cell_css=cell_css, row_css=row_css)
-    else:
-        pkey = key or f"pg_{abs(hash(tuple(show.columns))) % 100000}"
-        cur, pages = grid_pager(total, GRID_PAGE_ROWS, key=pkey)
-        chunk = show.iloc[cur * GRID_PAGE_ROWS:(cur + 1) * GRID_PAGE_ROWS]
-        _render_mgrid(chunk, right_cols=right, fmt=_fmt,
-                      cell_css=cell_css, row_css=row_css)
-        render_pager(pages, key=pkey,
-                     caption=f"Rows {cur * GRID_PAGE_ROWS + 1}–"
-                             f"{min((cur + 1) * GRID_PAGE_ROWS, total)} "
-                             f"of {total:,}")
+    pkey = key or f"pg_{abs(hash(tuple(show.columns))) % 100000}"
+    _render_mgrid(show, right_cols=right, fmt=_fmt,
+                  cell_css=cell_css, row_css=row_css, key=pkey)
     if len(df) > max_rows:
         st.caption(f"Showing the first {int(max_rows)} of {len(df):,} rows.")
 
