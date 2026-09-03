@@ -103,6 +103,25 @@ with bordered_container():
                                   key="fx_type")
     cfg = _TYPES[type_label]
 
+    # Discover the table's REAL columns (LIMIT 0 → metadata only): the
+    # OFFICIAL layouts differ from the _ADJUSTMENT DDLs this page was
+    # first written against, and one bad identifier kills the data query
+    # while the summary still works — an empty grid with healthy KPIs.
+    _probe = _q(f"SELECT * FROM {cfg['table']} LIMIT 0")
+    avail = set(map(str, _probe.columns)) if _probe is not None else set()
+    book_col = ("BUSINESS_ORGANIZATION_CODE"
+                if "BUSINESS_ORGANIZATION_CODE" in avail else "BOOK_CODE")
+    sel_cols = [c for c in cfg["columns"]
+                if (book_col if c == "BUSINESS_ORGANIZATION_CODE" else c)
+                in avail] if avail else cfg["columns"]
+    sel_cols = [book_col if c == "BUSINESS_ORGANIZATION_CODE" else c
+                for c in sel_cols]
+    _missing = [c for c in cfg["columns"]
+                if c != "BUSINESS_ORGANIZATION_CODE" and c not in avail] \
+        if avail else []
+    if _missing:
+        st.caption("Not in this table (skipped): " + ", ".join(_missing))
+
     df_cobs = _q(f"SELECT DISTINCT COBID FROM {cfg['table']} "
                  f"ORDER BY COBID DESC LIMIT 60")
     cob_opts = ([int(c) for c in df_cobs["COBID"].dropna().tolist()]
@@ -138,7 +157,8 @@ with bordered_container():
     section_title("Narrow down", "filter")
     df_dim = _q(f"""
         SELECT DISTINCT {cfg['risk_col']} AS RISK,
-               {cfg.get('sens_col') or 'NULL'} AS SENS, BUSINESS_ORGANIZATION_CODE
+               {cfg.get('sens_col') or 'NULL'} AS SENS,
+               {book_col} AS BOOKDIM
         FROM {cfg['table']}
         WHERE {_gate}
         LIMIT 5000""")
@@ -146,7 +166,7 @@ with bordered_container():
     if not df_dim.empty:
         risks = sorted(df_dim["RISK"].dropna().unique().tolist())
         senss = sorted(df_dim["SENS"].dropna().unique().tolist())
-        books = sorted(df_dim["BUSINESS_ORGANIZATION_CODE"].dropna().unique().tolist())
+        books = sorted(df_dim["BOOKDIM"].dropna().unique().tolist())
     n_narrow = 4 if cfg.get("sens_col") else 3
     gcols = st.columns(n_narrow)
     with gcols[0]:
@@ -172,7 +192,7 @@ if sel_sens:
     where.append(f"{cfg['sens_col']} IN (" +
                  ",".join(f"'{_esc(x)}'" for x in sel_sens) + ")")
 if sel_book:
-    where.append("BUSINESS_ORGANIZATION_CODE IN (" +
+    where.append(f"{book_col} IN (" +
                  ",".join(f"'{_esc(b)}'" for b in sel_book) + ")")
 if trade.strip():
     where.append(f"RAPTOR_TRADE_CODE ILIKE '%{_esc(trade.strip())}%'")
@@ -182,7 +202,7 @@ where_sql = " AND ".join(where)
 df_sum = _q(f"""
     SELECT COUNT(*) AS N_ROWS,
            COUNT(DISTINCT RAPTOR_TRADE_CODE) AS N_TRADES,
-           COUNT(DISTINCT BUSINESS_ORGANIZATION_CODE) AS N_BOOKS,
+           COUNT(DISTINCT {book_col}) AS N_BOOKS,
            SUM({cfg['measure']}) AS TOTAL_USD
     FROM {cfg['table']}
     WHERE {where_sql}""")
@@ -197,7 +217,7 @@ st.markdown(
     + kpi_card("Matching rows", f"{n_rows:,}",
                f"showing/downloading up to {MAX_ROWS:,}")
     + kpi_card("Trades", f"{n_trades:,}", "distinct RAPTOR_TRADE_CODE")
-    + kpi_card("Books", f"{n_books:,}", "distinct BUSINESS_ORGANIZATION_CODE")
+    + kpi_card("Books", f"{n_books:,}", f"distinct {book_col}")
     + kpi_card(cfg["measure_label"], f"{total:,.2f}",
                f"sum over all {n_rows:,} matching rows")
     + "</div>", unsafe_allow_html=True)
@@ -213,10 +233,11 @@ if n_rows > MAX_ROWS:
 
 # ── Data (capped at MAX_ROWS for both the grid and the CSV) ─────────────────
 df_data = _q(f"""
-    SELECT {", ".join(cfg['columns'])}
+    SELECT {", ".join(sel_cols)}
     FROM {cfg['table']}
     WHERE {where_sql}
-    ORDER BY ENTITY_CODE, BUSINESS_ORGANIZATION_CODE, RAPTOR_TRADE_CODE
+    ORDER BY {", ".join(c for c in ("ENTITY_CODE", book_col) if c in sel_cols)
+              or "1"}
     LIMIT {MAX_ROWS}""")
 
 # File name that encodes the selection: FRTB_DRC_COB20260626_MUSI_GIRR.csv
