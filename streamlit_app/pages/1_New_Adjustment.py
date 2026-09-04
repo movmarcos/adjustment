@@ -2111,8 +2111,6 @@ def render_var_upload_form() -> None:
         wiz["_upval"] = None
 
     _csv_card.__exit__(None, None, None)
-    if _preview_after is not None:
-        render_data_grid(_preview_after, height=320)
 
     with _card():
         _sec(3, "Upload Details", "COB and entity are auto-detected from the CSV when present.")
@@ -2446,8 +2444,6 @@ def _render_frtb_direct_body(scope: str) -> None:
         wiz["_frtb_cob_bad"] = False
 
     _csv_card.__exit__(None, None, None)
-    if _frtb_preview_after is not None:
-        render_data_grid(_frtb_preview_after, height=380)
 
     with _card():
         _sec(4, "Upload Details", "COB is taken from the file when present.")
@@ -2494,6 +2490,12 @@ def _render_frtb_direct_body(scope: str) -> None:
             wiz["_dup_adj_ids"] = []
     else:
         wiz["_dup_adj_ids"] = []
+
+    # Preview grid LAST (user request): details/context sections above, the
+    # data below — many rows welcome (internal scroll, ✓/✗ + Errors first).
+    if _frtb_preview_after is not None:
+        _sec(6, "Uploaded Data", "Every row with its validation verdict.")
+        render_data_grid(_frtb_preview_after, height=440)
 
 
 def render_entity_roll_form() -> None:

@@ -1903,20 +1903,21 @@ def download_csv_link(data, filename, label="⬇ Download CSV",
 def render_data_grid(df, height=380, empty_msg="No rows."):
     """Data-preview grid for wide/long frames (Direct upload previews).
 
-    Hybrid, tuned live with the user (2026-09-03):
-    - ≤ 15 rows → the .mgrid HTML table, sized EXACTLY to its rows. A 1-row
-      upload previously sat in a 380px canvas full of empty filler lines,
-      and the canvas repaints on every page interaction (content visibly
-      vanishing/reappearing while typing) — plain HTML does neither.
-    - > 15 rows → st.dataframe (expandable, internal scroll — the user's
-      choice for data-heavy tables), height fitted to the rows and capped
-      at `height` so short-ish sets get no filler either."""
+    Hybrid, tuned live with the user (2026-09-03/04):
+    - SMALL AND NARROW (≤ 15 rows and ≤ 12 columns) → the .mgrid HTML
+      table, sized exactly to its rows: no empty filler lines, no canvas
+      repaint flicker while interacting.
+    - Anything else → st.dataframe (expandable, internal scroll BOTH axes),
+      height fitted to the rows and capped at `height`. WIDE frames must
+      take this path regardless of row count: a 60-column FRTB template as
+      HTML overflows into a horizontal page scrollbar, which white-boxes in
+      the users' environment (12-row FRTB preview went fully blank)."""
     import streamlit as st
 
     if df is None or len(df) == 0:
         st.caption(empty_msg)
         return
-    if len(df) <= 15:
+    if len(df) <= 15 and df.shape[1] <= 12:
         render_df_table(df, max_rows=len(df), wrap_cols="auto")
         return
     fit = 35 * (len(df) + 1) + 3
