@@ -2173,6 +2173,12 @@ def render_var_upload_form() -> None:
     else:
         wiz["_dup_adj_ids"] = []
 
+    # Preview grid LAST (user request): details/context sections above, the
+    # data below — many rows welcome (internal scroll).
+    if _preview_after is not None:
+        _sec(5, "Uploaded Data", "The rows exactly as they will be submitted.")
+        render_data_grid(_preview_after, height=440)
+
 
 def _frtb_required_errors(df, schema) -> pd.DataFrame:
     """Per-row DATA validation of the plain schema contract (ROW, COLUMN,
