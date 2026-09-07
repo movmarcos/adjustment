@@ -47,6 +47,9 @@ ACTION_MAP = {
     "direct":       "Direct",
 }
 
+# Scopes whose Direct adjustment is a whole file (rows in ADJ_LINE_ITEM_JSON).
+FRTB_FILE_SCOPES = ("FRTB", "FRTBDRC", "FRTBRRAO")
+
 # Pipeline groupings — used for blocking checks at submit time.
 # (FRTBALL is retired: the app submits one adjustment per real FRTB sub-type.)
 PIPELINE_TYPES = {
@@ -432,7 +435,13 @@ def main(session, p_adjustment):
         global_ref = adj.get("global_reference")
         replaced_adj_ids = []
         dup_rows = []
-        if (str(adjustment_type).lower() == 'upload'
+        # File-based submissions: the legacy VaR Upload (type 'Upload') and
+        # the FRTB file flows, which are typed 'Direct' (one file = one
+        # Direct adjustment) but still replace by reference.
+        _is_file_flow = (str(adjustment_type).lower() == 'upload'
+                         or (str(adjustment_type).lower() == 'direct'
+                             and str(process_type).upper() in FRTB_FILE_SCOPES))
+        if (_is_file_flow
                 and global_ref and str(global_ref).strip()
                 and initial_status != STATUS_REJECTED_SO):
             dup_rows = session.sql(f"""
@@ -440,7 +449,7 @@ def main(session, p_adjustment):
                 FROM ADJUSTMENT_APP.ADJ_HEADER
                 WHERE COBID = {int(cobid)}
                   AND UPPER(GLOBAL_REFERENCE) = UPPER('{_esc(global_ref)}')
-                  AND UPPER(ADJUSTMENT_TYPE) = 'UPLOAD'
+                  AND UPPER(ADJUSTMENT_TYPE) IN ('UPLOAD', 'DIRECT')
                   AND IS_DELETED = FALSE
             """).collect()
 

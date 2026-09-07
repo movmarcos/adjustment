@@ -411,7 +411,8 @@ def _do_clone(src_adj_id, new_cob) -> None:
                 WHERE ADJ_ID = '{_sid}' AND IS_DELETED = FALSE
             """)
             _copied = int(rows[0][0]) if rows else 0
-            if _copied == 0 and _adj_action == "Upload":
+            if _copied == 0 and (_adj_action == "Upload" or str(src.get("PROCESS_TYPE"))
+                                 in ("FRTB", "FRTBDRC", "FRTBRRAO")):
                 st.session_state["adj_action_flash"] = (
                     "warning", "Clone failed — the source upload has no line "
                                "items to copy.")

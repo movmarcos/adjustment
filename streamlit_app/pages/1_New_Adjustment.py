@@ -131,7 +131,9 @@ def _build_payload() -> dict:
         return {
             "cobid":                 wiz["cobid"],
             "process_type":          wiz["process_type"],
-            "adjustment_type":       "Upload",
+            # FRTB file flow is a DIRECT adjustment (one file = one Direct
+            # entry); only the legacy VaR file feed is typed Upload.
+            "adjustment_type":       "Direct" if _is_frtb_file_direct() else "Upload",
             "username":              current_user_name(),
             "source_cobid":          wiz["cobid"],
             "reason":                wiz.get("reason", ""),

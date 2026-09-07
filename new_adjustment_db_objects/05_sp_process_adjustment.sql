@@ -999,175 +999,201 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 raise Exception("DIMENSION.ADJUSTMENT insert returned no ADJUSTMENT_IDs")
             dim_ids_str = ', '.join(str(v) for v in dim_adj_map.values())
 
-            # ── Column expressions + key-resolution joins (header alias: h) ──
-            # Snowflake rejects correlated scalar subqueries it cannot unnest
-            # ("Unsupported subquery type cannot be evaluated") — the same
-            # limitation that forced the validation views to LEFT JOINs. Each
-            # dimension key therefore resolves via a per-header derived table:
-            # MAX(key) GROUP BY ADJ_ID → at most ONE row per header (no
-            # fanout) with the exact semantics of the old MAX() subselects.
-            # Only the joins for columns the fact table actually has are
-            # included in the INSERT.
-            _RES_JOINS = {
-                'ENTITY_KEY': ('rent', f"""
-                LEFT JOIN (
-                    SELECT h2.ADJ_ID, MAX(e.ENTITY_KEY) AS K
-                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
-                    JOIN DIMENSION.ENTITY e
-                      ON UPPER(e.ENTITY_CODE) = UPPER(h2.ENTITY_CODE)
-                    WHERE h2.ADJ_ID IN ({adj_ids_str})
-                    GROUP BY h2.ADJ_ID
-                ) rent ON rent.ADJ_ID = h.ADJ_ID"""),
-                'BOOK_KEY': ('rbook', f"""
-                LEFT JOIN (
-                    SELECT h2.ADJ_ID, MAX(bk.BOOK_KEY) AS K
-                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
-                    JOIN DIMENSION.BOOK bk
-                      ON UPPER(bk.BOOK_CODE) = UPPER(h2.BOOK_CODE)
-                     AND bk.IS_CURRENT_ROW = TRUE
-                     AND (h2.ENTITY_CODE IS NULL OR UPPER(bk.ENTITY_CODE) = UPPER(h2.ENTITY_CODE))
-                     AND (h2.DEPARTMENT_CODE IS NULL OR UPPER(bk.DEPARTMENT_CODE) = UPPER(h2.DEPARTMENT_CODE))
-                    WHERE h2.ADJ_ID IN ({adj_ids_str})
-                    GROUP BY h2.ADJ_ID
-                ) rbook ON rbook.ADJ_ID = h.ADJ_ID"""),
-                'TRADE_KEY': ('rtrade', f"""
-                LEFT JOIN (
-                    SELECT h2.ADJ_ID, MAX(td.TRADE_KEY) AS K
-                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
-                    JOIN DIMENSION.TRADE td
-                      ON UPPER(td.TRADE_CODE) = UPPER(h2.TRADE_CODE)
-                     AND td.IS_CURRENT_ROW = TRUE
-                    WHERE h2.ADJ_ID IN ({adj_ids_str})
-                    GROUP BY h2.ADJ_ID
-                ) rtrade ON rtrade.ADJ_ID = h.ADJ_ID"""),
-                'COMMON_INSTRUMENT_KEY': ('rinstr', f"""
-                LEFT JOIN (
-                    SELECT h2.ADJ_ID, MAX(ci.COMMON_INSTRUMENT_KEY) AS K
-                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
-                    JOIN DIMENSION.COMMON_INSTRUMENT ci
-                      ON UPPER(ci.INSTRUMENT_CODE) = UPPER(h2.INSTRUMENT_CODE)
-                     AND ci.IS_CURRENT_ROW = TRUE
-                    WHERE h2.ADJ_ID IN ({adj_ids_str})
-                    GROUP BY h2.ADJ_ID
-                ) rinstr ON rinstr.ADJ_ID = h.ADJ_ID"""),
-                'STRESS_SIMULATION_KEY': ('rsim', f"""
-                LEFT JOIN (
-                    SELECT h2.ADJ_ID, MAX(ss.STRESS_SIMULATION_KEY) AS K
-                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
-                    JOIN DIMENSION.STRESS_SIMULATION ss
-                      ON UPPER(ss.STRESS_SIMULATION_NAME) = UPPER(h2.SIMULATION_NAME)
-                     AND (h2.SIMULATION_SOURCE IS NULL OR UPPER(ss.SIMULATION_SOURCE) = UPPER(h2.SIMULATION_SOURCE))
-                    WHERE h2.ADJ_ID IN ({adj_ids_str})
-                    GROUP BY h2.ADJ_ID
-                ) rsim ON rsim.ADJ_ID = h.ADJ_ID"""),
-                'MEASURE_TYPE_KEY': ('rmt', f"""
-                LEFT JOIN (
-                    SELECT h2.ADJ_ID, MAX(mt.MEASURE_TYPE_KEY) AS K
-                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
-                    JOIN DIMENSION.MEASURE_TYPE mt
-                      ON UPPER(mt.MEASURE_TYPE_CODE) = UPPER(h2.MEASURE_TYPE_CODE)
-                    WHERE h2.ADJ_ID IN ({adj_ids_str})
-                    GROUP BY h2.ADJ_ID
-                ) rmt ON rmt.ADJ_ID = h.ADJ_ID"""),
-                'TENOR_CURRENCY_KEY': ('rtenor', f"""
-                LEFT JOIN (
-                    SELECT h2.ADJ_ID, MAX(tc.TENOR_CURRENCY_KEY) AS K
-                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
-                    JOIN DIMENSION.TENOR_CURRENCY tc
-                      ON UPPER(tc.TENOR_CURRENCY_CODE) =
-                         UPPER(CONCAT(h2.TENOR_CODE, '_', COALESCE(h2.CURRENCY_CODE, 'USD')))
-                    WHERE h2.ADJ_ID IN ({adj_ids_str})
-                    GROUP BY h2.ADJ_ID
-                ) rtenor ON rtenor.ADJ_ID = h.ADJ_ID"""),
-                'UNDERLYING_TENOR_CURRENCY_KEY': ('rutenor', f"""
-                LEFT JOIN (
-                    SELECT h2.ADJ_ID, MAX(ut.UNDERLYING_TENOR_CURRENCY_KEY) AS K
-                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
-                    JOIN DIMENSION.UNDERLYING_TENOR_CURRENCY ut
-                      ON UPPER(ut.UNDERYLING_TENOR_CODE) =
-                         UPPER(h2.UNDERLYING_TENOR_CODE)
-                    WHERE h2.ADJ_ID IN ({adj_ids_str})
-                    GROUP BY h2.ADJ_ID
-                ) rutenor ON rutenor.ADJ_ID = h.ADJ_ID"""),
-                'CURVE_CURRENCY_KEY': ('rcurve', f"""
-                LEFT JOIN (
-                    SELECT h2.ADJ_ID, MAX(cc.CURVE_CURRENCY_KEY) AS K
-                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
-                    JOIN DIMENSION.CURVE_CURRENCY cc
-                      ON UPPER(cc.CURVE_CODE) = UPPER(h2.CURVE_CODE)
-                    WHERE h2.ADJ_ID IN ({adj_ids_str})
-                    GROUP BY h2.ADJ_ID
-                ) rcurve ON rcurve.ADJ_ID = h.ADJ_ID"""),
-                'PRODUCT_CATEGORY_ATTRIBUTES_KEY': ('rpca', f"""
-                LEFT JOIN (
-                    SELECT h2.ADJ_ID, MAX(pca.PRODUCT_CATEGORY_ATTRIBUTES_KEY) AS K
-                    FROM ADJUSTMENT_APP.ADJ_HEADER h2
-                    JOIN DIMENSION.PRODUCT_CATEGORY_ATTRIBUTES pca
-                      ON UPPER(REPLACE(pca.PCA_CONCAT_KEY, ' ', '')) =
-                         UPPER(REPLACE(h2.PRODUCT_CATEGORY_ATTRIBUTES, ' ', ''))
-                    WHERE h2.ADJ_ID IN ({adj_ids_str})
-                    GROUP BY h2.ADJ_ID
-                ) rpca ON rpca.ADJ_ID = h.ADJ_ID"""),
-            }
-
-            def _direct_expr(c):
-                fixed = {
-                    'COBID':               str(cobid),
-                    'ADJUSTMENT_ID':       "h.DIMENSION_ADJ_ID",
-                    'ENTITY_CODE':         "COALESCE(h.ENTITY_CODE, 'N/A')",
-                    'MEASURE_TYPE_CODE':   "h.MEASURE_TYPE_CODE",
-                    'INSTRUMENT_CODE':     "h.INSTRUMENT_CODE",
-                    'TRADE_CURRENCY':      "COALESCE(h.CURRENCY_CODE, 'N/A')",
-                    'CURRENCY_CODE':       "COALESCE(h.CURRENCY_CODE, 'N/A')",
-                    'SOURCE_SYSTEM_CODE':  "COALESCE(h.SOURCE_SYSTEM_CODE, 'QP')",
-                    'IS_OFFICIAL_SOURCE':  "TRUE",
-                    'RUN_LOG_ID':          str(run_log_id),
-                    'LOAD_TIMESTAMP':      "CURRENT_TIMESTAMP()",
-                    'DEPARTMENT_CODE':     "h.DEPARTMENT_CODE",
-                    'BOOK_CODE':           "h.BOOK_CODE",
-                    'TRADE_CODE':          "h.TRADE_CODE",
-                    'TRADE_TYPOLOGY':      "h.TRADE_TYPOLOGY",
-                    'STRATEGY':            "h.STRATEGY",
-                    'SIMULATION_NAME':     "h.SIMULATION_NAME",
-                    'SIMULATION_SOURCE':   "h.SIMULATION_SOURCE",
+            # ── File-based Direct scopes (FRTB / FRTBDRC / FRTBRRAO) ─────
+            # The whole file is ONE Direct adjustment whose rows live in
+            # ADJ_LINE_ITEM_JSON; the scope's WRITER_OVERRIDE (enriched views
+            # in 15_direct_frtb_upload.sql) writes them. The per-header insert
+            # below is for row-level Direct adjustments (value on the header).
+            _dcfg = load_direct_schema(session, process_type)
+            _writer_name = (_dcfg or {}).get("writer_override")
+            if _writer_name:
+                _writer = globals().get(_writer_name)
+                if _writer is None:
+                    update_header_status(session, df_adj_direct, cobid, "Failed",
+                                         f"WRITER_OVERRIDE {_writer_name} not found")
+                    log_status_history(session, adj_ids, "Running", "Failed")
+                    result["message"] = f"Writer override {_writer_name} not found"
+                    return json.dumps(result)
+                rows_count = _writer(session, adj_ids, adj_ids_str, dim_adj_map, cobid,
+                                     fact_adj_tbl_name, metric_name, metric_usd_name,
+                                     run_log_id)
+            else:
+                # ── Column expressions + key-resolution joins (header alias: h) ──
+                # Snowflake rejects correlated scalar subqueries it cannot unnest
+                # ("Unsupported subquery type cannot be evaluated") — the same
+                # limitation that forced the validation views to LEFT JOINs. Each
+                # dimension key therefore resolves via a per-header derived table:
+                # MAX(key) GROUP BY ADJ_ID → at most ONE row per header (no
+                # fanout) with the exact semantics of the old MAX() subselects.
+                # Only the joins for columns the fact table actually has are
+                # included in the INSERT.
+                _RES_JOINS = {
+                    'ENTITY_KEY': ('rent', f"""
+                    LEFT JOIN (
+                        SELECT h2.ADJ_ID, MAX(e.ENTITY_KEY) AS K
+                        FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                        JOIN DIMENSION.ENTITY e
+                          ON UPPER(e.ENTITY_CODE) = UPPER(h2.ENTITY_CODE)
+                        WHERE h2.ADJ_ID IN ({adj_ids_str})
+                        GROUP BY h2.ADJ_ID
+                    ) rent ON rent.ADJ_ID = h.ADJ_ID"""),
+                    'BOOK_KEY': ('rbook', f"""
+                    LEFT JOIN (
+                        SELECT h2.ADJ_ID, MAX(bk.BOOK_KEY) AS K
+                        FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                        JOIN DIMENSION.BOOK bk
+                          ON UPPER(bk.BOOK_CODE) = UPPER(h2.BOOK_CODE)
+                         AND bk.IS_CURRENT_ROW = TRUE
+                         AND (h2.ENTITY_CODE IS NULL OR UPPER(bk.ENTITY_CODE) = UPPER(h2.ENTITY_CODE))
+                         AND (h2.DEPARTMENT_CODE IS NULL OR UPPER(bk.DEPARTMENT_CODE) = UPPER(h2.DEPARTMENT_CODE))
+                        WHERE h2.ADJ_ID IN ({adj_ids_str})
+                        GROUP BY h2.ADJ_ID
+                    ) rbook ON rbook.ADJ_ID = h.ADJ_ID"""),
+                    'TRADE_KEY': ('rtrade', f"""
+                    LEFT JOIN (
+                        SELECT h2.ADJ_ID, MAX(td.TRADE_KEY) AS K
+                        FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                        -- Direct-adjustment trade rule (legacy dbt base model):
+                        -- no TRADE_CODE → the book's '<BOOK_CODE>/Adjustment'
+                        -- trade, constrained to the header's book / entity.
+                        JOIN DIMENSION.TRADE td
+                          ON UPPER(td.TRADE_CODE) = UPPER(COALESCE(
+                                 NULLIF(h2.TRADE_CODE, ''),
+                                 CONCAT(NULLIF(h2.BOOK_CODE, ''), '/Adjustment')))
+                         AND td.IS_CURRENT_ROW = TRUE
+                         AND (h2.BOOK_CODE IS NULL OR UPPER(td.BOOK_CODE) = UPPER(h2.BOOK_CODE))
+                         AND (h2.ENTITY_CODE IS NULL OR UPPER(td.ENTITY_CODE) = UPPER(h2.ENTITY_CODE))
+                        WHERE h2.ADJ_ID IN ({adj_ids_str})
+                        GROUP BY h2.ADJ_ID
+                    ) rtrade ON rtrade.ADJ_ID = h.ADJ_ID"""),
+                    'COMMON_INSTRUMENT_KEY': ('rinstr', f"""
+                    LEFT JOIN (
+                        SELECT h2.ADJ_ID, MAX(ci.COMMON_INSTRUMENT_KEY) AS K
+                        FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                        JOIN DIMENSION.COMMON_INSTRUMENT ci
+                          ON UPPER(ci.INSTRUMENT_CODE) = UPPER(h2.INSTRUMENT_CODE)
+                         AND ci.IS_CURRENT_ROW = TRUE
+                        WHERE h2.ADJ_ID IN ({adj_ids_str})
+                        GROUP BY h2.ADJ_ID
+                    ) rinstr ON rinstr.ADJ_ID = h.ADJ_ID"""),
+                    'STRESS_SIMULATION_KEY': ('rsim', f"""
+                    LEFT JOIN (
+                        SELECT h2.ADJ_ID, MAX(ss.STRESS_SIMULATION_KEY) AS K
+                        FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                        JOIN DIMENSION.STRESS_SIMULATION ss
+                          ON UPPER(ss.STRESS_SIMULATION_NAME) = UPPER(h2.SIMULATION_NAME)
+                         AND (h2.SIMULATION_SOURCE IS NULL OR UPPER(ss.SIMULATION_SOURCE) = UPPER(h2.SIMULATION_SOURCE))
+                        WHERE h2.ADJ_ID IN ({adj_ids_str})
+                        GROUP BY h2.ADJ_ID
+                    ) rsim ON rsim.ADJ_ID = h.ADJ_ID"""),
+                    'MEASURE_TYPE_KEY': ('rmt', f"""
+                    LEFT JOIN (
+                        SELECT h2.ADJ_ID, MAX(mt.MEASURE_TYPE_KEY) AS K
+                        FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                        JOIN DIMENSION.MEASURE_TYPE mt
+                          ON UPPER(mt.MEASURE_TYPE_CODE) = UPPER(h2.MEASURE_TYPE_CODE)
+                        WHERE h2.ADJ_ID IN ({adj_ids_str})
+                        GROUP BY h2.ADJ_ID
+                    ) rmt ON rmt.ADJ_ID = h.ADJ_ID"""),
+                    'TENOR_CURRENCY_KEY': ('rtenor', f"""
+                    LEFT JOIN (
+                        SELECT h2.ADJ_ID, MAX(tc.TENOR_CURRENCY_KEY) AS K
+                        FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                        JOIN DIMENSION.TENOR_CURRENCY tc
+                          ON UPPER(tc.TENOR_CURRENCY_CODE) =
+                             UPPER(CONCAT(h2.TENOR_CODE, '_', COALESCE(h2.CURRENCY_CODE, 'USD')))
+                        WHERE h2.ADJ_ID IN ({adj_ids_str})
+                        GROUP BY h2.ADJ_ID
+                    ) rtenor ON rtenor.ADJ_ID = h.ADJ_ID"""),
+                    'UNDERLYING_TENOR_CURRENCY_KEY': ('rutenor', f"""
+                    LEFT JOIN (
+                        SELECT h2.ADJ_ID, MAX(ut.UNDERLYING_TENOR_CURRENCY_KEY) AS K
+                        FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                        JOIN DIMENSION.UNDERLYING_TENOR_CURRENCY ut
+                          ON UPPER(ut.UNDERYLING_TENOR_CODE) =
+                             UPPER(h2.UNDERLYING_TENOR_CODE)
+                        WHERE h2.ADJ_ID IN ({adj_ids_str})
+                        GROUP BY h2.ADJ_ID
+                    ) rutenor ON rutenor.ADJ_ID = h.ADJ_ID"""),
+                    'CURVE_CURRENCY_KEY': ('rcurve', f"""
+                    LEFT JOIN (
+                        SELECT h2.ADJ_ID, MAX(cc.CURVE_CURRENCY_KEY) AS K
+                        FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                        JOIN DIMENSION.CURVE_CURRENCY cc
+                          ON UPPER(cc.CURVE_CODE) = UPPER(h2.CURVE_CODE)
+                        WHERE h2.ADJ_ID IN ({adj_ids_str})
+                        GROUP BY h2.ADJ_ID
+                    ) rcurve ON rcurve.ADJ_ID = h.ADJ_ID"""),
+                    'PRODUCT_CATEGORY_ATTRIBUTES_KEY': ('rpca', f"""
+                    LEFT JOIN (
+                        SELECT h2.ADJ_ID, MAX(pca.PRODUCT_CATEGORY_ATTRIBUTES_KEY) AS K
+                        FROM ADJUSTMENT_APP.ADJ_HEADER h2
+                        JOIN DIMENSION.PRODUCT_CATEGORY_ATTRIBUTES pca
+                          ON UPPER(REPLACE(pca.PCA_CONCAT_KEY, ' ', '')) =
+                             UPPER(REPLACE(h2.PRODUCT_CATEGORY_ATTRIBUTES, ' ', ''))
+                        WHERE h2.ADJ_ID IN ({adj_ids_str})
+                        GROUP BY h2.ADJ_ID
+                    ) rpca ON rpca.ADJ_ID = h.ADJ_ID"""),
                 }
-                if c in fixed:
-                    return fixed[c]
-                if c in _RES_JOINS:
-                    return f"COALESCE({_RES_JOINS[c][0]}.K, -1)"
-                if c in (metric_name, metric_usd_name):
-                    return "h.ADJUSTMENT_VALUE_IN_USD"
-                if key_name != pk_expr and c == key_name:
-                    return None          # scope surrogate key: never stored by legacy uploads
-                if c.split('_')[-1].upper() in ('KEY', 'ID'):
-                    return "-1"          # legacy default for unmapped keys
-                return None              # column left out → its own default/NULL
 
-            target_cols, select_exprs = [], []
-            for c in fact_adj_tbl.columns:
-                expr = _direct_expr(c)
-                if expr is not None:
-                    target_cols.append(c)
-                    select_exprs.append(f"{expr} AS {c}")
+                def _direct_expr(c):
+                    fixed = {
+                        'COBID':               str(cobid),
+                        'ADJUSTMENT_ID':       "h.DIMENSION_ADJ_ID",
+                        'ENTITY_CODE':         "COALESCE(h.ENTITY_CODE, 'N/A')",
+                        'MEASURE_TYPE_CODE':   "h.MEASURE_TYPE_CODE",
+                        'INSTRUMENT_CODE':     "h.INSTRUMENT_CODE",
+                        'TRADE_CURRENCY':      "COALESCE(h.CURRENCY_CODE, 'N/A')",
+                        'CURRENCY_CODE':       "COALESCE(h.CURRENCY_CODE, 'N/A')",
+                        'SOURCE_SYSTEM_CODE':  "COALESCE(h.SOURCE_SYSTEM_CODE, 'QP')",
+                        'IS_OFFICIAL_SOURCE':  "TRUE",
+                        'RUN_LOG_ID':          str(run_log_id),
+                        'LOAD_TIMESTAMP':      "CURRENT_TIMESTAMP()",
+                        'DEPARTMENT_CODE':     "h.DEPARTMENT_CODE",
+                        'BOOK_CODE':           "h.BOOK_CODE",
+                        'TRADE_CODE':          "h.TRADE_CODE",
+                        'TRADE_TYPOLOGY':      "h.TRADE_TYPOLOGY",
+                        'STRATEGY':            "h.STRATEGY",
+                        'SIMULATION_NAME':     "h.SIMULATION_NAME",
+                        'SIMULATION_SOURCE':   "h.SIMULATION_SOURCE",
+                    }
+                    if c in fixed:
+                        return fixed[c]
+                    if c in _RES_JOINS:
+                        return f"COALESCE({_RES_JOINS[c][0]}.K, -1)"
+                    if c in (metric_name, metric_usd_name):
+                        return "h.ADJUSTMENT_VALUE_IN_USD"
+                    if key_name != pk_expr and c == key_name:
+                        return None          # scope surrogate key: never stored by legacy uploads
+                    if c.split('_')[-1].upper() in ('KEY', 'ID'):
+                        return "-1"          # legacy default for unmapped keys
+                    return None              # column left out → its own default/NULL
 
-            direct_joins = '\n'.join(
-                sql for col, (alias, sql) in _RES_JOINS.items()
-                if col in target_cols)
+                target_cols, select_exprs = [], []
+                for c in fact_adj_tbl.columns:
+                    expr = _direct_expr(c)
+                    if expr is not None:
+                        target_cols.append(c)
+                        select_exprs.append(f"{expr} AS {c}")
 
-            direct_insert = f"""
-                INSERT INTO {fact_adj_tbl_name} ({', '.join(target_cols)})
-                SELECT {', '.join(select_exprs)}
-                FROM ADJUSTMENT_APP.ADJ_HEADER h
-                {direct_joins}
-                WHERE h.ADJ_ID IN ({adj_ids_str})
-                  AND h.ADJUSTMENT_VALUE_IN_USD IS NOT NULL
-            """
-            _erlog(session, _sqlog, "direct_row_insert", direct_insert)
+                direct_joins = '\n'.join(
+                    sql for col, (alias, sql) in _RES_JOINS.items()
+                    if col in target_cols)
 
-            rows_count = session.sql(f"""
-                SELECT COUNT(*) AS CNT FROM {fact_adj_tbl_name}
-                WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
-            """).collect()[0]["CNT"]
+                direct_insert = f"""
+                    INSERT INTO {fact_adj_tbl_name} ({', '.join(target_cols)})
+                    SELECT {', '.join(select_exprs)}
+                    FROM ADJUSTMENT_APP.ADJ_HEADER h
+                    {direct_joins}
+                    WHERE h.ADJ_ID IN ({adj_ids_str})
+                      AND h.ADJUSTMENT_VALUE_IN_USD IS NOT NULL
+                """
+                _erlog(session, _sqlog, "direct_row_insert", direct_insert)
+
+                rows_count = session.sql(f"""
+                    SELECT COUNT(*) AS CNT FROM {fact_adj_tbl_name}
+                    WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
+                """).collect()[0]["CNT"]
 
             # ── Common post-processing ───────────────────────────────────
             # Per-ADJUSTMENT counts (zero-init then grouped update) — a batch

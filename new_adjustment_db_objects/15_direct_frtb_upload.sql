@@ -18,6 +18,11 @@
 --     confirmed spec (Excel + prototype TYPE_CONFIG), stored as config in
 --     DIRECT_SCOPE_SCHEMA so the app validates BEFORE anything is written.
 --   • SBM is onboarded as scope 'FRTB' (SBM == FRTB in our configs).
+--   • The file is submitted as a DIRECT adjustment (ADJUSTMENT_TYPE/ACTION =
+--     'Direct'); SP_PROCESS_ADJUSTMENT's Direct branch dispatches to the
+--     WRITER_OVERRIDE below. Older rows typed 'Upload' still process.
+--   • Trade rule shared by every direct scope: empty TRADE_CODE → the
+--     book's '<BOOK_CODE>/Adjustment' trade in DIMENSION.TRADE.
 -- Processing: 05_sp_process_adjustment upload path dispatches to the
 -- WRITER_OVERRIDE functions registered below (write_direct_frtb_*).
 -- =============================================================================
@@ -51,7 +56,8 @@ SELECT
         {"name":"RISK_CLASS","type":"string","required":true},
         {"name":"AMOUNT","type":"number","required":true},
         {"name":"AMOUNT_IN_USD","type":"number","required":true},
-        {"name":"TRADE_CODE","type":"string"},{"name":"BOND_CDS","type":"string"},
+        {"name":"TRADE_CODE","type":"string"},{"name":"BOOK_CODE","type":"string"},
+        {"name":"BOND_CDS","type":"string"},
         {"name":"BT_TYPE","type":"string"},{"name":"BUCKET","type":"string"},
         {"name":"BUSINESS_PRODUCT_CODE1","type":"string"},
         {"name":"BUSINESS_PRODUCT_CODE2","type":"string"},
@@ -111,7 +117,8 @@ SELECT
         {"field":"ISSUER_CODE","conditions":[["RISK_CLASS","EQUIT|CSR",false]],"error":"ISSUER_CODE is required for Equity and CSR positions"},
         {"field":"ISSUER_NAME","conditions":[["RISK_CLASS","EQUIT|CSR",false]],"error":"ISSUER_NAME is required for Equity and CSR positions"},
         {"field":"PRA_BUCKET","conditions":[["RISK_CLASS","EQUIT|CSR",false]],"error":"PRA_BUCKET is required for Equity and CSR positions"},
-        {"field":"SECURITY_INFORMATION3","conditions":[["RISK_CLASS","CSR",false]],"error":"SECURITY_INFORMATION3 (Sector) is required for CSR positions"}
+        {"field":"SECURITY_INFORMATION3","conditions":[["RISK_CLASS","CSR",false]],"error":"SECURITY_INFORMATION3 (Sector) is required for CSR positions"},
+        {"field":"BOOK_CODE","conditions":[["TRADE_CODE","^(|NAN|NONE)$",false]],"error":"BOOK_CODE is required when TRADE_CODE is empty (the row is booked to the <BOOK_CODE>/Adjustment trade)"}
     ]'),
     PARSE_JSON('{"EVALUATION_DATE":"COBID","VERTEX_UNDERLYING":"UNDERLYING_TENOR_CODE",
                  "TRADE_ID":"TRADE_CODE","BUSINESS_ORGANIZATION_CODE":"BOOK_CODE"}');
@@ -196,7 +203,8 @@ SELECT
         {"field":"ISSUER_NAME","conditions":[["RISK_CLASS","NON.*SEC.*EQUITY",false]],"error":"ISSUER_NAME is required for Non-Sec (Equity)"},
         {"field":"DEFAULT_RISK_WEIGHT","conditions":[["RISK_CLASS","NON.*SEC.*EQUITY",false]],"error":"DEFAULT_RISK_WEIGHT is required for Non-Sec (Equity)"},
         {"field":"DEFAULT_RISK_WEIGHT","conditions":[["RISK_CLASS","SEC",false],["RISK_CLASS","NON.*SEC",true]],"error":"DEFAULT_RISK_WEIGHT is required for Sec"},
-        {"field":"LGD","conditions":[["RISK_CLASS","NON.*SEC.*CREDIT",false]],"error":"LGD is required for Non-Sec (Credit)"}
+        {"field":"LGD","conditions":[["RISK_CLASS","NON.*SEC.*CREDIT",false]],"error":"LGD is required for Non-Sec (Credit)"},
+        {"field":"BOOK_CODE","conditions":[["TRADE_CODE","^(|NAN|NONE)$",false]],"error":"BOOK_CODE is required when TRADE_CODE is empty (the row is booked to the <BOOK_CODE>/Adjustment trade)"}
     ]'),
     PARSE_JSON('{"EVALUATION_DATE":"COBID","TRADE_ID":"TRADE_CODE",
                  "BUSINESS_ORGANIZATION_CODE":"BOOK_CODE"}');
@@ -255,7 +263,9 @@ SELECT
          "match_column":"MEASURE_TYPE_CODE","key_column":"MEASURE_TYPE_KEY","target_column":"MEASURE_TYPE_CODE"}
     ]'),
     'NOTIONAL_AMOUNT', 'NOTIONAL_AMOUNT_USD', 'write_direct_frtb_rrao', TRUE,
-    PARSE_JSON('[]'),
+    PARSE_JSON('[
+        {"field":"BOOK_CODE","conditions":[["TRADE_CODE","^(|NAN|NONE)$",false]],"error":"BOOK_CODE is required when TRADE_CODE is empty (the row is booked to the <BOOK_CODE>/Adjustment trade)"}
+    ]'),
     PARSE_JSON('{"EVALUATION_DATE":"COBID","TRADE_ID":"TRADE_CODE",
                  "BUSINESS_ORGANIZATION_CODE":"BOOK_CODE"}');
 COMMIT;
@@ -277,6 +287,7 @@ WITH base AS (
         TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"DELTA_SUBTRACT"), 38, 10) AS DELTA_SUBTRACT,
         TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"PV_CURRENT"), 38, 10)     AS PV_CURRENT,
         TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"PV_SIMULATED"), 38, 10)   AS PV_SIMULATED,
+        TO_VARCHAR(j.PAYLOAD:"BOOK_CODE")           AS BOOK_CODE_IN,
         TO_VARCHAR(j.PAYLOAD:"BOND_CDS")            AS BOND_CDS,
         TO_VARCHAR(j.PAYLOAD:"BT_TYPE")             AS BT_TYPE,
         TO_VARCHAR(j.PAYLOAD:"BUCKET")              AS BUCKET,
@@ -334,7 +345,7 @@ WITH base AS (
     WHERE j.IS_DELETED = FALSE
       AND h.IS_DELETED = FALSE
       AND UPPER(h.PROCESS_TYPE) = 'FRTB'
-      AND h.ADJUSTMENT_ACTION = 'Upload'
+      AND h.ADJUSTMENT_ACTION IN ('Direct', 'Upload')   -- file flow is Direct; Upload = pre-retype rows
 ),
 enriched AS (
     SELECT base.*,
@@ -354,8 +365,8 @@ enriched AS (
 SELECT
     enriched.*,
     COALESCE(td.TRADE_SOURCE_SYSTEM_CODE, 'MS') AS SOURCE_SYSTEM_CODE,
-    COALESCE(td.BOOK_CODE, b.BOOK_CODE) AS BOOK_CODE,
-    COALESCE(td.BOOK_CODE, b.BOOK_CODE) AS BOOK_CODE_SABRE,
+    COALESCE(NULLIF(enriched.BOOK_CODE_IN, ''), td.BOOK_CODE, b.BOOK_CODE) AS BOOK_CODE,
+    COALESCE(NULLIF(enriched.BOOK_CODE_IN, ''), td.BOOK_CODE, b.BOOK_CODE) AS BOOK_CODE_SABRE,
     COALESCE(b.BOOK_KEY, -1) AS BOOK_KEY,
     enriched.ENTITY_CODE AS ENTITY_CODE_SABRE,
     IFF(COALESCE(enriched.CURVE_TYPE, '') = '', 'N/A', enriched.CURVE_TYPE) AS CURVE_CODE,
@@ -413,12 +424,16 @@ SELECT
     enriched.FILE_NAME AS RAVEN_FILENAME,
     enriched.ROW_NUM   AS RAVEN_FILE_ROW_NUMBER
 FROM enriched
+-- Direct-adjustment trade rule (all direct scopes): an empty TRADE_CODE
+-- resolves to the book's synthetic '<BOOK_CODE>/Adjustment' trade.
 LEFT JOIN DIMENSION.TRADE td
-  ON td.TRADE_CODE = NULLIF(enriched.TRADE_CODE, '')
+  ON td.TRADE_CODE = COALESCE(NULLIF(enriched.TRADE_CODE, ''),
+                              CONCAT(NULLIF(enriched.BOOK_CODE_IN, ''), '/Adjustment'))
+ AND td.BOOK_CODE = COALESCE(NULLIF(enriched.BOOK_CODE_IN, ''), td.BOOK_CODE)
  AND td.ENTITY_CODE = enriched.ENTITY_CODE
  AND enriched.EVAL_DATE BETWEEN td.EFFECTIVE_START_DATE AND td.EFFECTIVE_END_DATE
 LEFT JOIN DIMENSION.BOOK b
-  ON td.BOOK_CODE = b.BOOK_CODE
+  ON b.BOOK_CODE = COALESCE(NULLIF(enriched.BOOK_CODE_IN, ''), td.BOOK_CODE)
  AND enriched.EVAL_DATE BETWEEN b.EFFECTIVE_START_DATE AND b.EFFECTIVE_END_DATE
 LEFT JOIN DIMENSION.MEASURE_TYPE mt
   ON enriched.MEASURE_TYPE_CODE = mt.MEASURE_TYPE_CODE
@@ -527,7 +542,7 @@ WITH base AS (
     WHERE j.IS_DELETED = FALSE
       AND h.IS_DELETED = FALSE
       AND UPPER(h.PROCESS_TYPE) = 'FRTBDRC'
-      AND h.ADJUSTMENT_ACTION = 'Upload'
+      AND h.ADJUSTMENT_ACTION IN ('Direct', 'Upload')   -- file flow is Direct; Upload = pre-retype rows
 ),
 enriched AS (
     SELECT base.*,
@@ -669,7 +684,7 @@ WITH base AS (
     WHERE j.IS_DELETED = FALSE
       AND h.IS_DELETED = FALSE
       AND UPPER(h.PROCESS_TYPE) = 'FRTBRRAO'
-      AND h.ADJUSTMENT_ACTION = 'Upload'
+      AND h.ADJUSTMENT_ACTION IN ('Direct', 'Upload')   -- file flow is Direct; Upload = pre-retype rows
 ),
 enriched AS (
     SELECT base.*,

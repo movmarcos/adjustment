@@ -16,9 +16,16 @@ grid and the CSV download are capped at 1,000 rows (hard requirement).
 The download name encodes the selection, e.g.
 FRTB_DRC_COB20260626_MUSI_GIRR.csv.
 
-Columns shown are the fields used to report the adjustment (mirrors the
-_ADJUSTMENT fact layout), not every raw column.
+Columns shown — in the grid AND the CSV — are exactly the upload template
+of the matching Direct FRTB scope (DIRECT_SCOPE_SCHEMA.EXPECTED_COLUMNS:
+SBM → 'FRTB', DRC → 'FRTBDRC', RRAO → 'FRTBRRAO'), in template order. A
+template column the OFFICIAL table doesn't hold is exported empty (or
+filled from its fact-side name, e.g. RAPTOR_TRADE_CODE → TRADE_CODE), so
+the download can be edited and re-uploaded as an adjustment file without
+touching the header. If the schema row is missing the page falls back to
+the reporting columns below.
 """
+import json
 import re
 
 import streamlit as st
@@ -41,7 +48,9 @@ st.markdown("## FRTB Explore")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
     f"Browse the FRTB fact data, filter what you need, and download it as "
-    f"CSV (up to 1,000 rows).</span>", unsafe_allow_html=True)
+    f"CSV (up to 1,000 rows). The columns are the upload template of the "
+    f"FRTB type, so the file can be edited and uploaded as an adjustment."
+    f"</span>", unsafe_allow_html=True)
 st.markdown("<br/>", unsafe_allow_html=True)
 
 MAX_ROWS = 1000
@@ -51,7 +60,8 @@ MAX_ROWS = 1000
 # report the adjustment — mirrors the _ADJUSTMENT fact layout).
 _TYPES = {
     "SBM (Sensitivities)": dict(
-        code="SBM", table="FACT.FRTBSA_SENSITIVITY_MEASURES_SBM_OFFICIAL",
+        code="SBM", scope="FRTB",
+        table="FACT.FRTBSA_SENSITIVITY_MEASURES_SBM_OFFICIAL",
         risk_col="RISK_CLASS", risk_label="Risk class",
         sens_col="SENSITIVITY_TYPE",
         measure="AMOUNT_IN_USD", measure_label="Amount (USD)",
@@ -61,7 +71,7 @@ _TYPES = {
                  "CURRENCY_CODE", "AMOUNT", "AMOUNT_IN_USD",
                  "LOAD_SET", "RAVEN_DATASET_NAME"]),
     "DRC (Default Risk Charge)": dict(
-        code="DRC", table="FACT.FRTBSA_DRC_MEASURES_OFFICIAL",
+        code="DRC", scope="FRTBDRC", table="FACT.FRTBSA_DRC_MEASURES_OFFICIAL",
         risk_col="RISK_CLASS", risk_label="Risk class",
         measure="JTD_LOSS_USD", measure_label="JTD loss (USD)",
         columns=["COBID", "ENTITY_CODE", "BUSINESS_ORGANIZATION_CODE", "RAPTOR_TRADE_CODE",
@@ -70,7 +80,7 @@ _TYPES = {
                  "NOTIONAL_AMOUNT", "JTD_LOSS", "JTD_LOSS_USD",
                  "MEASURE_TYPE_CODE", "LOAD_SET"]),
     "RRAO (Residual Risk Add-On)": dict(
-        code="RRAO", table="FACT.FRTBSA_RRAO_MEASURES_OFFICIAL",
+        code="RRAO", scope="FRTBRRAO", table="FACT.FRTBSA_RRAO_MEASURES_OFFICIAL",
         risk_col="SA_RRAO_PRODUCT_TYPE", risk_label="RRAO product type",
         measure="NOTIONAL_AMOUNT_USD", measure_label="Notional (USD)",
         columns=["COBID", "ENTITY_CODE", "BUSINESS_ORGANIZATION_CODE", "RAPTOR_TRADE_CODE",
@@ -94,6 +104,41 @@ def _esc(v):
     return str(v).replace("\\", "\\\\").replace("'", "''")
 
 
+# Template column → OFFICIAL-table column(s) that carry the same value when
+# the template name itself is not in the table (fact side renames a few raw
+# fields; the enrichment views in 15_direct_frtb_upload.sql are the source).
+_FACT_FALLBACK = {
+    "TRADE_CODE": ["RAPTOR_TRADE_CODE"],
+    "BOOK_CODE": ["BUSINESS_ORGANIZATION_CODE"],
+    "CURVE_TYPE": ["CURVE_CODE"],
+    "UNDERLYING_TENOR_CODE": ["VERTEX_UNDERLYING"],
+    "CCY1": ["CURRENCY_CODE"],
+}
+
+
+def _template_cols(scope):
+    """Upload template of a Direct FRTB scope, in template order — the same
+    DIRECT_SCOPE_SCHEMA row the New Adjustment page validates files
+    against, so the two can never drift. [] when the row is missing."""
+    df = _q(f"""
+        SELECT EXPECTED_COLUMNS FROM ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
+        WHERE UPPER(PROCESS_TYPE) = UPPER('{_esc(scope)}')
+          AND IS_ACTIVE = TRUE""")
+    if df.empty:
+        return []
+    raw = df.iloc[0, 0]
+    try:
+        raw = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return []
+    out = []
+    for c in raw or []:
+        name = (c.get("name") if isinstance(c, dict) else c)
+        if name and str(name).upper() not in out:
+            out.append(str(name).upper())
+    return out
+
+
 # ── Filters (same shape as the Adjustments page) ─────────────────────────────
 with bordered_container():
     section_title("Filters", "search")
@@ -111,16 +156,45 @@ with bordered_container():
     avail = set(map(str, _probe.columns)) if _probe is not None else set()
     book_col = ("BUSINESS_ORGANIZATION_CODE"
                 if "BUSINESS_ORGANIZATION_CODE" in avail else "BOOK_CODE")
-    sel_cols = [c for c in cfg["columns"]
-                if (book_col if c == "BUSINESS_ORGANIZATION_CODE" else c)
-                in avail] if avail else cfg["columns"]
-    sel_cols = [book_col if c == "BUSINESS_ORGANIZATION_CODE" else c
-                for c in sel_cols]
-    _missing = [c for c in cfg["columns"]
-                if c != "BUSINESS_ORGANIZATION_CODE" and c not in avail] \
-        if avail else []
-    if _missing:
-        st.caption("Not in this table (skipped): " + ", ".join(_missing))
+    # Output layout = the scope's upload template. Each template column is
+    # taken from the table when it exists there, from its fact-side name
+    # otherwise, and exported EMPTY when the table has neither — the header
+    # must still match the template so the file re-uploads as-is.
+    tmpl_cols = _template_cols(cfg["scope"])
+    sel_exprs, _renamed, _empty = [], [], []
+    if tmpl_cols and avail:
+        for c in tmpl_cols:
+            if c in avail:
+                sel_exprs.append(c)
+                continue
+            src = next((f for f in _FACT_FALLBACK.get(c, []) if f in avail),
+                       None)
+            if src:
+                sel_exprs.append(f"{src} AS {c}")
+                _renamed.append(f"{src} → {c}")
+            else:
+                sel_exprs.append(f"NULL AS {c}")
+                _empty.append(c)
+        sel_cols = list(tmpl_cols)
+    else:
+        # No schema row (or the probe failed): reporting columns, as before.
+        if not tmpl_cols:
+            st.warning(f"No upload template found for scope {cfg['scope']} "
+                       f"(ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA) — showing the "
+                       f"reporting columns instead; this export will NOT "
+                       f"match the upload layout.")
+        sel_cols = [c for c in cfg["columns"]
+                    if (book_col if c == "BUSINESS_ORGANIZATION_CODE" else c)
+                    in avail] if avail else cfg["columns"]
+        sel_cols = [book_col if c == "BUSINESS_ORGANIZATION_CODE" else c
+                    for c in sel_cols]
+        sel_exprs = list(sel_cols)
+    if _renamed:
+        st.caption("Filled from the fact column: " + ", ".join(_renamed))
+    if _empty:
+        st.caption("Template column(s) this table does not hold — exported "
+                   "empty, fill in before uploading if needed: "
+                   + ", ".join(_empty))
 
     df_cobs = _q(f"SELECT DISTINCT COBID FROM {cfg['table']} "
                  f"ORDER BY COBID DESC LIMIT 60")
@@ -177,8 +251,26 @@ with bordered_container():
         with gcols[1]:
             sel_sens = st.multiselect("Sensitivity type", senss,
                                       key=f"fx_sens_{cfg['code']}")
+    # Book list follows the risk / sensitivity picks: only books that
+    # actually have rows in the current selection are offered.
+    if not df_dim.empty:
+        _dim = df_dim
+        if sel_risk:
+            _dim = _dim[_dim["RISK"].isin(sel_risk)]
+        if sel_sens:
+            _dim = _dim[_dim["SENS"].isin(sel_sens)]
+        books = sorted(_dim["BOOKDIM"].dropna().unique().tolist())
+    _book_key = f"fx_book_{cfg['code']}"
+    # Drop any previously picked book that fell out of the narrowed list,
+    # otherwise the widget errors on a value that is no longer an option.
+    if _book_key in st.session_state:
+        _kept = [b for b in st.session_state[_book_key] if b in books]
+        if _kept != list(st.session_state[_book_key]):
+            st.session_state[_book_key] = _kept
     with gcols[-2]:
-        sel_book = st.multiselect("Book", books, key=f"fx_book_{cfg['code']}")
+        sel_book = st.multiselect("Book", books, key=_book_key,
+                                  help="Only books present for the chosen "
+                                       "risk / sensitivity types.")
     with gcols[-1]:
         trade = st.text_input("Trade code (contains)", key="fx_trade",
                               help="Matches RAPTOR_TRADE_CODE, case-"
@@ -232,13 +324,17 @@ if n_rows > MAX_ROWS:
                f"complete extract.")
 
 # ── Data (capped at MAX_ROWS for both the grid and the CSV) ─────────────────
+_order = [c for c in ("ENTITY_CODE", book_col) if c in avail] \
+    if avail else ["ENTITY_CODE", book_col]
 df_data = _q(f"""
-    SELECT {", ".join(sel_cols)}
+    SELECT {", ".join(sel_exprs)}
     FROM {cfg['table']}
     WHERE {where_sql}
-    ORDER BY {", ".join(c for c in ("ENTITY_CODE", book_col) if c in sel_cols)
-              or "1"}
+    ORDER BY {", ".join(_order) or "1"}
     LIMIT {MAX_ROWS}""")
+# Header exactly as the template, even when the query returned nothing.
+if list(df_data.columns) != sel_cols:
+    df_data = df_data.reindex(columns=sel_cols)
 
 # File name that encodes the selection: FRTB_DRC_COB20260626_MUSI_GIRR.csv
 def _tag(values, all_count):
@@ -264,7 +360,8 @@ with h2:
     # under the corporate proxy (Azure 'Signature fields not well formed').
     download_csv_link(
         df_data.to_csv(index=False), fname,
-        help_text=f"Downloads exactly what is shown below ({fname}).")
+        help_text=f"Downloads exactly what is shown below ({fname}) — "
+                  f"same columns as the {cfg['code']} upload template.")
 
 render_data_grid(df_data, height=440)
 st.caption(f"Source: {cfg['table']} · COB {int(cobid)} · file: {fname}")
