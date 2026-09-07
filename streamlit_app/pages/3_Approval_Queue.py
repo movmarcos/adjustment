@@ -363,97 +363,97 @@ else:
                         unsafe_allow_html=True)
 
             if col_actions is not None:
-              with col_actions:
-                st.markdown("<br/>", unsafe_allow_html=True)
-                st.markdown(
-                    f'<div style="text-align:center;margin-bottom:1rem;font-size:0.85rem;'
-                    f'color:{P["grey_700"]};font-weight:600">Actions</div>',
-                    unsafe_allow_html=True)
-
-                # ── Authorization guards ──
-                is_own_adjustment = (
-                    user and submitted_by and
-                    str(user).strip().upper() == str(submitted_by).strip().upper()
-                )
-                can_approve_scope = is_approver and _scope_allowed(scope)
-
-                if is_own_adjustment:
+                with col_actions:
+                    st.markdown("<br/>", unsafe_allow_html=True)
                     st.markdown(
-                        f'<div style="background:#FFF3CD;border:1px solid #FFECB5;'
-                        f'border-radius:6px;padding:0.6rem;font-size:0.8rem;text-align:center;'
-                        f'color:#664D03;margin-bottom:0.5rem">'
-                        f'{icon("alert-triangle", size=13, color=P["warning"])} You cannot approve your own adjustment</div>',
-                        unsafe_allow_html=True)
-                elif not can_approve_scope:
-                    st.markdown(
-                        f'<div style="background:#F8D7DA;border:1px solid #F5C2C7;'
-                        f'border-radius:6px;padding:0.6rem;font-size:0.8rem;text-align:center;'
-                        f'color:#842029;margin-bottom:0.5rem">'
-                        f'{icon("lock", size=13, color=P["grey_700"])} Not authorized for {scope}</div>',
+                        f'<div style="text-align:center;margin-bottom:1rem;font-size:0.85rem;'
+                        f'color:{P["grey_700"]};font-weight:600">Actions</div>',
                         unsafe_allow_html=True)
 
-                actions_enabled = (is_approver and can_approve_scope
-                                   and not is_own_adjustment and _identity_ok)
+                    # ── Authorization guards ──
+                    is_own_adjustment = (
+                        user and submitted_by and
+                        str(user).strip().upper() == str(submitted_by).strip().upper()
+                    )
+                    can_approve_scope = is_approver and _scope_allowed(scope)
 
-                def _decide(new_status: str, comment: str) -> None:
-                    """Decision enforced SERVER-SIDE by SP_DECIDE_ADJUSTMENT:
-                    caller identity from CURRENT_USER(), active-approver +
-                    scope check, self-approval refusal, guarded transition and
-                    audit all happen in the database — the UI checks above are
-                    UX only and cannot be bypassed by skipping them."""
-                    import json as _json
-                    with st.spinner("Applying decision…"):
-                        res = run_query(
-                            f"CALL ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT("
-                            f"'{_esc(adj_id)}', '{_esc(new_status)}', '{_esc(comment)}', "
-                            f"'{_esc(user)}')")
-                    try:
-                        out = _json.loads(str(res[0][0])) if res else {}
-                    except (ValueError, TypeError, IndexError):
-                        out = {}
-                    if out.get("status") == "ok":
-                        set_flash("approval", "success",
-                                  f"ADJ {adj_short} {new_status.lower()}.")
-                    else:
-                        set_flash(
-                            "approval", "warning",
-                            f"ADJ {adj_short} was NOT {new_status.lower()} — "
-                            f"{out.get('message', 'the decision was not applied')}")
+                    if is_own_adjustment:
+                        st.markdown(
+                            f'<div style="background:#FFF3CD;border:1px solid #FFECB5;'
+                            f'border-radius:6px;padding:0.6rem;font-size:0.8rem;text-align:center;'
+                            f'color:#664D03;margin-bottom:0.5rem">'
+                            f'{icon("alert-triangle", size=13, color=P["warning"])} You cannot approve your own adjustment</div>',
+                            unsafe_allow_html=True)
+                    elif not can_approve_scope:
+                        st.markdown(
+                            f'<div style="background:#F8D7DA;border:1px solid #F5C2C7;'
+                            f'border-radius:6px;padding:0.6rem;font-size:0.8rem;text-align:center;'
+                            f'color:#842029;margin-bottom:0.5rem">'
+                            f'{icon("lock", size=13, color=P["grey_700"])} Not authorized for {scope}</div>',
+                            unsafe_allow_html=True)
 
-                # Approve
-                if st.button("Approve", key=f"approve_{adj_id}",
-                             use_container_width=True, type="primary",
-                             disabled=not actions_enabled):
-                    try:
-                        _decide("Approved", f"Approved by {user}")
-                        safe_rerun()
-                    except Exception as ex:
-                        st.error(f"Approval failed. {friendly_error(ex)}")
+                    actions_enabled = (is_approver and can_approve_scope
+                                       and not is_own_adjustment and _identity_ok)
 
-                st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
+                    def _decide(new_status: str, comment: str) -> None:
+                        """Decision enforced SERVER-SIDE by SP_DECIDE_ADJUSTMENT:
+                        caller identity from CURRENT_USER(), active-approver +
+                        scope check, self-approval refusal, guarded transition and
+                        audit all happen in the database — the UI checks above are
+                        UX only and cannot be bypassed by skipping them."""
+                        import json as _json
+                        with st.spinner("Applying decision…"):
+                            res = run_query(
+                                f"CALL ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT("
+                                f"'{_esc(adj_id)}', '{_esc(new_status)}', '{_esc(comment)}', "
+                                f"'{_esc(user)}')")
+                        try:
+                            out = _json.loads(str(res[0][0])) if res else {}
+                        except (ValueError, TypeError, IndexError):
+                            out = {}
+                        if out.get("status") == "ok":
+                            set_flash("approval", "success",
+                                      f"ADJ {adj_short} {new_status.lower()}.")
+                        else:
+                            set_flash(
+                                "approval", "warning",
+                                f"ADJ {adj_short} was NOT {new_status.lower()} — "
+                                f"{out.get('message', 'the decision was not applied')}")
 
-                # Reject — a reason is mandatory and the decision is final, so
-                # the button stays disabled until a reason is typed AND the
-                # approver ticks the confirmation.
-                reject_reason = st.text_input(
-                    "Rejection reason (required)", key=f"reject_reason_{adj_id}",
-                    placeholder="Rejection reason (required)",
-                    disabled=not actions_enabled)
-                _reject_confirmed = confirm_gate(
-                    "I confirm this rejection", key=f"reject_confirm_{adj_id}",
-                    help="Rejecting is final — the submitter must create a new adjustment.")
-                _reject_ready = (actions_enabled
-                                 and bool((reject_reason or "").strip())
-                                 and _reject_confirmed)
-                if st.button("Reject", key=f"reject_{adj_id}",
-                             use_container_width=True,
-                             disabled=not _reject_ready):
-                    try:
-                        _decide("Rejected", reject_reason.strip())
-                        safe_rerun()
-                    except Exception as ex:
-                        st.error(f"Rejection failed. {friendly_error(ex)}")
-                st.caption("Rejecting is final — the submitter must create a new adjustment.")
+                    # Approve
+                    if st.button("Approve", key=f"approve_{adj_id}",
+                                 use_container_width=True, type="primary",
+                                 disabled=not actions_enabled):
+                        try:
+                            _decide("Approved", f"Approved by {user}")
+                            safe_rerun()
+                        except Exception as ex:
+                            st.error(f"Approval failed. {friendly_error(ex)}")
+
+                    st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
+
+                    # Reject — a reason is mandatory and the decision is final, so
+                    # the button stays disabled until a reason is typed AND the
+                    # approver ticks the confirmation.
+                    reject_reason = st.text_input(
+                        "Rejection reason (required)", key=f"reject_reason_{adj_id}",
+                        placeholder="Rejection reason (required)",
+                        disabled=not actions_enabled)
+                    _reject_confirmed = confirm_gate(
+                        "I confirm this rejection", key=f"reject_confirm_{adj_id}",
+                        help="Rejecting is final — the submitter must create a new adjustment.")
+                    _reject_ready = (actions_enabled
+                                     and bool((reject_reason or "").strip())
+                                     and _reject_confirmed)
+                    if st.button("Reject", key=f"reject_{adj_id}",
+                                 use_container_width=True,
+                                 disabled=not _reject_ready):
+                        try:
+                            _decide("Rejected", reject_reason.strip())
+                            safe_rerun()
+                        except Exception as ex:
+                            st.error(f"Rejection failed. {friendly_error(ex)}")
+                    st.caption("Rejecting is final — the submitter must create a new adjustment.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # BULK DECISIONS — placed BELOW the list so each item has been seen before it

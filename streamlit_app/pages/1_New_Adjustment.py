@@ -855,25 +855,6 @@ def _render_reference(key: str, required: bool, placeholder: str = "") -> None:
     wiz["global_reference"] = rv.strip() or None
 
 
-def _is_entity_only(wiz: dict) -> bool:
-    """True when a Scaling Adjustment is broad-scope (entity set, no book or department).
-
-    Entity+currency is treated as broad-scope because it still targets millions of
-    rows and the preview times out. The pipeline blocking logic already handles it
-    correctly — only book_code, department_code and (for VaR) the VaR component
-    filters narrow the scope meaningfully.
-    """
-    if wiz.get("category") != "Scaling Adjustment":
-        return False
-    if not (wiz.get("entity_code") or "").strip():
-        return False
-    has_book = bool((wiz.get("book_code") or "").strip())
-    has_dept = bool((wiz.get("department_code") or "").strip())
-    has_var  = bool((wiz.get("var_component_name") or "").strip()) \
-        or bool((wiz.get("var_sub_component_name") or "").strip())
-    return not (has_book or has_dept or has_var)
-
-
 def _preview_payload() -> dict:
     pj = {
         "cobid":           wiz["cobid"],
