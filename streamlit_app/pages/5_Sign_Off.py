@@ -24,8 +24,12 @@ st.set_page_config(page_title="Sign-Off · MUFG", page_icon="🔒", layout="wide
 
 from utils.styles import (inject_css, render_sidebar, section_title, P,
                           ALL_SCOPES, icon, bordered_container, fmt_user_dt,
-                          SCOPE_CONFIG, render_grid)
+                          SCOPE_CONFIG, render_grid,
+                          set_flash, render_flash, confirm_gate,
+                          SIGNOFF_STATUS_META, signoff_status_label)
 from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
+
+_FLASH_KEY = "signoff"
 
 
 def _esc(val):
@@ -35,20 +39,21 @@ def _esc(val):
 
 def _pill(text, color) -> str:
     return (f'<span style="background:{color}18;color:{color};border:1px solid {color}55;'
-            f'border-radius:99px;padding:1px 10px;font-size:0.74rem;font-weight:700;'
+            f'border-radius:99px;padding:1px 10px;font-size:0.75rem;font-weight:700;'
             f'white-space:nowrap">{text}</span>')
 
 
 # status → (label, color, blocks submissions?)
 # Palette (Marcos): the day's GOAL is to close the COB — SIGNED OFF (done)
 # is GREEN, OPEN/RE-OPENED (work outstanding) are RED, anything partial or
-# awaiting a decision is ORANGE.
+# awaiting a decision is ORANGE. Labels/colours come from the shared
+# SIGNOFF_STATUS_META in utils.styles (its `blocks` flag = submissions are
+# blocked in that state; the local set is only a fallback).
+_BLOCKS_SUBMISSIONS = {"SIGNOFF_REQUESTED", "REOPEN_REQUESTED", "SIGNED_OFF"}
 _STATUS_META = {
-    "OPEN":              ("OPEN",              P["danger"],  False),
-    "REOPENED":          ("RE-OPENED",         P["danger"],  False),
-    "SIGNOFF_REQUESTED": ("SIGN-OFF REQUESTED", "#B45309",   True),
-    "REOPEN_REQUESTED":  ("RE-OPEN REQUESTED",  "#B45309",   True),
-    "SIGNED_OFF":        ("SIGNED OFF",        P["success"], True),
+    code: (meta["label"], meta["color"],
+           bool(meta.get("blocks", code in _BLOCKS_SUBMISSIONS)))
+    for code, meta in SIGNOFF_STATUS_META.items()
 }
 
 inject_css()
@@ -98,23 +103,22 @@ with _hd1:
         unsafe_allow_html=True)
 with _hd2:
     st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
+    # Secondary on purpose (S-M4): "Sign off now" is the page's one primary.
     if st.button("⟳  Sync from upstream feed", key="signoff_sync_btn",
-                 type="primary", use_container_width=True,
+                 type="secondary", use_container_width=True,
                  help="Pulls every COB/scope/entity from the publish feed: "
                       "not signed off → OPEN, signed off → SIGNED_OFF. Also "
                       "runs automatically every 30 minutes."):
         try:
             res = run_query("CALL ADJUSTMENT_APP.SP_SYNC_SIGNOFF_STATUS()")
-            st.session_state["so_flash"] = (
-                "success", _sync_summary(res[0][0] if res else "no result"))
+            set_flash(_FLASH_KEY, "success",
+                      _sync_summary(res[0][0] if res else "no result"))
         except Exception as ex:
-            st.session_state["so_flash"] = (
-                "warning", f"Sync failed. The database reported: {ex}")
+            set_flash(_FLASH_KEY, "warning",
+                      f"Sync failed. The database reported: {ex}")
         safe_rerun()
 
-_flash = st.session_state.pop("so_flash", None)
-if _flash:
-    (st.success if _flash[0] == "success" else st.warning)(_flash[1])
+render_flash(_FLASH_KEY)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LOAD — all sign-off rows (one query drives the whole page)
@@ -178,8 +182,8 @@ _all_cobs = sorted(df_all["COBID"].astype(int).unique().tolist(), reverse=True)
 st.markdown(
     f'<div style="font-size:0.75rem;font-weight:700;text-transform:uppercase;'
     f'letter-spacing:.07em;color:{P["grey_700"]};margin-bottom:1px">'
-    f'{icon("calendar", size=13)} &nbsp;Business date (COB) — everything below '
-    f'covers the selected date</div>', unsafe_allow_html=True)
+    f'{icon("calendar", size=13)} &nbsp;Business date (COB) — scope status and '
+    f'actions cover the selected COB</div>', unsafe_allow_html=True)
 
 _cb1, _cb2 = st.columns([1, 3])
 with _cb1:
@@ -188,6 +192,17 @@ with _cb1:
                            label_visibility="collapsed")
 
 df_cob = df_all[df_all["COBID"].astype(int) == int(sel_cob)]
+
+# S-H1: the COB multiselects further down (status grid, Latest Changes) must
+# FOLLOW this picker. A widget only takes its default when first created, so
+# push the new COB into their session state BEFORE they are instantiated,
+# every time the picker changes. The user can still add/remove COBs in them
+# afterwards — that selection survives until the picker moves again.
+_FOLLOW_COB_KEYS = ("so_f_cob", "so_h_cob")
+if st.session_state.get("_so_last_cob") != int(sel_cob):
+    for _fk in _FOLLOW_COB_KEYS:
+        st.session_state[_fk] = [int(sel_cob)]
+    st.session_state["_so_last_cob"] = int(sel_cob)
 
 # Summary as colored chips right under the picker.
 _n_blocked = int(df_cob["_SU"].isin(
@@ -209,7 +224,7 @@ st.markdown(
     + _chip(f'{len(df_cob)} on COB {sel_cob}', P["grey_700"])
     + _chip(f'{_n_open} open', P["danger"])
     + _chip(f'{_n_signed} signed off', P["success"])
-    + (_chip(f'{_n_pending} awaiting approval', "#B45309") if _n_pending else "")
+    + (_chip(f'{_n_pending} awaiting approval', P["warning"]) if _n_pending else "")
     + '</div>', unsafe_allow_html=True)
 
 def _fmt_ts(v):
@@ -230,7 +245,7 @@ def _scope_summary(rows):
     if not pending.empty:
         _p = pending.iloc[0]
         _verb = ("Sign-off" if _p["_SU"] == "SIGNOFF_REQUESTED" else "Re-open")
-        eff, col = f"{_verb.upper()} PENDING", "#B45309"
+        eff, col = f"{_verb.upper()} PENDING", P["warning"]
         detail = (f"{_verb} requested by "
                   f"{_p.get('REOPEN_REQUESTED_BY') or '—'} "
                   f"{_fmt_ts(_p.get('REOPEN_REQUESTED_AT'))} — awaiting "
@@ -242,7 +257,7 @@ def _scope_summary(rows):
                   f"{_fmt_ts(_s.get('SIGN_OFF_TIMESTAMP'))} "
                   f"({_s.get('SIGNOFF_SOURCE') or 'EXTERNAL'})")
     elif not signed.empty:
-        eff, col = "PARTIALLY SIGNED OFF", "#B45309"
+        eff, col = "PARTIALLY SIGNED OFF", P["warning"]
         _open_n = int((~blocked).sum())
         detail = (f"{len(signed)} entit{'y' if len(signed) == 1 else 'ies'} "
                   f"signed off, {_open_n} still open")
@@ -279,7 +294,7 @@ def _entity_chips(rows):
                                        (str(r["_SU"]), P["grey_700"], False))
         chips.append(
             f'<span style="background:{col}14;color:{col};border:1px solid {col}44;'
-            f'border-radius:99px;padding:0 8px;font-size:0.7rem;font-weight:700;'
+            f'border-radius:99px;padding:0 8px;font-size:0.75rem;font-weight:700;'
             f'white-space:nowrap">{_hesc.escape(str(r["_ENT_LBL"]))}&nbsp;·&nbsp;{lbl}</span>')
     return '<span style="line-height:1.9">' + " ".join(chips) + "</span>"
 
@@ -301,7 +316,7 @@ for _c, _scope in zip(_cols, _scopes_shown):
                     and str(_rows.iloc[0]["ENTITY_CODE"]) == "*"
                     else f"{_n_ent} entit{'y' if _n_ent == 1 else 'ies'}")
         body = (f'<div style="margin:6px 0 4px">{_pill(eff, col)}</div>'
-                f'<div style="font-size:0.7rem;color:{P["grey_700"]}">{_ent_txt}'
+                f'<div style="font-size:0.75rem;color:{P["grey_700"]}">{_ent_txt}'
                 f' · submissions <span style="color:{sub_col};font-weight:700">'
                 f'{sub.split(" for ")[0].lower()}</span></div>')
         border = col
@@ -353,11 +368,10 @@ def _request(scope_, entity_, sub_, action, verb, reason, requires_approval,
         else:
             msg = (f"COB {sel_cob} / {_lbl} is now RE-OPENED — new "
                    f"adjustment submissions are allowed.")
-        st.session_state["so_flash"] = ("success", msg)
+        set_flash(_FLASH_KEY, "success", msg)
     else:
-        st.session_state["so_flash"] = (
-            "warning", f"{verb} was NOT applied — "
-                       f"{out.get('message', 'no detail')}")
+        set_flash(_FLASH_KEY, "warning",
+                  f"{verb} was NOT applied — {out.get('message', 'no detail')}")
     # Clear the form so the selection is empty again after the rerun — the
     # user must explicitly pick the next thing to sign off / re-open.
     for _rk in reset_keys:
@@ -414,13 +428,33 @@ with tab_act:
                 _appr_s = st.checkbox(
                     "Request approval first (optional)", value=False,
                     key="so_signoff_appr")
+                # S-H2: an immediate sign-off is irreversible without an
+                # approver, so it needs an explicit confirmation. The gate is
+                # keyed per target so a tick never carries over to a different
+                # scope/entity picked afterwards.
+                _conf_key = None
+                _conf_s = True
+                if _sel_s and not _appr_s:
+                    _conf_key = "so_signoff_confirm_" + "_".join(
+                        str(p or "") for p in _sel_s)
+                    _conf_s = confirm_gate(
+                        f"I confirm all adjustments for {_row_label(_sel_s)} "
+                        f"on COB {sel_cob} are complete — submissions will be "
+                        f"blocked immediately",
+                        key=_conf_key)
+                _can_s = bool(_sel_s and _rsn_s.strip() and _conf_s)
                 if st.button(("Request sign-off" if _appr_s else "Sign off now"),
                              key="so_signoff_btn", type="primary",
-                             use_container_width=True,
-                             disabled=not (_sel_s and _rsn_s.strip())):
+                             use_container_width=True, disabled=not _can_s):
                     _request(_sel_s[0], _sel_s[1], _sel_s[2], "SIGNOFF",
                              "Sign-off", _rsn_s, _appr_s,
-                             reset_keys=("so_signoff_target", "so_signoff_reason"))
+                             reset_keys=("so_signoff_target", "so_signoff_reason")
+                             + ((_conf_key,) if _conf_key else ()))
+                if not _can_s:
+                    st.caption("Choose a scope/entity and enter a reason"
+                               + (" — then tick the confirmation"
+                                  if (_sel_s and not _appr_s) else "")
+                               + " to enable")
 
     with _act_r:
         with bordered_container():
@@ -448,12 +482,14 @@ with tab_act:
                 # Re-open approval is REQUIRED by policy — ticked and locked.
                 st.checkbox("Request approval (required by policy)", value=True,
                             disabled=True, key="so_reopen_appr")
+                _can_r = bool(_sel_r and _rsn_r.strip())
                 if st.button("Request re-open", key="so_reopen_btn",
-                             use_container_width=True,
-                             disabled=not (_sel_r and _rsn_r.strip())):
+                             use_container_width=True, disabled=not _can_r):
                     _request(_sel_r[0], _sel_r[1], _sel_r[2], "REOPEN",
                              "Re-open", _rsn_r, True,
                              reset_keys=("so_reopen_target", "so_reopen_reason"))
+                if not _can_r:
+                    st.caption("Choose a scope/entity and enter a reason to enable")
 
     st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -467,12 +503,16 @@ with tab_act:
     st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Sign-Off Status", "table")
     st.caption("One line per COB and scope — the entity chips show the per-entity "
-               "state when a scope is split. Defaults to the selected COB.")
+               "state when a scope is split. Follows the selected COB; add more "
+               "COBs here to compare.")
     g1, g2, g3 = st.columns(3)
     with g1:
-        f_cobs = st.multiselect("COB", _all_cobs, default=[int(sel_cob)],
+        # No `default=` — the value is seeded in session state by the
+        # follow-the-picker block under the COB selectbox (S-H1).
+        f_cobs = st.multiselect("COB", _all_cobs,
                                 key="so_f_cob", format_func=lambda v: str(v),
-                                help="Empty = all COBs.")
+                                help="Follows the selected COB; add more COBs "
+                                     "here to compare. Empty = all COBs.")
     with g2:
         f_scopes = st.multiselect("Scope",
                                   sorted(df_all["PROCESS_TYPE"].unique().tolist()),
@@ -480,7 +520,7 @@ with tab_act:
     with g3:
         f_status = st.multiselect(
             "Status", list(_STATUS_META.keys()), default=[], key="so_f_status",
-            format_func=lambda v: _STATUS_META[v][0].title(),
+            format_func=lambda v: signoff_status_label(v).title(),
             help="Keeps a COB/scope line when ANY of its entities has one of "
                  "the selected statuses.")
 
@@ -512,8 +552,8 @@ with tab_act:
             ])
         _signoff_colors = {
             "SIGNED OFF": P["success"], "OPEN": P["danger"],
-            "RE-OPENED": P["danger"], "PARTIALLY SIGNED OFF": "#B45309",
-            "SIGN-OFF PENDING": "#B45309", "RE-OPEN PENDING": "#B45309",
+            "RE-OPENED": P["danger"], "PARTIALLY SIGNED OFF": P["warning"],
+            "SIGN-OFF PENDING": P["warning"], "RE-OPEN PENDING": P["warning"],
         }
         render_grid(
             ["COB", "Scope", "Sign-off", "Submissions", "Entities", "Detail"],
@@ -534,12 +574,34 @@ with tab_hist:
     st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Latest Changes", "file-text")
     st.caption("Sign-offs, re-opens and pending requests — newest first, with who "
-               "and why. Times in your selected timezone.")
+               "and why. Times in your selected timezone. Follows the selected "
+               "COB; add more COBs to compare, or clear the filter to see all "
+               "(last 300 events across every COB).")
 
     df_hist = df_hist_cached
+    if not df_hist.empty:
+        df_hist = df_hist.copy()
+        df_hist["_COB_N"] = pd.to_numeric(df_hist["COBID"], errors="coerce")
+    _hist_cobs = sorted(
+        set(_all_cobs) | {int(v) for v in
+                          (df_hist["_COB_N"].dropna().unique().tolist()
+                           if not df_hist.empty else [])},
+        reverse=True)
+    # S-M3: same follow-the-picker seeding as the status grid (see S-H1).
+    _h1, _ = st.columns([1, 2])
+    with _h1:
+        h_cobs = st.multiselect("COB", _hist_cobs, key="so_h_cob",
+                                format_func=lambda v: str(v),
+                                help="Follows the selected COB; add more COBs "
+                                     "to compare. Empty = all COBs.")
+    if h_cobs and not df_hist.empty:
+        df_hist = df_hist[df_hist["_COB_N"].isin([int(v) for v in h_cobs])]
 
-    if df_hist.empty:
+    if df_hist_cached.empty:
         st.caption("No sign-off activity recorded yet.")
+    elif df_hist.empty:
+        st.info("No sign-off activity for the selected COB(s) in the last 300 "
+                "events — clear the COB filter to see everything.")
     else:
         def _nz(v):
             """NaN/None-safe string ('' for empty), whitespace-normalized."""
@@ -562,8 +624,8 @@ with tab_hist:
             "SIGNED_OFF":        ("SIGNED OFF",         P["success"]),
             "REOPENED":          ("RE-OPENED",          P["danger"]),
             "OPEN":              ("OPEN",               P["danger"]),
-            "SIGNOFF_REQUESTED": ("SIGN-OFF REQUESTED", "#B45309"),
-            "REOPEN_REQUESTED":  ("RE-OPEN REQUESTED",  "#B45309"),
+            "SIGNOFF_REQUESTED": ("SIGN-OFF REQUESTED", P["warning"]),
+            "REOPEN_REQUESTED":  ("RE-OPEN REQUESTED",  P["warning"]),
         }
 
         def _ev_pill(status):
@@ -591,6 +653,10 @@ with tab_hist:
             _old = _nz(h.get("OLD_STATUS")).upper()
             frm = (_ev_pill(_old) if _old
                    else f'<span style="color:{P["grey_700"]}">—</span>')
+            # Q-L6: truncate the RAW text, then escape; the full comment is
+            # available on hover via the title attribute.
+            _cmt_full = _nz(h.get("COMMENT"))
+            _cmt_short = (_cmt_full[:160] + "…") if len(_cmt_full) > 160 else _cmt_full
             _rows.append([
                 fmt_user_dt(h.get("ACTION_AT"), "%H:%M:%S"),
                 _ev_pill(h.get("NEW_STATUS")),
@@ -598,8 +664,8 @@ with tab_hist:
                 _scope_pill(h.get("PROCESS_TYPE")),
                 ent, frm,
                 _cell(h.get("ACTION_BY")) or "—",
-                f'<span style="color:{P["grey_700"]}">'
-                f'{_cell(_nz(h.get("COMMENT"))[:160])}</span>',
+                f'<span style="color:{P["grey_700"]}" title="{_cell(_cmt_full)}">'
+                f'{_cell(_cmt_short)}</span>',
             ])
         _ev_colors = {lbl: col for (lbl, col) in _EVENT_META.values()}
         render_grid(

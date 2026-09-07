@@ -40,11 +40,13 @@ st.markdown("<br/>", unsafe_allow_html=True)
 
 # ── formatting helpers ────────────────────────────────────────────────────────
 
-def _fmt_ts(val, fmt="%d %b %Y %H:%M:%S"):
+def _fmt_ts(val, fmt=None):
+    """User-timezone timestamp; `fmt=None` uses the fmt_user_dt default so
+    every tab shows the same shape."""
     if val is None or str(val) in ("NaT", "None", ""):
         return "—"
     if hasattr(val, "strftime"):
-        return fmt_user_dt(val, fmt)
+        return (fmt_user_dt(val, fmt) if fmt else fmt_user_dt(val)) or "—"
     return str(val)
 
 
@@ -86,7 +88,7 @@ def _esc_html(v) -> str:
 
 def _pill(text, color) -> str:
     return (f'<span style="background:{color}18;color:{color};border:1px solid {color}55;'
-            f'border-radius:99px;padding:1px 9px;font-size:0.72rem;font-weight:700;'
+            f'border-radius:99px;padding:1px 9px;font-size:0.75rem;font-weight:700;'
             f'white-space:nowrap">{text}</span>')
 
 
@@ -118,12 +120,14 @@ with f1:
         cob_options = [int(r["COBID"]) for r in cob_rows] if cob_rows else []
     except Exception:
         cob_options = []
-    filter_cob = st.selectbox("COB Date", options=["All"] + cob_options, index=0, key="lg_cob")
+    filter_cob = st.selectbox("COB", options=["All"] + cob_options, index=0, key="lg_cob")
 with f2:
     filter_scope = st.multiselect(
         "Scope", ALL_SCOPES, default=[], key="lg_scope")
 with f3:
-    row_limit = st.selectbox("Rows", options=[100, 200, 500, 1000], index=1, key="lg_limit")
+    row_limit = st.selectbox(
+        "Max rows per tab", options=[100, 200, 500, 1000], index=1, key="lg_limit",
+        help="Applies to Processing Runs, Activity Feed, Errors and Sign-Off.")
 
 
 def _scope_filter(col="PROCESS_TYPE"):
@@ -176,7 +180,7 @@ with tab_runs:
               AND IS_DELETED = FALSE
               {_cob_filter()}{_scope_filter()}
             GROUP BY RUN_LOG_ID
-            ORDER BY MAX(PROCESS_DATE) DESC NULLS LAST
+            ORDER BY COALESCE(MAX(PROCESS_DATE), MIN(START_DATE)) DESC NULLS LAST
             LIMIT {int(row_limit)}
         """)
     except Exception as e:
@@ -193,8 +197,8 @@ with tab_runs:
             [k1, k2, k3, k4],
             [("Runs shown", len(df_runs), P["primary"]),
              ("Adjustments", int(df_runs["ADJ_COUNT"].sum()), P["info"]),
-             ("Rows written", _fmt_int(df_runs["TOTAL_RECORDS"].sum()), P["success"]),
-             ("With failures", _tot_failed,
+             ("Rows (all statuses)", _fmt_int(df_runs["TOTAL_RECORDS"].sum()), P["success"]),
+             ("Failed adjustments", _tot_failed,
               P["danger"] if _tot_failed else P["grey_700"])],
         ):
             col.markdown(
@@ -203,7 +207,7 @@ with tab_runs:
                 f'text-align:center">'
                 f'<div style="font-size:1.35rem;font-weight:800;color:{color};'
                 f'font-variant-numeric:tabular-nums">{val}</div>'
-                f'<div style="font-size:0.7rem;text-transform:uppercase;'
+                f'<div style="font-size:0.75rem;text-transform:uppercase;'
                 f'letter-spacing:.06em;color:{P["grey_700"]}">{label}</div></div>',
                 unsafe_allow_html=True)
         st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
@@ -226,10 +230,10 @@ with tab_runs:
                 int(r.get("ADJ_COUNT", 0)),
                 _fmt_int(r.get("TOTAL_RECORDS")),
                 _fmt_dur(r.get("DURATION_SEC")),
-                _fmt_ts(r.get("ENDED"), "%d %b %H:%M"),
+                _fmt_ts(r.get("ENDED")),
             ])
         _html_table = _table(
-            ["", "Run", "Scope", "Action", "COB", "Adj", "Rows", "Duration", "Ended"],
+            ["Outcome", "Run", "Scope", "Action", "COB", "Adj", "Rows", "Duration", "Ended"],
             rows,
             aligns=["left", "right", "left", "left", "right", "right", "right",
                     "right", "right"])
@@ -341,8 +345,10 @@ with tab_activity:
         st.info("No activity matches the filters.")
     else:
         # Day-grouped feed with badges — scannable, unlike a raw dataframe.
-        df_act["_DAY"] = (pd.to_datetime(df_act["EVENT_TIME"], errors="coerce")
-                          .dt.strftime("%A %d %b %Y").fillna("Unknown date"))
+        # Days are grouped in the USER's timezone (same clock as the row times),
+        # so an event never lands under the wrong date header.
+        df_act["_DAY"] = df_act["EVENT_TIME"].apply(
+            lambda v: fmt_user_dt(v, "%A %d %b %Y") or "Unknown date")
 
         for day, day_df in df_act.groupby("_DAY", sort=False):
             st.markdown(
@@ -356,8 +362,11 @@ with tab_activity:
                     _esc_html(ev.get("ENTITY_CODE") or ""),
                     _esc_html(ev.get("BOOK_CODE") or "")] if b]
                 where_txt = " · ".join(detail_bits) if detail_bits else "All"
+                # "Event" = what happened at that moment (EVENT_TYPE);
+                # "Now" = where the adjustment is today (CURRENT_STATUS).
                 feed_rows.append([
                     _fmt_ts(ev.get("EVENT_TIME"), "%H:%M:%S"),
+                    _status_pill(ev.get("EVENT_TYPE")),
                     _status_pill(ev.get("CURRENT_STATUS")),
                     f'<strong>{fmt_adj_id(ev.get("DIMENSION_ADJ_ID"))}</strong>',
                     _scope_pill(ev.get("PROCESS_TYPE")),
@@ -368,10 +377,10 @@ with tab_activity:
                     f'{_esc_html(ev.get("EVENT_DETAIL") or "")}</span>',
                 ])
             st.markdown(_table(
-                ["Time", "Status", "Adj", "Scope", "Type", "Entity / Book",
+                ["Time", "Event", "Now", "Adj", "Scope", "Type", "Entity / Book",
                  "By", "Detail"],
                 feed_rows,
-                aligns=["right", "left", "left", "left", "left", "left",
+                aligns=["right", "left", "left", "left", "left", "left", "left",
                         "left", "left"]),
                 unsafe_allow_html=True)
 
@@ -384,19 +393,35 @@ with tab_errors:
     st.markdown(
         f"<span style='color:{P['grey_700']};font-size:0.8rem'>"
         f"Adjustments currently in Failed status — fix with "
-        f"<strong>Retry</strong> on the Adjustments page.</span>",
+        f"<strong>Retry</strong> on the Adjustments page, or acknowledge a "
+        f"handled failure on Home (Current Errors) so System Status returns "
+        f"to healthy.</span>",
         unsafe_allow_html=True)
 
-    try:
-        df_err = run_query_df(f"""
-            SELECT
+    _err_cols = """
                 ERROR_TIME, COBID, PROCESS_TYPE, ADJUSTMENT_TYPE,
-                ENTITY_CODE, BOOK_CODE, USERNAME, DIMENSION_ADJ_ID, REASON, ERRORMESSAGE
+                ENTITY_CODE, BOOK_CODE, USERNAME, DIMENSION_ADJ_ID, REASON, ERRORMESSAGE,
+                COUNT(*) OVER () AS TOTAL_N"""
+    _err_tail = f"""
             FROM ADJUSTMENT_APP.VW_ERRORS
             WHERE 1=1 {_cob_filter()}{_scope_filter()}
             ORDER BY ERROR_TIME DESC
-            LIMIT {int(row_limit)}
-        """)
+            LIMIT {int(row_limit)}"""
+    try:
+        try:
+            df_err = run_query_df(f"""
+                SELECT {_err_cols},
+                    IS_ACKNOWLEDGED, ERROR_ACK_BY, ERROR_ACK_NOTE
+                {_err_tail}
+            """)
+        except Exception:
+            # View not yet redeployed with the acknowledgement columns.
+            df_err = run_query_df(f"""
+                SELECT {_err_cols},
+                    FALSE AS IS_ACKNOWLEDGED, NULL AS ERROR_ACK_BY,
+                    NULL AS ERROR_ACK_NOTE
+                {_err_tail}
+            """)
     except Exception as e:
         df_err = pd.DataFrame()
         st.warning(f"Could not load errors: {e}")
@@ -404,15 +429,35 @@ with tab_errors:
     if df_err.empty:
         st.success("No failed adjustments.")
     else:
+        _ack_mask = df_err["IS_ACKNOWLEDGED"].fillna(False).astype(bool)
+        _acked_n = int(_ack_mask.sum())
+        try:
+            _total_n = int(df_err["TOTAL_N"].iloc[0])
+        except (KeyError, TypeError, ValueError):
+            _total_n = len(df_err)
+        _shown_note = (f' <span style="color:{P["grey_700"]};font-weight:400">'
+                       f'(showing first {len(df_err)})</span>'
+                       if _total_n > len(df_err) else "")
         st.markdown(
             f'<div style="background:{P["danger_lt"]};border-left:4px solid {P["danger"]};'
             f'border-radius:8px;padding:0.6rem 1rem;margin-bottom:0.8rem;font-size:0.82rem">'
             f'{icon("x-circle", size=13, color=P["danger"])} '
-            f'<strong>{len(df_err)}</strong> failed adjustment(s)</div>',
+            f'<strong>{_total_n}</strong> failed · '
+            f'<strong>{_acked_n}</strong> acknowledged{_shown_note}</div>',
             unsafe_allow_html=True)
 
         # Always-visible cards: an error should not need a click to be seen.
+        # Acknowledged failures mirror Home's ACK tag: greyed card, ACK pill,
+        # and "no action needed" instead of the Retry hint.
         for _, e in df_err.iterrows():
+            _is_ack = bool(e.get("IS_ACKNOWLEDGED") or False)
+            _ack_by = _esc_html(e.get("ERROR_ACK_BY") or "")
+            _ack_note = _esc_html(e.get("ERROR_ACK_NOTE") or "")
+            _accent = P["grey_400"] if _is_ack else P["danger"]
+            _ack_tag = (f' <span title="acknowledged by {_ack_by}" '
+                        f'style="background:{P["grey_100"]};color:{P["grey_700"]};'
+                        f'border-radius:99px;padding:0 6px;font-size:0.75rem;'
+                        f'font-weight:700">ACK</span>' if _is_ack else "")
             meta_bits = " · ".join(b for b in [
                 f'Entity {_esc_html(e.get("ENTITY_CODE"))}' if e.get("ENTITY_CODE") else "",
                 f'Book {_esc_html(e.get("BOOK_CODE"))}' if e.get("BOOK_CODE") else "",
@@ -420,20 +465,33 @@ with tab_errors:
             ] if b)
             reason = _esc_html(e.get("REASON") or "")
             err_msg = _esc_html(e.get("ERRORMESSAGE") or "(no message recorded)")
+            if _is_ack:
+                _next_step = (
+                    f'<div style="font-size:0.78rem;margin-top:6px;color:{P["grey_700"]}">'
+                    f'{icon("check-circle", size=12, color=P["grey_700"])} '
+                    f'Acknowledged by <strong>{_ack_by or "—"}</strong> — no action needed.'
+                    + (f' <em>{_ack_note}</em>' if _ack_note else "")
+                    + '</div>')
+            else:
+                _next_step = (
+                    f'<div style="font-size:0.78rem;margin-top:6px;color:{P["grey_700"]}">'
+                    f'Fix with <strong>Retry</strong> on the Adjustments page, or '
+                    f'acknowledge it on Home (Current Errors).</div>')
             st.markdown(
                 f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
-                f'border-left:4px solid {P["danger"]};border-radius:8px;'
-                f'padding:0.7rem 1rem;margin-bottom:0.6rem">'
+                f'border-left:4px solid {_accent};border-radius:8px;'
+                f'padding:0.7rem 1rem;margin-bottom:0.6rem'
+                f'{";opacity:.6" if _is_ack else ""}">'
                 f'<div style="display:flex;justify-content:space-between;'
                 f'align-items:center;flex-wrap:wrap;gap:6px">'
                 f'  <div style="font-size:0.88rem">'
-                f'    <strong>ADJ {fmt_adj_id(e.get("DIMENSION_ADJ_ID"))}</strong>'
+                f'    <strong>ADJ {fmt_adj_id(e.get("DIMENSION_ADJ_ID"))}</strong>{_ack_tag}'
                 f'    &nbsp;{_scope_pill(e.get("PROCESS_TYPE"))}'
                 f'    &nbsp;<span style="color:{P["grey_700"]};font-size:0.78rem">'
                 f'    {_esc_html(e.get("ADJUSTMENT_TYPE") or "")} · COB '
                 f'    {e.get("COBID", "—")}</span>'
                 f'  </div>'
-                f'  <div style="font-size:0.74rem;color:{P["grey_700"]}">'
+                f'  <div style="font-size:0.75rem;color:{P["grey_700"]}">'
                 f'  {_fmt_ts(e.get("ERROR_TIME"))}</div>'
                 f'</div>'
                 + (f'<div style="font-size:0.76rem;color:{P["grey_700"]};'
@@ -442,10 +500,11 @@ with tab_errors:
                    f'<span style="color:{P["grey_700"]}">Reason:</span> '
                    f'{reason}</div>' if reason else "")
                 + f'<div style="font-size:0.79rem;font-family:monospace;'
-                  f'background:{P["danger_lt"]};border-radius:6px;'
-                  f'padding:0.45rem 0.6rem;margin-top:6px;'
+                  f'background:{P["grey_100"] if _is_ack else P["danger_lt"]};'
+                  f'border-radius:6px;padding:0.45rem 0.6rem;margin-top:6px;'
                   f'word-break:break-word">{err_msg}</div>'
-                f'</div>',
+                + _next_step
+                + '</div>',
                 unsafe_allow_html=True)
 
 
@@ -458,40 +517,37 @@ with tab_signoff:
                "approvals, rejections — newest first. Times in your selected "
                "timezone.")
     try:
-        _sf1, _sf2, _sf3 = st.columns(3)
-        _so_hist_all = run_query_df("""
+        # Page filters (COB / Scope / Max rows) apply here like every other
+        # tab; TOTAL_N tells the user when the row limit truncated the trail.
+        _so_hist_all = run_query_df(f"""
             SELECT COBID, PROCESS_TYPE, COALESCE(ENTITY_CODE, '*') AS ENTITY_CODE,
-                   SUB_TYPE, OLD_STATUS, NEW_STATUS, ACTION_BY, ACTION_AT, COMMENT
+                   SUB_TYPE, OLD_STATUS, NEW_STATUS, ACTION_BY, ACTION_AT, COMMENT,
+                   COUNT(*) OVER () AS TOTAL_N
             FROM ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
+            WHERE 1=1 {_cob_filter()}{_scope_filter()}
             ORDER BY ACTION_AT DESC
-            LIMIT 1000
+            LIMIT {int(row_limit)}
         """)
         if _so_hist_all.empty:
-            st.info("No sign-off activity recorded yet.")
+            st.info("No sign-off activity matches the filters.")
         else:
-            with _sf1:
-                _so_cobs = sorted(_so_hist_all["COBID"].astype(int).unique(),
-                                  reverse=True)
-                _f_cob = st.multiselect("COB", _so_cobs, default=[],
-                                        key="lg_so_cob",
-                                        format_func=lambda v: str(v))
-            with _sf2:
-                _f_scope = st.multiselect(
-                    "Scope", sorted(_so_hist_all["PROCESS_TYPE"].unique()),
-                    default=[], key="lg_so_scope")
-            with _sf3:
-                _f_event = st.multiselect(
-                    "Event", sorted(_so_hist_all["NEW_STATUS"]
-                                    .astype(str).unique()),
-                    default=[], key="lg_so_event")
+            _f_event = st.multiselect(
+                "Event", sorted(_so_hist_all["NEW_STATUS"].astype(str).unique()),
+                default=[], key="lg_so_event")
             _df = _so_hist_all
-            if _f_cob:
-                _df = _df[_df["COBID"].astype(int).isin(_f_cob)]
-            if _f_scope:
-                _df = _df[_df["PROCESS_TYPE"].isin(_f_scope)]
             if _f_event:
                 _df = _df[_df["NEW_STATUS"].astype(str).isin(_f_event)]
-            st.caption(f"{len(_df)} transition(s)")
+            try:
+                _so_total = int(_so_hist_all["TOTAL_N"].iloc[0])
+            except (KeyError, TypeError, ValueError):
+                _so_total = len(_so_hist_all)
+            if _so_total > len(_so_hist_all):
+                st.caption(f"{len(_df)} transition(s) — showing first "
+                           f"{len(_so_hist_all)} of {_so_total}; raise "
+                           f"“Max rows per tab” or narrow the COB / Scope "
+                           f"filters to see more.")
+            else:
+                st.caption(f"{len(_df)} transition(s)")
 
             # Same palette as the Sign-Off page: done=green, open work=red,
             # awaiting a decision=orange.
@@ -514,9 +570,9 @@ with tab_signoff:
                 except (TypeError, ValueError):
                     return _esc_html(v) or "—"
 
-            _df = _df.head(300).copy()
+            _df = _df.copy()
             _df["_DAY"] = _df["ACTION_AT"].apply(
-                lambda v: fmt_user_dt(v, "%A %d %b %Y"))
+                lambda v: fmt_user_dt(v, "%A %d %b %Y") or "Unknown date")
             _rows, _cur = [], None
             for _, ev in _df.iterrows():
                 if ev["_DAY"] != _cur:

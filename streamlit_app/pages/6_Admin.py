@@ -10,12 +10,50 @@ import pandas as pd
 st.set_page_config(page_title="Admin · MUFG", page_icon="⚙️", layout="wide", initial_sidebar_state="expanded")
 
 from utils.styles import (inject_css, render_sidebar, section_title, P,
-                          SCOPE_CONFIG, icon, render_df_table)
+                          SCOPE_CONFIG, SCOPE_LABEL_HELP, icon, render_df_table,
+                          kpi_card, fmt_user_dt, set_flash, render_flash,
+                          confirm_gate)
 from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
 
 def _esc(val):
     """Escape single quotes for safe SQL interpolation."""
     return str(val).replace("\\", "\\\\").replace("'", "''") if val is not None else ""
+
+
+def _identity_keys(name: str) -> set:
+    """Comparable forms of an identity. The app-resolved viewer name is
+    often the EMAIL (st.user, when READ SESSION is absent) while SHOW
+    GRANTS OF ROLE returns Snowflake USERNAMES — frequently the same
+    person as 'MARCOS.MAGRI@BANK.COM' vs 'MARCOS.MAGRI'. Compare on the
+    full string AND the local part (before '@'), both upper-cased.
+    Module-level so the Approvers tab can use it even in bootstrap mode."""
+    n = str(name or "").strip().upper()
+    if not n:
+        return set()
+    keys = {n}
+    if "@" in n:
+        keys.add(n.split("@", 1)[0])
+    return keys
+
+
+def _cob_input(label, key, placeholder="e.g. 20260101"):
+    """Compact YYYYMMDD input returning int, or None when empty/invalid —
+    same strict validation as New Adjustment's _int_input (8 digits AND a
+    real calendar date), with an inline error."""
+    from datetime import datetime as _dt
+    raw = st.text_input(label, key=key, placeholder=placeholder).strip()
+    if not raw:
+        return None
+    if not raw.isdigit() or len(raw) != 8:
+        st.error(f"“{raw}” is not a valid COB — use exactly 8 digits, "
+                 f"YYYYMMDD (e.g. 20260101).")
+        return None
+    try:
+        _dt.strptime(raw, "%Y%m%d")
+    except ValueError:
+        st.error(f"“{raw}” is not a real calendar date — check the month/day.")
+        return None
+    return int(raw)
 
 inject_css()
 render_sidebar()
@@ -127,20 +165,6 @@ if not _admin_rows:
         "currently open to every user. Add the first administrator in the "
         "*Approvers* tab to lock it down.")
 else:
-    def _identity_keys(name: str) -> set:
-        """Comparable forms of an identity. The app-resolved viewer name is
-        often the EMAIL (st.user, when READ SESSION is absent) while SHOW
-        GRANTS OF ROLE returns Snowflake USERNAMES — frequently the same
-        person as 'MARCOS.MAGRI@BANK.COM' vs 'MARCOS.MAGRI'. Compare on the
-        full string AND the local part (before '@'), both upper-cased."""
-        n = str(name or "").strip().upper()
-        if not n:
-            return set()
-        keys = {n}
-        if "@" in n:
-            keys.add(n.split("@", 1)[0])
-        return keys
-
     _me_keys = _identity_keys(user)
     _admin_users = {str(r["USERNAME"]).strip().upper() for r in _admin_rows
                     if str(r["ADMIN_TYPE"]).upper() == "USER"}
@@ -217,11 +241,14 @@ else:
         st.stop()
 
 st.markdown("## Admin — Configuration")
+# Outcome of the last save/deactivate — stored before safe_rerun so the
+# message survives the rerun (st.success right before a rerun never paints).
+render_flash("admin")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
     "Manage scope configurations, recurring templates, and view system reference. "
     "In production, changes here write to <code>ADJUSTMENTS_SETTINGS</code> and "
-    "<code>ADJ_RECURRING_TEMPLATE</code> in the ADJUSTMENT schema."
+    "<code>ADJ_RECURRING_TEMPLATE</code> in the ADJUSTMENT_APP schema."
     "</span>", unsafe_allow_html=True)
 st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -250,19 +277,14 @@ with tab_health:
     st.caption("Live health of the processing pipeline. Anything red needs a "
                "human; amber is worth a look.")
 
+    # Standard KPI card; the state is spelled out in `sub` (threshold rule,
+    # "OK", or an "Action needed" prefix) so it is never colour-only.
+    _HEALTH_VARIANT = {"ok": "success", "warn": "warning", "bad": "danger"}
+
     def _health_card(col, label, value, state, sub=""):
-        color = {"ok": P["success"], "warn": "#B45309",
-                 "bad": P["danger"]}.get(state, P["grey_700"])
-        col.markdown(
-            f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
-            f'border-top:3px solid {color};border-radius:8px;padding:0.75rem;'
-            f'text-align:center;min-height:92px">'
-            f'<div style="font-size:1.25rem;font-weight:800;color:{color}">{value}</div>'
-            f'<div style="font-size:0.72rem;text-transform:uppercase;'
-            f'letter-spacing:.05em;color:{P["grey_700"]};margin-top:2px">{label}</div>'
-            + (f'<div style="font-size:0.68rem;color:{P["grey_700"]};'
-               f'margin-top:2px">{sub}</div>' if sub else "")
-            + '</div>', unsafe_allow_html=True)
+        col.markdown(kpi_card(label, value, sub,
+                              variant=_HEALTH_VARIANT.get(state, "primary")),
+                     unsafe_allow_html=True)
 
     # ── Tasks ────────────────────────────────────────────────────────────────
     st.markdown("<div style='height:0.4rem'></div>", unsafe_allow_html=True)
@@ -279,7 +301,8 @@ with tab_health:
                     name.replace("TASK_", "").replace("_", " ").title(),
                     state.title(),
                     "ok" if state == "started" else "bad",
-                    "polling" if state == "started" else "NOT RUNNING — resume it")
+                    "OK — polling every minute" if state == "started"
+                    else "Action needed — NOT RUNNING, resume it")
             if any(str(t["state"]).lower() != "started" for t in _tasks):
                 st.error("One or more tasks are suspended — the pipeline is NOT "
                          "processing for those scopes. Ask the deploy owner to "
@@ -320,19 +343,28 @@ with tab_health:
             oq  = q["OLDEST_QUEUED_MIN"]
             orn = q["OLDEST_RUNNING_MIN"]
             h1, h2, h3, h4, h5 = st.columns(5)
+            _blocked = int(q["BLOCKED"] or 0)
+            _failed  = int(q["FAILED_24H"] or 0)
+            _oq_txt  = f"oldest {int(oq)} min (amber > 5)" if oq is not None else "queue empty"
             _health_card(h1, "Queued", int(q["QUEUED"] or 0),
                          "warn" if oq is not None and int(oq) > 5 else "ok",
-                         f"oldest {int(oq)} min" if oq is not None else "")
-            _health_card(h2, "Blocked", int(q["BLOCKED"] or 0),
-                         "warn" if int(q["BLOCKED"] or 0) else "ok",
-                         "waiting behind overlaps")
-            _health_card(h3, "Running", int(q["RUNNING"] or 0),
-                         "bad" if orn is not None and int(orn) > 240
-                         else ("warn" if orn is not None and int(orn) > 180 else "ok"),
-                         f"oldest {int(orn)} min" if orn is not None else "")
-            _health_card(h4, "Failed (24h)", int(q["FAILED_24H"] or 0),
-                         "bad" if int(q["FAILED_24H"] or 0) else "ok",
-                         "Retry from the Adjustments page")
+                         _oq_txt if (oq is not None and int(oq) > 5) else f"OK — {_oq_txt}")
+            _health_card(h2, "Blocked", _blocked,
+                         "warn" if _blocked else "ok",
+                         "waiting behind overlaps (amber > 0)" if _blocked else "OK — none")
+            if orn is not None and int(orn) > 240:
+                _run_state, _run_sub = "bad", f"Action needed — oldest {int(orn)} min (red > 240)"
+            elif orn is not None and int(orn) > 180:
+                _run_state, _run_sub = "warn", f"oldest {int(orn)} min (amber > 180)"
+            elif orn is not None:
+                _run_state, _run_sub = "ok", f"OK — oldest {int(orn)} min (amber > 180)"
+            else:
+                _run_state, _run_sub = "ok", "OK — nothing running"
+            _health_card(h3, "Running", int(q["RUNNING"] or 0), _run_state, _run_sub)
+            _health_card(h4, "Failed (24h)", _failed,
+                         "bad" if _failed else "ok",
+                         "Action needed — retry from the Adjustments page (red > 0)"
+                         if _failed else "OK — none")
             # PBI backlog (external table — best effort)
             try:
                 _pbi = run_query("""
@@ -343,10 +375,11 @@ with tab_health:
                 pbi_waiting = int(_pbi[0]["C"]) if _pbi else 0
                 _health_card(h5, "PBI refreshes waiting", pbi_waiting,
                              "warn" if pbi_waiting > 5 else "ok",
-                             "picked up ~every 5 min")
+                             "picked up ~every 5 min (amber > 5)" if pbi_waiting > 5
+                             else "OK — picked up ~every 5 min")
             except Exception:
                 _health_card(h5, "PBI refreshes waiting", "n/a", "warn",
-                             "METADATA.POWERBI_ACTION not readable")
+                             "Not readable — METADATA.POWERBI_ACTION")
     except Exception as ex:
         st.info(f"Queue stats not available: {ex}")
 
@@ -364,13 +397,16 @@ with tab_health:
         n = _n[0] if _n else None
         if n is not None:
             n1, n2, n3 = st.columns(3)
-            _health_card(n1, "Sent", int(n["SENT"] or 0), "ok")
-            _health_card(n2, "Failed", int(n["FAILED"] or 0),
-                         "bad" if int(n["FAILED"] or 0) else "ok",
-                         "see the Notifications tab log")
-            _health_card(n3, "Skipped (disabled)", int(n["SKIPPED"] or 0),
-                         "warn" if int(n["SKIPPED"] or 0) else "ok",
-                         "master switch is off")
+            _nf = int(n["FAILED"] or 0)
+            _ns = int(n["SKIPPED"] or 0)
+            _health_card(n1, "Sent", int(n["SENT"] or 0), "ok", "OK")
+            _health_card(n2, "Failed", _nf,
+                         "bad" if _nf else "ok",
+                         "Action needed — see the Notifications tab log (red > 0)"
+                         if _nf else "OK — none")
+            _health_card(n3, "Skipped (disabled)", _ns,
+                         "warn" if _ns else "ok",
+                         "master switch is off (amber > 0)" if _ns else "OK — none")
     except Exception as ex:
         st.info(f"Notification stats not available: {ex}")
 
@@ -379,7 +415,8 @@ with tab_health:
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_scopes:
-    section_title("Configured Data Sources (ADJUSTMENTS_SETTINGS)", "database")
+    section_title("Scopes", "database")
+    st.caption("Source table: ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS")
     st.markdown(
         f'<div style="background:{P["info_lt"]};border:1px solid #90CAF9;border-radius:8px;'
         f'padding:0.7rem 1rem;margin-bottom:1rem;font-size:0.85rem">'
@@ -420,9 +457,7 @@ with tab_scopes:
                             unsafe_allow_html=True)
                     with c2:
                         section_title("Timestamps")
-                        created = row.get("CREATED_DATE", "")
-                        if hasattr(created, "strftime"):
-                            created = created.strftime("%d %b %Y %H:%M")
+                        created = fmt_user_dt(row.get("CREATED_DATE", ""))
                         st.markdown(
                             f'<div style="font-size:0.85rem">'
                             f'<strong>Created:</strong> {created}</div>',
@@ -433,7 +468,7 @@ with tab_scopes:
         st.warning(f"Could not load settings: {e}")
 
     st.markdown("<br/>", unsafe_allow_html=True)
-    section_title("Add / Edit Scope", "settings")
+    section_title("How to onboard a scope (DBA step)", "settings")
     st.markdown(
         f'<div style="background:{P["grey_100"]};border-radius:8px;padding:1rem;'
         f'font-size:0.85rem;color:{P["grey_700"]}">'
@@ -489,32 +524,38 @@ with tab_approvers:
                     for _, r in df_approvers.iterrows()
                 ]
                 sel_approver = st.selectbox("Select approver", approver_options, key="toggle_approver")
+            approver_id   = int(sel_approver.split("ID ")[1].split(")")[0])
+            approver_name = sel_approver.split(" (ID ")[0].strip()
             with toggle_cols[1]:
                 if st.button("Activate", key="activate_approver_btn"):
-                    approver_id = int(sel_approver.split("ID ")[1].split(")")[0])
                     try:
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_APPROVERS
                             SET IS_ACTIVE = TRUE
                             WHERE APPROVER_ID = {approver_id}
                         """)
-                        st.success("Approver activated.")
+                        set_flash("admin", "success", f"Approver {approver_name} activated.")
                         safe_rerun()
                     except Exception as ex:
-                        st.error(str(ex))
+                        set_flash("admin", "error", f"Failed to activate approver: {ex}")
+                        safe_rerun()
             with toggle_cols[2]:
-                if st.button("Deactivate", key="deactivate_approver_btn"):
-                    approver_id = int(sel_approver.split("ID ")[1].split(")")[0])
+                # Deactivating removes a 4-eyes control — two clicks, not one.
+                _cfm_appr = confirm_gate(f"Confirm deactivating {approver_name}",
+                                         key=f"cfm_deact_approver_{approver_id}")
+                if st.button("Deactivate", key="deactivate_approver_btn",
+                             disabled=not _cfm_appr):
                     try:
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_APPROVERS
                             SET IS_ACTIVE = FALSE
                             WHERE APPROVER_ID = {approver_id}
                         """)
-                        st.success("Approver deactivated.")
+                        set_flash("admin", "success", f"Approver {approver_name} deactivated.")
                         safe_rerun()
                     except Exception as ex:
-                        st.error(str(ex))
+                        set_flash("admin", "error", f"Failed to deactivate approver: {ex}")
+                        safe_rerun()
         else:
             st.info("No approvers configured yet. Add one below.")
     except Exception as e:
@@ -529,7 +570,8 @@ with tab_approvers:
             a_username = st.text_input("Username", placeholder="e.g. JSMITH", key="approver_user")
         with ac2:
             scope_options = ["All Scopes"] + list(SCOPE_CONFIG.keys())
-            a_scope = st.selectbox("Scope (optional)", scope_options, key="approver_scope")
+            a_scope = st.selectbox("Scope (optional)", scope_options, key="approver_scope",
+                                   help=SCOPE_LABEL_HELP)
 
         a_submit = st.form_submit_button("Add Approver", type="primary")
         if a_submit:
@@ -543,7 +585,8 @@ with tab_approvers:
                             (USERNAME, PROCESS_TYPE, IS_ACTIVE, ADDED_BY)
                         VALUES (UPPER('{_esc(a_username.strip())}'), {scope_val}, TRUE, '{_esc(user)}')
                     """)
-                    st.success(f"Approver {a_username.strip().upper()} added successfully!")
+                    set_flash("admin", "success",
+                              f"Approver {a_username.strip().upper()} added.")
                     safe_rerun()
                 except Exception as ex:
                     st.error(f"Failed to add approver: {ex}")
@@ -583,14 +626,21 @@ with tab_approvers:
                             SET IS_ACTIVE = TRUE
                             WHERE ADMIN_ID = {_sel_admin_id}
                         """)
-                        st.success("Administrator activated.")
+                        set_flash("admin", "success",
+                                  f"Administrator {_sel_admin_user} activated.")
                         safe_rerun()
                     except Exception as ex:
-                        st.error(f"Failed to activate administrator: {ex}")
+                        set_flash("admin", "error",
+                                  f"Failed to activate administrator: {ex}")
+                        safe_rerun()
             with adm_cols[2]:
-                _is_self = _sel_admin_user == str(user).strip().upper()
+                # Same identity comparison as the auth gate (email vs username).
+                _is_self = bool(_identity_keys(_sel_admin_user) & _identity_keys(user))
+                _cfm_adm = confirm_gate(f"Confirm deactivating {_sel_admin_user}",
+                                        key=f"cfm_deact_admin_{_sel_admin_id}",
+                                        help="You cannot deactivate yourself." if _is_self else None)
                 if st.button("Deactivate", key="deactivate_admin_btn",
-                             disabled=_is_self,
+                             disabled=_is_self or not _cfm_adm,
                              help="You cannot deactivate yourself." if _is_self else None):
                     try:
                         run_query(f"""
@@ -598,10 +648,13 @@ with tab_approvers:
                             SET IS_ACTIVE = FALSE
                             WHERE ADMIN_ID = {_sel_admin_id}
                         """)
-                        st.success("Administrator deactivated.")
+                        set_flash("admin", "success",
+                                  f"Administrator {_sel_admin_user} deactivated.")
                         safe_rerun()
                     except Exception as ex:
-                        st.error(f"Failed to deactivate administrator: {ex}")
+                        set_flash("admin", "error",
+                                  f"Failed to deactivate administrator: {ex}")
+                        safe_rerun()
         else:
             st.info("No page administrators yet — the Admin page is open to "
                     "everyone until the first one is added.")
@@ -637,17 +690,19 @@ with tab_approvers:
                     if _t == "ROLE":
                         _m = _role_members(adm_username.strip().upper())
                         if _m is None:
-                            st.warning(
-                                "Role added, but its membership could NOT be "
-                                "verified (the app cannot run SHOW GRANTS OF "
-                                "ROLE) — role-based access will not work "
-                                "until that privilege is granted.")
+                            set_flash("admin", "warning",
+                                      "Role added, but its membership could NOT be "
+                                      "verified (the app cannot run SHOW GRANTS OF "
+                                      "ROLE) — role-based access will not work "
+                                      "until that privilege is granted.")
                         else:
-                            st.success(f"Role {adm_username.strip().upper()} "
-                                       f"added — {len(_m)} member(s) resolve "
-                                       f"as administrators.")
+                            set_flash("admin", "success",
+                                      f"Role {adm_username.strip().upper()} "
+                                      f"added — {len(_m)} member(s) resolve "
+                                      f"as administrators.")
                     else:
-                        st.success(f"Administrator {adm_username.strip().upper()} added.")
+                        set_flash("admin", "success",
+                                  f"Administrator {adm_username.strip().upper()} added.")
                     safe_rerun()
                 except Exception as ex:
                     st.error(f"Failed to add administrator: {ex}")
@@ -662,7 +717,7 @@ with tab_recurring:
     st.markdown(
         f'<div style="background:{P["info_lt"]};border:1px solid #90CAF9;border-radius:8px;'
         f'padding:0.7rem 1rem;margin-bottom:1rem;font-size:0.85rem">'
-        f'{icon("alert-triangle", size=13, color="#B45309")} <strong>Recurring '
+        f'{icon("alert-triangle", size=13, color=P["warning"])} <strong>Recurring '
         f'processing is not live yet.</strong> Templates saved here are stored '
         f'but nothing instantiates them automatically — the instantiation task '
         f'is planned for a future release. Until then, submit each COB\'s '
@@ -699,47 +754,67 @@ with tab_recurring:
     st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Create New Template", "calendar")
 
-    with st.form("new_template_form"):
-        tc1, tc2, tc3 = st.columns(3)
-        with tc1:
-            t_scope = st.selectbox("Scope (Process Type)", list(SCOPE_CONFIG.keys()), key="tmpl_scope")
-            t_type  = st.selectbox("Adjustment Type", ["Flatten", "Scale", "Roll"], key="tmpl_type")
+    # Plain widgets rather than st.form: the Scale Factor field must react to
+    # the Adjustment Type (hidden for Flatten), and forms only rerun on submit.
+    tc1, tc2, tc3 = st.columns(3)
+    with tc1:
+        t_scope = st.selectbox("Scope (Process Type)", list(SCOPE_CONFIG.keys()), key="tmpl_scope",
+                               help=SCOPE_LABEL_HELP)
+        t_type  = st.selectbox("Adjustment Type", ["Flatten", "Scale", "Roll"], key="tmpl_type")
+        if t_type == "Flatten":
+            t_scale = 1.0
+            st.caption("Flatten has no scale factor.")
+        else:
             t_scale = st.number_input("Scale Factor", value=1.0, min_value=-10.0, max_value=100.0,
                                       step=0.01, format="%.4f", key="tmpl_scale")
-        with tc2:
-            t_entity = st.text_input("Entity Code", placeholder="e.g. MUSE", key="tmpl_entity")
-            t_book   = st.text_input("Book Code (optional)", key="tmpl_book")
-            t_dept   = st.text_input("Department Code (optional)", key="tmpl_dept")
-        with tc3:
-            t_start = st.text_input("Start COBID", placeholder="e.g. 20260101", key="tmpl_start")
-            t_end   = st.text_input("End COBID", placeholder="e.g. 20261231", key="tmpl_end")
-            t_cron  = st.text_input("CRON Expression (optional)", placeholder="0 8 * * MON-FRI",
-                                    key="tmpl_cron")
+    with tc2:
+        t_entity = st.text_input("Entity Code", placeholder="e.g. MUSE", key="tmpl_entity")
+        t_book   = st.text_input("Book Code (optional)", key="tmpl_book")
+        t_dept   = st.text_input("Department Code (optional)", key="tmpl_dept")
+    with tc3:
+        t_start = _cob_input("Start COBID", key="tmpl_start", placeholder="e.g. 20260101")
+        t_end   = _cob_input("End COBID", key="tmpl_end", placeholder="e.g. 20261231")
+        t_cron  = st.text_input("CRON Expression (optional)", placeholder="0 8 * * MON-FRI",
+                                key="tmpl_cron",
+                                help="5 space-separated fields: minute hour day-of-month "
+                                     "month day-of-week (e.g. 0 8 * * MON-FRI).")
+        _cron_ok = True
+        if t_cron.strip() and len(t_cron.split()) != 5:
+            _cron_ok = False
+            st.error(f"“{t_cron.strip()}” is not a valid CRON expression — it needs "
+                     f"exactly 5 space-separated fields (minute hour day month weekday), "
+                     f"e.g. 0 8 * * MON-FRI.")
 
-        submitted = st.form_submit_button("Create Template", type="primary")
-        if submitted:
-            if not t_start.strip() or not t_end.strip():
-                st.error("Start and End COBID are required.")
-            else:
-                try:
-                    book_val = f"'{_esc(t_book.strip())}'" if t_book.strip() else "NULL"
-                    dept_val = f"'{_esc(t_dept.strip())}'" if t_dept.strip() else "NULL"
-                    entity_val = f"'{_esc(t_entity.strip())}'" if t_entity.strip() else "NULL"
-                    cron_val = f"'{_esc(t_cron.strip())}'" if t_cron.strip() else "NULL"
+    _tmpl_ready = (t_start is not None and t_end is not None and _cron_ok
+                   and t_start <= t_end)
+    if t_start is not None and t_end is not None and t_start > t_end:
+        st.error("End COBID must be on or after Start COBID.")
 
-                    run_query(f"""
-                        INSERT INTO ADJUSTMENT_APP.ADJ_RECURRING_TEMPLATE
-                            (PROCESS_TYPE, ADJUSTMENT_TYPE, ENTITY_CODE, BOOK_CODE,
-                             DEPARTMENT_CODE, SCALE_FACTOR, START_COBID, END_COBID,
-                             CRON_EXPRESSION, IS_ACTIVE, CREATED_BY)
-                        VALUES ('{_esc(t_scope)}', '{_esc(t_type)}', {entity_val}, {book_val},
-                                {dept_val}, {float(t_scale)}, {int(t_start.strip())}, {int(t_end.strip())},
-                                {cron_val}, TRUE, '{_esc(user)}')
-                    """)
-                    st.success("Template created successfully!")
-                    safe_rerun()
-                except Exception as ex:
-                    st.error(f"Failed to create template: {ex}")
+    if st.button("Save template (not scheduled yet)", key="tmpl_save",
+                 type="secondary", disabled=not _tmpl_ready,
+                 help="Stores the template only — nothing instantiates it until "
+                      "recurring processing goes live."):
+        try:
+            book_val = f"'{_esc(t_book.strip())}'" if t_book.strip() else "NULL"
+            dept_val = f"'{_esc(t_dept.strip())}'" if t_dept.strip() else "NULL"
+            entity_val = f"'{_esc(t_entity.strip())}'" if t_entity.strip() else "NULL"
+            cron_val = f"'{_esc(t_cron.strip())}'" if t_cron.strip() else "NULL"
+
+            run_query(f"""
+                INSERT INTO ADJUSTMENT_APP.ADJ_RECURRING_TEMPLATE
+                    (PROCESS_TYPE, ADJUSTMENT_TYPE, ENTITY_CODE, BOOK_CODE,
+                     DEPARTMENT_CODE, SCALE_FACTOR, START_COBID, END_COBID,
+                     CRON_EXPRESSION, IS_ACTIVE, CREATED_BY)
+                VALUES ('{_esc(t_scope)}', '{_esc(t_type)}', {entity_val}, {book_val},
+                        {dept_val}, {float(t_scale)}, {int(t_start)}, {int(t_end)},
+                        {cron_val}, TRUE, '{_esc(user)}')
+            """)
+            set_flash("admin", "success",
+                      f"Template saved ({t_scope} · {t_type} · {t_start}–{t_end}). "
+                      "It is stored only — recurring processing is not live yet.")
+            safe_rerun()
+        except Exception as ex:
+            st.error(f"Failed to save template: {ex}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -801,7 +876,7 @@ with tab_notify:
                             UPDATED_AT = CURRENT_TIMESTAMP()
                         WHERE CONFIG_KEY = '{_esc(key)}'
                     """)
-                st.success("Notification settings saved.")
+                set_flash("admin", "success", "Notification settings saved.")
                 safe_rerun()
             except Exception as ex:
                 st.error(f"Failed to save settings: {ex}")
@@ -821,7 +896,8 @@ with tab_notify:
     with t2:
         st.markdown("<br/>", unsafe_allow_html=True)
         if st.button("Send test", key="ntf_test_btn", use_container_width=True,
-                     disabled=not test_email.strip()):
+                     disabled=not test_email.strip(),
+                     help="Enter a recipient first — the test bypasses the master switch"):
             try:
                 import json as _json
                 _tp = _json.dumps({"email": test_email.strip()}).replace("\\", "\\\\").replace("'", "''")
@@ -864,7 +940,8 @@ with tab_notify:
                 ]
                 sel_pref = st.selectbox("Select recipient", pref_options,
                                         key="ntf_pref_pick")
-            _sel_pref_id = int(sel_pref.split("ID ")[1].split(")")[0])
+            _sel_pref_id   = int(sel_pref.split("ID ")[1].split(")")[0])
+            _sel_pref_user = sel_pref.split(" (ID ")[0].strip()
             with pcols[1]:
                 if st.button("Activate", key="ntf_pref_on"):
                     try:
@@ -872,21 +949,27 @@ with tab_notify:
                             UPDATE ADJUSTMENT_APP.ADJ_NOTIFICATION_PREFS
                             SET IS_ACTIVE = TRUE WHERE PREF_ID = {_sel_pref_id}
                         """)
-                        st.success("Recipient activated.")
+                        set_flash("admin", "success",
+                                  f"Recipient {_sel_pref_user} activated.")
                         safe_rerun()
                     except Exception as ex:
-                        st.error(f"Failed: {ex}")
+                        set_flash("admin", "error", f"Failed to activate recipient: {ex}")
+                        safe_rerun()
             with pcols[2]:
-                if st.button("Deactivate", key="ntf_pref_off"):
+                _cfm_pref = confirm_gate(f"Confirm deactivating {_sel_pref_user}",
+                                         key=f"cfm_deact_pref_{_sel_pref_id}")
+                if st.button("Deactivate", key="ntf_pref_off", disabled=not _cfm_pref):
                     try:
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_NOTIFICATION_PREFS
                             SET IS_ACTIVE = FALSE WHERE PREF_ID = {_sel_pref_id}
                         """)
-                        st.success("Recipient deactivated.")
+                        set_flash("admin", "success",
+                                  f"Recipient {_sel_pref_user} deactivated.")
                         safe_rerun()
                     except Exception as ex:
-                        st.error(f"Failed: {ex}")
+                        set_flash("admin", "error", f"Failed to deactivate recipient: {ex}")
+                        safe_rerun()
         else:
             st.info("No recipients configured yet — add the first one below.")
     except Exception as ex:
@@ -924,7 +1007,8 @@ with tab_notify:
                                 {'TRUE' if np_approvals else 'FALSE'},
                                 TRUE, '{_esc(user)}')
                     """)
-                    st.success(f"Recipient {np_user.strip().upper()} added.")
+                    set_flash("admin", "success",
+                              f"Recipient {np_user.strip().upper()} added.")
                     safe_rerun()
                 except Exception as ex:
                     st.error(f"Failed to add recipient: {ex}")
@@ -957,16 +1041,24 @@ with tab_schema:
     schema_items = [
         ("ADJUSTMENT_APP.ADJ_HEADER",            "TABLE",         "One row per adjustment — lifecycle, metadata, all dimension filters"),
         ("ADJUSTMENT_APP.ADJ_LINE_ITEM",         "TABLE",         "Explicit row-level values for Upload/Direct adjustments"),
+        ("ADJUSTMENT_APP.ADJ_LINE_ITEM_JSON",    "TABLE",         "Direct Adjustment uploads — one row per CSV line, raw fields in PAYLOAD (VARIANT)"),
         ("ADJUSTMENT_APP.ADJ_STATUS_HISTORY",    "TABLE",         "Append-only audit log of every status change"),
         ("ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS",  "TABLE",         "Config: scope → fact table mapping, PK columns, metrics"),
-        ("ADJUSTMENT_APP.ADJ_RECURRING_TEMPLATE","TABLE",         "Templates for automatically recurring adjustments"),
+        ("ADJUSTMENT_APP.ADJ_RECURRING_TEMPLATE","TABLE",         "Templates for automatically recurring adjustments (not scheduled yet)"),
         # (Streams retired — the pipeline POLLS; tasks fire every minute
         #  unconditionally and SP_RUN_PIPELINE exits fast when idle.)
         ("ADJUSTMENT_APP.DT_DASHBOARD",          "DYNAMIC TABLE", "Aggregated metrics by scope, status, entity, user"),
         ("ADJUSTMENT_APP.DT_OVERLAP_ALERTS",     "DYNAMIC TABLE", "Self-join detecting overlapping adjustments"),
         ("ADJUSTMENT_APP.VW_DASHBOARD_KPI",      "VIEW",          "Pre-aggregated KPIs for the dashboard"),
         ("ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS",    "TABLE",         "COB sign-off status per scope+entity. Managed via the Sign-Off page (approval-gated requests)"),
+        ("ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY",   "TABLE",         "Append-only audit of sign-off / re-open transitions"),
         ("ADJUSTMENT_APP.ADJ_APPROVERS",         "TABLE",         "Authorized approvers with optional scope restriction. Managed via Admin page"),
+        ("ADJUSTMENT_APP.ADJ_ADMINS",            "TABLE",         "Users and Snowflake roles allowed to open this Admin page. Managed via Admin page"),
+        ("ADJUSTMENT_APP.ADJ_APP_CONFIG",        "TABLE",         "App-level key/value config (notification master switch, email integration name)"),
+        ("ADJUSTMENT_APP.ADJ_NOTIFICATION_PREFS","TABLE",         "Per-user email notification opt-ins (recipients). Managed via Admin page"),
+        ("ADJUSTMENT_APP.ADJ_NOTIFICATION_LOG",  "TABLE",         "Every notification send attempt, including SKIPPED_DISABLED while the switch is off"),
+        ("ADJUSTMENT_APP.ADJ_USER_PREFS",        "TABLE",         "Per-user display preferences (timezone), written by the app"),
+        ("ADJUSTMENT_APP.EROL_PROCESS_LOG",      "TABLE",         "Append-only Entity Roll diagnostics per run/step (timings, rows, spill). Report view VW_EROL_PROCESS_LOG"),
         ("ADJUSTMENT_APP.VW_SIGNOFF_STATUS",     "VIEW",          "COB sign-off status (reads from ADJ_SIGNOFF_STATUS)"),
         ("ADJUSTMENT_APP.VW_RECENT_ACTIVITY",    "VIEW",          "UNION of submissions + status changes"),
         ("ADJUSTMENT_APP.VW_ERRORS",             "VIEW",          "Adjustments with Error status"),
@@ -987,8 +1079,9 @@ with tab_schema:
     **2. Config-Driven Scopes** — `ADJUSTMENTS_SETTINGS` drives which data sources
     are available. New scope = new config row, zero code changes.
 
-    **3. Async Processing** — Adjustments are applied by Snowflake Tasks triggered
-    by Streams, not by the Streamlit session. Users are never blocked.
+    **3. Async Processing** — Snowflake tasks poll the queue every minute (streams
+    were retired) and process each (scope, action, COB) batch — never the Streamlit
+    session. Users are never blocked.
 
     **4. Full Audit Trail** — Every status change is logged to `ADJ_STATUS_HISTORY`.
     Adjustments are soft-deleted (IS_DELETED flag), never physically removed.
@@ -1066,9 +1159,8 @@ CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT('VaR', 'Scale', 20260328);"""),
 
     section_title("Snowflake Tasks Configuration", "timer")
     st.markdown("""
-    Four independent scope tasks, each guarded by a standard stream on its queue view.
-    Tasks fire every 1 minute **only when** the stream has data (INSERT or UPDATE on ADJ_HEADER
-    that matches the queue view filters).
+    Async processing — Snowflake tasks poll the queue every minute (streams were retired)
+    and process each (scope, action, COB) batch.
     """)
     st.markdown("""
     There are four scope tasks, all using **serverless compute** and the same pattern:
@@ -1079,7 +1171,7 @@ CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT('VaR', 'Scale', 20260328);"""),
       (sub-types FRTB, FRTBDRC, FRTBRRAO — "All FRTB" in the app submits one adjustment per sub-type).
     - **`TASK_PROCESS_SENSITIVITY`** — every minute; polls and runs the **Sensitivity** pipeline.
 
-    Each task is scheduled every **1 minute** but only does work when its stream has new data,
-    at which point it calls `SP_RUN_PIPELINE` for that process type. The task definitions are
+    Each task fires every **1 minute** unconditionally and calls `SP_RUN_PIPELINE` for its
+    process type, which exits fast when the queue is empty. The task definitions are
     deployed from `06_tasks.sql` — they are not created from this app.
     """)

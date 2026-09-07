@@ -13,7 +13,8 @@ st.set_page_config(page_title="Approval Queue · MUFG", page_icon="✅", layout=
 from utils.styles import (
     inject_css, render_sidebar, render_filter_chips, fmt_user_dt,
     section_title, status_badge, P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, icon, bordered_container,
-    render_grid, fmt_adj_id,
+    render_grid, fmt_adj_id, set_flash, render_flash, confirm_gate,
+    SIGNOFF_STATUS_META, signoff_status_label,
 )
 from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
                                   safe_rerun, friendly_error)
@@ -57,11 +58,9 @@ st.markdown(
     "</span>", unsafe_allow_html=True)
 st.markdown("<br/>", unsafe_allow_html=True)
 
-# Outcome of the last approve/reject — stashed before the rerun (a message
-# rendered just before st.rerun() is destroyed by it).
-_flash = st.session_state.pop("apq_flash", None)
-if _flash:
-    (st.success if _flash[0] == "success" else st.warning)(_flash[1])
+# Outcome of the last decision — stashed via set_flash() before the rerun (a
+# message rendered just before st.rerun() is destroyed by it).
+render_flash("approval")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # APPROVER AUTHORIZATION CHECK
@@ -88,7 +87,21 @@ except Exception:
     pass
 
 if not is_approver:
-    st.warning("You are not registered as an approver. Contact an admin to be added to the approvers list.")
+    # Single page-level banner; the queue below renders read-only (no actions
+    # column) rather than repeating a "not authorized" notice per row.
+    st.warning("You are not registered as an approver. The queue is shown "
+               "read-only — contact an admin to be added to the approvers list.")
+
+
+def _scope_allowed(process_type) -> bool:
+    """UX mirror of the proc's scope rule. An approver registered for a
+    family scope (e.g. 'FRTB') may also action its sub-scopes (FRTBDRC,
+    FRTBRRAO); every other scope stays an exact match — process-type codes
+    are VaR/Stress/Sensitivity/FRTB/FRTBDRC/FRTBRRAO, so prefix matching on
+    the code cannot bleed 'VaR' into anything else."""
+    pt = str(process_type or "").upper()
+    return (not approver_scopes
+            or any(pt == s or pt.startswith(s) for s in approver_scopes))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SUMMARY STATS
@@ -118,10 +131,18 @@ try:
 except Exception:
     n_so_pending = 0
 
+# The boxes are queue-wide totals (the scope / type filters below do not
+# apply to them) — say so, or a filtered list under an unfiltered count reads
+# as a bug.
+st.markdown(
+    f'<div style="font-size:0.75rem;text-transform:uppercase;letter-spacing:.06em;'
+    f'color:{P["grey_700"]};margin-bottom:6px">All scopes — totals are not '
+    f'affected by the filters below</div>',
+    unsafe_allow_html=True)
 c1, c2, c3, c4 = st.columns(4)
 stat_items = [
     ("Adjustments awaiting", qs.get("TOTAL_PENDING", 0), P["info"],   "clipboard"),
-    ("Sign-off requests",    n_so_pending, "#B45309" if n_so_pending
+    ("Sign-off requests",    n_so_pending, P["warning"] if n_so_pending
                                            else P["grey_700"], "unlock"),
     ("Scopes",               qs.get("SCOPES", 0),        P["primary"], "bar-chart"),
     ("Submitters",           qs.get("SUBMITTERS", 0),    P["grey_700"], "user"),
@@ -131,7 +152,7 @@ for col, (label, val, color, icon_name) in zip([c1, c2, c3, c4], stat_items):
         f'<div style="background:{P["white"]};border:1px solid {P["border"]};'
         f'border-top:3px solid {color};border-radius:8px;padding:0.8rem;text-align:center">'
         f'<div style="font-size:1.6rem;font-weight:800;color:{color};font-variant-numeric:tabular-nums">{icon(icon_name, size=15, color=color)} {int(val)}</div>'
-        f'<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.06em;'
+        f'<div style="font-size:0.75rem;text-transform:uppercase;letter-spacing:.06em;'
         f'color:{P["grey_700"]};margin-top:3px">{label}</div>'
         f'</div>',
         unsafe_allow_html=True)
@@ -171,15 +192,29 @@ try:
 
     where_sql = (" AND " + " AND ".join(where_parts)) if where_parts else ""
 
+    _QUEUE_LIMIT = 100
     df_queue = run_query_df(f"""
         SELECT *
         FROM ADJUSTMENT_APP.VW_APPROVAL_QUEUE
         WHERE 1=1 {where_sql}
         ORDER BY SUBMITTED_AT ASC
-        LIMIT 100
+        LIMIT {_QUEUE_LIMIT}
     """)
+    # Total under the SAME filters, so the title can say "100 of 340" rather
+    # than silently capping at the LIMIT.
+    try:
+        _cnt = run_query(f"""
+            SELECT COUNT(*) AS N
+            FROM ADJUSTMENT_APP.VW_APPROVAL_QUEUE
+            WHERE 1=1 {where_sql}
+        """)
+        total_pending = int(_cnt[0]["N"]) if _cnt else len(df_queue)
+    except Exception:
+        total_pending = len(df_queue)
 except Exception as e:
     df_queue = pd.DataFrame()
+    total_pending = 0
+    _QUEUE_LIMIT = 100
     st.warning(f"Could not load approval queue: {e}")
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -201,91 +236,11 @@ if not df_queue.empty:
     except Exception:
         df_overlaps = pd.DataFrame()
 
-# ──────────────────────────────────────────────────────────────────────────────
-# BULK DECISIONS — every item still goes through SP_DECIDE_ADJUSTMENT, so the
-# 4-eyes rules (approver registration, scope, self-approval) are enforced
-# per adjustment server-side; the loop just saves the clicking.
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _bulk_eligible(df):
-    """Rows the current user is allowed to decide (UX filter — the proc
-    re-checks everything)."""
-    out = []
-    if df.empty or not is_approver or not _identity_ok:
-        return out
-    for _, r in df.iterrows():
-        scope_ok = (not approver_scopes
-                    or str(r.get("PROCESS_TYPE", "")).upper() in approver_scopes)
-        own = (user and str(r.get("SUBMITTED_BY", "")).strip().upper()
-               == user.strip().upper())
-        if scope_ok and not own:
-            out.append(r)
-    return out
-
-
-_bulk_rows = _bulk_eligible(df_queue)
-if len(_bulk_rows) >= 2:
-    with bordered_container():
-        section_title("Bulk Decision", "layers")
-        st.caption("Select several adjustments and decide them in one go — "
-                   "each one is still individually enforced (scope, 4-eyes) "
-                   "and audited.")
-
-        def _bulk_label(i):
-            r = _bulk_rows[i]
-            return (f'#{str(r.get("ADJ_ID"))[:8]}… · {r.get("PROCESS_TYPE")} · '
-                    f'{r.get("ADJUSTMENT_TYPE")} · COB {r.get("COBID")} · '
-                    f'by {r.get("SUBMITTED_BY")}')
-
-        _sel = st.multiselect(
-            "Adjustments to decide", options=list(range(len(_bulk_rows))),
-            format_func=_bulk_label, key="apq_bulk_sel")
-        b1, b2, b3 = st.columns([1, 1, 2])
-        with b3:
-            _bulk_comment = st.text_input(
-                "Comment / rejection reason (applied to all selected)",
-                key="apq_bulk_comment", label_visibility="collapsed",
-                placeholder="Comment / rejection reason (applied to all)")
-
-        def _bulk_decide(decision):
-            import json as _json
-            done, skipped = 0, []
-            for i in _sel:
-                r = _bulk_rows[i]
-                try:
-                    res = run_query(
-                        f"CALL ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT("
-                        f"'{_esc(r.get('ADJ_ID'))}', '{decision}', "
-                        f"'{_esc(_bulk_comment or f'{decision} (bulk) by {user}')}', "
-                        f"'{_esc(user)}')")
-                    out = _json.loads(str(res[0][0])) if res else {}
-                    if out.get("status") == "ok":
-                        done += 1
-                    else:
-                        skipped.append(f"#{str(r.get('ADJ_ID'))[:8]}… "
-                                       f"({out.get('message', '?')})")
-                except Exception as ex:
-                    skipped.append(f"#{str(r.get('ADJ_ID'))[:8]}… ({ex})")
-            msg = f"{done} adjustment(s) {decision.lower()}."
-            if skipped:
-                msg += " Not applied: " + "; ".join(skipped[:5])
-                if len(skipped) > 5:
-                    msg += f" (+{len(skipped) - 5} more)"
-            st.session_state["apq_flash"] = (
-                "success" if done and not skipped else "warning", msg)
-            safe_rerun()
-
-        with b1:
-            if st.button(f"Approve selected ({len(_sel)})", key="apq_bulk_ok",
-                         type="primary", use_container_width=True,
-                         disabled=not _sel):
-                _bulk_decide("Approved")
-        with b2:
-            if st.button(f"Reject selected ({len(_sel)})", key="apq_bulk_no",
-                         use_container_width=True, disabled=not _sel):
-                _bulk_decide("Rejected")
-
-section_title(f"Adjustments Awaiting Approval ({len(df_queue)})", "clipboard")
+section_title(
+    f"Adjustments Awaiting Approval ({len(df_queue)} of {total_pending})",
+    "clipboard")
+if total_pending > len(df_queue):
+    st.caption(f"oldest first — showing the first {_QUEUE_LIMIT}")
 
 if df_queue.empty:
     st.markdown(
@@ -297,7 +252,9 @@ if df_queue.empty:
 else:
     for _, row in df_queue.iterrows():
         adj_id      = row.get("ADJ_ID", "?")
-        adj_short   = f"#{str(adj_id)[:8]}…"   # no DIMENSION_ADJ_ID yet (pre-approval); short hash keeps rows distinct
+        # No DIMENSION_ADJ_ID yet (pre-approval) — fmt_adj_id falls back to
+        # the short hash, the same rendering used everywhere else in the app.
+        adj_short   = fmt_adj_id(row.get("DIMENSION_ADJ_ID"), adj_id=adj_id)
         scope       = str(row.get("PROCESS_TYPE", ""))
         adj_type    = str(row.get("ADJUSTMENT_TYPE", ""))
         entity      = str(row.get("ENTITY_CODE", "")) or "—"
@@ -321,7 +278,11 @@ else:
             + ("  — ⚠ OVERLAP" if has_overlap else "")
         )
         with st.expander(expander_label, expanded=has_overlap):
-            col_info, col_actions = st.columns([3, 1])
+            if is_approver:
+                col_info, col_actions = st.columns([3, 1])
+            else:
+                # Read-only view for non-approvers: no actions column at all.
+                col_info, col_actions = st.container(), None
 
             with col_info:
                 st.markdown(status_badge("Pending Approval"), unsafe_allow_html=True)
@@ -366,7 +327,7 @@ else:
                             f'<tr>'
                             f'<td style="padding:3px 10px 3px 0;font-size:0.78rem;'
                             f'font-weight:700;white-space:nowrap">'
-                            f'ADJ #{str(r["ADJ_ID_B"] if r["ADJ_ID_A"] == adj_id else r["ADJ_ID_A"])[:8]}…'
+                            f'ADJ {_htmlmod.escape(fmt_adj_id(None, adj_id=(r["ADJ_ID_B"] if r["ADJ_ID_A"] == adj_id else r["ADJ_ID_A"])))}'
                             f'</td>'
                             f'<td style="padding:3px 0;font-size:0.78rem;color:{P["grey_700"]}">'
                             f'{_htmlmod.escape(str(r.get("ALERT_MESSAGE","")).strip()) or "Overlapping filters on same COB"}'
@@ -379,11 +340,11 @@ else:
                             f'border-left:4px solid #F9A825;border-radius:8px;'
                             f'padding:0.7rem 1rem;margin:0.8rem 0">'
                             f'<div style="font-weight:700;font-size:0.82rem;color:#E65100;'
-                            f'margin-bottom:0.4rem">{icon("alert-triangle", size=13, color="#B45309")} Overlap Detected with '
+                            f'margin-bottom:0.4rem">{icon("alert-triangle", size=13, color=P["warning"])} Overlap Detected with '
                             f'{len(other_ids)} adjustment(s)</div>'
                             f'<table style="width:100%;border-collapse:collapse">'
                             f'{rows_html}</table>'
-                            f'<div style="font-size:0.72rem;color:#795548;margin-top:0.4rem">'
+                            f'<div style="font-size:0.75rem;color:#795548;margin-top:0.4rem">'
                             f'These adjustments target overlapping data. '
                             f'Review carefully before approving.</div>'
                             f'</div>',
@@ -401,7 +362,8 @@ else:
                         f'<strong>Scale Factor:</strong> {row["SCALE_FACTOR"]:.4f}×</div>',
                         unsafe_allow_html=True)
 
-            with col_actions:
+            if col_actions is not None:
+              with col_actions:
                 st.markdown("<br/>", unsafe_allow_html=True)
                 st.markdown(
                     f'<div style="text-align:center;margin-bottom:1rem;font-size:0.85rem;'
@@ -413,19 +375,14 @@ else:
                     user and submitted_by and
                     str(user).strip().upper() == str(submitted_by).strip().upper()
                 )
-                can_approve_scope = (
-                    is_approver and (
-                        not approver_scopes or  # empty set = all scopes
-                        scope.upper() in approver_scopes
-                    )
-                )
+                can_approve_scope = is_approver and _scope_allowed(scope)
 
                 if is_own_adjustment:
                     st.markdown(
                         f'<div style="background:#FFF3CD;border:1px solid #FFECB5;'
                         f'border-radius:6px;padding:0.6rem;font-size:0.8rem;text-align:center;'
                         f'color:#664D03;margin-bottom:0.5rem">'
-                        f'{icon("alert-triangle", size=13, color="#B45309")} You cannot approve your own adjustment</div>',
+                        f'{icon("alert-triangle", size=13, color=P["warning"])} You cannot approve your own adjustment</div>',
                         unsafe_allow_html=True)
                 elif not can_approve_scope:
                     st.markdown(
@@ -445,20 +402,21 @@ else:
                     audit all happen in the database — the UI checks above are
                     UX only and cannot be bypassed by skipping them."""
                     import json as _json
-                    res = run_query(
-                        f"CALL ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT("
-                        f"'{_esc(adj_id)}', '{_esc(new_status)}', '{_esc(comment)}', "
-                        f"'{_esc(user)}')")
+                    with st.spinner("Applying decision…"):
+                        res = run_query(
+                            f"CALL ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT("
+                            f"'{_esc(adj_id)}', '{_esc(new_status)}', '{_esc(comment)}', "
+                            f"'{_esc(user)}')")
                     try:
                         out = _json.loads(str(res[0][0])) if res else {}
                     except (ValueError, TypeError, IndexError):
                         out = {}
                     if out.get("status") == "ok":
-                        st.session_state["apq_flash"] = (
-                            "success", f"ADJ {adj_short} {new_status.lower()}.")
+                        set_flash("approval", "success",
+                                  f"ADJ {adj_short} {new_status.lower()}.")
                     else:
-                        st.session_state["apq_flash"] = (
-                            "warning",
+                        set_flash(
+                            "approval", "warning",
                             f"ADJ {adj_short} was NOT {new_status.lower()} — "
                             f"{out.get('message', 'the decision was not applied')}")
 
@@ -474,18 +432,133 @@ else:
 
                 st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 
-                # Reject
+                # Reject — a reason is mandatory and the decision is final, so
+                # the button stays disabled until a reason is typed AND the
+                # approver ticks the confirmation.
                 reject_reason = st.text_input(
-                    "Rejection reason", key=f"reject_reason_{adj_id}",
-                    label_visibility="collapsed")
+                    "Rejection reason (required)", key=f"reject_reason_{adj_id}",
+                    placeholder="Rejection reason (required)",
+                    disabled=not actions_enabled)
+                _reject_confirmed = confirm_gate(
+                    "I confirm this rejection", key=f"reject_confirm_{adj_id}",
+                    help="Rejecting is final — the submitter must create a new adjustment.")
+                _reject_ready = (actions_enabled
+                                 and bool((reject_reason or "").strip())
+                                 and _reject_confirmed)
                 if st.button("Reject", key=f"reject_{adj_id}",
                              use_container_width=True,
-                             disabled=not actions_enabled):
+                             disabled=not _reject_ready):
                     try:
-                        _decide("Rejected", reject_reason or "Rejected")
+                        _decide("Rejected", reject_reason.strip())
                         safe_rerun()
                     except Exception as ex:
                         st.error(f"Rejection failed. {friendly_error(ex)}")
+                st.caption("Rejecting is final — the submitter must create a new adjustment.")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# BULK DECISIONS — placed BELOW the list so each item has been seen before it
+# is batch-decided. Every item still goes through SP_DECIDE_ADJUSTMENT, so the
+# 4-eyes rules (approver registration, scope, self-approval) are enforced per
+# adjustment server-side; the loop just saves the clicking.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _bulk_eligible(df):
+    """Rows the current user is allowed to decide (UX filter — the proc
+    re-checks everything)."""
+    out = []
+    if df.empty or not is_approver or not _identity_ok:
+        return out
+    for _, r in df.iterrows():
+        own = (user and str(r.get("SUBMITTED_BY", "")).strip().upper()
+               == user.strip().upper())
+        if _scope_allowed(r.get("PROCESS_TYPE")) and not own:
+            out.append(r)
+    return out
+
+
+def _nz(v):
+    """Display value for a possibly-null cell."""
+    if v is None or (isinstance(v, float) and pd.isna(v)) or str(v).strip() == "":
+        return "—"
+    return str(v)
+
+
+_bulk_rows = _bulk_eligible(df_queue)
+if len(_bulk_rows) >= 2:
+    st.markdown("<br/>", unsafe_allow_html=True)
+    with st.expander(
+            f"Bulk decision — {len(_bulk_rows)} adjustments you can decide",
+            expanded=False):
+        st.caption("Select several adjustments and decide them in one go — "
+                   "each one is still individually enforced (scope, 4-eyes) "
+                   "and audited. Review each one in the list above first.")
+
+        def _bulk_label(i):
+            r = _bulk_rows[i]
+            return (f'{fmt_adj_id(r.get("DIMENSION_ADJ_ID"), adj_id=r.get("ADJ_ID"))} · '
+                    f'{_nz(r.get("PROCESS_TYPE"))} · {_nz(r.get("ADJUSTMENT_TYPE"))} · '
+                    f'COB {_nz(r.get("COBID"))} · entity {_nz(r.get("ENTITY_CODE"))} · '
+                    f'book {_nz(r.get("BOOK_CODE"))} · by {_nz(r.get("SUBMITTED_BY"))}')
+
+        _sel = st.multiselect(
+            "Adjustments to decide", options=list(range(len(_bulk_rows))),
+            format_func=_bulk_label, key="apq_bulk_sel")
+        _bulk_comment = st.text_input(
+            "Comment — optional for approve, required for reject (applied to all selected)",
+            key="apq_bulk_comment",
+            placeholder="Comment / rejection reason (applied to all selected)")
+        _n_sel = len(_sel)
+        if _n_sel:
+            _bulk_confirmed = confirm_gate(
+                f"I have reviewed each of these {_n_sel} adjustments",
+                key="apq_bulk_confirm")
+        else:
+            _bulk_confirmed = False
+            st.caption("Select at least one adjustment to enable the buttons.")
+
+        def _bulk_decide(decision):
+            import json as _json
+            done, skipped = 0, []
+            with st.spinner("Applying decision…"):
+                for i in _sel:
+                    r = _bulk_rows[i]
+                    _lbl = fmt_adj_id(r.get("DIMENSION_ADJ_ID"), adj_id=r.get("ADJ_ID"))
+                    try:
+                        res = run_query(
+                            f"CALL ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT("
+                            f"'{_esc(r.get('ADJ_ID'))}', '{decision}', "
+                            f"'{_esc(_bulk_comment.strip() or f'{decision} (bulk) by {user}')}', "
+                            f"'{_esc(user)}')")
+                        out = _json.loads(str(res[0][0])) if res else {}
+                        if out.get("status") == "ok":
+                            done += 1
+                        else:
+                            skipped.append(f"{_lbl} ({out.get('message', '?')})")
+                    except Exception as ex:
+                        skipped.append(f"{_lbl} ({ex})")
+            msg = f"{done} adjustment(s) {decision.lower()}."
+            if skipped:
+                msg += " Not applied: " + "; ".join(skipped[:5])
+                if len(skipped) > 5:
+                    msg += f" (+{len(skipped) - 5} more)"
+            set_flash("approval",
+                      "success" if done and not skipped else "warning", msg)
+            safe_rerun()
+
+        _bulk_ready = bool(_sel) and _bulk_confirmed
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button(f"Approve selected ({_n_sel})", key="apq_bulk_ok",
+                         type="primary", use_container_width=True,
+                         disabled=not _bulk_ready):
+                _bulk_decide("Approved")
+        with b2:
+            if st.button(f"Reject selected ({_n_sel})", key="apq_bulk_no",
+                         use_container_width=True,
+                         disabled=not (_bulk_ready and _bulk_comment.strip())):
+                _bulk_decide("Rejected")
+        st.caption("Bulk reject needs a comment — it is recorded against every "
+                   "selected adjustment and is final.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # COB RE-OPEN REQUESTS (sign-off lifecycle)
@@ -505,25 +578,35 @@ def _decide_signoff_change(cobid, scope, entity, sub, approve, comment, verb):
     requests. The UI guards are UX only."""
     import json as _json
     decision = "Approved" if approve else "Rejected"
-    res = run_query(
-        f"CALL ADJUSTMENT_APP.SP_DECIDE_SIGNOFF_CHANGE("
-        f"{int(cobid)}, '{_esc(scope)}', '{_esc(entity or chr(42))}', "
-        f"'{_esc(sub or '')}', "
-        f"'{decision}', '{_esc(comment)}', '{_esc(user)}')")
+    with st.spinner("Applying decision…"):
+        res = run_query(
+            f"CALL ADJUSTMENT_APP.SP_DECIDE_SIGNOFF_CHANGE("
+            f"{int(cobid)}, '{_esc(scope)}', '{_esc(entity or chr(42))}', "
+            f"'{_esc(sub or '')}', "
+            f"'{decision}', '{_esc(comment)}', '{_esc(user)}')")
     try:
         out = _json.loads(str(res[0][0])) if res else {}
     except (ValueError, TypeError, IndexError):
         out = {}
     if out.get("status") == "ok":
-        done = (f"{verb} approved — now {out.get('new_status', '?')}"
+        # Status code → user label ("SIGNED_OFF" reads as "Signed off").
+        _new_lbl = signoff_status_label(str(out.get("new_status") or "?"))
+        done = (f"{verb} approved — now {_new_lbl}"
                 if approve else f"{verb} request rejected")
-        st.session_state["apq_flash"] = (
-            "success", f"COB {cobid} / {scope}: {done}.")
+        set_flash("approval", "success", f"COB {cobid} / {scope}: {done}.")
     else:
-        st.session_state["apq_flash"] = (
-            "warning",
+        set_flash(
+            "approval", "warning",
             f"COB {cobid} / {scope} was NOT changed — "
             f"{out.get('message', 'the decision was not applied')}")
+
+
+def _so_meta(code):
+    """SIGNOFF_STATUS_META entry for a status code, tolerant of the stored
+    case (the table is compared with UPPER() everywhere)."""
+    c = str(code or "")
+    return (SIGNOFF_STATUS_META.get(c) or SIGNOFF_STATUS_META.get(c.upper())
+            or SIGNOFF_STATUS_META.get(c.lower()) or {})
 
 
 try:
@@ -551,9 +634,13 @@ else:
         r_ent_tx = ("all entities" if r_ent == "*" else r_ent)                    + (f" / {r_sub}" if r_sub else "")
         r_by     = str(rr["REOPEN_REQUESTED_BY"] or "—")
         r_reason = str(rr["REOPEN_REASON"] or "—")
-        _is_signoff = str(rr["SIGN_OFF_STATUS"]).upper() == "SIGNOFF_REQUESTED"
+        _so_code = str(rr["SIGN_OFF_STATUS"])
+        _is_signoff = _so_code.upper() == "SIGNOFF_REQUESTED"
         r_verb   = "Sign-off" if _is_signoff else "Re-open"
-        _verb_col = "#B45309" if _is_signoff else P["danger"]
+        # Pill colour comes from the shared sign-off palette so the request
+        # reads the same here as on the Sign-Off page.
+        _verb_col = _so_meta(_so_code).get(
+            "color", P["warning"] if _is_signoff else P["danger"])
         with bordered_container():
             c_info, c_act = st.columns([2.4, 1])
             with c_info:
@@ -590,8 +677,7 @@ else:
             with c_act:
                 _own_req = (user and r_by != "—"
                             and user.strip().upper() == r_by.strip().upper())
-                _can_scope = is_approver and (
-                    not approver_scopes or r_scope.upper() in approver_scopes)
+                _can_scope = is_approver and _scope_allowed(r_scope)
                 if _own_req:
                     st.caption(f"You requested this {r_verb.lower()} — another "
                                f"approver must decide it.")
@@ -649,7 +735,7 @@ def _rc_cell(v):
 
 try:
     df_recent = run_query_df("""
-        SELECT h.DIMENSION_ADJ_ID, h.COBID, h.PROCESS_TYPE,
+        SELECT h.ADJ_ID, h.DIMENSION_ADJ_ID, h.COBID, h.PROCESS_TYPE,
                h.ADJUSTMENT_TYPE, h.ENTITY_CODE,
                h.USERNAME AS SUBMITTED_BY,
                sh.NEW_STATUS, sh.CHANGED_BY AS ACTIONED_BY, sh.CHANGED_AT,
@@ -699,7 +785,7 @@ try:
                 _out = str(r.get("NEW_STATUS") or "")
                 _oc = STATUS_COLORS.get(_out, P["grey_700"])
                 _rows.append([
-                    f'<strong>{_htmlmod.escape(str(fmt_adj_id(r.get("DIMENSION_ADJ_ID"))))}</strong>',
+                    f'<strong>{_htmlmod.escape(str(fmt_adj_id(r.get("DIMENSION_ADJ_ID"), adj_id=r.get("ADJ_ID"))))}</strong>',
                     _rc_pill(_htmlmod.escape(_out.upper()), _oc),
                     f'<strong>{"" if pd.isna(r.get("COBID")) else int(r.get("COBID"))}</strong>',
                     _rc_scope_pill(r.get("PROCESS_TYPE")),
@@ -713,9 +799,14 @@ try:
                     # horizontal scrollbar — the one structural difference
                     # vs the clean grids, and scrollbars are where the white
                     # block appears in the users' environment).
+                    # Truncate BEFORE escaping so an entity like &amp; is never
+                    # cut mid-way; the full (escaped) text sits in the title
+                    # attribute for hover.
                     f'<span style="color:{P["grey_700"]};display:inline-block;'
-                    f'max-width:340px;white-space:normal">'
-                    f'{_rc_cell(r.get("COMMENT"))[:160]}</span>',
+                    f'max-width:340px;white-space:normal" '
+                    f'title="{_rc_cell(r.get("COMMENT")).replace(chr(34), "&quot;")}">'
+                    f'{_rc_cell(str(r.get("COMMENT") or "")[:160])}'
+                    f'{"…" if len(str(r.get("COMMENT") or "")) > 160 else ""}</span>',
                 ])
             render_grid(
                 ["Adj", "Outcome", "COB", "Scope", "Type", "Entity",

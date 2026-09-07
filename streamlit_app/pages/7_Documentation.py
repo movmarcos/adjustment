@@ -34,7 +34,7 @@ st.set_page_config(
 
 from utils.styles import (
     inject_css, render_sidebar, section_title,
-    P, SCOPE_CONFIG, STATUS_COLORS, icon, bordered_container,
+    P, SCOPE_CONFIG, icon, bordered_container, status_badge,
 )
 from utils.snowflake_conn import run_query, run_query_df, friendly_error
 
@@ -134,8 +134,12 @@ reports combine them.
 Adjustment categories:
 - Scaling: Flatten (zero the scope), Scale (multiply by a factor), Roll (carry
   another COB's adjusted values forward).
-- Direct: paste/upload a CSV of exact values (Stress/Sensitivity/FRTB); each
-  row is its own adjustment.
+- Direct: exact values. For VaR/Stress/Sensitivity it is PER ROW — paste or
+  upload a CSV and each row becomes its own independent adjustment. For
+  FRTB/FRTBDRC/FRTBRRAO it is PER FILE — one uploaded file = one Direct
+  adjustment (type "Direct"); the columns are the scope's upload template, the
+  COB is read-only and comes from the file's COBID column, and a new file with
+  the same COB + Reference replaces the previous submission.
 - VaR Upload: one CSV in VaR legacy layout = one adjustment; re-upload with the
   same COB+Reference replaces the previous one.
 - Entity Roll: destructive replace of an entity's figures at a COB; always
@@ -158,15 +162,27 @@ signed off, no new adjustments can be submitted for that entity. Sign-off can
 apply immediately (approval optional); re-open ALWAYS needs 4-eyes approval.
 
 Reports hand-off: VaR/Stress -> Power BI refresh (~5 min); Sensitivity/FRTB ->
-dbt rebuild via Control-M. If hand-off fails the numbers are still applied but
-reports may be stale.
+dbt rebuild trigger via Control-M. If hand-off fails the numbers are still
+applied but reports may be stale.
 
-Pages: Home (dashboard), New Adjustment (create/submit), Adjustments (pipeline
-status boxes + stage board + full list with Retry/Delete/Recall), Approval
-Queue (approve/reject, 4-eyes), Sign-Off (sign off / re-open, sync), Admin
-(config, approvers, admins), Logs (runs, activity, errors, sign-off audit),
-Tasks & Cost (task health + serverless cost). Approvers never approve their own
-requests.
+Home / System Status: the System Status indicator follows the selected COB
+range. A Failed adjustment can be ACKNOWLEDGED on Home (Current Errors ->
+"Acknowledge a failure") with a note: System Status returns to HEALTHY while
+the failure stays listed (tagged ACK). If a Retry fails again the failure is
+re-armed and counts again until acknowledged again. Once a failure is handled
+(retried or accepted), acknowledge it on Home so System Status returns to
+healthy.
+
+Pages: Home (dashboard, System Status, acknowledge failures), New Adjustment
+(create/submit), Adjustments (pipeline status boxes + stage board + full list
+with Retry/Delete/Recall), Approval Queue (approve/reject, 4-eyes), Sign-Off
+(sign off — approval optional; request re-open — approval required; sync),
+FRTB Explore (browse the OFFICIAL FRTB fact tables by COB / entity / risk
+class / sensitivity type / book / trade, with summary KPIs, a grid and a CSV
+download of max 1,000 rows whose columns are exactly the FRTB upload template —
+edit the file and re-upload it as a Direct adjustment), Admin (config,
+approvers, admins), Logs (runs, activity, errors, sign-off audit), Tasks & Cost
+(task health + serverless cost). Approvers never approve their own requests.
 """.strip()
 
 
@@ -294,9 +310,12 @@ def _render_ai_assistant() -> None:
         "answers from the engine's live state.</span>", unsafe_allow_html=True)
 
     with bordered_container():
-        _ex = st.session_state.get("_ai_example", "")
+        # No value= : the widget is owned by session state ("ai_q") so an
+        # example chip can pre-fill it before the rerun without the
+        # "value + key" conflict warning.
+        st.session_state.setdefault("ai_q", "")
         q = st.text_input(
-            "Your question", value=_ex, key="ai_q",
+            "Your question", key="ai_q",
             placeholder="e.g. What is the status of adjustment #1234? "
                         "Why is my VaR adjustment blocked? Which COBs are signed off?")
         c1, c2, _ = st.columns([1, 2, 3])
@@ -320,7 +339,7 @@ def _render_ai_assistant() -> None:
         for _c, _q in zip(ec, _examples):
             if _c.button(_q, key=f"ai_ex_{hash(_q) & 0xffff}",
                          use_container_width=True):
-                st.session_state["_ai_example"] = _q
+                st.session_state["ai_q"] = _q
                 try:
                     st.rerun()
                 except AttributeError:
@@ -362,7 +381,7 @@ st.markdown("<br/>", unsafe_allow_html=True)
     "Creating Adjustments",
     "Approvals & Sign-Off",
     "Processing Engine",
-    "Reports (PowerBI)",
+    "Reports (Power BI / dbt)",
     "Troubleshooting",
     "Reference",
 ])
@@ -379,15 +398,16 @@ with tab_overview:
         "fully audited way. Instead of editing fact data directly, you submit an "
         "<strong>adjustment ticket</strong>; the engine validates it, optionally "
         "routes it for approval, applies it to the adjustment tables (never the "
-        "original fact data), and queues a PowerBI report refresh. Every step is "
-        "recorded: who submitted, who approved, when it processed, and when the "
-        "reports picked it up."))
+        "original fact data), and hands the change to reporting — a Power BI "
+        "refresh for VaR/Stress, a dbt rebuild trigger via Control-M for "
+        "Sensitivity/FRTB. Every step is recorded: who submitted, who "
+        "approved, when it processed, and when the reports picked it up."))
 
     _html(_flow([
         ("Submit", "New Adjustment page"),
         ("Approve", "if required / Entity Roll"),
         ("Process", "task polls every 1 min"),
-        ("Reports", "PowerBI refresh queued"),
+        ("Reports", "Power BI refresh or dbt rebuild queued"),
     ]))
 
     section_title("Supported Scopes", "bar-chart")
@@ -414,9 +434,12 @@ with tab_overview:
          "it; <em>Roll</em> carries another COB's adjusted values forward.",
          "No (optional)"],
         ["<strong>Direct Adjustment</strong>",
-         "Paste or upload a CSV of exact values for Stress, Sensitivity or "
-         "FRTB. Each row is validated and submitted as its own, independent "
-         "adjustment.",
+         "Exact values. <em>VaR, Stress, Sensitivity:</em> paste or upload a "
+         "CSV — each row is validated and submitted as its own, independent "
+         "adjustment. <em>FRTB, FRTBDRC, FRTBRRAO:</em> upload one file in the "
+         "scope's upload template — the whole file is one Direct adjustment; "
+         "the COB comes from the file's COBID and a re-upload with the same "
+         "COB + Reference <em>replaces</em> the previous submission.",
          "No (optional)"],
         ["<strong>VaR Upload</strong>",
          "Upload one CSV in VaR's legacy layout — the whole file becomes a "
@@ -433,7 +456,12 @@ with tab_overview:
 
     section_title("Application Pages", "file-text")
     _html(_table(["Page", "What you do there"], [
-        ["<strong>Home</strong>", "Dashboard: KPIs, recent activity, overlap alerts."],
+        ["<strong>Home</strong>",
+         "Dashboard: KPIs, System Status (follows the COB range), recent "
+         "activity, overlap alerts, Current Errors. Once a failure is handled "
+         "(retried or accepted), acknowledge it here (Current Errors → "
+         "<em>Acknowledge a failure</em>, with a note) so System Status "
+         "returns to healthy — the failure stays listed, tagged ACK."],
         ["<strong>New Adjustment</strong>",
          "Create and submit adjustments; request a COB re-open; sign a "
          "re-opened COB off again."],
@@ -445,8 +473,14 @@ with tab_overview:
          "Approvers approve/reject adjustments and COB sign-off / re-open "
          "requests (4-eyes: never your own)."],
         ["<strong>Sign-Off</strong>",
-         "COB sign-off status for everyone; request a sign-off or re-open "
-         "(both approval-gated); sync from the upstream feed."],
+         "COB sign-off status for everyone; sign off (approval optional) or "
+         "request a re-open (approval required); sync from the upstream feed."],
+        ["<strong>FRTB Explore</strong>",
+         "Browse the <em>official</em> FRTB fact tables (SBM, DRC, RRAO) by "
+         "COB, entity, risk class, sensitivity type, book or trade: summary "
+         "KPIs, a grid, and a CSV download (max 1,000 rows) whose columns are "
+         "exactly the FRTB upload template — edit the file and re-upload it "
+         "as a Direct adjustment."],
         ["<strong>Admin</strong>",
          "Restricted: scope config, approvers, page administrators, "
          "notifications, reference."],
@@ -496,14 +530,26 @@ with tab_create:
 
     section_title("Direct Adjustment (paste or upload CSV)", "list")
     _html(_card(
-        "Paste or upload a CSV of exact values for Stress, Sensitivity or "
-        "FRTB (the expected columns are shown on the page). Each row is "
-        "validated independently and becomes its own adjustment — a 200-row "
-        "file submits 200 separate tickets, each with its own USD value, "
-        "not one combined adjustment.<br/><br/>"
-        "There is no reference-based replacement here: to correct a row, "
-        "submit a new one or act on the existing ticket from the "
-        "<strong>Adjustments</strong> page (Retry, Delete, Recall)."))
+        "<strong>VaR, Stress, Sensitivity — per row.</strong> Paste or upload "
+        "a CSV of exact values (the expected columns are shown on the page). "
+        "Each row is validated independently and becomes its own adjustment "
+        "— a 200-row file submits 200 separate tickets, each with its own USD "
+        "value, not one combined adjustment. There is no reference-based "
+        "replacement here: to correct a row, submit a new one or act on the "
+        "existing ticket from the <strong>Adjustments</strong> page (Retry, "
+        "Delete, Recall)."))
+    _html(_card(
+        f'{icon("layers", size=13, color="#7E22CE")} <strong>FRTB, FRTBDRC, '
+        f'FRTBRRAO — per file.</strong> Upload one file in the scope\'s '
+        f'<em>upload template</em> (the same columns the FRTB Explore download '
+        f'produces). The whole file is stored as <strong>one</strong> Direct '
+        f'adjustment (type <em>Direct</em>): the COB is read-only and taken '
+        f'from the file\'s COBID column, and the Reference identifies the '
+        f'submission. Uploading a new file with the same <strong>COB + '
+        f'Reference</strong> <em>replaces</em> the previous submission — the '
+        f'old ticket is marked <em>Replaced</em> and its rows removed. '
+        f'Typical workflow: FRTB Explore → download the rows you need → edit '
+        f'the values → upload here as a Direct adjustment.', "#7E22CE"))
 
     section_title("VaR Upload (CSV file)", "upload")
     _html(_card(
@@ -656,9 +702,11 @@ with tab_processing:
          "Adjustments touching the same data (same COB + overlapping filters) "
          "must not run at once. The oldest proceeds; newer ones are marked "
          "blocked-by and start automatically when the blocker finishes. Direct "
-         "and VaR Upload rows don't overlap-serialise: Direct rows are "
-         "independent per-row adjustments (no dedupe needed); VaR Upload's "
-         "duplicate control is the Reference."],
+         "and VaR Upload rows don't overlap-serialise: per-row Direct "
+         "adjustments (VaR/Stress/Sensitivity) are independent (no dedupe "
+         "needed); file-based submissions (VaR Upload and FRTB Direct files) "
+         "use the COB + Reference as their duplicate control — a re-upload "
+         "replaces the previous one."],
         ["<strong>Claim</strong>",
          "Eligible Pending/Approved rows are atomically promoted to "
          "<em>Running</em> and stamped with the run's unique claim token. Each "
@@ -688,12 +736,12 @@ with tab_processing:
          "Two legs: flatten the target COB's current values, then carry the "
          "source COB's <em>adjusted</em> values forward (× factor). Combined "
          "result at the target = the source COB's adjusted numbers."],
-        ["<strong>Direct</strong>",
+        ["<strong>Direct</strong> (per row: VaR / Stress / Sensitivity)",
          "One header row = one fact row: the codes on the adjustment resolve "
          "directly to dimension keys (case-insensitive, −1 when blank or "
          "unmatched) and its USD value lands straight in the measure column "
          "— no intermediate line items, no FX conversion."],
-        ["<strong>Upload</strong>",
+        ["<strong>Upload</strong> (VaR Upload and FRTB Direct files)",
          "The uploaded file's line items are transformed via the scope's "
          "configured mapping (dimension codes resolved to keys) and inserted "
          "with the adjustment's report ID as one entry. A retry after a "
@@ -799,7 +847,10 @@ with tab_trouble:
          "The processing run hit an error (message shown on the ticket).",
          "Adjustments page → select it → <strong>Retry</strong>. Retries are "
          "safe: anything a failed run wrote is cleaned up first. If it keeps "
-         "failing, the error text says why — contact support with the ADJ id."],
+         "failing, the error text says why — contact support with the ADJ id. "
+         "Once handled (retried or accepted), acknowledge it on Home "
+         "(Current Errors → <em>Acknowledge a failure</em>) so System Status "
+         "returns to healthy; a retry that fails again re-arms it."],
         ["Adjustment stuck in <strong>Running</strong> for hours",
          "The run that claimed it died (timeout, kill). Big Entity Rolls "
          "legitimately run ~20 min — hours means dead.",
@@ -855,10 +906,9 @@ with tab_reference:
         "Superseded":           "Removed by an Entity Roll that rebuilt the entity at that COB.",
         "Deleted":              "Deleted by a user; its rows were removed from the adjustment tables.",
     }
-    srows = []
-    for name, desc in status_desc.items():
-        color = STATUS_COLORS.get(name, P["grey_700"])
-        srows.append([_pill(name, color), desc])
+    # status_badge = the exact badge (colour + icon) used on the Adjustments
+    # grid, so the reference matches what users see elsewhere.
+    srows = [[status_badge(name), desc] for name, desc in status_desc.items()]
     _html(_table(["Status", "Meaning"], srows))
 
     section_title("Key Database Objects", "database")
@@ -866,7 +916,8 @@ with tab_reference:
         ["<code>ADJ_HEADER</code>",
          "Single entry point for every adjustment — one row per ticket, with "
          "status, claim token, and blocking info."],
-        ["<code>ADJ_LINE_ITEM_JSON</code>", "VaR Upload rows (verbatim CSV payload per row)."],
+        ["<code>ADJ_LINE_ITEM_JSON</code>",
+         "VaR Upload and FRTB Direct file rows (verbatim CSV payload per row)."],
         ["<code>ADJ_STATUS_HISTORY</code>", "Append-only audit of every status transition."],
         ["<code>ADJUSTMENTS_SETTINGS</code>",
          "Per-scope config: fact/adjustment/summary tables, metric columns, "

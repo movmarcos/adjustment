@@ -16,6 +16,7 @@ from utils.styles import (
     status_badge, section_title, P, SCOPE_CONFIG, STAGE_CONFIG, ALL_SCOPES,
     STATUS_COLORS, STATUS_ICONS,
     fmt_adj_id, icon, render_activity_grid, SELECTION_UNSUPPORTED, bordered_container,
+    set_flash, render_flash, confirm_gate, ACTION_LABELS,
 )
 from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
                                   safe_rerun, friendly_error)
@@ -25,12 +26,63 @@ render_sidebar()
 
 user = current_user_name()
 
+# Page-level flash key — every action on this page stores its outcome here
+# (set_flash) BEFORE safe_rerun() and it is rendered ONCE, below the header,
+# so it survives the rerun and never appears under a different adjustment.
+_FLASH = "adjustments"
+
+
+def _identity_keys(name: str) -> set:
+    """Comparable forms of an identity (same approach as the Admin page): the
+    viewer name may be an EMAIL while ADJ_ADMINS / SUBMITTED_BY hold Snowflake
+    USERNAMES — compare on the full string AND the local part before '@',
+    both upper-cased."""
+    n = str(name or "").strip().upper()
+    if not n:
+        return set()
+    keys = {n}
+    if "@" in n:
+        keys.add(n.split("@", 1)[0])
+    return keys
+
+
+_me_keys = _identity_keys(user)
+
+
+def _load_is_admin() -> bool:
+    """True when the current user is an active USER entry in ADJ_ADMINS.
+    (ROLE entries need SHOW GRANTS OF ROLE, which only the Admin page
+    resolves — deliberately not replicated here.)"""
+    try:
+        rows = run_query(
+            "SELECT USERNAME, COALESCE(ADMIN_TYPE, 'USER') AS ADMIN_TYPE "
+            "FROM ADJUSTMENT_APP.ADJ_ADMINS WHERE IS_ACTIVE = TRUE")
+    except Exception:
+        try:  # pre-ADMIN_TYPE deployment
+            rows = run_query(
+                "SELECT USERNAME, 'USER' AS ADMIN_TYPE "
+                "FROM ADJUSTMENT_APP.ADJ_ADMINS WHERE IS_ACTIVE = TRUE")
+        except Exception:
+            return False
+    for r in rows or []:
+        if str(r["ADMIN_TYPE"]).upper() != "USER":
+            continue
+        if _identity_keys(r["USERNAME"]) & _me_keys:
+            return True
+    return False
+
+
+if "_adj_is_admin" not in st.session_state:
+    st.session_state["_adj_is_admin"] = _load_is_admin()
+_is_admin = bool(st.session_state["_adj_is_admin"])
+
 st.markdown("## Adjustments")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
     f"Pipeline status at a glance, then all adjustments with full history and "
     f"actions. Tick <em>Only my adjustments</em> to see just yours.</span>",
     unsafe_allow_html=True)
+render_flash(_FLASH)
 st.markdown("<br/>", unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -58,10 +110,11 @@ if not df_pipe.empty:
             if "BLOCKED_BY_ADJ_ID" in df_pipe.columns
             else pd.Series(False, index=df_pipe.index))
     _stage = df_pipe["CURRENT_STAGE"].fillna("")
+    st.caption("Pipeline overview — counts over the last 500 submissions.")
     _boxes = [
-        ("Awaiting Approval", int((_st == "Pending Approval").sum()), "#B45309", "clipboard"),
-        ("In Queue",  int((_st.isin(["Pending", "Approved"]) & ~_blk).sum()), P["warning"], "clock"),
-        ("Blocked",   int((_st.isin(["Pending", "Approved"]) & _blk).sum()),  "#B45309", "pause-circle"),
+        ("Awaiting Approval", int((_st == "Pending Approval").sum()), P["info"], "clipboard"),
+        ("Queued",    int((_st.isin(["Pending", "Approved"]) & ~_blk).sum()), P["warning"], "clock"),
+        ("Blocked",   int((_st.isin(["Pending", "Approved"]) & _blk).sum()),  P["warning"], "pause-circle"),
         ("Running",   int((_st == "Running").sum()),  P["info"],    "zap"),
         ("Failed",    int((_st == "Failed").sum()),   P["danger"],  "x-circle"),
         ("Reports Ready", int(_stage.isin(["Reports Ready", "Rebuild Triggered"]).sum()),
@@ -75,9 +128,11 @@ if not df_pipe.empty:
             f'<div style="font-size:1.6rem;font-weight:800;color:{_col};'
             f'font-variant-numeric:tabular-nums">'
             f'{icon(_ic, size=15, color=_col)} {_val}</div>'
-            f'<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.06em;'
+            f'<div style="font-size:0.75rem;text-transform:uppercase;letter-spacing:.06em;'
             f'color:{P["grey_700"]};margin-top:3px">{_lbl}</div></div>',
             unsafe_allow_html=True)
+    st.caption("Blocked = waiting for an overlapping adjustment to finish first "
+               "— no action needed.")
 
     # Awaiting Approval links to the Approval Queue page (decisions live there).
     if int((_st == "Pending Approval").sum()) > 0:
@@ -97,6 +152,14 @@ if not df_pipe.empty:
             "PBI Queued", "PBI Refreshing", "Reports Ready",
             "Rebuild Pending", "Rebuild Triggered",
         ]
+        # Stage codes are data values (matched against CURRENT_STAGE); the
+        # labels shown to users are plain English.
+        _STAGE_LABELS = {
+            "PBI Queued": "Power BI refresh queued",
+            "PBI Refreshing": "Power BI refreshing",
+            "Rebuild Pending": "dbt rebuild pending",
+            "Rebuild Triggered": "dbt rebuild triggered",
+        }
         _bh = '<div class="tracker-board">'
         for _stg in _BOARD_STAGES:
             _cfg = STAGE_CONFIG.get(_stg, {"color": "#9E9E9E", "icon": "", "bg": "#F5F5F5"})
@@ -113,11 +176,11 @@ if not df_pipe.empty:
                         f'<div class="bi-scope">{icon(_sccfg.get("icon", ""), size=11)} {_sc}</div>'
                         f'<div class="bi-detail">{_det}</div></div>')
             if _cnt > 10:
-                _ih += (f'<div style="font-size:0.65rem;color:{P["grey_700"]};'
+                _ih += (f'<div style="font-size:0.75rem;color:{P["grey_700"]};'
                         f'text-align:center;padding:4px">+ {_cnt - 10} more</div>')
             _bh += (f'<div class="board-col" style="border-top-color:{_cfg["color"]}">'
                     f'<div class="board-col-header" style="color:{_cfg["color"]}">'
-                    f'{icon(_cfg["icon"], size=13)} {_stg}'
+                    f'{icon(_cfg["icon"], size=13)} {_STAGE_LABELS.get(_stg, _stg)}'
                     f'<span class="board-col-count" style="color:{_cfg["color"]}">{_cnt}</span>'
                     f'</div>{_ih}</div>')
         _bh += '</div>'
@@ -200,9 +263,9 @@ with bordered_container():
     with f3:
         # Option values are the raw ADJUSTMENT_TYPE codes (used directly in the SQL
         # filter); the label maps the cryptic "EROL" code to "Entity Roll".
-        _type_labels = {"Flatten": "Flatten", "Scale": "Scale", "Roll": "Roll",
-                        "Direct": "Direct Adjustment", "Upload": "VaR Upload",
-                        "EROL": "Entity Roll"}
+        _type_labels = {"Flatten": "Flatten", "Scale": "Scale", "Roll": "Roll"}
+        for _code in ("Direct", "Upload", "EROL"):
+            _type_labels[_code] = ACTION_LABELS.get(_code, _code)
         filter_type = st.multiselect(
             "Type", list(_type_labels.keys()),
             default=[], key="mw_type",
@@ -230,7 +293,7 @@ with bordered_container():
     fc1, fc2 = st.columns([5, 1])
     with fc1:
         st.caption(f"{_applied_n} filter(s) applied." if _applied_n else
-                   "No filters applied — showing the latest 200 adjustments.")
+                   "No filters applied — showing the newest 200 adjustments.")
     with fc2:
         if st.button("Clear filters", key="adj_clear_btn", use_container_width=True,
                      disabled=not _applied_n):
@@ -348,7 +411,7 @@ def _clone_jsonable(v):
         return str(v)
 
 
-def _do_clone(src_adj_id, new_cob) -> None:
+def _do_clone(src_adj_id, new_cob, requires_approval: bool = False) -> None:
     """Create a NEW adjustment at `new_cob` from an existing one's header
     (and, for VaR Upload / legacy Direct rows that carry line items, a copy
     of them). Goes through SP_SUBMIT_ADJUSTMENT like any submission —
@@ -362,8 +425,8 @@ def _do_clone(src_adj_id, new_cob) -> None:
         src_rows = run_query(
             f"SELECT * FROM ADJUSTMENT_APP.ADJ_HEADER WHERE ADJ_ID = '{_sid}'")
         if not src_rows:
-            st.session_state["adj_action_flash"] = (
-                "warning", "Clone failed — the source adjustment was not found.")
+            set_flash(_FLASH, "warning",
+                      "Clone failed — the source adjustment was not found.")
             safe_rerun()
             return
         src = dict(src_rows[0].as_dict()) if hasattr(src_rows[0], "as_dict") \
@@ -382,9 +445,9 @@ def _do_clone(src_adj_id, new_cob) -> None:
             "source_cobid":    int(new_cob) if src_srcc == src_cob else src_srcc,
             "scale_factor":    _clone_jsonable(src.get("SCALE_FACTOR")) or 1.0,
             "adjustment_occurrence": "ADHOC",
-            "requires_approval": False,
+            "requires_approval": bool(requires_approval),
             "reason": (f"Cloned from ADJ "
-                       f"{fmt_adj_id(src.get('DIMENSION_ADJ_ID')) if src.get('DIMENSION_ADJ_ID') else '#' + _sid[:8]}"
+                       f"{fmt_adj_id(src.get('DIMENSION_ADJ_ID'), adj_id=str(src_adj_id))}"
                        f" (COB {src_cob}): {src.get('REASON') or ''}")[:990],
         }
         for col, key in _CLONE_FIELDS.items():
@@ -413,9 +476,8 @@ def _do_clone(src_adj_id, new_cob) -> None:
             _copied = int(rows[0][0]) if rows else 0
             if _copied == 0 and (_adj_action == "Upload" or str(src.get("PROCESS_TYPE"))
                                  in ("FRTB", "FRTBDRC", "FRTBRRAO")):
-                st.session_state["adj_action_flash"] = (
-                    "warning", "Clone failed — the source upload has no line "
-                               "items to copy.")
+                set_flash(_FLASH, "warning",
+                          "Clone failed — the source upload has no line items to copy.")
                 safe_rerun()
                 return
             if _copied > 0:
@@ -428,10 +490,9 @@ def _do_clone(src_adj_id, new_cob) -> None:
         out = _json.loads(str(raw)) if isinstance(raw, str) else (raw or {})
         status = out.get("status")
         if status in ("Pending", "Pending Approval", "Approved"):
-            st.session_state["adj_action_flash"] = (
-                "success",
-                f"Cloned to COB {new_cob} — new adjustment created with "
-                f"status '{status}'. {out.get('message', '')}")
+            set_flash(_FLASH, "success",
+                      f"Cloned to COB {new_cob} — new adjustment created with "
+                      f"status '{status}'. {out.get('message', '')}")
         else:
             if copied_line_items_for:
                 try:
@@ -439,9 +500,8 @@ def _do_clone(src_adj_id, new_cob) -> None:
                               f"WHERE ADJ_ID = '{copied_line_items_for}'")
                 except Exception:
                     pass
-            st.session_state["adj_action_flash"] = (
-                "warning",
-                f"Clone was not accepted — {out.get('message', status or 'no response')}")
+            set_flash(_FLASH, "warning",
+                      f"Clone was not accepted — {out.get('message', status or 'no response')}")
     except Exception as ex:
         if copied_line_items_for:
             try:
@@ -449,17 +509,17 @@ def _do_clone(src_adj_id, new_cob) -> None:
                           f"WHERE ADJ_ID = '{copied_line_items_for}'")
             except Exception:
                 pass
-        st.session_state["adj_action_flash"] = (
-            "warning", f"Clone failed. {friendly_error(ex)}")
+        set_flash(_FLASH, "warning", f"Clone failed. {friendly_error(ex)}")
     safe_rerun()
 
 
 def render_adj_card(row, expanded=False):
     """Render one adjustment's detail + actions (used as the grid's detail panel)."""
     adj_id      = row.get("ADJ_ID", "?")
-    adj_label   = fmt_adj_id(row.get("DIMENSION_ADJ_ID"))
+    adj_label   = fmt_adj_id(row.get("DIMENSION_ADJ_ID"), adj_id=adj_id)
     scope       = str(row.get("PROCESS_TYPE", ""))
     adj_type    = str(row.get("ADJUSTMENT_TYPE", ""))
+    type_label  = ACTION_LABELS.get(adj_type, adj_type)
     run_status  = str(row.get("RUN_STATUS", ""))
     entity      = str(row.get("ENTITY_CODE", "")) or "—"
     book        = str(row.get("BOOK_CODE", "")) or "—"
@@ -472,13 +532,16 @@ def render_adj_card(row, expanded=False):
 
     with st.expander(
         f'ADJ {adj_label} · {scope} · '
-        f'{adj_type} · {run_status} · {record_cnt} rows',
+        f'{type_label} · {run_status} · {record_cnt} rows',
         expanded=expanded,
     ):
         col_info, col_meta = st.columns([2, 1])
 
         with col_info:
             st.markdown(status_badge(run_status), unsafe_allow_html=True)
+            if run_status == "Pending" and not bool(row.get("IS_DELETED")):
+                st.caption("Queued — the pipeline picks this up within a minute. "
+                           "Delete it now if it should not run.")
 
             # Lifecycle progress bar
             if not df_track.empty:
@@ -533,7 +596,9 @@ def render_adj_card(row, expanded=False):
                 ("Source COB",   str(row.get("SOURCE_COBID", "—")) if row.get("SOURCE_COBID") else "—"),
                 ("Started",      start_date),
                 ("Ended",        process_date),
-                ("Occurrence",   str(row.get("ADJUSTMENT_OCCURRENCE", "—"))),
+                ("Occurrence",   {"ADHOC": "One-off"}.get(
+                                     str(row.get("ADJUSTMENT_OCCURRENCE") or "").upper(),
+                                     str(row.get("ADJUSTMENT_OCCURRENCE") or "—"))),
             ]
             # Report status (for Processed adjustments)
             if run_status == "Processed" and not df_track.empty:
@@ -548,9 +613,7 @@ def render_adj_card(row, expanded=False):
                     _dbt_trigger = tr.get("DBT_TRIGGER_TIME")
                     _rs_time = (_dbt_trigger or _pbi_completed
                                 or _pbi_started or _pbi_queued)
-                    _rs_time_str = (_rs_time.strftime("%d %b %H:%M")
-                                    if hasattr(_rs_time, "strftime") and str(_rs_time) != "NaT"
-                                    else "")
+                    _rs_time_str = fmt_user_dt(_rs_time, "%d %b %H:%M")
 
                     _rs_icons = {
                         "Reports Ready": "check-circle",
@@ -562,18 +625,18 @@ def render_adj_card(row, expanded=False):
                     _rs_messages = {
                         "Reports Ready": f"Reports Ready ({_rs_time_str})",
                         "Refreshing": f"Refreshing ({_rs_time_str})",
-                        "Queued": "Queued — next ControlM cycle ~5 min",
+                        "Queued": "Queued — picked up by the next scheduled rebuild (~5 min)",
                         "Awaiting": "Awaiting report refresh",
                         "Rebuild Triggered":
-                            f"Rebuild triggered ({_rs_time_str}) — "
-                            "Control-M will run the dbt refresh",
+                            f"dbt rebuild triggered ({_rs_time_str}) — "
+                            "reports refresh on the next scheduled rebuild",
                     }
                     _rs_colors = {
-                        "Reports Ready": "#15803D",
-                        "Refreshing": "#1D4ED8",
-                        "Queued": "#B45309",
+                        "Reports Ready": P["success"],
+                        "Refreshing": P["info"],
+                        "Queued": P["warning"],
                         "Awaiting": "#64748B",
-                        "Rebuild Triggered": "#15803D",
+                        "Rebuild Triggered": P["success"],
                     }
                     color = _rs_colors.get(_rs_status, "#64748B")
                     _rs_icon = icon(_rs_icons.get(_rs_status, ""), size=12, color=color)
@@ -616,12 +679,6 @@ def render_adj_card(row, expanded=False):
             st.caption("This adjustment has been deleted — actions are disabled.")
         act_cols = st.columns(4)   # deleted rows have RUN_STATUS='Deleted' → no buttons render
 
-        # Flash from the previous action — set before the rerun (a message
-        # rendered just before st.rerun() is destroyed by it).
-        _flash = st.session_state.pop("adj_action_flash", None)
-        if _flash:
-            (st.success if _flash[0] == "success" else st.warning)(_flash[1])
-
         _aid = str(adj_id).replace("\\", "\\\\").replace("'", "''")
         _st  = str(run_status).replace("\\", "\\\\").replace("'", "''")
         _usr = str(user).replace("\\", "\\\\").replace("'", "''")
@@ -649,7 +706,7 @@ def render_adj_card(row, expanded=False):
                   AND IS_DELETED = FALSE
             """))
             if n == 0:
-                st.session_state["adj_action_flash"] = ("warning", _STALE_MSG)
+                set_flash(_FLASH, "warning", _STALE_MSG)
                 return False
             run_query(f"""
                 INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
@@ -687,7 +744,7 @@ def render_adj_card(row, expanded=False):
                 if n == 0:
                     run_query("ROLLBACK")
                     txn = False
-                    st.session_state["adj_action_flash"] = ("warning", _STALE_MSG)
+                    set_flash(_FLASH, "warning", _STALE_MSG)
                     return
                 run_query(f"""
                     INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
@@ -727,11 +784,10 @@ def render_adj_card(row, expanded=False):
                                 """)
                 run_query("COMMIT")
                 txn = False
-                st.session_state["adj_action_flash"] = (
-                    "success",
-                    "Adjustment deleted."
-                    + (" Its rows were removed from the adjustment tables."
-                       if dim_adj_id is not None else ""))
+                set_flash(_FLASH, "success",
+                          "Adjustment deleted."
+                          + (" Its rows were removed from the adjustment tables."
+                             if dim_adj_id is not None else ""))
             except Exception as ex:
                 if txn:
                     try:
@@ -740,30 +796,59 @@ def render_adj_card(row, expanded=False):
                         pass
                 st.error(f"Delete failed — nothing was removed. {friendly_error(ex)}")
 
+        def _signoff_blocked() -> bool:
+            """True when the row's COB is signed off (or a re-open is pending)
+            for its scope — for this entity or for the whole scope ('*').
+            Deleting would silently change signed-off numbers, so the app
+            asks for a re-open first (same gate SP_SUBMIT_ADJUSTMENT applies)."""
+            try:
+                _cob = int(row.get("COBID"))
+            except (TypeError, ValueError):
+                return False
+            _pt = str(row.get("PROCESS_TYPE") or "").replace("\\", "\\\\").replace("'", "''")
+            _en = str(row.get("ENTITY_CODE") or "").replace("\\", "\\\\").replace("'", "''")
+            try:
+                rows = run_query(f"""
+                    SELECT COUNT(*) AS N
+                    FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
+                    WHERE COBID = {_cob}
+                      AND UPPER(PROCESS_TYPE) = UPPER('{_pt}')
+                      AND ENTITY_CODE IN ('{_en}', '*')
+                      AND UPPER(SIGN_OFF_STATUS) IN ('SIGNED_OFF', 'REOPEN_REQUESTED')
+                """)
+                return bool(rows and int(rows[0][0]) > 0)
+            except Exception:
+                return False   # gate unavailable → SP-level checks still apply
+
         def _delete_button(container) -> None:
             with container:
+                _owner = bool(_identity_keys(row.get("SUBMITTED_BY")) & _me_keys)
+                if not (_owner or _is_admin):
+                    st.caption("Only the person who submitted this adjustment "
+                               "(or an administrator) can delete it.")
+                    return
+                if _signoff_blocked():
+                    st.markdown(
+                        f'<div style="font-size:0.85rem;color:{P["warning"]}">'
+                        f'{icon("lock", size=13, color=P["warning"])} '
+                        f'COB {row.get("COBID")} is signed off for {scope} — '
+                        f'request a re-open on the Sign-Off page first.</div>',
+                        unsafe_allow_html=True)
+                    return
                 _extra = (" and remove its processed rows from the adjustment "
                           "tables and reports" if run_status == "Processed" else "")
-                confirmed = st.checkbox(
+                confirmed = confirm_gate(
                     f"Confirm — permanently delete this adjustment{_extra}",
-                    key=f"delcf_{adj_id}", value=False)
+                    key=f"delcf_{adj_id}")
                 if st.button("Delete", key=f"del_{adj_id}", use_container_width=True,
                              disabled=not confirmed):
                     _do_delete()
                     safe_rerun()
 
         if run_status == "Pending":
+            # No "Submit for Approval" here: approval is chosen at submission
+            # time and a Pending row is already queued for the pipeline.
             _delete_button(act_cols[0])
-            with act_cols[1]:
-                if st.button("Submit for Approval", key=f"approv_{adj_id}",
-                             use_container_width=True):
-                    try:
-                        if _transition("Pending Approval", comment="Submitted for approval"):
-                            st.session_state["adj_action_flash"] = (
-                                "success", "Submitted for approval.")
-                        safe_rerun()
-                    except Exception as ex:
-                        st.error(f"Submit for approval failed. {friendly_error(ex)}")
 
         elif run_status == "Failed":
             with act_cols[0]:
@@ -773,9 +858,9 @@ def render_adj_card(row, expanded=False):
                         if _transition("Pending",
                                        extra_set=", ERRORMESSAGE = NULL, CLAIM_TOKEN = NULL",
                                        comment="Retrying after failure"):
-                            st.session_state["adj_action_flash"] = (
-                                "success", "Queued for retry — the pipeline picks "
-                                           "it up within a minute.")
+                            set_flash(_FLASH, "success",
+                                      "Queued for retry — the pipeline picks it up "
+                                      "within a minute.")
                         safe_rerun()
                     except Exception as ex:
                         st.error(f"Retry failed. {friendly_error(ex)}")
@@ -790,8 +875,7 @@ def render_adj_card(row, expanded=False):
                              use_container_width=True):
                     try:
                         if _transition("Pending", comment="Recalled by submitter"):
-                            st.session_state["adj_action_flash"] = (
-                                "success", "Recalled to Pending.")
+                            set_flash(_FLASH, "success", "Recalled to Pending.")
                         safe_rerun()
                     except Exception as ex:
                         st.error(f"Recall failed. {friendly_error(ex)}")
@@ -811,6 +895,26 @@ def render_adj_card(row, expanded=False):
                 _clone_raw = st.text_input(
                     "Target COB (YYYYMMDD)", key=f"clone_cob_{adj_id}",
                     placeholder="e.g. 20260729").strip()
+            # Default "Request approval" to what the source did: if its history
+            # ever passed through Pending Approval, the clone asks for it too.
+            _appr_key = f"_clone_appr_default_{adj_id}"
+            if _appr_key not in st.session_state:
+                _src_needed_approval = False
+                try:
+                    _hrows = run_query(f"""
+                        SELECT COUNT(*) AS N FROM ADJUSTMENT_APP.ADJ_STATUS_HISTORY
+                        WHERE ADJ_ID = '{_aid}' AND NEW_STATUS = 'Pending Approval'
+                    """)
+                    _src_needed_approval = bool(_hrows and int(_hrows[0][0]) > 0)
+                except Exception:
+                    pass
+                st.session_state[_appr_key] = _src_needed_approval
+            with cc2:
+                _clone_appr = st.checkbox(
+                    "Request approval", key=f"clone_appr_{adj_id}",
+                    value=bool(st.session_state[_appr_key]),
+                    help="Send the clone to the Approval Queue before it runs. "
+                         "Pre-ticked when the original went through approval.")
             _clone_cob = None
             if _clone_raw:
                 from datetime import datetime as _dt
@@ -832,7 +936,7 @@ def render_adj_card(row, expanded=False):
                 if st.button("Clone", key=f"clone_btn_{adj_id}",
                              use_container_width=True,
                              disabled=_clone_cob is None):
-                    _do_clone(adj_id, _clone_cob)
+                    _do_clone(adj_id, _clone_cob, requires_approval=_clone_appr)
 
 
 # ── Browse + act ───────────────────────────────────────────────────────────────
@@ -858,6 +962,9 @@ with bordered_container():
     with _rh1:
         section_title(f"Results — {shown} of {total}", "table")
         st.caption("Select a row to view its details and actions.")
+        if total >= 200:
+            st.caption("Showing the newest 200 matching adjustments — narrow "
+                       "the filters to see older ones.")
     with _rh2:
         st.download_button(
             "⬇ Export CSV", view_df.to_csv(index=False).encode("utf-8-sig"),
@@ -876,26 +983,49 @@ selected = render_activity_grid(
 # Older Streamlit-in-Snowflake runtimes lack native row-selection; fall back to
 # a selectbox picker (same no-tabs single-grid design, just a different control).
 if selected is SELECTION_UNSUPPORTED:
-    def _opt_label(i):
-        if i is None:
+    # Options are ADJ_IDs (not positions) and the labels carry NO status: after
+    # an action the status changes, so a status-bearing label would change the
+    # option set and reset the picker. The chosen ADJ_ID is remembered in
+    # session_state and the index recomputed on every rerun, so the same
+    # adjustment stays open after Delete / Retry / Recall / Clone.
+    _pick_ids = (view_df["ADJ_ID"].astype(str).tolist()
+                 if "ADJ_ID" in view_df.columns else [])
+    _pick_pos = {}
+    for _i, _pid in enumerate(_pick_ids):
+        _pick_pos.setdefault(_pid, _i)
+    _pick_options = [None] + list(_pick_pos.keys())
+    _remembered = st.session_state.get("_adj_pick_id")
+    _pick_index = (_pick_options.index(_remembered)
+                   if _remembered in _pick_pos else 0)
+
+    def _opt_label(aid):
+        if aid is None:
             return "— select an adjustment to view details / actions —"
-        r = view_df.iloc[i]
-        return (f'{fmt_adj_id(r.get("DIMENSION_ADJ_ID"))} · {r.get("PROCESS_TYPE")} · '
-                f'{r.get("ADJUSTMENT_TYPE")} · {r.get("RUN_STATUS")} · '
-                f'{r.get("ENTITY_CODE") or "—"}')
+        r = view_df.iloc[_pick_pos[aid]]
+        _t = str(r.get("ADJUSTMENT_TYPE") or "")
+        _created = fmt_user_dt(r.get("SUBMITTED_AT"), "%d %b %H:%M")
+        parts = [
+            fmt_adj_id(r.get("DIMENSION_ADJ_ID"), adj_id=aid),
+            str(r.get("PROCESS_TYPE") or "—"),
+            ACTION_LABELS.get(_t, _t) or "—",
+            f"COB {r.get('COBID')}" if r.get("COBID") else "—",
+            str(r.get("ENTITY_CODE") or "—"),
+        ]
+        if _created:
+            parts.append(_created)
+        return " · ".join(parts)
+
     # Breathing room between the grid and the picker so they don't crowd.
     st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
     choice = st.selectbox(
         "Open an adjustment for details / actions",
-        options=[None] + list(range(len(view_df))),
+        options=_pick_options, index=_pick_index,
         format_func=_opt_label, key="adj_pick")
-    selected = view_df.iloc[choice].to_dict() if choice is not None else None
+    st.session_state["_adj_pick_id"] = choice
+    selected = (view_df.iloc[_pick_pos[choice]].to_dict()
+                if choice is not None else None)
 
 # ── Bulk retry — all FAILED rows in the current filtered view ────────────────
-_bulk_flash = st.session_state.pop("adj_bulk_flash", None)
-if _bulk_flash:
-    (st.success if _bulk_flash[0] == "success" else st.warning)(_bulk_flash[1])
-
 _failed_view = (view_df[view_df["RUN_STATUS"] == "Failed"]
                 if "RUN_STATUS" in view_df.columns else view_df.iloc[0:0])
 if len(_failed_view) >= 2:
@@ -945,8 +1075,7 @@ if len(_failed_view) >= 2:
                 if _skipped:
                     msg += (f" {_skipped} skipped (status changed or the "
                             f"update failed).")
-                st.session_state["adj_bulk_flash"] = (
-                    "success" if _ok and not _skipped else "warning", msg)
+                set_flash(_FLASH, "success" if _ok and not _skipped else "warning", msg)
                 safe_rerun()
 
 if selected is not None:

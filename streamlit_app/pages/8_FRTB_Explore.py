@@ -152,15 +152,30 @@ with bordered_container():
     # OFFICIAL layouts differ from the _ADJUSTMENT DDLs this page was
     # first written against, and one bad identifier kills the data query
     # while the summary still works — an empty grid with healthy KPIs.
-    _probe = _q(f"SELECT * FROM {cfg['table']} LIMIT 0")
-    avail = set(map(str, _probe.columns)) if _probe is not None else set()
+    # Fetched ONCE per FRTB type per session (session_state — no st.cache_data
+    # on SiS): the probe and the template are metadata, not data, and
+    # re-running them on every widget change was ~2 of the ~7 queries.
+    _meta_key = f"fx_meta_{cfg['code']}"
+    _meta = st.session_state.get(_meta_key)
+    if not isinstance(_meta, dict) or not _meta.get("avail"):
+        _probe = _q(f"SELECT * FROM {cfg['table']} LIMIT 0")
+        _meta = {
+            "avail": sorted(map(str, _probe.columns))
+                     if _probe is not None else [],
+            "tmpl_cols": _template_cols(cfg["scope"]),
+        }
+        # Only remember a SUCCESSFUL probe — a transient failure must not
+        # pin the fallback layout for the rest of the session.
+        if _meta["avail"]:
+            st.session_state[_meta_key] = _meta
+    avail = set(_meta["avail"])
     book_col = ("BUSINESS_ORGANIZATION_CODE"
                 if "BUSINESS_ORGANIZATION_CODE" in avail else "BOOK_CODE")
     # Output layout = the scope's upload template. Each template column is
     # taken from the table when it exists there, from its fact-side name
     # otherwise, and exported EMPTY when the table has neither — the header
     # must still match the template so the file re-uploads as-is.
-    tmpl_cols = _template_cols(cfg["scope"])
+    tmpl_cols = list(_meta["tmpl_cols"])
     sel_exprs, _renamed, _empty = [], [], []
     if tmpl_cols and avail:
         for c in tmpl_cols:
@@ -178,30 +193,32 @@ with bordered_container():
         sel_cols = list(tmpl_cols)
     else:
         # No schema row (or the probe failed): reporting columns, as before.
-        if not tmpl_cols:
-            st.warning(f"No upload template found for scope {cfg['scope']} "
-                       f"(ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA) — showing the "
-                       f"reporting columns instead; this export will NOT "
-                       f"match the upload layout.")
+        if not tmpl_cols or not avail:
+            if not avail:
+                _why = (f"Could not read the columns of {cfg['table']} — "
+                        f"showing the reporting columns; the export will "
+                        f"NOT match the upload layout.")
+            else:
+                _why = (f"No upload template found for scope {cfg['scope']} "
+                        f"(ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA) — showing the "
+                        f"reporting columns instead; this export will NOT "
+                        f"match the upload layout.")
+            st.warning(_why)
         sel_cols = [c for c in cfg["columns"]
                     if (book_col if c == "BUSINESS_ORGANIZATION_CODE" else c)
                     in avail] if avail else cfg["columns"]
         sel_cols = [book_col if c == "BUSINESS_ORGANIZATION_CODE" else c
                     for c in sel_cols]
         sel_exprs = list(sel_cols)
-    if _renamed:
-        st.caption("Filled from the fact column: " + ", ".join(_renamed))
-    if _empty:
-        st.caption("Template column(s) this table does not hold — exported "
-                   "empty, fill in before uploading if needed: "
-                   + ", ".join(_empty))
+    # (Column-mapping notes are shown under the Results title, see below.)
 
     df_cobs = _q(f"SELECT DISTINCT COBID FROM {cfg['table']} "
                  f"ORDER BY COBID DESC LIMIT 60")
     cob_opts = ([int(c) for c in df_cobs["COBID"].dropna().tolist()]
                 if not df_cobs.empty else [])
     with f2:
-        cobid = st.selectbox("COB *", cob_opts, key=f"fx_cob_{cfg['code']}") \
+        cobid = st.selectbox("COB *", cob_opts, key=f"fx_cob_{cfg['code']}",
+                             help="Required — pick the business date first.") \
             if cob_opts else None
         if not cob_opts:
             st.caption("No data found in this table.")
@@ -234,8 +251,7 @@ with bordered_container():
                {cfg.get('sens_col') or 'NULL'} AS SENS,
                {book_col} AS BOOKDIM
         FROM {cfg['table']}
-        WHERE {_gate}
-        LIMIT 5000""")
+        WHERE {_gate}""")
     risks, senss, books = [], [], []
     if not df_dim.empty:
         risks = sorted(df_dim["RISK"].dropna().unique().tolist())
@@ -273,8 +289,8 @@ with bordered_container():
                                        "risk / sensitivity types.")
     with gcols[-1]:
         trade = st.text_input("Trade code (contains)", key="fx_trade",
-                              help="Matches RAPTOR_TRADE_CODE, case-"
-                                   "insensitive. Leave empty for all trades.")
+                              help="Matches the trade code, case-insensitive. "
+                                   "Leave empty for all trades.")
 
 where = [_gate]
 if sel_risk:
@@ -290,51 +306,96 @@ if trade.strip():
     where.append(f"RAPTOR_TRADE_CODE ILIKE '%{_esc(trade.strip())}%'")
 where_sql = " AND ".join(where)
 
-# ── Summary ──────────────────────────────────────────────────────────────────
-df_sum = _q(f"""
-    SELECT COUNT(*) AS N_ROWS,
-           COUNT(DISTINCT RAPTOR_TRADE_CODE) AS N_TRADES,
-           COUNT(DISTINCT {book_col}) AS N_BOOKS,
-           SUM({cfg['measure']}) AS TOTAL_USD
-    FROM {cfg['table']}
-    WHERE {where_sql}""")
-n_rows = int(df_sum["N_ROWS"].iloc[0]) if not df_sum.empty else 0
-n_trades = int(df_sum["N_TRADES"].iloc[0]) if not df_sum.empty else 0
-n_books = int(df_sum["N_BOOKS"].iloc[0]) if not df_sum.empty else 0
-total = float(df_sum["TOTAL_USD"].iloc[0] or 0) if not df_sum.empty else 0.0
+# ── Summary + data — one spinner so a slow SBM selection shows feedback ─────
+_order = [c for c in ("ENTITY_CODE", book_col) if c in avail] \
+    if avail else ["ENTITY_CODE", book_col]
+df_book_counts = pd.DataFrame()
+with st.spinner("Loading FRTB rows…"):
+    df_sum = _q(f"""
+        SELECT COUNT(*) AS N_ROWS,
+               COUNT(DISTINCT RAPTOR_TRADE_CODE) AS N_TRADES,
+               COUNT(DISTINCT {book_col}) AS N_BOOKS,
+               SUM({cfg['measure']}) AS TOTAL_USD
+        FROM {cfg['table']}
+        WHERE {where_sql}""")
+    n_rows = int(df_sum["N_ROWS"].iloc[0]) if not df_sum.empty else 0
+    n_trades = int(df_sum["N_TRADES"].iloc[0]) if not df_sum.empty else 0
+    n_books = int(df_sum["N_BOOKS"].iloc[0]) if not df_sum.empty else 0
+    total = (float(df_sum["TOTAL_USD"].iloc[0] or 0)
+             if not df_sum.empty else 0.0)
+    # Data (capped at MAX_ROWS for both the grid and the CSV).
+    df_data = pd.DataFrame()
+    if n_rows:
+        df_data = _q(f"""
+            SELECT {", ".join(sel_exprs)}
+            FROM {cfg['table']}
+            WHERE {where_sql}
+            ORDER BY {", ".join(_order) or "1"}
+            LIMIT {MAX_ROWS}""")
+    # Only when capped: per-book totals, to tell complete books from the
+    # one(s) the cap cut through (rows are ordered by entity then book).
+    if n_rows > MAX_ROWS:
+        df_book_counts = _q(f"""
+            SELECT {book_col} AS BOOKDIM, COUNT(*) AS N
+            FROM {cfg['table']}
+            WHERE {where_sql}
+            GROUP BY 1""")
 
 st.markdown(
     '<div style="display:grid;grid-template-columns:repeat(4,1fr);'
     'gap:0.8rem">'
     + kpi_card("Matching rows", f"{n_rows:,}",
                f"showing/downloading up to {MAX_ROWS:,}")
-    + kpi_card("Trades", f"{n_trades:,}", "distinct RAPTOR_TRADE_CODE")
-    + kpi_card("Books", f"{n_books:,}", f"distinct {book_col}")
+    + kpi_card("Trades", f"{n_trades:,}", "distinct trades")
+    + kpi_card("Books", f"{n_books:,}", "distinct books")
     + kpi_card(cfg["measure_label"], f"{total:,.2f}",
-               f"sum over all {n_rows:,} matching rows")
+               (f"sum of {cfg['measure']} — compare only within one "
+                f"sensitivity type") if cfg["code"] == "SBM"
+               else f"sum over all {n_rows:,} matching rows")
     + "</div>", unsafe_allow_html=True)
 st.markdown("<br/>", unsafe_allow_html=True)
 
 if n_rows == 0:
     st.info("No rows match the current filters.")
     st.stop()
-if n_rows > MAX_ROWS:
-    st.warning(f"{n_rows:,} rows match — only the first {MAX_ROWS:,} are "
-               f"shown and downloaded. Narrow the filters to get a "
-               f"complete extract.")
-
-# ── Data (capped at MAX_ROWS for both the grid and the CSV) ─────────────────
-_order = [c for c in ("ENTITY_CODE", book_col) if c in avail] \
-    if avail else ["ENTITY_CODE", book_col]
-df_data = _q(f"""
-    SELECT {", ".join(sel_exprs)}
-    FROM {cfg['table']}
-    WHERE {where_sql}
-    ORDER BY {", ".join(_order) or "1"}
-    LIMIT {MAX_ROWS}""")
 # Header exactly as the template, even when the query returned nothing.
 if list(df_data.columns) != sel_cols:
     df_data = df_data.reindex(columns=sel_cols)
+
+if n_rows > MAX_ROWS:
+    _msg = (f"{n_rows:,} rows match — only the first {MAX_ROWS:,} are shown "
+            f"and downloaded. Rows are sorted by entity then book — the last "
+            f"book in the file may be incomplete; filter to fewer books "
+            f"before uploading.")
+    # Which books made it whole: compare the per-book count in the capped
+    # frame against the true per-book count.
+    _bk_out = next((c for c in ("BOOK_CODE", book_col) if c in df_data.columns),
+                   None)
+    if _bk_out and not df_book_counts.empty and not df_data.empty:
+        _have = df_data[_bk_out].dropna().astype(str).value_counts()
+        _true = (df_book_counts.dropna(subset=["BOOKDIM"])
+                 .assign(BOOKDIM=lambda d: d["BOOKDIM"].astype(str))
+                 .set_index("BOOKDIM")["N"])
+        _complete = sorted(b for b, n in _have.items()
+                           if int(n) >= int(_true.get(b, 0)))
+        _partial = sorted(b for b, n in _have.items()
+                          if int(n) < int(_true.get(b, 0)))
+        _missing = int(len(_true) - len(_have))
+        if _complete:
+            _msg += (f"\n\n**Complete in this file:** "
+                     + ", ".join(_complete[:40])
+                     + (f" … (+{len(_complete) - 40})" if len(_complete) > 40 else ""))
+        if _partial:
+            _msg += ("\n\n**Possibly partial (cut by the cap):** "
+                     + ", ".join(_partial))
+        if _missing > 0:
+            _msg += f"\n\n{_missing:,} matching book(s) are not in the file at all."
+    elif _bk_out and not df_data.empty:
+        _last = str(df_data[_bk_out].dropna().astype(str).iloc[-1]) \
+            if df_data[_bk_out].notna().any() else ""
+        if _last:
+            _msg += f"\n\nPossibly partial: **{_last}** (last book in the file)."
+    st.warning(_msg)
 
 # File name that encodes the selection: FRTB_DRC_COB20260626_MUSI_GIRR.csv
 def _tag(values, all_count):
@@ -362,6 +423,15 @@ with h2:
         df_data.to_csv(index=False), fname,
         help_text=f"Downloads exactly what is shown below ({fname}) — "
                   f"same columns as the {cfg['code']} upload template.")
+
+if _renamed or _empty:
+    with st.expander("About the columns in this file"):
+        if _renamed:
+            st.caption("Filled from the fact column: " + ", ".join(_renamed))
+        if _empty:
+            st.caption("Template column(s) this table does not hold — "
+                       "exported empty, fill in before uploading if needed: "
+                       + ", ".join(_empty))
 
 render_data_grid(df_data, height=440)
 st.caption(f"Source: {cfg['table']} · COB {int(cobid)} · file: {fname}")

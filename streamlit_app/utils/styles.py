@@ -8,6 +8,7 @@ one elevation scale (sm/md/lg). Icons are inline Lucide-style SVGs — no
 external requests, so they render inside the Streamlit-in-Snowflake sandbox
 (external origins like Google Fonts are blocked there).
 """
+import re
 import streamlit as st
 import pandas as pd
 
@@ -33,7 +34,8 @@ P = {
     "accent":     "#0F172A",
     "grey_900":   "#0F172A",
     "grey_700":   "#475569",
-    "grey_400":   "#94A3B8",
+    "grey_400":   "#94A3B8",   # borders / icons only — too light for text
+    "grey_500":   "#64748B",   # muted TEXT (captions, placeholders, unset values)
     "grey_100":   "#F1F5F9",
     "white":      "#FFFFFF",
     "bg":         "#F6F7F9",
@@ -97,6 +99,11 @@ _ICON_PATHS = {
     "timer":          '<line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/><circle cx="12" cy="14" r="8"/>',
     "undo":           '<path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/>',
     "list":           '<line x1="8" x2="21" y1="6" y2="6"/><line x1="8" x2="21" y1="12" y2="12"/><line x1="8" x2="21" y1="18" y2="18"/><line x1="3" x2="3.01" y1="6" y2="6"/><line x1="3" x2="3.01" y1="12" y2="12"/><line x1="3" x2="3.01" y1="18" y2="18"/>',
+    "mail":           '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
+    "dollar-sign":    '<line x1="12" x2="12" y1="2" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>',
+    "help-circle":    '<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>',
+    "unlock":         '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>',
+    "filter":         '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>',
 }
 
 
@@ -120,14 +127,14 @@ STATUS_COLORS = {
     "Pending":              "#B45309",
     "Pending Approval":     "#1D4ED8",
     "Approved":             "#0F766E",
-    "Running":              "#1D4ED8",
+    "Running":              "#7E22CE",   # purple — distinct from Pending Approval blue
     "Processed":            "#15803D",
     "Failed":               "#DC2626",
     "Rejected":             "#B91C1C",
-    "Rejected - SignedOff": "#7E22CE",
-    "Replaced":             "#9333EA",   # superseded by a newer upload (same COB+Reference)
-    "Superseded":           "#475569",   # removed by an Entity Roll rebuild
-    "Deleted":              "#64748B",
+    "Rejected - SignedOff": "#9F1239",   # rose — red family, distinct from Rejected
+    "Replaced":             "#C026D3",   # fuchsia — superseded by a newer upload (same COB+Reference)
+    "Superseded":           "#0E7490",   # cyan — removed by an Entity Roll rebuild
+    "Deleted":              "#64748B",   # neutral grey
 }
 
 # Values are icon() names (previously emoji)
@@ -308,7 +315,8 @@ def inject_css():
         --brand-dk:   {P["primary_dk"]};
         --ink:        {P["grey_900"]};
         --ink-2:      {P["grey_700"]};
-        --ink-3:      {P["grey_400"]};
+        --ink-3:      {P["grey_400"]};   /* borders, icons, dots — NOT text */
+        --ink-muted:  {P["grey_500"]};   /* muted text: captions, placeholders */
         --bg:         {P["bg"]};
         --card:       {P["card"]};
         --border:     {P["border"]};
@@ -418,7 +426,8 @@ def inject_css():
     [data-testid="stSidebar"] [data-testid="stSidebarNav"] a:hover {{
         background: rgba(255,255,255,.06) !important;
     }}
-    [data-testid="stSidebar"] [data-testid="stSidebarNav"] a[aria-selected="true"] {{
+    [data-testid="stSidebar"] [data-testid="stSidebarNav"] a[aria-selected="true"],
+    [data-testid="stSidebar"] [data-testid="stSidebarNav"] a[aria-current="page"] {{
         background: rgba(213,0,50,.28) !important;
         box-shadow: inset 3px 0 0 var(--brand) !important;
     }}
@@ -458,7 +467,7 @@ def inject_css():
         box-shadow: var(--sh-sm);
         transition: box-shadow .15s ease-out, transform .15s ease-out;
     }}
-    .mcard:hover {{ box-shadow: var(--sh-lg); }}
+    .mcard.is-link:hover {{ box-shadow: var(--sh-lg); }}
 
     /* KPI cards */
     .kpi-grid {{
@@ -477,20 +486,20 @@ def inject_css():
         overflow: hidden;
         transition: box-shadow .15s ease-out;
     }}
-    .kpi-card:hover {{ box-shadow: var(--sh-md); }}
+    .kpi-link .kpi-card:hover, .kpi-card.is-link:hover {{ box-shadow: var(--sh-md); }}
     .kpi-card::before {{
         content: ""; position: absolute; left: 0; top: 0; bottom: 0;
         width: 3px; background: var(--border);
     }}
     .kpi-card .kpi-label {{
-        font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+        font-size: 0.75rem; font-weight: 600; text-transform: uppercase;
         letter-spacing: .07em; color: var(--ink-2); margin-bottom: 0.35rem;
     }}
     .kpi-card .kpi-value {{
         font-size: 1.8rem; font-weight: 700; color: var(--ink); line-height: 1.05;
         font-variant-numeric: tabular-nums;
     }}
-    .kpi-card .kpi-sub {{ font-size: 0.72rem; color: var(--ink-2); margin-top: 0.3rem; }}
+    .kpi-card .kpi-sub {{ font-size: 0.75rem; color: var(--ink-2); margin-top: 0.3rem; }}
     .kpi-card.kpi-primary::before {{ background: {P["primary"]}; }}
     .kpi-card.kpi-warning::before {{ background: {P["warning"]}; }}
     .kpi-card.kpi-success::before {{ background: {P["success"]}; }}
@@ -502,7 +511,7 @@ def inject_css():
     .status-badge {{
         display: inline-flex; align-items: center; gap: 5px;
         padding: 2px 10px; border-radius: 999px;
-        font-size: 0.72rem; font-weight: 600; letter-spacing: .03em;
+        font-size: 0.76rem; font-weight: 600; letter-spacing: .03em;
         white-space: nowrap; border: 1px solid transparent;
     }}
 
@@ -513,7 +522,7 @@ def inject_css():
         box-shadow: var(--sh-sm);
         transition: box-shadow .15s ease-out;
     }}
-    .adj-card:hover {{ box-shadow: var(--sh-md); }}
+    .adj-card.is-link:hover {{ box-shadow: var(--sh-md); }}
     .adj-card-header {{
         display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;
     }}
@@ -525,7 +534,7 @@ def inject_css():
     .filter-chip {{
         background: {P["grey_100"]}; border: 1px solid var(--border);
         border-radius: 999px; padding: 1px 9px;
-        font-size: 0.71rem; color: var(--ink-2); font-weight: 500;
+        font-size: 0.75rem; color: var(--ink-2); font-weight: 500;
     }}
 
     /* Overlap warning */
@@ -554,7 +563,7 @@ def inject_css():
     }}
     .tl-status {{ font-size: 0.78rem; font-weight: 700; text-transform: uppercase;
                   display: inline-flex; align-items: center; gap: 5px; }}
-    .tl-meta {{ font-size: 0.73rem; color: var(--ink-2); margin-top: 2px; }}
+    .tl-meta {{ font-size: 0.75rem; color: var(--ink-2); margin-top: 2px; }}
     .tl-comment {{ font-size: 0.8rem; color: var(--ink); margin-top: 4px; font-style: italic; }}
 
     /* Queue items */
@@ -582,7 +591,7 @@ def inject_css():
     .pipe-node .pn-icon {{ display: flex; justify-content: center; color: var(--ink-2); }}
     .pipe-node.active .pn-icon {{ color: {P["info"]}; }}
     .pipe-node.done .pn-icon {{ color: {P["success"]}; }}
-    .pipe-node .pn-label {{ font-size: 0.7rem; font-weight: 600; margin-top: 5px; color: var(--ink-2); }}
+    .pipe-node .pn-label {{ font-size: 0.75rem; font-weight: 600; margin-top: 5px; color: var(--ink-2); }}
     .pipe-arrow {{ color: var(--ink-3); display: flex; align-items: center; padding: 0 4px; flex-shrink: 0; }}
 
     /* Step indicator */
@@ -626,7 +635,7 @@ def inject_css():
 
     /* Home KPI cards — clickable */
     .kpi-link {{ text-decoration: none; color: inherit; display: block; }}
-    .kpi-link:hover .kpi-card {{
+    .kpi-link:hover .kpi-card, .kpi-card.is-link:hover {{
         transform: translateY(-1px);
         box-shadow: 0 4px 14px rgba(15,23,42,.12);
     }}
@@ -634,7 +643,7 @@ def inject_css():
     /* Tags */
     .tag {{
         display: inline-block; background: {P["info_lt"]}; color: {P["info"]};
-        border-radius: 999px; padding: 1px 8px; font-size: 0.7rem; font-weight: 600;
+        border-radius: 999px; padding: 1px 8px; font-size: 0.75rem; font-weight: 600;
     }}
     .tag.recurring {{ background: {P["purple_lt"]}; color: {P["purple"]}; }}
 
@@ -767,26 +776,26 @@ def inject_css():
     .sec-num {{
         width: 21px; height: 21px; border-radius: 50%; flex-shrink: 0;
         background: {P["grey_100"]}; border: 1px solid #CBD5E1;
-        color: {P["grey_700"]}; font-size: 0.7rem; font-weight: 700;
+        color: {P["grey_700"]}; font-size: 0.75rem; font-weight: 700;
         display: flex; align-items: center; justify-content: center;
         margin-top: 1px;
     }}
     .sec-title {{
-        font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+        font-size: 0.75rem; font-weight: 700; text-transform: uppercase;
         letter-spacing: .08em; color: var(--ink); line-height: 1.6;
     }}
     .sec-help {{ font-size: 0.76rem; color: var(--ink-2); margin-top: -1px; }}
 
     /* Ticket summary value states + completion progress */
     .ticket .kv .v.v-set {{ color: var(--ink); font-weight: 700; }}
-    .ticket .kv .v.v-unset {{ color: var(--ink-3); font-weight: 500; font-style: italic; }}
+    .ticket .kv .v.v-unset {{ color: var(--ink-muted); font-weight: 500; font-style: italic; }}
     .ticket .t-prog {{
         margin-top: 0.85rem; border-top: 1px solid var(--border);
         padding-top: 0.7rem;
     }}
     .prog-head {{
         display: flex; justify-content: space-between; align-items: center;
-        font-size: 0.64rem; font-weight: 700; text-transform: uppercase;
+        font-size: 0.75rem; font-weight: 700; text-transform: uppercase;
         letter-spacing: .07em; color: var(--ink-2); margin-bottom: 6px;
     }}
     .prog-head b {{ color: var(--ink); font-variant-numeric: tabular-nums; }}
@@ -893,15 +902,15 @@ def inject_css():
         border: 2px solid var(--border);
     }}
     .lc-label {{
-        font-size: 0.62rem;
+        font-size: 0.75rem;
         font-weight: 600;
         margin-top: 3px;
         text-align: center;
         white-space: nowrap;
     }}
     .lc-time {{
-        font-size: 0.58rem;
-        color: var(--ink-3);
+        font-size: 0.7rem;
+        color: var(--ink-muted);
         margin-top: 1px;
         text-align: center;
         font-variant-numeric: tabular-nums;
@@ -934,7 +943,7 @@ def inject_css():
         border-top: 3px solid var(--border);
     }}
     .board-col-header {{
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: .05em;
@@ -947,7 +956,7 @@ def inject_css():
         background: white;
         border-radius: 999px;
         padding: 1px 7px;
-        font-size: 0.68rem;
+        font-size: 0.75rem;
         font-weight: 700;
         font-variant-numeric: tabular-nums;
     }}
@@ -957,16 +966,16 @@ def inject_css():
         border-radius: var(--r-sm);
         padding: 0.4rem 0.6rem;
         margin-bottom: 0.4rem;
-        font-size: 0.72rem;
+        font-size: 0.75rem;
         box-shadow: var(--sh-sm);
     }}
     .board-item .bi-scope {{
         font-weight: 600;
-        font-size: 0.68rem;
+        font-size: 0.75rem;
     }}
     .board-item .bi-detail {{
         color: var(--ink-2);
-        font-size: 0.65rem;
+        font-size: 0.75rem;
         margin-top: 2px;
     }}
 
@@ -1024,7 +1033,7 @@ def inject_css():
     }}
     [data-testid="stMainBlockContainer"] input::placeholder,
     [data-testid="stMainBlockContainer"] textarea::placeholder {{
-        color: var(--ink-3) !important;
+        color: var(--ink-muted) !important;
     }}
 
     /* Pop-out menus (selectbox / multiselect / date picker) render in a portal
@@ -1089,10 +1098,10 @@ def inject_css():
     }}
     /* UNSCOPED on purpose: [data-testid="stMainBlockContainer"] does not
        exist on the SiS 1.26 runtime, so rules scoped to it never applied
-       there — which is why input borders stayed invisible. #C9D0DA is a
-       step stronger than --border so fields read clearly on white cards. */
+       there — which is why input borders stayed invisible. #94A3B8 (grey_400)
+       is well above --border so fields read clearly on white cards. */
     [data-baseweb="input"], [data-baseweb="textarea"] {{
-        border: 1px solid #C9D0DA !important;
+        border: 1px solid {P["grey_400"]} !important;
         background-color: var(--card) !important;
     }}
     [data-baseweb="input"]:focus-within,
@@ -1100,7 +1109,7 @@ def inject_css():
         border-color: var(--brand) !important;
     }}
     input::placeholder, textarea::placeholder {{
-        color: var(--ink-3) !important;
+        color: var(--ink-muted) !important;
     }}
     /* Number-input +/- steppers sit inside the same wrapper — keep them light */
     .stNumberInput button {{
@@ -1109,7 +1118,7 @@ def inject_css():
     }}
     [data-testid="stMainBlockContainer"] input::placeholder,
     [data-testid="stMainBlockContainer"] textarea::placeholder {{
-        color: var(--ink-3) !important;
+        color: var(--ink-muted) !important;
     }}
 
     /* Select / multiselect surfaces + their dropdown menus — same wrapper
@@ -1117,7 +1126,7 @@ def inject_css():
     .stSelectbox [data-baseweb="select"] > div,
     .stMultiSelect [data-baseweb="select"] > div {{
         background-color: var(--card) !important;
-        border: 1px solid #C9D0DA !important;
+        border: 1px solid {P["grey_400"]} !important;
     }}
     .stSelectbox [data-baseweb="select"]:focus-within > div,
     .stMultiSelect [data-baseweb="select"]:focus-within > div {{
@@ -1163,9 +1172,9 @@ def inject_css():
     .stButton button:disabled, .stDownloadButton button:disabled,
     .stFormSubmitButton button:disabled {{
         background-color: {P["grey_100"]} !important;
-        color: var(--ink-3) !important;
+        color: var(--ink-muted) !important;
     }}
-    .stButton button:disabled p {{ color: var(--ink-3) !important; }}
+    .stButton button:disabled p {{ color: var(--ink-muted) !important; }}
 
     /* Tabs — a clear SEGMENTED CONTROL so it reads unmistakably as tabs:
        a bordered track holding pill tabs; the active tab is a raised white
@@ -1214,7 +1223,7 @@ def inject_css():
     }}
     .mgrid {{ width: 100%; border-collapse: separate; border-spacing: 0; }}
     .mgrid th {{
-        text-align: left; padding: 8px 10px; font-size: 0.7rem;
+        text-align: left; padding: 8px 10px; font-size: 0.75rem;
         font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
         color: {P["grey_700"]}; background: {P["card"]};
         border-bottom: 2px solid {P["border"]}; white-space: nowrap;
@@ -1230,7 +1239,7 @@ def inject_css():
     .mgrid td.nw {{ white-space: nowrap; }}
     /* full-width day/section divider row inside a grid */
     .mgrid tr.mgrid-div td {{
-        padding: 9px 12px 3px; font-size: 0.7rem; font-weight: 700;
+        padding: 9px 12px 3px; font-size: 0.75rem; font-weight: 700;
         text-transform: uppercase; letter-spacing: .06em;
         color: {P["grey_700"]}; background: {P["bg"]};
     }}
@@ -1441,7 +1450,12 @@ def section_title(text: str, icon_name: str = ""):
     prefix = ""
     if icon_name:
         svg = icon(icon_name, size=13)
-        prefix = f"{svg} " if svg else f"{icon_name} "
+        if svg:
+            prefix = f"{svg} "
+        elif not re.fullmatch(r"[a-z0-9-]+", icon_name):
+            # Legacy emoji / free text — render as-is. An unknown icon
+            # IDENTIFIER (e.g. "mail") is never printed to the user.
+            prefix = f"{icon_name} "
     st.markdown(f'<div class="section-title">{prefix}{text}</div>', unsafe_allow_html=True)
 
 
@@ -1459,21 +1473,108 @@ def fmt_currency(v) -> str:
     return f"${v:+,.0f}"
 
 
-def fmt_adj_id(dimension_adj_id, prefix: str = "#") -> str:
+def fmt_adj_id(dimension_adj_id, prefix: str = "#", adj_id=None) -> str:
     """Business-facing adjustment identifier.
 
-    Shows DIMENSION_ADJ_ID (the numeric DIMENSION.ADJUSTMENT id) — never the
-    internal ADJ_ID hash. Returns "Pending" while the adjustment has not been
-    processed yet (DIMENSION_ADJ_ID is set by SP_PROCESS_ADJUSTMENT, so it is
-    NULL for Pending/Running/Failed rows)."""
-    import pandas as pd
+    Shows DIMENSION_ADJ_ID (the numeric DIMENSION.ADJUSTMENT id). While the
+    adjustment has not been processed yet (DIMENSION_ADJ_ID is set by
+    SP_PROCESS_ADJUSTMENT, so it is NULL for Pending/Running/Failed rows) it
+    falls back to the first 8 chars of the internal ADJ_ID when one is
+    supplied, otherwise an em dash. It never returns a status word — the
+    Status column owns that."""
+    def _missing():
+        if isinstance(adj_id, str) and adj_id.strip():
+            return f"{prefix}{adj_id.strip()[:8]}"
+        return "—"
     if dimension_adj_id is None or (isinstance(dimension_adj_id, float) and pd.isna(dimension_adj_id)):
-        return "Pending"
+        return _missing()
     try:
         return f"{prefix}{int(dimension_adj_id)}"
     except (TypeError, ValueError):
         s = str(dimension_adj_id).strip()
-        return f"{prefix}{s}" if s else "Pending"
+        return f"{prefix}{s}" if s else _missing()
+
+
+# ── Flash messages that survive safe_rerun() ─────────────────────────────────
+
+_FLASH_KINDS = ("success", "warning", "error", "info")
+
+
+def set_flash(page_key: str, kind: str, message: str) -> None:
+    """Queue a one-shot message for `page_key`; shown by render_flash() on the
+    next run. kind: success | warning | error | info."""
+    if kind not in _FLASH_KINDS:
+        kind = "info"
+    st.session_state[f"_flash_{page_key}"] = {"kind": kind, "message": message}
+
+
+def render_flash(page_key: str) -> None:
+    """Pop and render the flash queued for `page_key`. No-op if none. Call
+    once near the top of the page so a message set before safe_rerun()
+    survives the rerun."""
+    flash = st.session_state.pop(f"_flash_{page_key}", None)
+    if not flash:
+        return
+    kind = flash.get("kind", "info")
+    message = flash.get("message", "")
+    fn = {"success": st.success, "warning": st.warning,
+          "error": st.error, "info": st.info}.get(kind, st.info)
+    fn(message)
+
+
+def confirm_gate(label: str, key: str, help: str = None) -> bool:
+    """Explicit acknowledgement checkbox that gates an irreversible button —
+    the button is rendered `disabled=not confirm_gate(...)`."""
+    return bool(st.checkbox(label, key=key, help=help, value=False))
+
+
+# ── Adjustment-type (ADJUSTMENT_TYPE) codes → business labels ───────────────
+# Matches the filter labels on the Adjustments and Approval Queue pages.
+
+ACTION_LABELS = {
+    "Direct":     "Direct Adjustment",
+    "Upload":     "VaR Upload",
+    "EROL":       "Entity Roll",
+    "EntityRoll": "Entity Roll",
+    "Scale":      "Scale",
+    "Flatten":    "Flatten",
+    "Roll":       "Roll",
+}
+
+
+def action_label(code) -> str:
+    """Business label for an ADJUSTMENT_TYPE code; unknown codes pass through."""
+    if code is None or code != code:
+        return "—"
+    return ACTION_LABELS.get(str(code), str(code))
+
+
+# ── COB sign-off status codes (ADJ_SIGNOFF_STATUS.SIGN_OFF_STATUS) ──────────
+# Palette: the day's GOAL is to close the COB — SIGNED OFF (done) is GREEN,
+# OPEN / RE-OPENED (work outstanding) are RED, anything awaiting a decision
+# is ORANGE. `blocks` = submissions blocked while in this state.
+
+SIGNOFF_STATUS_META = {
+    "OPEN":              {"label": "OPEN",              "color": P["danger"],  "bg": P["danger_lt"],  "blocks": False},
+    "REOPENED":          {"label": "RE-OPENED",         "color": P["danger"],  "bg": P["danger_lt"],  "blocks": False},
+    "SIGNOFF_REQUESTED": {"label": "SIGN-OFF REQUESTED", "color": "#B45309",   "bg": P["warning_lt"], "blocks": True},
+    "REOPEN_REQUESTED":  {"label": "RE-OPEN REQUESTED",  "color": "#B45309",   "bg": P["warning_lt"], "blocks": True},
+    "SIGNED_OFF":        {"label": "SIGNED OFF",        "color": P["success"], "bg": P["success_lt"], "blocks": True},
+}
+
+
+def signoff_status_label(code: str) -> str:
+    """Business label for a sign-off status code; unknown codes pass through
+    upper-cased (never blank)."""
+    if code is None:
+        return "—"
+    c = str(code).strip().upper()
+    meta = SIGNOFF_STATUS_META.get(c)
+    return meta["label"] if meta else (c or "—")
+
+
+# Admin page: scope pills tooltip
+SCOPE_LABEL_HELP = "FRTB covers FRTBDRC and FRTBRRAO"
 
 
 def render_step_bar(current_step: int, steps: list):
@@ -1532,7 +1633,7 @@ def render_filter_chips(row: dict):
     if chips:
         st.markdown(f'<div class="adj-filters">{"".join(chips)}</div>', unsafe_allow_html=True)
     else:
-        st.markdown('<span style="font-size:0.78rem;color:#94A3B8">All records (no filters)</span>',
+        st.markdown(f'<span style="font-size:0.78rem;color:{P["grey_500"]}">All records (no filters)</span>',
                     unsafe_allow_html=True)
 
 
@@ -1671,7 +1772,7 @@ def render_lifecycle_bar(track_row: dict):
                 conn_class = "failed"
             else:
                 dot_class = "upcoming"
-                label_color = "#94A3B8"
+                label_color = P["grey_500"]
                 conn_class = "upcoming"
         elif i < current_idx:
             dot_class = "completed"
@@ -1683,7 +1784,7 @@ def render_lifecycle_bar(track_row: dict):
             conn_class = "upcoming"
         else:
             dot_class = "upcoming"
-            label_color = "#94A3B8"
+            label_color = P["grey_500"]
             conn_class = "upcoming"
 
         if dot_class == "completed":
@@ -1715,14 +1816,9 @@ ACTIVITY_GRID_COLS = [
     "Records", "Created", "Started", "Ended", "Processing Time",
 ]
 
-STATUS_STYLE = {
-    "Processed":        f"color:{P['success']};font-weight:600",
-    "Failed":           f"color:{P['danger']};font-weight:600",
-    "Running":          f"color:{P['info']};font-weight:600",
-    "Pending":          f"color:{P['warning']};font-weight:600",
-    "Approved":         "color:#00897B;font-weight:600",
-    "Pending Approval": f"color:{P['info']};font-weight:600",
-}
+# Derived from STATUS_COLORS so every status (all 11) gets the same hue in
+# the grids as in status_badge().
+STATUS_STYLE = {k: f"color:{v};font-weight:600" for k, v in STATUS_COLORS.items()}
 
 
 def _fmt_duration(seconds):
@@ -1779,11 +1875,12 @@ def build_activity_grid_df(df_source):
     dur_secs = (end - start).dt.total_seconds()
 
     out = pd.DataFrame({
-        "Adj ID":          col("DIMENSION_ADJ_ID").apply(fmt_adj_id),
+        "Adj ID":          [fmt_adj_id(d, adj_id=(a if isinstance(a, str) else None))
+                            for d, a in zip(col("DIMENSION_ADJ_ID"), col("ADJ_ID"))],
         "COB":             col("COBID").apply(_grid_int_str),
         "Source COB":      col("SOURCE_COBID").apply(_grid_int_str),
         "Scope":           col("PROCESS_TYPE").fillna("—").astype(str),
-        "Type":            col("ADJUSTMENT_TYPE").fillna("—").astype(str),
+        "Type":            col("ADJUSTMENT_TYPE").apply(action_label),
         "Status":          col("RUN_STATUS").fillna("—").astype(str),
         "Deleted":         col("IS_DELETED").apply(lambda v: "Deleted" if (v is not None and v == v and bool(v)) else ""),
         "Entity":          col("ENTITY_CODE").fillna("—").astype(str),
@@ -2100,7 +2197,7 @@ def render_sidebar():
             <text x="90" y="52" font-family="Arial,Helvetica,sans-serif"
                   font-size="38" font-weight="700" fill="#ffffff" letter-spacing="3">MUFG</text>
           </svg>
-          <div style="font-size:0.67rem;font-weight:600;text-transform:uppercase;
+          <div style="font-size:0.75rem;font-weight:600;text-transform:uppercase;
             letter-spacing:.1em;color:rgba(255,255,255,0.4);margin-top:5px;padding-left:1px">
             Adjustment Engine
           </div>
@@ -2138,7 +2235,7 @@ def render_sidebar():
             f'<div class="sidebar-user-footer">'
             f'{icon("user", size=16, color="rgba(255,255,255,0.5)", valign="0")}'
             f'<div>'
-            f'<div style="font-size:0.6rem;font-weight:700;text-transform:uppercase;'
+            f'<div style="font-size:0.75rem;font-weight:700;text-transform:uppercase;'
             f'letter-spacing:.1em;color:rgba(255,255,255,0.38);margin-bottom:2px">'
             f'Logged in as</div>'
             f'<div style="font-size:0.82rem;font-weight:600;color:rgba(255,255,255,0.88)">'

@@ -516,6 +516,7 @@ def _do_submit() -> dict:
                 out = json.loads(str(raw)) if isinstance(raw, str) else (raw or {})
             except Exception as exc:
                 out = {"status": "Error", "created": 0, "message": str(exc)}
+            submitted_sig = wiz.get("_direct_sig")
             try:
                 _delete_direct_batch(batch_id)   # no-op when the SP consumed it
             except Exception:
@@ -528,22 +529,31 @@ def _do_submit() -> dict:
             created  = int(out.get("created") or 0)
             rejected = int(out.get("rejected_signoff") or 0)
             if out.get("status") == "Error" or not created:
-                return {"status": "Error",
+                return {"status": "Error", "created": 0, "rejected": rejected,
                         "message": out.get("message",
                                            "Batch submission failed.")}
-            # Sign-off rejections must never read as clean success (their
-            # headers exist for audit, but carry no numbers).
+            # Headers now exist server-side. Remember the batch signature so
+            # the SAME input (still sitting in the paste box / row builder)
+            # can never be re-staged and submitted a second time — that was
+            # how a partial batch produced duplicates on the second Submit.
+            wiz["_direct_submitted_sig"] = submitted_sig
+            noun = "adjustment" if created == 1 else "adjustments"
+            # A partial batch (some headers created, some rows rejected by
+            # sign-off) IS a success for the rows that went through: report
+            # it as such, with both counts, instead of an Error that invited
+            # a re-submit of everything.
             if rejected:
                 rej_rows = out.get("rejected_rows") or []
                 shown = ", ".join(str(r) for r in rej_rows[:10])
                 more  = (f" (+{len(rej_rows) - 10} more)"
                          if len(rej_rows) > 10 else "")
-                return {"status": "Error",
-                        "message": f"Created {created} Direct adjustment(s), "
-                                   f"but {rejected} row(s) were rejected by "
-                                   f"sign-off (rows {shown}{more})."}
+                return {"status": out.get("status"),
+                        "created": created, "rejected": rejected,
+                        "message": f"{created} created · {rejected} rejected "
+                                   f"by sign-off (rows {shown}{more})."}
             return {"status": out.get("status"),
-                    "message": f"Created {created} Direct adjustment(s)."}
+                    "created": created, "rejected": 0,
+                    "message": f"Created {created} Direct {noun}."}
 
         payload = _build_payload()
 
@@ -757,7 +767,7 @@ OCC_BTN_ICONS = {
 }
 
 
-def _int_input(label, key, value, placeholder="e.g. 20260328"):
+def _int_input(label, key, value, placeholder="e.g. 20260328", help=None):
     """Compact YYYYMMDD date input returning int, or None when empty/invalid.
 
     Strict validation: a transposed digit used to pass as a "valid" COB
@@ -766,7 +776,7 @@ def _int_input(label, key, value, placeholder="e.g. 20260328"):
     (the completion checklist treats None as missing)."""
     from datetime import datetime as _dt
     raw = st.text_input(label, key=_k(key), value=str(value or ""),
-                        placeholder=placeholder).strip()
+                        placeholder=placeholder, help=help).strip()
     if not raw:
         return None
     if not raw.isdigit() or len(raw) != 8:
@@ -783,27 +793,38 @@ def _int_input(label, key, value, placeholder="e.g. 20260328"):
 
 def _float_input(label, key, value, min_v=-10.0, max_v=100.0,
                  help=None, placeholder="e.g. 1.05"):
-    """Type-only numeric input (no +/- steppers) returning a clamped float.
+    """Type-only numeric input (no +/- steppers) returning a float, or None
+    when the box is empty, not a number, or out of range.
 
     Unlike st.number_input, st.text_input has no stepper buttons, so it avoids
-    the per-click rerun lag that makes +/- unusable in Snowsight. Invalid or
-    out-of-range entries surface an inline error and fall back to the last value.
-    """
-    default = float(value if value is not None else 1.0)
-    shown = ("%.4f" % default).rstrip("0").rstrip(".")
+    the per-click rerun lag that makes +/- unusable in Snowsight. An invalid
+    entry used to be silently replaced by 1 / clamped into range — which then
+    submitted a factor the user never typed. Now it surfaces an inline error
+    and returns None, and the completion checklist treats None as missing.
+    A comma decimal separator (1,05) is accepted. The raw text is kept in
+    wiz so the user's entry (and its error) survive the rerun."""
+    import math as _math
+    raw_state = f"_{key}_raw_text"
+    if wiz.get(raw_state) is not None:
+        shown = str(wiz[raw_state])
+    elif value is None:
+        shown = ""
+    else:
+        shown = ("%.4f" % float(value)).rstrip("0").rstrip(".")
     raw = st.text_input(label, key=_k(key), value=shown,
                         help=help, placeholder=placeholder)
-    s = raw.strip()
+    wiz[raw_state] = raw
+    s = raw.strip().replace(",", ".")
     if not s:
-        return default
+        return None
     try:
         v = float(s)
     except ValueError:
-        st.error(f"“{raw}” is not a number — keeping {default:g}")
-        return default
-    if v < min_v or v > max_v:
-        st.error(f"Scale Factor must be between {min_v:g} and {max_v:g}")
-        return max(min_v, min(max_v, v))
+        st.error(f"“{raw}” is not a number — enter a decimal such as 1.05.")
+        return None
+    if not _math.isfinite(v) or v < min_v or v > max_v:
+        st.error(f"{label.rstrip(' *')} must be between {min_v:g} and {max_v:g}.")
+        return None
     return v
 
 
@@ -812,6 +833,26 @@ def _info_banner(text: str) -> None:
         f'<div style="background:{P["info_lt"]};border:1px solid #BFDBFE;'
         f'border-radius:8px;padding:0.7rem 1rem;margin-bottom:1rem;font-size:0.85rem">'
         f'{text}</div>', unsafe_allow_html=True)
+
+
+# One Reference field for every category — same label, same help, same
+# position (Business Context, right after Adjustment Category). Only the two
+# file flows (VaR Upload, FRTB file) use it as a replace key, so only they
+# state the replace semantics and require it.
+_REF_HELP = ("Free-text reference shown next to the adjustment in the "
+             "Adjustments grid — e.g. a ticket number or desk note.")
+_REF_HELP_FILE = (_REF_HELP + " Required for file uploads, and it doubles as "
+                  "the replace key: re-submitting the same COB + Reference "
+                  "REPLACES the previous upload (it is soft-deleted and its "
+                  "data removed).")
+
+
+def _render_reference(key: str, required: bool, placeholder: str = "") -> None:
+    rv = st.text_input("Reference *" if required else "Reference",
+                       key=_k(key), value=wiz.get("global_reference") or "",
+                       placeholder=placeholder,
+                       help=_REF_HELP_FILE if required else _REF_HELP)
+    wiz["global_reference"] = rv.strip() or None
 
 
 def _is_entity_only(wiz: dict) -> bool:
@@ -895,7 +936,8 @@ def _completion_checks() -> list:
             ("CSV data",            wiz.get("uploaded_df") is not None),
             ("CSV validated",       wiz.get("uploaded_df") is not None
                                     and _upload_validation_ok()),
-            ("COB date",            bool(wiz.get("cobid"))),
+            ("Single COB in file",  not wiz.get("_var_cob_bad")),
+            ("COB date (from file)", bool(wiz.get("cobid"))),
             ("Entity code",         bool((wiz.get("entity_code") or "").strip())),
             ("Reference",           bool((wiz.get("global_reference") or "").strip())),
             ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
@@ -917,10 +959,19 @@ def _completion_checks() -> list:
         ]
     elif cat == "Direct Adjustment":
         _n_valid = sum(1 for v in (wiz.get("direct_verdicts") or []) if v["IS_VALID"])
+        _staged = (wiz.get("direct_ndf") is not None
+                   and len(wiz["direct_ndf"]) > 0)
+        checks += [("Data scope", bool(wiz.get("process_type")))]
+        if wiz.get("_direct_in_mode") == "Enter rows":
+            # Row builder: the user adds rows, then must click Validate rows
+            # — say so, instead of "CSV parsed" (there is no CSV).
+            checks += [
+                ("Rows added",      bool(wiz.get("direct_rows"))),
+                ("Rows validated — click Validate rows", _staged),
+            ]
+        else:
+            checks += [("CSV parsed", _staged)]
         checks += [
-            ("Data scope",          bool(wiz.get("process_type"))),
-            ("CSV parsed",          wiz.get("direct_ndf") is not None
-                                    and len(wiz["direct_ndf"]) > 0),
             ("At least 1 valid row", _n_valid > 0),
             ("COB date",            bool(wiz.get("cobid"))),
             ("COB matches the file", wiz.get("_direct_file_cob") is None
@@ -948,9 +999,15 @@ def _completion_checks() -> list:
         ]
         if wiz.get("adjustment_type") == "Roll":
             checks.append(("Source COB", bool(wiz.get("source_cobid"))))
+        if wiz.get("adjustment_type") in ("Scale", "Roll"):
+            # None = empty / not a number / out of range (see _float_input)
+            checks.append(("Scale Factor", wiz.get("scale_factor") is not None))
         if wiz.get("occurrence") == "RECURRING":
-            checks += [("Start COBID", bool(wiz.get("recurring_start_cobid"))),
-                       ("End COBID",   bool(wiz.get("recurring_end_cobid")))]
+            _rs, _re = wiz.get("recurring_start_cobid"), wiz.get("recurring_end_cobid")
+            checks += [("Start COB", bool(_rs)),
+                       ("End COB",   bool(_re))]
+            if _rs and _re:
+                checks.append(("Start before End", _rs <= _re))
         _has_var_comp = wiz.get("process_type") == "VaR" and (
             bool((wiz.get("var_component_name") or "").strip())
             or bool((wiz.get("var_sub_component_name") or "").strip()))
@@ -986,6 +1043,26 @@ def _render_scope_pills(include_frtball: bool = True) -> None:
     if clicked and clicked != current_group:
         wiz["process_type"] = clicked  # FRTB group starts on the plain FRTB sub-type
         wiz["_preview_sum"] = None
+        # Filters that the NEW scope does not offer must not ride along
+        # invisibly (a VaR Component picked under VaR used to survive a switch
+        # to Stress, hidden from the form but still in the payload).
+        _var_only = {"var_component_name", "var_sub_component_name", "day_type"}
+        _allowed = ({k for k, _, _ in SCOPE_FIELDS.get(clicked, [])}
+                    | {k for k, _, _ in ALL_EXTRA_FIELDS})
+        if clicked == "VaR":
+            _allowed |= _var_only
+        for _fk in FILTER_KEYS:
+            if _fk in ("entity_code", "source_system_code",
+                       "department_code", "book_code"):
+                continue
+            if _fk not in _allowed:
+                wiz[_fk] = None
+        if clicked != "VaR":
+            # The dropdown widgets keep their own state; drop it so a later
+            # switch back to VaR starts blank rather than resurrecting the
+            # old selection.
+            for _wk in ("var_comp_dd", "var_sub_dd"):
+                st.session_state.pop(_k(_wk), None)
         safe_rerun()
 
     if wiz.get("process_type") in FRTB_SUBTYPES:
@@ -1138,9 +1215,9 @@ def _render_field_chips(cols, required=None, note="* required · column order an
                  f'background:{P["grey_100"]};color:{P["grey_700"]};'
                  f'border:1px solid {P["border"]};')
         chips.append(f'<span style="display:inline-block;margin:2px 6px 2px 0;'
-                     f'padding:2px 10px;border-radius:999px;font-size:0.72rem;'
+                     f'padding:2px 10px;border-radius:999px;font-size:0.78rem;'
                      f'font-weight:600;{style}">{c}{" *" if req else ""}</span>')
-    note_html = (f'<div style="font-size:0.7rem;color:{P["grey_700"]};'
+    note_html = (f'<div style="font-size:0.78rem;color:{P["grey_700"]};'
                  f'margin-top:2px">{note}</div>' if note else '')
     st.markdown('<div style="margin:0.1rem 0 0.45rem;line-height:1.9">'
                 + ''.join(chips) + note_html + '</div>',
@@ -1365,6 +1442,19 @@ def _render_main_filters() -> None:
         st.caption("Blank = all values for that dimension · "
                    "† at least one of Department or Book")
 
+    # Inline nudge the moment the entity is picked without a narrowing
+    # filter — the checklist on the right says the same, but users look at
+    # the row they are editing, not the ticket.
+    _is_var = wiz.get("process_type") == "VaR"
+    _narrowed = (bool((wiz.get("department_code") or "").strip())
+                 or bool((wiz.get("book_code") or "").strip())
+                 or (_is_var and (bool((wiz.get("var_component_name") or "").strip())
+                                  or bool((wiz.get("var_sub_component_name") or "").strip()))))
+    if (wiz.get("entity_code") or "").strip() and not _narrowed:
+        st.warning("Entity alone is not enough — add a Department or Book code"
+                   + (" (or a VaR Component)" if _is_var else "")
+                   + ". Entity-wide adjustments are not allowed.")
+
 
 def _render_extra_filters() -> None:
     """Scope-specific (tier 2) + rarely-used (tier 3) filters, collapsed."""
@@ -1456,7 +1546,11 @@ def render_scaling_form() -> None:
 
     # ── Filters ──────────────────────────────────────────────────────────
     with _card():
-        _sec(5, "Dimension Filters", "Optional — blank means all values for that dimension.")
+        _sec(5, "Dimension Filters",
+             "Entity is required, plus at least one of Department / Book"
+             + (" (VaR: or VaR Component)" if wiz.get("process_type") == "VaR" else "")
+             + ". Everything else is optional — blank = all values. "
+               "Entity-wide adjustments (entity with no other filter) are not allowed.")
         _render_main_filters()
         _render_extra_filters()
 
@@ -1466,48 +1560,58 @@ def render_scaling_form() -> None:
         wiz["adjustment_category"] = _code_select(
             "Adjustment Category *", _k("adj_category"),
             wiz.get("adjustment_category"), _category_options()) or None
-        wiz["global_reference"] = st.text_input(
-            "Reference", key=_k("scale_ref"),
-            value=wiz.get("global_reference") or "",
-            help="Optional free-text reference for this adjustment.").strip() or None
+        _render_reference("scale_ref", required=False)
         wiz["reason"] = st.text_area("Reason / Business Justification *",
                                      value=wiz.get("reason", ""), height=70,
                                      key=_k("reason"))
 
 
 def _render_schedule_fields() -> None:
+    _recurring = wiz["occurrence"] == "RECURRING"
     d1, d2, d3 = st.columns(3)
     with d1:
         wiz["cobid"] = _int_input(
-            "First COB Date (YYYYMMDD) *" if wiz["occurrence"] == "RECURRING"
-            else "COB Date (YYYYMMDD) *", "cobid", wiz.get("cobid"))
+            "First COB Date (YYYYMMDD) *" if _recurring else "COB Date (YYYYMMDD) *",
+            "cobid", wiz.get("cobid"),
+            help=("The COB the adjustment is applied to first. The daily "
+                  "schedule below (Start COB → End COB) repeats it on each "
+                  "later COB.") if _recurring else None)
     with d2:
         if wiz.get("adjustment_type") == "Roll":
             wiz["source_cobid"] = _int_input("Source COB (roll from) *",
                                              "src_cobid", wiz.get("source_cobid"))
-        elif wiz["occurrence"] == "RECURRING":
-            wiz["recurring_start_cobid"] = _int_input("Start COBID *", "rec_start",
-                                                      wiz.get("recurring_start_cobid"))
     with d3:
         if wiz.get("adjustment_type") in ("Scale", "Roll"):
             wiz["scale_factor"] = _float_input(
-                "Scale Factor", "sf", wiz.get("scale_factor", 1.0),
+                "Scale Factor *", "sf", wiz.get("scale_factor", 1.0),
                 min_v=-10.0, max_v=100.0,
-                help="1.05 = +5%,  0.95 = −5%")
+                help="1.05 = +5%,  0.95 = −5%. Comma or dot decimals accepted.")
+    if (wiz.get("adjustment_type") == "Scale"
+            and wiz.get("scale_factor") is not None
+            and float(wiz["scale_factor"]) == 1.0):
+        st.warning("A scale factor of 1 changes nothing — enter e.g. 1.05 "
+                   "for +5% or 0.95 for −5%.")
 
-    if wiz["occurrence"] == "RECURRING":
+    if _recurring:
+        # Start / End always side by side on their own row, whatever the type.
         r1, r2, _ = st.columns(3)
-        if wiz.get("adjustment_type") == "Roll":
-            with r1:
-                wiz["recurring_start_cobid"] = _int_input("Start COBID *", "rec_start",
-                                                          wiz.get("recurring_start_cobid"))
-            with r2:
-                wiz["recurring_end_cobid"] = _int_input("End COBID *", "rec_end",
-                                                        wiz.get("recurring_end_cobid"))
-        else:
-            with r1:
-                wiz["recurring_end_cobid"] = _int_input("End COBID *", "rec_end",
-                                                        wiz.get("recurring_end_cobid"))
+        with r1:
+            wiz["recurring_start_cobid"] = _int_input(
+                "Start COB (YYYYMMDD) *", "rec_start",
+                wiz.get("recurring_start_cobid"),
+                help="First day of the daily repeat window. Usually the same "
+                     "as the First COB Date; set it later if the repeats "
+                     "should begin after the first application.")
+        with r2:
+            wiz["recurring_end_cobid"] = _int_input(
+                "End COB (YYYYMMDD) *", "rec_end",
+                wiz.get("recurring_end_cobid"),
+                help="Last day of the daily repeat window (inclusive). Must "
+                     "not be before the Start COB.")
+            _rs, _re = wiz.get("recurring_start_cobid"), wiz.get("recurring_end_cobid")
+            if _rs and _re and _rs > _re:
+                st.error(f"End COB {_re} is before Start COB {_rs} — the "
+                         f"schedule must run forwards.")
 
 
 DIRECT_SCOPES = ["VaR", "Stress", "Sensitivity", "FRTB", "FRTBDRC", "FRTBRRAO"]
@@ -1545,11 +1649,15 @@ def _purge_abandoned_direct_batches() -> None:
         pass
 
 
-def _render_direct_verdict_preview() -> None:
-    """✓/✗ + Errors preview table (+ reject download) for whatever batch is
+def _render_direct_verdict_preview():
+    """✓/✗ + Errors verdict messages (+ reject download) for whatever batch is
     currently staged in wiz['direct_ndf']/['direct_verdicts'] — identical
     rendering regardless of which input mode staged it, so CSV and grid look
-    the same once rows are staged."""
+    the same once rows are staged.
+
+    Returns the preview DataFrame for the caller to render AFTER the card
+    closes (or None when nothing is staged) — the grid itself must not sit
+    inside the styled card (resize-observer loop; see VaR/FRTB bodies)."""
     verdicts = wiz.get("direct_verdicts")
     ndf_staged = wiz.get("direct_ndf")
     if verdicts is not None and ndf_staged is not None and len(ndf_staged):
@@ -1576,7 +1684,8 @@ def _render_direct_verdict_preview() -> None:
                 key=_k("dadj_rejects_dl"))
         else:
             st.success(f"All {n_valid} row(s) validated — ready to submit.")
-        render_data_grid(preview, height=380)
+        return preview
+    return None
 
 
 def _stage_and_validate(ndf, scope: str):
@@ -1640,6 +1749,10 @@ def render_direct_form() -> None:
         return
 
     accepted_map, required, _ = _accepted_columns(scope)
+    # ✓/✗ verdict grid is rendered AFTER every card closes (see the end of
+    # this function) — a dataframe inside the styled card triggers the
+    # resize-observer loop in the users' environment (same as VaR/FRTB).
+    _grid_after = None
 
     with _card():
         # Read the radio's widget state (if any) before instantiating it so the
@@ -1829,14 +1942,31 @@ def render_direct_form() -> None:
                     wiz["_direct_sig"]     = None
                 else:
                     _sig = f'{scope}|{len(df)}|{",".join(map(str, df.columns))}|{_src_token}'
-                    if wiz.get("_direct_sig") != _sig:
+                    if wiz.get("_direct_submitted_sig") == _sig:
+                        # This exact content was already submitted from this
+                        # wizard — never re-stage it (the second Submit would
+                        # create the same adjustments again).
+                        if wiz.get("direct_batch_id"):
+                            try:
+                                _delete_direct_batch(wiz["direct_batch_id"])
+                            except Exception:
+                                pass
+                        wiz["direct_batch_id"] = None
+                        wiz["direct_ndf"]      = None
+                        wiz["direct_verdicts"] = None
+                        wiz["_direct_sig"]     = None
+                        st.warning("This exact batch has already been "
+                                   "submitted — its adjustments exist. Change "
+                                   "the data to stage a new batch, or start "
+                                   "a new adjustment.")
+                    elif wiz.get("_direct_sig") != _sig:
                         batch_id, verdicts = _stage_and_validate(ndf, scope)
                         wiz["direct_batch_id"] = batch_id
                         wiz["direct_ndf"]      = ndf
                         wiz["direct_verdicts"] = verdicts
                         wiz["_direct_sig"]     = _sig
 
-                _render_direct_verdict_preview()
+                _grid_after = _render_direct_verdict_preview()
             elif wiz.get("direct_batch_id"):
                 # No content currently shown (cleared paste box / removed
                 # uploaded file) but a batch from a previous validation is
@@ -1912,6 +2042,7 @@ def render_direct_form() -> None:
                         else:
                             vals[c] = st.text_input(lbl, key=k).strip()
 
+                _add_err = None
                 bc1, bc2, bc3, _sp = st.columns([1.2, 1, 1, 1.4])
                 with bc1:
                     if _btn("Add row to batch", icon_name=":material/playlist_add:",
@@ -1919,8 +2050,8 @@ def render_direct_form() -> None:
                             use_container_width=True):
                         if not (vals.get("ENTITY_CODE") or "").strip() \
                                 or not vals.get("VALUE_USD"):
-                            st.warning("Entity Code and Value (USD) are "
-                                       "required for every row.")
+                            _add_err = ("Entity Code and Value (USD) are "
+                                        "required for every row.")
                         else:
                             wiz["direct_rows"] = rows + [
                                 {c: (vals.get(c) or None) for c in row_cols}]
@@ -1935,15 +2066,28 @@ def render_direct_form() -> None:
                                      use_container_width=True):
                         wiz["direct_rows"] = []
                         safe_rerun()
+                if _add_err:
+                    # Full width — inside the narrow button column the
+                    # message wrapped into an unreadable sliver.
+                    st.warning(_add_err)
 
                 _rows_sig = (f'rows|{scope}|{len(rows)}|'
                              f'{hash(json.dumps(rows, sort_keys=True, default=str))}')
+                _already_submitted = (rows and
+                                      wiz.get("_direct_submitted_sig") == _rows_sig)
 
                 if rows:
                     st.caption(f"{len(rows)} row(s) in this batch:")
                     render_df_table(pd.DataFrame(rows, columns=row_cols),
                                     max_rows=50, height=220)
-                    if st.button("Validate rows", key=_k("direct_rows_validate")):
+                    if _already_submitted:
+                        st.warning("This exact batch has already been "
+                                   "submitted — its adjustments exist. Change "
+                                   "the rows to validate a new batch, or "
+                                   "start a new adjustment.")
+                    if _btn("Validate rows", icon_name=":material/fact_check:",
+                            key=_k("direct_rows_validate"), type="primary",
+                            disabled=bool(_already_submitted)):
                         rndf = pd.DataFrame(rows, columns=row_cols)
                         batch_id, verdicts = _stage_and_validate(rndf, scope)
                         wiz["direct_batch_id"] = batch_id
@@ -1956,7 +2100,7 @@ def render_direct_form() -> None:
 
                 if wiz.get("direct_verdicts") is not None:
                     if wiz.get("_direct_sig") == _rows_sig:
-                        _render_direct_verdict_preview()
+                        _grid_after = _render_direct_verdict_preview()
                     else:
                         # Batch edited since the last validation — the staged
                         # snapshot must not remain submittable (completion
@@ -1977,7 +2121,7 @@ def render_direct_form() -> None:
                                 "refresh before submitting.")
 
     with _card():
-        _sec(4, "Batch Details", "COB applies to every row submitted from this CSV.")
+        _sec(4, "Batch Details", "COB applies to every row submitted from this batch.")
         wiz["cobid"] = _int_input("COB Date (YYYYMMDD) *", "dadj_cobid", wiz.get("cobid"))
 
     with _card():
@@ -1985,9 +2129,20 @@ def render_direct_form() -> None:
         wiz["adjustment_category"] = _code_select(
             "Adjustment Category *", _k("dadj_adj_category"),
             wiz.get("adjustment_category"), _category_options()) or None
+        # SP_SUBMIT_DIRECT_BATCH takes no reference — say so rather than
+        # showing a field that would silently be dropped.
+        st.caption("Per-row Direct adjustments carry no Reference — each row "
+                   "becomes its own adjustment; use the row's Reason column "
+                   "for row-level notes.")
         wiz["reason"] = st.text_area("Reason / Business Justification *",
                                      value=wiz.get("reason", ""), height=70,
                                      key=_k("dadj_reason"))
+
+    # Verdict grid LAST, outside every card (see _grid_after above).
+    if _grid_after is not None:
+        _sec(6, "Staged Rows", "Every row with its validation verdict — "
+                               "invalid rows are excluded from submission.")
+        render_data_grid(_grid_after, height=380)
 
 
 def render_var_upload_form() -> None:
@@ -2024,11 +2179,12 @@ def render_var_upload_form() -> None:
              "columns come out wrong.")
 
     def _read_csv(buf):
-        """Parse with the chosen delimiter (or sniff it) — same for both modes."""
+        """Parse with the chosen delimiter (or sniff it) — same for both modes.
+        dtype=str so codes never get float-mangled ('12345' → '12345.0')."""
         sep = _DELIMS[delim_choice]
         if sep is None:
-            return pd.read_csv(buf, sep=None, engine="python")
-        return pd.read_csv(buf, sep=sep)
+            return pd.read_csv(buf, sep=None, engine="python", dtype=str)
+        return pd.read_csv(buf, sep=sep, dtype=str)
 
     df, _src_token, _parse_err = None, None, None
     if _in_mode == "Upload file":
@@ -2066,6 +2222,8 @@ def render_var_upload_form() -> None:
         # submittable behind the error message.
         wiz["uploaded_df"] = None
         wiz["_upval"] = None
+        wiz["cobid"] = None
+        wiz["_var_cob_bad"] = False
         st.error(f"Failed to read the CSV: {_parse_err}. If the columns look "
                  f"wrong, try selecting the delimiter explicitly above.")
     elif df is not None:
@@ -2099,44 +2257,91 @@ def render_var_upload_form() -> None:
         # users' environment (grid grows unbounded, page locks).
         _preview_after = df
 
+        # COB comes ONLY from the file and is re-derived on every parse
+        # (same rule as the FRTB file flow): the file's single COBId, or
+        # nothing. Never user-editable — an edited COB used to disagree with
+        # the rows and mis-target the upload.
+        wiz["cobid"] = None
+        wiz["_var_cob_bad"] = False
         if "COBId" in df.columns and len(df):
-            try:
-                wiz["cobid"] = int(df["COBId"].iloc[0])
-            except (TypeError, ValueError):
-                pass
+            _cobs = sorted(pd.to_numeric(df["COBId"], errors="coerce")
+                           .dropna().astype(int).unique().tolist())
+            if len(_cobs) == 1:
+                wiz["cobid"] = int(_cobs[0])
+            elif len(_cobs) > 1:
+                wiz["_var_cob_bad"] = True
+                st.error(f"The file mixes {len(_cobs)} different COBIds "
+                         f"({', '.join(map(str, _cobs[:5]))}…) — one upload "
+                         f"covers exactly one COB. Submission is blocked.")
+            else:
+                st.error("COBId has no valid value in the file — every row "
+                         "must carry the COB as YYYYMMDD. Submission is "
+                         "blocked.")
+        else:
+            st.error("The file has no COBId column — the COB is taken from "
+                     "the file, so submission is blocked until it is added.")
+
+        # Entity is SEEDED from the file once per new parse, then the box
+        # below owns it — so the user can correct or clear it without the
+        # file value snapping back on the next rerun.
+        _file_sig = f'{len(df)}|{",".join(map(str, df.columns))}|{_src_token}'
         if "EntityCode" in df.columns and len(df):
-            wiz["entity_code"] = str(df["EntityCode"].iloc[0])
+            _ents = sorted({str(e).strip() for e in df["EntityCode"].dropna()
+                            if str(e).strip() and str(e).strip().upper() != "NAN"})
+            if len(_ents) > 1:
+                st.warning(f"The file contains {len(_ents)} different "
+                           f"EntityCodes ({', '.join(_ents[:5])}"
+                           f"{'…' if len(_ents) > 5 else ''}) — one upload is "
+                           f"normally one entity. Entity Code below is set to "
+                           f"the first; check it before submitting.")
+            if _ents and wiz.get("_var_entity_sig") != _file_sig:
+                wiz["entity_code"] = _ents[0]
+        wiz["_var_entity_sig"] = _file_sig
     else:
         # CSV cleared (paste box emptied / file removed): the previously
-        # parsed upload must NOT stay submittable behind an empty input.
+        # parsed upload must NOT stay submittable behind an empty input, and
+        # the file-derived COB goes with it.
         wiz["uploaded_df"] = None
         wiz["_upval"] = None
+        wiz["cobid"] = None
+        wiz["_var_cob_bad"] = False
 
     _csv_card.__exit__(None, None, None)
 
     with _card():
-        _sec(3, "Upload Details", "COB and entity are auto-detected from the CSV when present.")
-        g1, g2, g3 = st.columns(3)
+        _sec(3, "Upload Details",
+             "COB is read from the file's COBId column and cannot be edited; "
+             "Entity is pre-filled from the file and can be corrected.")
+        g1, g2 = st.columns(2)
         with g1:
-            wiz["cobid"] = _int_input("COB Date (auto-detected) *", "var_cobid",
-                                      wiz.get("cobid"), placeholder="")
+            # Read-only: the value is whatever the current parse derived
+            # (no key on purpose — a keyed widget would hold on to the
+            # previous file's COB after the data changed).
+            st.text_input("COB Date (from file) *", value=str(wiz.get("cobid") or ""),
+                          disabled=True,
+                          placeholder="derived from the file's COBId",
+                          help="Taken from the COBId column of the CSV. To "
+                               "change it, change the file — every row must "
+                               "carry the same COB.")
+            if wiz.get("_var_cob_bad"):
+                st.caption("⚠ The file has more than one COBId — fix the "
+                           "file to set the COB.")
+            elif wiz.get("uploaded_df") is not None and not wiz.get("cobid"):
+                st.caption("⚠ No valid COBId found in the file.")
         with g2:
-            ev = st.text_input("Entity Code (auto-detected) *", key=_k("var_entity"),
-                               value=wiz.get("entity_code") or "")
-            wiz["entity_code"] = ev.strip() or wiz.get("entity_code")
-        with g3:
-            rv = st.text_input("Reference *", key=_k("var_ref"),
-                               value=wiz.get("global_reference") or "",
-                               placeholder="e.g. CTN FX VaR",
-                               help="Unique reference for this upload. Re-submitting the same "
-                                    "COB + Reference replaces the previous adjustment.")
-            wiz["global_reference"] = rv.strip() or None
+            ev = st.text_input("Entity Code *", key=_k("var_entity"),
+                               value=wiz.get("entity_code") or "",
+                               help="Pre-filled from the file's EntityCode "
+                                    "column. Clear or change it if the file "
+                                    "value is wrong.")
+            wiz["entity_code"] = ev.strip() or None
 
     with _card():
         _sec(4, "Business Context", "Why is this adjustment needed?")
         wiz["adjustment_category"] = _code_select(
             "Adjustment Category *", _k("var_adj_category"),
             wiz.get("adjustment_category"), _category_options()) or None
+        _render_reference("var_ref", required=True, placeholder="e.g. CTN FX VaR")
         wiz["reason"] = st.text_area("Reason / Business Justification *",
                                      value=wiz.get("reason", ""), height=70,
                                      key=_k("var_reason"))
@@ -2160,14 +2365,15 @@ def render_var_upload_form() -> None:
                 f'<div style="background:{P["warning_lt"]};border:1px solid #FDE68A;border-radius:10px;'
                 f'padding:1rem;margin:0.8rem 0">'
                 f'<div style="font-weight:700;font-size:0.92rem;color:{P["warning"]};margin-bottom:0.4rem">'
-                f'{icon("alert-triangle", size=14, color="#B45309")} Existing adjustment found with the same Reference</div>'
+                f'{icon("alert-triangle", size=14, color=P["warning"])} Existing adjustment found with the same Reference</div>'
                 f'<div style="font-size:0.83rem;color:{P["warning"]}">'
                 f'<strong>Adj ID:</strong> {fmt_adj_id(dup_info[5])} &nbsp;·&nbsp; '
                 f'<strong>Entity:</strong> {dup_info[1]} &nbsp;·&nbsp; '
                 f'<strong>Status:</strong> {dup_info[2]} &nbsp;·&nbsp; '
                 f'<strong>User:</strong> {dup_info[3]}<br/>'
                 f'If you submit, the previous adjustment will be <strong>soft-deleted</strong> '
-                f'and its data removed from the adjustment tables.</div></div>',
+                f'and its data removed from the adjustment tables. '
+                f'<strong>Confirm the replacement in the ticket panel on the right.</strong></div></div>',
                 unsafe_allow_html=True)
             wiz["_dup_adj_ids"] = [r[0] for r in dup_rows]
         else:
@@ -2465,7 +2671,7 @@ def _render_frtb_direct_body(scope: str) -> None:
     with _card():
         _sec(4, "Upload Details",
              "COB is read from the file's COBID column and cannot be edited.")
-        g1, g2 = st.columns(2)
+        g1, _g2 = st.columns(2)
         with g1:
             # Read-only: the value is whatever the current parse derived
             # (no key on purpose — a keyed widget would hold on to the
@@ -2482,20 +2688,14 @@ def _render_frtb_direct_body(scope: str) -> None:
                            "file to set the COB.")
             elif wiz.get("uploaded_df") is not None and not wiz.get("cobid"):
                 st.caption("⚠ No valid COBID found in the file.")
-        with g2:
-            rv = st.text_input("Reference *", key=_k("frtbup_ref"),
-                               value=wiz.get("global_reference") or "",
-                               placeholder="e.g. SBM EQ desk correction",
-                               help="Unique reference for this upload. "
-                                    "Re-submitting the same COB + Reference "
-                                    "replaces the previous adjustment.")
-            wiz["global_reference"] = rv.strip() or None
 
     with _card():
         _sec(5, "Business Context", "Why is this adjustment needed?")
         wiz["adjustment_category"] = _code_select(
             "Adjustment Category *", _k("frtbup_adj_category"),
             wiz.get("adjustment_category"), _category_options()) or None
+        _render_reference("frtbup_ref", required=True,
+                          placeholder="e.g. SBM EQ desk correction")
         wiz["reason"] = st.text_area("Reason / Business Justification *",
                                      value=wiz.get("reason", ""), height=70,
                                      key=_k("frtbup_reason"))
@@ -2515,7 +2715,8 @@ def _render_frtb_direct_body(scope: str) -> None:
         if dup_rows:
             st.warning(f"An adjustment already exists for COB {wiz['cobid']} "
                        f"with reference “{wiz['global_reference']}” — "
-                       f"submitting will replace it.")
+                       f"submitting will replace it. Confirm the replacement "
+                       f"in the ticket panel on the right.")
             wiz["_dup_adj_ids"] = [r[0] for r in dup_rows]
         else:
             wiz["_dup_adj_ids"] = []
@@ -2534,7 +2735,7 @@ def render_entity_roll_form() -> None:
         f'<div style="background:{P["danger_lt"]};border:1px solid #FECACA;border-radius:10px;'
         f'padding:0.8rem 1rem;margin-bottom:0.6rem">'
         f'<div style="font-weight:700;font-size:0.9rem;color:{P["danger"]};margin-bottom:0.3rem">'
-        f'{icon("alert-triangle", size=14, color="#B91C1C")} Entity Roll is destructive — approval required</div>'
+        f'{icon("alert-triangle", size=14, color=P["danger"])} Entity Roll is destructive — approval required</div>'
         f'<div style="font-size:0.82rem;color:{P["danger"]}">'
         f'The entity\'s adjusted figures at the target COB are rebuilt from the source '
         f'COB. <strong>Any existing adjustments for this entity at the target COB are '
@@ -2610,14 +2811,14 @@ def render_entity_roll_form() -> None:
                 f'<div style="background:{P["danger_lt"]};border:1px solid #FECACA;border-radius:10px;'
                 f'padding:0.8rem 1rem;margin:0.2rem 0 0.6rem">'
                 f'<div style="font-weight:700;font-size:0.88rem;color:{P["danger"]};margin-bottom:0.25rem">'
-                f'{icon("alert-triangle", size=14, color="#B91C1C")} '
+                f'{icon("alert-triangle", size=14, color=P["danger"])} '
                 f'{wiz["_eroll_remove_count"]} existing adjustment(s) will be permanently removed</div>'
                 f'<div style="font-size:0.82rem;color:{P["danger"]}">'
                 f'Processing this roll deletes <strong>all</strong> adjustment data for '
                 f'<strong>{wiz["entity_code"].strip()}</strong> at COB '
                 f'<strong>{wiz["cobid"]}</strong> (including any loaded by other systems) '
                 f'and rebuilds the entity from the source COB.<br/>'
-                f'<span style="font-size:0.76rem;opacity:0.85">{_recon}</span>'
+                f'<span style="font-size:0.78rem;opacity:0.85">{_recon}</span>'
                 f'</div></div>',
                 unsafe_allow_html=True)
 
@@ -2626,10 +2827,7 @@ def render_entity_roll_form() -> None:
         wiz["adjustment_category"] = _code_select(
             "Adjustment Category *", _k("er_adj_category"),
             wiz.get("adjustment_category"), _category_options()) or None
-        wiz["global_reference"] = st.text_input(
-            "Reference", key=_k("er_ref"),
-            value=wiz.get("global_reference") or "",
-            help="Optional free-text reference for this roll.").strip() or None
+        _render_reference("er_ref", required=False)
         wiz["reason"] = st.text_area("Reason / Business Justification *",
                                      value=wiz.get("reason", ""), height=70, key=_k("er_reason"),
                                      placeholder="e.g. Rolling MUSE VaR from previous business day")
@@ -2677,7 +2875,8 @@ def _ticket_html(missing: list) -> str:
         n_bad      = len(d_verdicts) - n_valid
         kv += _ticket_row("Scope", wiz.get("process_type"))
         kv += _ticket_row("COB",   wiz.get("cobid"))
-        kv += _ticket_row("CSV rows",
+        kv += _ticket_row("Rows" if wiz.get("_direct_in_mode") == "Enter rows"
+                          else "CSV rows",
                           f"{len(d_ndf):,}" if d_ndf is not None else None,
                           d_ndf is not None)
         kv += _ticket_row("Valid / Invalid",
@@ -2686,7 +2885,8 @@ def _ticket_html(missing: list) -> str:
     elif cat == "Scaling Adjustment":
         type_txt = wiz.get("adjustment_type")
         if type_txt and type_txt in ("Scale", "Roll"):
-            type_txt += f' ×{wiz.get("scale_factor", 1.0):g}'
+            _sf = wiz.get("scale_factor")     # None = not set / invalid
+            type_txt += f' ×{_sf:g}' if _sf is not None else " × ?"
         cob_txt = wiz.get("cobid")
         if wiz.get("adjustment_type") == "Roll" and wiz.get("source_cobid") and cob_txt:
             cob_txt = f'{wiz.get("source_cobid")} → {cob_txt}'
@@ -2727,21 +2927,18 @@ def _ticket_html(missing: list) -> str:
             kv += f'<div class="adj-filters" style="margin-top:6px">{chips}</div>'
 
     # ── Impact block ─────────────────────────────────────────────────────
+    # (No entity-wide branch: the checklist requires Department / Book /
+    #  VaR Component, so an entity-only ticket is never complete.)
     imp = ""
-    if cat == "Scaling Adjustment" and _is_entity_only(wiz) and not missing:
-        imp = (f'<div class="t-warn">{icon("alert-triangle", size=12, color="#B45309")} '
-               f'<strong>Entity-wide adjustment</strong> — applies to every book and '
-               f'department of {wiz.get("entity_code")}. Preview is skipped for '
-               f'broad-scope adjustments; processing waits until the scope is idle.</div>')
-    elif wiz.get("_preview_sum") is not None:
+    if wiz.get("_preview_sum") is not None:
         s = wiz["_preview_sum"]
         stale = (wiz.get("_preview_for") != json.dumps(_preview_payload(), sort_keys=True,
                                                        default=str)) \
                 if cat == "Scaling Adjustment" else False
-        note = ('<div style="font-size:0.68rem;color:#B45309;margin-top:3px">'
+        note = (f'<div style="font-size:0.78rem;color:{P["warning"]};margin-top:3px">'
                 'Filters changed — re-run the preview.</div>') if stale else ""
         imp = (f'<div class="t-imp">'
-               f'<div style="font-size:0.66rem;font-weight:700;text-transform:uppercase;'
+               f'<div style="font-size:0.78rem;font-weight:700;text-transform:uppercase;'
                f'letter-spacing:.07em;color:{P["grey_700"]};margin-bottom:3px">Impact preview</div>'
                f'<div class="kv"><span class="k">Rows affected</span>'
                f'<span class="v">{_safe_int(s.get("ROWS_AFFECTED")):,}</span></div>'
@@ -3164,24 +3361,60 @@ if wiz["step"] == 3:
     msg = _shorten_blocker(msg)
     blocked_msg = msg if "Blocked by ADJ #" in msg else ""
 
+    # What happens next depends on the status the SP assigned: a "Pending
+    # Approval" adjustment sits in the Approval Queue and is NOT queued for
+    # processing until an approver actions it — saying "processed
+    # automatically" there sent users looking for a report that never came.
+    status    = result.get("status")
+    n_created = result.get("created")          # Direct batches only
+    n_rej     = int(result.get("rejected") or 0)
+    plural    = n_created is not None and n_created != 1
+    noun      = "adjustments" if plural else "adjustment"
+    title     = (f"{n_created} Adjustments Submitted Successfully" if plural
+                 else "Adjustment Submitted Successfully")
+    if status == "Pending Approval":
+        next_html = (f'<strong>Waiting for approval</strong> — an approver must '
+                     f'action {"them" if plural else "it"} on the Approval Queue '
+                     f'page before {"they are" if plural else "it is"} processed. '
+                     f'Track {"them" if plural else "it"} on the Adjustments page; '
+                     f'once approved and processed {"each is" if plural else "it is"} '
+                     f'assigned a <strong>report ID</strong> (the number shown in '
+                     f'Adjustments and your reports).')
+    else:
+        next_html = (f'Your {noun} {"are" if plural else "is"} queued and will be '
+                     f'processed automatically by the scope pipeline. Track '
+                     f'{"them" if plural else "it"} on the Adjustments page; once '
+                     f'processed {"each is" if plural else "it is"} assigned a '
+                     f'<strong>report ID</strong> (the number shown in Adjustments '
+                     f'and your reports).')
+
     st.markdown(
         f'<div style="background:{P["success_lt"]};border:2px solid #BBF7D0;'
         f'border-radius:12px;padding:2.5rem;text-align:center;margin:1rem 0">'
         f'<div>{icon("check-circle", size=44, color=P["success"], valign="0")}</div>'
         f'<div style="font-size:1.4rem;font-weight:700;color:{P["success"]};margin-top:0.5rem">'
-        f'Adjustment Submitted Successfully</div>'
+        f'{title}</div>'
         f'<div style="font-size:0.9rem;color:{P["success"]};margin-top:0.4rem">{msg}</div>'
         f'<div style="font-size:0.82rem;color:{P["info"]};margin-top:0.8rem">'
-        f'Your adjustment is queued and will be processed automatically by the scope pipeline. '
-        f'Track it on the Adjustments page; once processed it is assigned a <strong>report ID</strong> '
-        f'(the number shown in Adjustments and your reports).</div>'
+        f'{next_html}</div>'
         f'</div>', unsafe_allow_html=True)
+
+    if n_rej:
+        st.markdown(
+            f'<div style="background:{P["warning_lt"]};border:1px solid #FDE68A;border-radius:8px;'
+            f'padding:0.75rem 1rem;margin-top:0.5rem;font-size:0.83rem;color:{P["warning"]}">'
+            f'{icon("alert-triangle", size=13, color=P["warning"])} '
+            f'<strong>{n_rej} row(s) were rejected by sign-off</strong> and were NOT created '
+            f'(their COB / entity is signed off). The {n_created} created above are unaffected. '
+            f'To submit the rejected rows, request a re-open for that COB and submit '
+            f'<em>only those rows</em> as a new batch — do not re-submit the whole file.</div>',
+            unsafe_allow_html=True)
 
     if blocked_msg:
         st.markdown(
             f'<div style="background:{P["warning_lt"]};border:1px solid #FDE68A;border-radius:8px;'
             f'padding:0.75rem 1rem;margin-top:0.5rem;font-size:0.83rem;color:{P["warning"]}">'
-            f'{icon("clock", size=13, color="#B45309")} <strong>Processing is queued behind another adjustment.</strong> '
+            f'{icon("clock", size=13, color=P["warning"])} <strong>Processing is queued behind another adjustment.</strong> '
             f'{blocked_msg} It will be picked up automatically once that run completes.</div>',
             unsafe_allow_html=True)
 
@@ -3224,7 +3457,11 @@ with left:
                         "direct_rows": None,
                         "_upval": None, "_frtb_rule_errs": None,
                         "_frtb_file_cob": None, "_frtb_cob_bad": False,
-                        "_direct_file_cob": None})
+                        "_direct_file_cob": None, "_var_cob_bad": False,
+                        # Entity Roll forces approval on; a previous
+                        # category's submit error must not show under the new
+                        # one either.
+                        "requires_approval": False, "result": None})
             safe_rerun()
         if wiz.get("category"):
             st.caption(CATEGORY_UI_DESCS.get(wiz["category"], ""))
@@ -3252,7 +3489,7 @@ with right:
 
     # ── Impact preview trigger (Scaling, narrow scope only) ─────────────
     zero_rows = False
-    if cat == "Scaling Adjustment" and not missing and not _is_entity_only(wiz):
+    if cat == "Scaling Adjustment" and not missing:
         if _btn("Run impact preview", icon_name=":material/visibility:",
                 use_container_width=True, key=_k("run_preview")):
             with st.spinner("Calculating impact…"):
@@ -3263,6 +3500,8 @@ with right:
         s = wiz.get("_preview_sum")
         preview_current = (s is not None and wiz.get("_preview_for")
                            == json.dumps(_preview_payload(), sort_keys=True, default=str))
+        if s is not None and not preview_current:
+            st.info("Filters changed since the last preview — run it again.")
         # STICKY zero-rows block: once a preview showed 0 rows, submission
         # stays blocked until a NEW preview runs — merely editing a filter
         # (which invalidates the preview) must not unlock Submit, or the
@@ -3332,6 +3571,15 @@ with right:
                    "selected scope (see the sign-off panel above).")
     elif zero_rows:
         st.caption("Submit is blocked: the current filters match no data.")
+    elif not dup_ok:
+        st.caption(f"Submit is blocked: tick 'Replace "
+                   f"{len(wiz.get('_dup_adj_ids') or [])} existing "
+                   f"adjustment(s)' in the ticket panel to confirm the "
+                   f"replacement.")
+    elif not eroll_ok:
+        st.caption("Submit is blocked: tick the 'I understand this Entity "
+                   "Roll will permanently remove…' box in the ticket panel "
+                   "to confirm the roll.")
 
     # ── Approval flag (Entity Roll is always locked on) ───────────────────
     if cat == "Entity Roll":
@@ -3350,7 +3598,7 @@ with right:
 #  per-row breakdown/sample only makes sense per sub-type.)
 if wiz.get("category") == "Scaling Adjustment" and wiz.get("_preview_sum") \
         and wiz.get("process_type") != "FRTBALL" \
-        and not missing and not _is_entity_only(wiz):
+        and not missing:
     s = wiz["_preview_sum"]
     total_rows = _safe_int(s.get("ROWS_AFFECTED"))
     _is_roll = (wiz.get("adjustment_type") == "Roll"

@@ -27,7 +27,8 @@ st.set_page_config(page_title="Tasks & Cost · MUFG", page_icon="📊",
                    layout="wide", initial_sidebar_state="expanded")
 
 from utils.styles import (inject_css, render_sidebar, section_title, P,
-                          kpi_card, render_df_table)
+                          kpi_card, render_df_table, set_flash, render_flash,
+                          confirm_gate)
 from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
                                   safe_rerun)
 import config
@@ -45,6 +46,7 @@ st.markdown(
     "its usage is not included here."
     "</span>", unsafe_allow_html=True)
 st.markdown("<br/>", unsafe_allow_html=True)
+render_flash("tasks")
 
 
 def _esc(v):
@@ -106,7 +108,8 @@ with c2:
         "Price per credit (USD)", min_value=0.0, step=0.05,
         value=_cfg_price if _cfg_price is not None else 3.00, format="%.2f",
         key="cost_price",
-        help="Your contracted Snowflake credit price. Saved for everyone.")
+        help="Your contracted Snowflake credit price. Changes apply to this "
+             "view immediately; Save makes it the default for all users.")
 with c3:
     st.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
     if st.button("Save price", key="cost_save") and price is not None:
@@ -159,7 +162,11 @@ if sel_tag != "All" and not df_srv.empty:
 # ── KPIs — task usage only ──────────────────────────────────────────────────
 srv_credits = float(pd.to_numeric(df_srv.get("CREDITS"), errors="coerce").sum()) if not df_srv.empty else 0.0
 total_cost = srv_credits * float(price or 0)
-monthly = total_cost / int(days) * 30.44 if days else 0.0
+# The INFORMATION_SCHEMA fallback only ever returns 14 days: projecting a
+# 14-day spend over a 30/60/90-day window under-states the pace.
+_capped = srv_src.startswith("INFORMATION_SCHEMA")
+eff_days = min(int(days), 14) if _capped else int(days)
+monthly = total_cost / eff_days * 30.44 if eff_days else 0.0
 _top_task, _top_cost = "—", ""
 if not df_srv.empty:
     _g = df_srv.groupby("TASK")["CREDITS"].sum()
@@ -169,17 +176,21 @@ if not df_srv.empty:
 st.markdown("<br/>", unsafe_allow_html=True)
 m1, m2, m3, m4 = st.columns(4)
 m1.markdown(kpi_card("Task credits", f"{srv_credits:,.3f}",
-                     f"serverless, last {days}d"), unsafe_allow_html=True)
+                     f"serverless, last {eff_days}d"
+                     + (" — window capped" if eff_days != int(days) else "")),
+            unsafe_allow_html=True)
 m2.markdown(kpi_card("Task cost", f"${total_cost:,.2f}",
                      f"at ${price:,.2f}/credit"), unsafe_allow_html=True)
 m3.markdown(kpi_card("Projected monthly cost", f"${monthly:,.2f}",
-                     f"if the last {days}d pace continues"),
+                     f"last {eff_days}d pace — window capped"
+                     if eff_days != int(days)
+                     else f"if the last {eff_days}d pace continues"),
             unsafe_allow_html=True)
 m4.markdown(kpi_card("Biggest consumer", _top_task, _top_cost),
             unsafe_allow_html=True)
 st.caption(
     f"“Projected monthly cost” takes the ${total_cost:,.2f} spent in the last "
-    f"{days} days and scales it to a full 30-day month — an estimate of the "
+    f"{eff_days} days and scales it to a full 30-day month — an estimate of the "
     f"monthly run-rate at the current pace, not a billed amount.")
 st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -191,8 +202,10 @@ else:
          .sort_values("CREDITS", ascending=False))
     g["COST_USD"] = g["CREDITS"] * float(price or 0)
     g["SHARE"] = g["CREDITS"] / g["CREDITS"].sum()
-    render_df_table(g, formats={"CREDITS": "{:,.4f}", "COST_USD": "${:,.2f}",
-                                "SHARE": "{:.1%}"})
+    g = g.rename(columns={"TASK": "Task", "CREDITS": "Credits",
+                          "COST_USD": "Cost (USD)", "SHARE": "Share"})
+    render_df_table(g, formats={"Credits": "{:,.4f}", "Cost (USD)": "${:,.2f}",
+                                "Share": "{:.1%}"})
     if srv_src:
         st.caption(f"Source: {srv_src}")
 
@@ -322,6 +335,10 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # ══════════════════════════════════════════════════════════════════════════════
 section_title("Scheduled Tasks", "clock")
 
+# STATE cell colours shared by the task list and the run history.
+_state_colors = {"FAILED": P["danger"], "SUSPENDED": P["danger"],
+                 "STARTED": P["success"], "SUCCEEDED": P["success"]}
+
 if _tasks:
     rows_out = []
     for t in _tasks:
@@ -350,12 +367,35 @@ if _tasks:
             "COMMENT": (t.get("comment") or "")[:90],
         })
     df_tasks = pd.DataFrame(rows_out)
-    n_susp = int((df_tasks["STATE"].str.upper() != "STARTED").sum())
-    if n_susp:
-        st.warning(f"**{n_susp} task(s) are not running** — the pipeline or "
-                   "sign-off sync is stopped. Resume them or redeploy 06_tasks.sql.")
+    _susp = [str(n) for n, s_ in zip(df_tasks["TASK"], df_tasks["STATE"])
+             if str(s_ or "").upper() != "STARTED"]
+    if _susp:
+        st.error("One or more tasks are suspended — the pipeline is NOT "
+                 "processing for those scopes.")
+        # Confirm-gated resume per task (same wording as Admin; the button
+        # is the "resume step"): tick the acknowledgement, then the button
+        # enables.
+        _rc = st.columns(min(len(_susp), 3))
+        for i, _name in enumerate(_susp):
+            with _rc[i % len(_rc)]:
+                _ok = confirm_gate(
+                    f"I want to resume {_name}",
+                    key=f"tasks_resume_ok_{_name}",
+                    help="The task runs again on its schedule as soon as it "
+                         "is resumed.")
+                if st.button(f"Resume {_name}", key=f"tasks_resume_{_name}",
+                             disabled=not _ok):
+                    try:
+                        run_query(f"ALTER TASK ADJUSTMENT_APP.{_name} RESUME")
+                        set_flash("tasks", "success",
+                                  f"Task {_name} resumed.")
+                        safe_rerun()
+                    except Exception as ex:
+                        st.error(f"Could not resume {_name} — the database "
+                                 f"reported: {ex}")
     render_df_table(df_tasks,
-                    highlight=lambda r: str(r.get("STATE", "")).upper() != "STARTED")
+                    highlight=lambda r: str(r.get("STATE", "")).upper() != "STARTED",
+                    color_cols={"STATE": _state_colors})
 else:
     st.caption("No tasks found in the schema.")
 
@@ -385,7 +425,10 @@ except Exception as ex:
 
 if not df_hist.empty:
     _su = df_hist["STATE"].astype(str).str.upper()
-    _last24 = pd.Timestamp.now() - pd.Timedelta(hours=24)
+    # SCHEDULED/COMPLETED are London wall-clock NTZ (CONVERT_TIMEZONE above),
+    # so the 24h cut-off must be London "now", not the server's local time.
+    _last24 = (pd.Timestamp.now(tz="Europe/London").tz_localize(None)
+               - pd.Timedelta(hours=24))
     _recent = df_hist[pd.to_datetime(df_hist["SCHEDULED"], errors="coerce") >= _last24]
     k1, k2, k3, k4 = st.columns(4)
     k1.markdown(kpi_card("Runs (24h)", len(_recent)), unsafe_allow_html=True)
@@ -401,8 +444,9 @@ if not df_hist.empty:
                 unsafe_allow_html=True)
     st.markdown("<br/>", unsafe_allow_html=True)
     render_df_table(df_hist, max_rows=100,
-                    highlight=lambda r: str(r.get("STATE", "")).upper() == "FAILED")
-    st.caption("Times shown in London. Source: INFORMATION_SCHEMA.TASK_HISTORY "
-               "(live, last 7 days).")
+                    highlight=lambda r: str(r.get("STATE", "")).upper() == "FAILED",
+                    color_cols={"STATE": _state_colors})
+    st.caption("Times in your selected timezone. Source: "
+               "INFORMATION_SCHEMA.TASK_HISTORY (live, last 7 days).")
 else:
     st.caption("No task runs found.")

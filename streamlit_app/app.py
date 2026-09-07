@@ -18,7 +18,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from utils.styles import inject_css, render_sidebar, section_title, P, SCOPE_CONFIG, fmt_adj_id, icon, render_activity_grid
+from utils.styles import (inject_css, render_sidebar, section_title, P, SCOPE_CONFIG,
+                          STATUS_COLORS, fmt_adj_id, icon, render_activity_grid,
+                          set_flash, render_flash)
 from utils.snowflake_conn import run_query_df, run_query, current_user_name, safe_rerun
 
 inject_css()
@@ -43,8 +45,9 @@ try:
           AND COMPLETE_TIME IS NULL
     """)
     pbi_pending = int(df_pbi_kpi.iloc[0]["PBI_QUEUED"]) + int(df_pbi_kpi.iloc[0]["PBI_RUNNING"]) if not df_pbi_kpi.empty else 0
-except Exception:
-    pbi_pending = 0
+except Exception as e:
+    pbi_pending = None          # rendered as "n/a" — never a misleading 0
+    st.warning(f"Could not load Power BI hand-off status: {e}")
 
 try:
     df_dbt_kpi = run_query_df("""
@@ -55,30 +58,14 @@ try:
           AND START_TIMESTAMP >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
     """)
     dbt_triggers = int(df_dbt_kpi.iloc[0]["DBT_TRIGGERS"]) if not df_dbt_kpi.empty else 0
-except Exception:
-    dbt_triggers = 0
-
-# ──────────────────────────────────────────────────────────────────────────────
-# KPIs — load once, used in header + cards
-# ──────────────────────────────────────────────────────────────────────────────
-
-try:
-    df_kpi = run_query_df("""
-        SELECT
-            COALESCE(SUM(TOTAL_ADJUSTMENTS), 0)       AS TOTAL,
-            COALESCE(SUM(PENDING_COUNT), 0)            AS PENDING,
-            COALESCE(SUM(PENDING_APPROVAL_COUNT), 0)   AS PENDING_APPROVAL,
-            COALESCE(SUM(APPROVED_COUNT), 0)           AS APPROVED,
-            COALESCE(SUM(RUNNING_COUNT), 0)            AS RUNNING,
-            COALESCE(SUM(PROCESSED_COUNT), 0)          AS PROCESSED,
-            COALESCE(SUM(FAILED_COUNT), 0)             AS FAILED,
-            COALESCE(SUM(OVERLAP_ALERTS), 0)           AS OVERLAPS
-        FROM ADJUSTMENT_APP.VW_DASHBOARD_KPI
-    """)
-    kpis = df_kpi.iloc[0].to_dict() if not df_kpi.empty else {}
 except Exception as e:
-    kpis = {}
-    st.warning(f"Could not load KPIs: {e}")
+    dbt_triggers = None         # rendered as "n/a" — never a misleading 0
+    st.warning(f"Could not load dbt rebuild-trigger status: {e}")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# KPIs — loaded ONCE, scoped to the selected COB range (below, after the range
+# picker). They drive the banner health, the KPI strip and the cards.
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 def _health(k):
@@ -106,6 +93,7 @@ _tz_label = next((l for l, z in USER_TZ_OPTIONS.items() if z == _tz), "London")
 london_now = datetime.now(pytz.timezone(_tz)).strftime("%d %b %Y  %H:%M")
 
 _banner = st.empty()   # filled once the COB range (below) is known
+render_flash("home")   # one-shot message from the previous action (ack / re-open)
 
 
 def _render_banner(health_color, health_label, health_title=""):
@@ -128,7 +116,7 @@ def _render_banner(health_color, health_label, health_title=""):
   </div>
   <div style="display:flex;align-items:center;gap:2rem">
     <div style="text-align:center">
-      <div style="font-size:0.65rem;color:rgba(255,255,255,.4);text-transform:uppercase;
+      <div style="font-size:0.72rem;color:rgba(255,255,255,.65);text-transform:uppercase;
         letter-spacing:.1em;margin-bottom:3px">System Status</div>
       <div title="{health_title}" style="background:rgba(255,255,255,.1);border:1px solid {health_color}44;
         border-radius:99px;padding:4px 14px;font-size:0.78rem;font-weight:700;
@@ -137,8 +125,8 @@ def _render_banner(health_color, health_label, health_title=""):
       </div>
     </div>
     <div style="text-align:right">
-      <div style="font-size:0.65rem;color:rgba(255,255,255,.4);text-transform:uppercase;
-        letter-spacing:.1em;margin-bottom:3px">{_tz_label} Time</div>
+      <div style="font-size:0.72rem;color:rgba(255,255,255,.65);text-transform:uppercase;
+        letter-spacing:.1em;margin-bottom:3px">As of</div>
       <div style="font-size:1.05rem;font-weight:700;color:white;letter-spacing:.03em">
         {london_now}
       </div>
@@ -192,9 +180,8 @@ with _rc2:
         f'</span></div>',
         unsafe_allow_html=True)
 
-# Re-scope the KPI totals to the selection (the first load above was unscoped).
-# System Status is derived from THIS scoped load — a failure outside the
-# selected COB range must not turn the page CRITICAL.
+# KPI totals scoped to the selection. System Status is derived from THIS load —
+# a failure outside the selected COB range must not turn the page CRITICAL.
 _kpi_sql = """
         SELECT
             COALESCE(SUM(TOTAL_ADJUSTMENTS), 0)       AS TOTAL,
@@ -218,8 +205,9 @@ try:
         df_kpi = run_query_df(_kpi_sql.format(acked="0 AS ACKED,",
                                               cob_where=cob_where))
     kpis = df_kpi.iloc[0].to_dict() if not df_kpi.empty else {}
-except Exception:
-    pass
+except Exception as e:
+    kpis = {}
+    st.warning(f"KPIs could not be scoped to the selected COB range: {e}")
 
 _hc, _hl = _health(kpis)
 _acked_n = int(kpis.get("ACKED", 0))
@@ -257,21 +245,27 @@ kpi_items = [
 cards_html = ('<div style="display:grid;grid-template-columns:repeat(8,1fr);'
               'gap:10px;margin-bottom:0.5rem">')
 for label, val, sub, color, icon_name in kpi_items:
-    alert_style = f"box-shadow:0 0 0 2px {color}44;" if (label in ("Power BI", "dbt Rebuild", "Overlaps") and val > 0) else ""
-    val_color = color if val > 0 else P["grey_400"]
+    # val is None when the hand-off source could not be queried — show "n/a"
+    # in grey rather than a reassuring 0 (the warning above says why).
+    _na = val is None
+    _n = 0 if _na else int(val)
+    alert_style = f"box-shadow:0 0 0 2px {color}44;" if (label in ("Power BI", "dbt Rebuild", "Overlaps") and _n > 0) else ""
+    val_color = P["grey_500"] if _na else (color if _n > 0 else P["grey_400"])
+    val_shown = "n/a" if _na else str(_n)
+    val_title = ' title="Status could not be loaded — see the warning above"' if _na else ""
     cards_html += f"""
     <div style="position:relative;background:white;border:1px solid {P['border']};
       border-radius:10px;padding:0.9rem 0.8rem 0.9rem 1rem;{alert_style}
-      box-shadow:0 1px 2px rgba(15,23,42,.05);overflow:hidden">
+      box-shadow:0 1px 2px rgba(15,23,42,.05);overflow:hidden"{val_title}>
       <div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:{color}"></div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.3rem">
-        <span style="font-size:0.62rem;font-weight:700;text-transform:uppercase;
+        <span style="font-size:0.72rem;font-weight:700;text-transform:uppercase;
           letter-spacing:.08em;color:{P['grey_700']}">{label}</span>
         {icon(icon_name, size=13, color=val_color, valign="0")}
       </div>
       <div style="font-size:1.75rem;font-weight:800;color:{val_color};
-        line-height:1;font-variant-numeric:tabular-nums">{val}</div>
-      <div style="font-size:0.68rem;color:{P['grey_700']};margin-top:4px">{sub}</div>
+        line-height:1;font-variant-numeric:tabular-nums">{val_shown}</div>
+      <div style="font-size:0.72rem;color:{P['grey_700']};margin-top:4px">{sub}</div>
     </div>"""
 cards_html += '</div>'
 # Plain-language explainer for the two report hand-off paths (non-technical
@@ -311,8 +305,8 @@ with col_charts:
             color_map = {
                 "Pending":          P["warning"],
                 "Pending Approval": P["info"],
-                "Approved":         "#00897B",
-                "Running":          "#1565C0",
+                "Approved":         STATUS_COLORS["Approved"],
+                "Running":          STATUS_COLORS["Running"],
                 "Processed":        P["success"],
                 "Failed":           P["danger"],
             }
@@ -347,10 +341,16 @@ with col_charts:
         st.info(f"No data available: {e}")
 
     # ── COB Trend Charts (selected range, capped at the 10 most recent) ─────
-    _trend_cobs = (sel_cobs if sel_cobs else _all_cobs)[:10]
-    section_title(
-        f"Activity Trend — {len(_trend_cobs)} COB(s)" if _trend_cobs
-        else "Activity Trend", "line-chart")
+    _trend_src  = sel_cobs if sel_cobs else _all_cobs
+    _trend_cobs = _trend_src[:10]
+    if _trend_cobs and len(_trend_cobs) < len(_trend_src):
+        _trend_title = (f"Activity Trend — latest {len(_trend_cobs)} of "
+                        f"{len(_trend_src)} COBs")
+    elif _trend_cobs:
+        _trend_title = f"Activity Trend — {len(_trend_cobs)} COB(s)"
+    else:
+        _trend_title = "Activity Trend"
+    section_title(_trend_title, "line-chart")
     try:
         _trend_where = ("COBID IN (" + ",".join(str(c) for c in _trend_cobs) + ")"
                         if _trend_cobs else "1=0")
@@ -443,23 +443,38 @@ with col_alerts:
 
     # ── Overlap Alerts ───────────────────────────────────────────────────────
     section_title("Overlap Alerts", "alert-triangle")
+    # Business-facing ids: DT_OVERLAP_ALERTS only carries the internal ADJ_ID
+    # hashes, so join ADJ_HEADER twice for the DIMENSION_ADJ_IDs (NULL until
+    # processed — fmt_adj_id then falls back to the short hash). The COB filter
+    # is applied inside the sub-select so `COBID` stays unambiguous.
+    _overlaps_failed = False
     try:
         df_overlaps = run_query_df(f"""
-            SELECT ADJ_ID_A, ADJ_ID_B, PROCESS_TYPE, ENTITY_A, ENTITY_B,
-                   BOOK_A, BOOK_B, COBID, ALERT_MESSAGE
-            FROM ADJUSTMENT_APP.DT_OVERLAP_ALERTS
-            WHERE {cob_where}
-            ORDER BY COBID DESC
+            SELECT o.ADJ_ID_A, o.ADJ_ID_B,
+                   ha.DIMENSION_ADJ_ID AS DIM_A, hb.DIMENSION_ADJ_ID AS DIM_B,
+                   o.PROCESS_TYPE, o.ENTITY_A, o.ENTITY_B,
+                   o.BOOK_A, o.BOOK_B, o.COBID, o.ALERT_MESSAGE
+            FROM (SELECT ADJ_ID_A, ADJ_ID_B, PROCESS_TYPE, ENTITY_A, ENTITY_B,
+                         BOOK_A, BOOK_B, COBID, ALERT_MESSAGE
+                  FROM ADJUSTMENT_APP.DT_OVERLAP_ALERTS
+                  WHERE {cob_where}) o
+            LEFT JOIN ADJUSTMENT_APP.ADJ_HEADER ha ON ha.ADJ_ID = o.ADJ_ID_A
+            LEFT JOIN ADJUSTMENT_APP.ADJ_HEADER hb ON hb.ADJ_ID = o.ADJ_ID_B
+            ORDER BY o.COBID DESC
             LIMIT 100
         """)
-    except Exception:
-        df_overlaps = __import__("pandas").DataFrame()
+    except Exception as e:
+        _overlaps_failed = True
+        df_overlaps = pd.DataFrame()
+        st.warning(f"Could not load overlap alerts: {e}")
 
-    if df_overlaps.empty:
+    if _overlaps_failed:
+        pass                                    # warning shown above — no green card
+    elif df_overlaps.empty:
         st.markdown(
             f'<div style="background:#F1F8F1;border:1px solid #C8E6C9;border-radius:10px;'
             f'padding:1.5rem;text-align:center;margin-bottom:0.8rem">'
-            f'<div>{icon("check-circle", size=26, color="#15803D", valign="0")}</div>'
+            f'<div>{icon("check-circle", size=26, color=P["success"], valign="0")}</div>'
             f'<div style="font-size:0.85rem;font-weight:600;color:#2E7D32;margin-top:6px">'
             f'No overlap alerts</div>'
             f'<div style="font-size:0.73rem;color:{P["grey_700"]};margin-top:4px">'
@@ -469,20 +484,25 @@ with col_alerts:
     else:
         count = len(df_overlaps)
         rows_html = ""
+        _cell = lambda v: _htmlmod.escape(str(v if v is not None and not pd.isna(v) else "") or "—")
         for _, r in df_overlaps.iterrows():
-            msg = _htmlmod.escape(str(r.get("ALERT_MESSAGE", "") or "").strip()[:55])
+            id_a = _htmlmod.escape(fmt_adj_id(r.get("DIM_A"), adj_id=r.get("ADJ_ID_A")))
+            id_b = _htmlmod.escape(fmt_adj_id(r.get("DIM_B"), adj_id=r.get("ADJ_ID_B")))
+            full_msg = _htmlmod.escape(str(r.get("ALERT_MESSAGE", "") or "").strip(), quote=True)
+            where_a = f'{_cell(r.get("ENTITY_A"))} / {_cell(r.get("BOOK_A"))}'
+            where_b = f'{_cell(r.get("ENTITY_B"))} / {_cell(r.get("BOOK_B"))}'
             rows_html += (
-                f'<tr style="border-bottom:1px solid #FFF8E1">'
+                f'<tr style="border-bottom:1px solid #FFF8E1" title="{full_msg}">'
                 f'<td style="padding:7px 8px;font-size:0.75rem;font-weight:700;'
                 f'color:{P["warning"]};white-space:nowrap">'
-                f'#{str(r["ADJ_ID_A"])[:8]}…<br/>↔ #{str(r["ADJ_ID_B"])[:8]}…</td>'
+                f'{id_a}<br/>↔ {id_b}</td>'
                 f'<td style="padding:7px 6px;font-size:0.73rem;color:{P["grey_700"]}">'
                 f'{r.get("PROCESS_TYPE","")}</td>'
                 f'<td style="padding:7px 6px;font-size:0.73rem;color:{P["grey_700"]}">'
                 f'{r.get("COBID","")}</td>'
                 f'<td style="padding:7px 6px;font-size:0.72rem;color:{P["grey_700"]};'
-                f'max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
-                f'{msg or "Overlapping filters"}</td>'
+                f'white-space:nowrap">'
+                f'{where_a}<br/>↔ {where_b}</td>'
                 f'</tr>'
             )
         st.markdown(
@@ -490,21 +510,21 @@ with col_alerts:
             f'overflow:hidden;margin-bottom:0.8rem">'
             f'<div style="background:#FFF8E1;border-bottom:2px solid #FFD54F;padding:0.55rem 0.8rem;'
             f'display:flex;justify-content:space-between;align-items:center">'
-            f'<span style="font-size:0.78rem;font-weight:700;color:#E65100">{icon("alert-triangle", size=13, color="#B45309")} Overlapping adjustments</span>'
+            f'<span style="font-size:0.78rem;font-weight:700;color:#E65100">{icon("alert-triangle", size=13, color=P["warning"])} Overlapping adjustments</span>'
             f'<span style="background:#E65100;color:white;border-radius:99px;'
             f'padding:1px 9px;font-size:0.7rem;font-weight:700">{count}</span>'
             f'</div>'
             f'<div style="max-height:220px;overflow-y:auto">'
             f'<table style="width:100%;border-collapse:collapse">'
             f'<thead><tr style="background:#FAFAFA">'
-            f'<th style="padding:6px 8px;font-size:0.65rem;font-weight:700;text-transform:uppercase;'
+            f'<th style="padding:6px 8px;font-size:0.72rem;font-weight:700;text-transform:uppercase;'
             f'letter-spacing:.06em;color:{P["grey_700"]};text-align:left;white-space:nowrap">ADJ IDs</th>'
-            f'<th style="padding:6px 6px;font-size:0.65rem;font-weight:700;text-transform:uppercase;'
+            f'<th style="padding:6px 6px;font-size:0.72rem;font-weight:700;text-transform:uppercase;'
             f'letter-spacing:.06em;color:{P["grey_700"]};text-align:left">Scope</th>'
-            f'<th style="padding:6px 6px;font-size:0.65rem;font-weight:700;text-transform:uppercase;'
+            f'<th style="padding:6px 6px;font-size:0.72rem;font-weight:700;text-transform:uppercase;'
             f'letter-spacing:.06em;color:{P["grey_700"]};text-align:left">COB</th>'
-            f'<th style="padding:6px 6px;font-size:0.65rem;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:.06em;color:{P["grey_700"]};text-align:left">Message</th>'
+            f'<th style="padding:6px 6px;font-size:0.72rem;font-weight:700;text-transform:uppercase;'
+            f'letter-spacing:.06em;color:{P["grey_700"]};text-align:left;white-space:nowrap">Entity / Book</th>'
             f'</tr></thead>'
             f'<tbody>{rows_html}</tbody>'
             f'</table></div></div>',
@@ -512,6 +532,7 @@ with col_alerts:
 
     # ── Errors ───────────────────────────────────────────────────────────────
     section_title("Current Errors", "x-circle")
+    _errors_failed = False
     try:
         try:
             df_errors = run_query_df(f"""
@@ -534,14 +555,18 @@ with col_alerts:
                 ORDER BY ERROR_TIME DESC
                 LIMIT 100
             """)
-    except Exception:
-        df_errors = __import__("pandas").DataFrame()
+    except Exception as e:
+        _errors_failed = True
+        df_errors = pd.DataFrame()
+        st.warning(f"Could not load current errors: {e}")
 
-    if df_errors.empty:
+    if _errors_failed:
+        pass                                    # warning shown above — no green card
+    elif df_errors.empty:
         st.markdown(
             f'<div style="background:#F1F8F1;border:1px solid #C8E6C9;border-radius:10px;'
             f'padding:1.5rem;text-align:center">'
-            f'<div>{icon("check-circle", size=26, color="#15803D", valign="0")}</div>'
+            f'<div>{icon("check-circle", size=26, color=P["success"], valign="0")}</div>'
             f'<div style="font-size:0.85rem;font-weight:600;color:#2E7D32;margin-top:6px">'
             f'No errors</div>'
             f'<div style="font-size:0.73rem;color:{P["grey_700"]};margin-top:4px">'
@@ -554,21 +579,24 @@ with col_alerts:
         acked_count = int(_ack_mask.sum())
         rows_html = ""
         for _, r in df_errors.iterrows():
-            msg = _htmlmod.escape(str(r.get("ERRORMESSAGE", "") or "").strip()[:70])
-            adj_label = fmt_adj_id(r.get("DIMENSION_ADJ_ID"))
+            full_msg = str(r.get("ERRORMESSAGE", "") or "").strip()
+            msg = _htmlmod.escape(full_msg[:70])
+            # Full text on hover — the cell is ellipsised at 70 chars.
+            msg_title = _htmlmod.escape(full_msg or "Unknown error", quote=True)
+            adj_label = fmt_adj_id(r.get("DIMENSION_ADJ_ID"), adj_id=r.get("ADJ_ID"))
             _is_ack = bool(r.get("IS_ACKNOWLEDGED") or False)
             _ack_by = _htmlmod.escape(str(r.get("ERROR_ACK_BY") or ""))
             _row_col = P["grey_400"] if _is_ack else P["danger"]
             _ack_tag = (f' <span title="acknowledged by {_ack_by}" style="background:{P["grey_100"]};'
                         f'color:{P["grey_700"]};border-radius:99px;padding:0 6px;'
-                        f'font-size:0.62rem;font-weight:700">ACK</span>' if _is_ack else "")
+                        f'font-size:0.7rem;font-weight:700">ACK</span>' if _is_ack else "")
             rows_html += (
                 f'<tr style="border-bottom:1px solid #FFEBEE{";opacity:.6" if _is_ack else ""}">'
                 f'<td style="padding:7px 8px;font-size:0.75rem;font-weight:700;'
                 f'color:{_row_col};white-space:nowrap">{adj_label}{_ack_tag}</td>'
                 f'<td style="padding:7px 6px;font-size:0.73rem;color:{P["grey_700"]}">'
                 f'{r.get("PROCESS_TYPE","")}</td>'
-                f'<td style="padding:7px 6px;font-size:0.72rem;color:{P["grey_700"]};'
+                f'<td title="{msg_title}" style="padding:7px 6px;font-size:0.72rem;color:{P["grey_700"]};'
                 f'max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
                 f'{msg or "Unknown error"}</td>'
                 f'</tr>'
@@ -586,16 +614,18 @@ with col_alerts:
             f'<div style="max-height:220px;overflow-y:auto">'
             f'<table style="width:100%;border-collapse:collapse">'
             f'<thead><tr style="background:#FAFAFA">'
-            f'<th style="padding:6px 8px;font-size:0.65rem;font-weight:700;text-transform:uppercase;'
+            f'<th style="padding:6px 8px;font-size:0.72rem;font-weight:700;text-transform:uppercase;'
             f'letter-spacing:.06em;color:{P["grey_700"]};text-align:left;white-space:nowrap">ADJ ID</th>'
-            f'<th style="padding:6px 6px;font-size:0.65rem;font-weight:700;text-transform:uppercase;'
+            f'<th style="padding:6px 6px;font-size:0.72rem;font-weight:700;text-transform:uppercase;'
             f'letter-spacing:.06em;color:{P["grey_700"]};text-align:left">Scope</th>'
-            f'<th style="padding:6px 6px;font-size:0.65rem;font-weight:700;text-transform:uppercase;'
+            f'<th style="padding:6px 6px;font-size:0.72rem;font-weight:700;text-transform:uppercase;'
             f'letter-spacing:.06em;color:{P["grey_700"]};text-align:left">Error</th>'
             f'</tr></thead>'
             f'<tbody>{rows_html}</tbody>'
             f'</table></div></div>',
             unsafe_allow_html=True)
+        st.caption("Hover an error for the full text. Full messages and Retry: "
+                   "Logs › Errors, and the Adjustments page.")
 
         # ── Acknowledge / re-open ─────────────────────────────────────────
         # Acknowledging records who/when/why on the header and takes the
@@ -615,18 +645,23 @@ with col_alerts:
                                      key="home_ack_pick")
                 _note = st.text_input("Note (why it is OK to acknowledge)",
                                       key="home_ack_note", max_chars=500,
-                                      placeholder="e.g. resubmitted as ADJ-1234")
-                if st.button("Acknowledge", key="home_ack_btn", type="primary"):
-                    _n = _note.strip()
+                                      placeholder="e.g. resubmitted as ADJ-1234",
+                                      help="A note is required for audit")
+                _n = (_note or "").strip()
+                if st.button("Acknowledge", key="home_ack_btn", type="primary",
+                             disabled=not _n,
+                             help="A note is required for audit"):
+                    _label = _pick.split(" · ")[0]       # the fmt_adj_id part
                     try:
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
                             SET ERROR_ACK_BY = '{_esc(_me)}',
                                 ERROR_ACK_AT = CONVERT_TIMEZONE('Europe/London',
                                                    CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9),
-                                ERROR_ACK_NOTE = {("'" + _esc(_n) + "'") if _n else "NULL"}
+                                ERROR_ACK_NOTE = '{_esc(_n)}'
                             WHERE ADJ_ID = '{_esc(_opts[_pick])}' AND RUN_STATUS = 'Failed'
                         """)
+                        set_flash("home", "success", f"Acknowledged {_label}")
                         safe_rerun()
                     except Exception as ex:
                         st.error(f"Could not acknowledge: {ex}")
@@ -639,6 +674,7 @@ with col_alerts:
                 _rpick = st.selectbox("Acknowledged failure", list(_ropts.keys()),
                                       key="home_unack_pick")
                 if st.button("Re-open (count it again)", key="home_unack_btn"):
+                    _rlabel = _rpick.split(" · ")[0]
                     try:
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
@@ -646,6 +682,8 @@ with col_alerts:
                                 ERROR_ACK_NOTE = NULL
                             WHERE ADJ_ID = '{_esc(_ropts[_rpick])}'
                         """)
+                        set_flash("home", "success",
+                                  f"Re-opened {_rlabel} — it counts in System Status again")
                         safe_rerun()
                     except Exception as ex:
                         st.error(f"Could not re-open: {ex}")
@@ -679,8 +717,8 @@ with col_alerts:
                 f'<div style="background:white;border:1px solid {P["border"]};'
                 f'border-radius:10px;padding:0.9rem 1rem">{rows_html}</div>',
                 unsafe_allow_html=True)
-    except Exception:
-        pass
+    except Exception as e:
+        st.warning(f"Could not load top submitters: {e}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
