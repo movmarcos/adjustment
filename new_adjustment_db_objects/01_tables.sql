@@ -86,6 +86,13 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER (
     RECORD_COUNT                NUMBER(38,0),
     ERRORMESSAGE                VARCHAR(1000) COLLATE 'en-ci',
     RUN_LOG_ID                  NUMBER(38,0),                    -- Set by SP_PROCESS_ADJUSTMENT from BATCH.SEQ_RUN_LOG
+    -- Failure acknowledgement (Home page): a Failed adjustment whose error
+    -- was acknowledged AFTER it failed (ERROR_ACK_AT >= PROCESS_DATE) no
+    -- longer drives System Status to CRITICAL. A retry that fails again gets
+    -- a newer PROCESS_DATE, which re-arms the alert automatically.
+    ERROR_ACK_BY                VARCHAR(40)  COLLATE 'en-ci',
+    ERROR_ACK_AT                TIMESTAMP_NTZ(9),
+    ERROR_ACK_NOTE              VARCHAR(500) COLLATE 'en-ci',
 
     -- Soft delete
     IS_DELETED                  BOOLEAN      DEFAULT FALSE,

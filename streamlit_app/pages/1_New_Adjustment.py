@@ -909,9 +909,8 @@ def _completion_checks() -> list:
                                     and _upload_validation_ok()),
             ("Risk-class rules",    not wiz.get("_frtb_rule_errs")),
             ("Single COB in file",  not wiz.get("_frtb_cob_bad")),
-            ("COB date",            bool(wiz.get("cobid"))),
-            ("COB matches the file", wiz.get("_frtb_file_cob") is None
-                                     or wiz.get("cobid") == wiz["_frtb_file_cob"]),
+            ("COB date (from file)", bool(wiz.get("cobid"))
+                                     and wiz.get("cobid") == wiz.get("_frtb_file_cob")),
             ("Reference",           bool((wiz.get("global_reference") or "").strip())),
             ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
             ("Reason",              bool((wiz.get("reason") or "").strip())),
@@ -1626,6 +1625,7 @@ def render_direct_form() -> None:
             wiz["_frtb_file_cob"]     = None
             wiz["_frtb_cob_bad"]      = False
             wiz["_direct_file_cob"]   = None
+            wiz["cobid"]              = None   # FRTB: COB comes from the file
             safe_rerun()
     if not wiz.get("process_type"):
         st.info("Select a data scope to continue.")
@@ -2342,6 +2342,7 @@ def _render_frtb_direct_body(scope: str) -> None:
         wiz["_frtb_rule_errs"] = None
         wiz["_frtb_file_cob"] = None
         wiz["_frtb_cob_bad"] = False
+        wiz["cobid"] = None
         st.error(f"Failed to read the CSV: {_parse_err}. If the columns look "
                  f"wrong, pick the delimiter explicitly above.")
     elif df is not None:
@@ -2365,21 +2366,28 @@ def _render_frtb_direct_body(scope: str) -> None:
                        f"{_FRTB_LABELS[scope]} layout (stored with the upload, "
                        "not processed): " + ", ".join(unknown[:15]))
 
-        # COB consistency: every row's COBID must match ONE cob → the header's
+        # COB comes ONLY from the file and is re-derived on every parse: the
+        # header COB is the file's single COBID, or nothing. It is never
+        # user-editable (a stale COB from a previous paste used to survive a
+        # data change and mis-target the adjustment).
         wiz["_frtb_file_cob"] = None
         wiz["_frtb_cob_bad"] = False
+        wiz["cobid"] = None
         if "COBID" in df.columns and len(df):
             _cobs = sorted(pd.to_numeric(df["COBID"], errors="coerce")
                            .dropna().astype(int).unique().tolist())
             if len(_cobs) == 1:
                 wiz["_frtb_file_cob"] = int(_cobs[0])
-                if not wiz.get("cobid"):
-                    wiz["cobid"] = int(_cobs[0])
+                wiz["cobid"] = int(_cobs[0])
             elif len(_cobs) > 1:
                 wiz["_frtb_cob_bad"] = True
                 st.error(f"The file mixes {len(_cobs)} different COBIDs "
                          f"({_cobs[:5]}…) — one upload covers exactly one COB. "
                          f"Submission is blocked.")
+            else:
+                st.error("COBID has no valid value in the file — every row "
+                         "must carry the COB as YYYYMMDD. Submission is "
+                         "blocked.")
 
         # Reference-data validation (codes vs dimensions) — same engine as
         # VaR Upload, config-driven via RESOLUTIONS.
@@ -2450,15 +2458,30 @@ def _render_frtb_direct_body(scope: str) -> None:
         wiz["_frtb_rule_errs"] = None
         wiz["_frtb_file_cob"] = None
         wiz["_frtb_cob_bad"] = False
+        wiz["cobid"] = None
 
     _csv_card.__exit__(None, None, None)
 
     with _card():
-        _sec(4, "Upload Details", "COB is taken from the file when present.")
+        _sec(4, "Upload Details",
+             "COB is read from the file's COBID column and cannot be edited.")
         g1, g2 = st.columns(2)
         with g1:
-            wiz["cobid"] = _int_input("COB Date (YYYYMMDD) *", "frtbup_cobid",
-                                      wiz.get("cobid"))
+            # Read-only: the value is whatever the current parse derived
+            # (no key on purpose — a keyed widget would hold on to the
+            # previous file's COB after the data changed).
+            _cob_show = str(wiz.get("cobid") or "")
+            st.text_input("COB Date (from file) *", value=_cob_show,
+                          disabled=True,
+                          placeholder="derived from the file's COBID",
+                          help="Taken from the COBID column of the CSV. To "
+                               "change it, change the file — every row must "
+                               "carry the same COB.")
+            if wiz.get("_frtb_cob_bad"):
+                st.caption("⚠ The file has more than one COBID — fix the "
+                           "file to set the COB.")
+            elif wiz.get("uploaded_df") is not None and not wiz.get("cobid"):
+                st.caption("⚠ No valid COBID found in the file.")
         with g2:
             rv = st.text_input("Reference *", key=_k("frtbup_ref"),
                                value=wiz.get("global_reference") or "",

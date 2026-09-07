@@ -61,6 +61,11 @@ SELECT
     COUNT(DISTINCT CASE WHEN h.RUN_STATUS = 'Processed'          THEN h.ADJ_ID END) AS PROCESSED_COUNT,
     COUNT(DISTINCT CASE WHEN h.RUN_STATUS = 'Running'            THEN h.ADJ_ID END) AS RUNNING_COUNT,
     COUNT(DISTINCT CASE WHEN h.RUN_STATUS = 'Failed'             THEN h.ADJ_ID END) AS FAILED_COUNT,
+    -- Failed but acknowledged after the failure (see ADJ_HEADER.ERROR_ACK_*)
+    COUNT(DISTINCT CASE WHEN h.RUN_STATUS = 'Failed'
+                         AND h.ERROR_ACK_AT IS NOT NULL
+                         AND h.ERROR_ACK_AT >= COALESCE(h.PROCESS_DATE, h.ERROR_ACK_AT)
+                        THEN h.ADJ_ID END)                                 AS ACKNOWLEDGED_FAILED_COUNT,
     COUNT(DISTINCT CASE WHEN h.RUN_STATUS LIKE 'Rejected%'       THEN h.ADJ_ID END) AS REJECTED_COUNT,
     SUM(CASE WHEN h.RUN_STATUS = 'Processed' AND NOT h.IS_DELETED
              THEN h.ADJUSTMENT_VALUE_IN_USD ELSE 0 END)               AS TOTAL_PROCESSED_VALUE_USD,
@@ -159,7 +164,13 @@ SELECT
     h.CREATED_DATE,
     h.PROCESS_DATE           AS ERROR_TIME,
     h.ERRORMESSAGE,
-    h.REASON
+    h.REASON,
+    -- Acknowledged only if the ack is newer than the failure it refers to
+    (h.ERROR_ACK_AT IS NOT NULL
+     AND h.ERROR_ACK_AT >= COALESCE(h.PROCESS_DATE, h.ERROR_ACK_AT)) AS IS_ACKNOWLEDGED,
+    h.ERROR_ACK_BY,
+    h.ERROR_ACK_AT,
+    h.ERROR_ACK_NOTE
 FROM ADJUSTMENT_APP.ADJ_HEADER h
 WHERE h.RUN_STATUS = 'Failed'
   AND h.IS_DELETED = FALSE;

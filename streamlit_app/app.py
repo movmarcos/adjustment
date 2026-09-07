@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 from utils.styles import inject_css, render_sidebar, section_title, P, SCOPE_CONFIG, fmt_adj_id, icon, render_activity_grid
-from utils.snowflake_conn import run_query_df, current_user_name
+from utils.snowflake_conn import run_query_df, run_query, current_user_name, safe_rerun
 
 inject_css()
 render_sidebar()
@@ -80,21 +80,21 @@ except Exception as e:
     kpis = {}
     st.warning(f"Could not load KPIs: {e}")
 
-failed  = int(kpis.get("FAILED", 0))
-running = int(kpis.get("RUNNING", 0))
-pending = int(kpis.get("PENDING", 0)) + int(kpis.get("APPROVED", 0))
 
-if failed > 0:
-    health_color, health_label = "#F87171", "CRITICAL"
-elif running > 0:
-    health_color, health_label = "#60A5FA", "PROCESSING"
-elif pending > 0:
-    health_color, health_label = "#FBBF24", "QUEUED"
-else:
-    health_color, health_label = "#4ADE80", "HEALTHY"
-health_dot = (f'<span style="display:inline-block;width:8px;height:8px;'
-              f'border-radius:50%;background:{health_color};'
-              f'box-shadow:0 0 6px {health_color}AA;vertical-align:1px"></span>')
+def _health(k):
+    """System Status from the KPI dict of the SELECTED COB range. Failed
+    adjustments whose error was acknowledged (Current Errors panel) do not
+    count — the status goes back to HEALTHY while the failure stays listed."""
+    failed  = int(k.get("FAILED", 0)) - int(k.get("ACKED", 0))
+    running = int(k.get("RUNNING", 0))
+    pending = int(k.get("PENDING", 0)) + int(k.get("APPROVED", 0))
+    if failed > 0:
+        return "#F87171", "CRITICAL"
+    if running > 0:
+        return "#60A5FA", "PROCESSING"
+    if pending > 0:
+        return "#FBBF24", "QUEUED"
+    return "#4ADE80", "HEALTHY"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # HEADER BANNER
@@ -105,7 +105,14 @@ _tz = get_user_tz()
 _tz_label = next((l for l, z in USER_TZ_OPTIONS.items() if z == _tz), "London")
 london_now = datetime.now(pytz.timezone(_tz)).strftime("%d %b %Y  %H:%M")
 
-st.markdown(f"""
+_banner = st.empty()   # filled once the COB range (below) is known
+
+
+def _render_banner(health_color, health_label, health_title=""):
+    health_dot = (f'<span style="display:inline-block;width:8px;height:8px;'
+                  f'border-radius:50%;background:{health_color};'
+                  f'box-shadow:0 0 6px {health_color}AA;vertical-align:1px"></span>')
+    _banner.markdown(f"""
 <div style="background:linear-gradient(135deg,{P['accent']} 0%,#2A2A48 100%);
   border-radius:14px;padding:1.4rem 2rem;margin-bottom:1.2rem;
   display:flex;justify-content:space-between;align-items:center;
@@ -123,7 +130,7 @@ st.markdown(f"""
     <div style="text-align:center">
       <div style="font-size:0.65rem;color:rgba(255,255,255,.4);text-transform:uppercase;
         letter-spacing:.1em;margin-bottom:3px">System Status</div>
-      <div style="background:rgba(255,255,255,.1);border:1px solid {health_color}44;
+      <div title="{health_title}" style="background:rgba(255,255,255,.1);border:1px solid {health_color}44;
         border-radius:99px;padding:4px 14px;font-size:0.78rem;font-weight:700;
         color:{health_color};backdrop-filter:blur(4px)">
         {health_dot} {health_label}
@@ -186,8 +193,9 @@ with _rc2:
         unsafe_allow_html=True)
 
 # Re-scope the KPI totals to the selection (the first load above was unscoped).
-try:
-    df_kpi = run_query_df(f"""
+# System Status is derived from THIS scoped load — a failure outside the
+# selected COB range must not turn the page CRITICAL.
+_kpi_sql = """
         SELECT
             COALESCE(SUM(TOTAL_ADJUSTMENTS), 0)       AS TOTAL,
             COALESCE(SUM(PENDING_COUNT), 0)            AS PENDING,
@@ -196,13 +204,28 @@ try:
             COALESCE(SUM(RUNNING_COUNT), 0)            AS RUNNING,
             COALESCE(SUM(PROCESSED_COUNT), 0)          AS PROCESSED,
             COALESCE(SUM(FAILED_COUNT), 0)             AS FAILED,
+            {acked}
             COALESCE(SUM(OVERLAP_ALERTS), 0)           AS OVERLAPS
         FROM ADJUSTMENT_APP.VW_DASHBOARD_KPI
-        WHERE {cob_where}
-    """)
+        WHERE {cob_where}"""
+try:
+    try:
+        df_kpi = run_query_df(_kpi_sql.format(
+            acked="COALESCE(SUM(ACKNOWLEDGED_FAILED_COUNT), 0) AS ACKED,",
+            cob_where=cob_where))
+    except Exception:
+        # View not yet redeployed with the acknowledgement column
+        df_kpi = run_query_df(_kpi_sql.format(acked="0 AS ACKED,",
+                                              cob_where=cob_where))
     kpis = df_kpi.iloc[0].to_dict() if not df_kpi.empty else {}
 except Exception:
     pass
+
+_hc, _hl = _health(kpis)
+_acked_n = int(kpis.get("ACKED", 0))
+_render_banner(_hc, _hl,
+               (f"{_acked_n} acknowledged failure(s) in {_range_txt} — "
+                f"see Current Errors" if _acked_n else f"Status for {_range_txt}"))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # KPI STRIP — each card LINKS to the Adjustments page with the matching
@@ -490,13 +513,27 @@ with col_alerts:
     # ── Errors ───────────────────────────────────────────────────────────────
     section_title("Current Errors", "x-circle")
     try:
-        df_errors = run_query_df(f"""
-            SELECT DIMENSION_ADJ_ID, PROCESS_TYPE, ENTITY_CODE, ERRORMESSAGE, USERNAME, ERROR_TIME
-            FROM ADJUSTMENT_APP.VW_ERRORS
-            WHERE {cob_where}
-            ORDER BY ERROR_TIME DESC
-            LIMIT 100
-        """)
+        try:
+            df_errors = run_query_df(f"""
+                SELECT ADJ_ID, DIMENSION_ADJ_ID, PROCESS_TYPE, ENTITY_CODE, ERRORMESSAGE,
+                       USERNAME, ERROR_TIME, IS_ACKNOWLEDGED, ERROR_ACK_BY, ERROR_ACK_AT,
+                       ERROR_ACK_NOTE
+                FROM ADJUSTMENT_APP.VW_ERRORS
+                WHERE {cob_where}
+                ORDER BY IS_ACKNOWLEDGED, ERROR_TIME DESC
+                LIMIT 100
+            """)
+        except Exception:
+            # View not yet redeployed with the acknowledgement columns
+            df_errors = run_query_df(f"""
+                SELECT ADJ_ID, DIMENSION_ADJ_ID, PROCESS_TYPE, ENTITY_CODE, ERRORMESSAGE,
+                       USERNAME, ERROR_TIME, FALSE AS IS_ACKNOWLEDGED,
+                       NULL AS ERROR_ACK_BY, NULL AS ERROR_ACK_AT, NULL AS ERROR_ACK_NOTE
+                FROM ADJUSTMENT_APP.VW_ERRORS
+                WHERE {cob_where}
+                ORDER BY ERROR_TIME DESC
+                LIMIT 100
+            """)
     except Exception:
         df_errors = __import__("pandas").DataFrame()
 
@@ -512,15 +549,23 @@ with col_alerts:
             f'</div>',
             unsafe_allow_html=True)
     else:
-        count = len(df_errors)
+        _ack_mask = df_errors["IS_ACKNOWLEDGED"].fillna(False).astype(bool)
+        count = int((~_ack_mask).sum())          # OPEN failures drive the badge
+        acked_count = int(_ack_mask.sum())
         rows_html = ""
         for _, r in df_errors.iterrows():
             msg = _htmlmod.escape(str(r.get("ERRORMESSAGE", "") or "").strip()[:70])
             adj_label = fmt_adj_id(r.get("DIMENSION_ADJ_ID"))
+            _is_ack = bool(r.get("IS_ACKNOWLEDGED") or False)
+            _ack_by = _htmlmod.escape(str(r.get("ERROR_ACK_BY") or ""))
+            _row_col = P["grey_400"] if _is_ack else P["danger"]
+            _ack_tag = (f' <span title="acknowledged by {_ack_by}" style="background:{P["grey_100"]};'
+                        f'color:{P["grey_700"]};border-radius:99px;padding:0 6px;'
+                        f'font-size:0.62rem;font-weight:700">ACK</span>' if _is_ack else "")
             rows_html += (
-                f'<tr style="border-bottom:1px solid #FFEBEE">'
+                f'<tr style="border-bottom:1px solid #FFEBEE{";opacity:.6" if _is_ack else ""}">'
                 f'<td style="padding:7px 8px;font-size:0.75rem;font-weight:700;'
-                f'color:{P["danger"]};white-space:nowrap">{adj_label}</td>'
+                f'color:{_row_col};white-space:nowrap">{adj_label}{_ack_tag}</td>'
                 f'<td style="padding:7px 6px;font-size:0.73rem;color:{P["grey_700"]}">'
                 f'{r.get("PROCESS_TYPE","")}</td>'
                 f'<td style="padding:7px 6px;font-size:0.72rem;color:{P["grey_700"]};'
@@ -535,7 +580,8 @@ with col_alerts:
             f'display:flex;justify-content:space-between;align-items:center">'
             f'<span style="font-size:0.78rem;font-weight:700;color:{P["danger"]}">{icon("x-circle", size=13, color=P["danger"])} Failed adjustments</span>'
             f'<span style="background:{P["danger"]};color:white;border-radius:99px;'
-            f'padding:1px 9px;font-size:0.7rem;font-weight:700">{count}</span>'
+            f'padding:1px 9px;font-size:0.7rem;font-weight:700">{count} open'
+            + (f' · {acked_count} acknowledged' if acked_count else "") + '</span>'
             f'</div>'
             f'<div style="max-height:220px;overflow-y:auto">'
             f'<table style="width:100%;border-collapse:collapse">'
@@ -550,6 +596,59 @@ with col_alerts:
             f'<tbody>{rows_html}</tbody>'
             f'</table></div></div>',
             unsafe_allow_html=True)
+
+        # ── Acknowledge / re-open ─────────────────────────────────────────
+        # Acknowledging records who/when/why on the header and takes the
+        # failure out of System Status (it stays listed, greyed, with ACK).
+        # A retry that fails again re-arms it (ack older than the failure).
+        _open_rows = df_errors[~_ack_mask]
+        _ack_rows  = df_errors[_ack_mask]
+        with st.expander("Acknowledge a failure (System Status back to HEALTHY)",
+                         expanded=False):
+            _me = current_user_name() or "UNKNOWN"
+            _esc = lambda v: str(v).replace("\\", "\\\\").replace("'", "''")
+            if not _open_rows.empty:
+                _opts = {f"{fmt_adj_id(r.DIMENSION_ADJ_ID)} · {r.PROCESS_TYPE} · "
+                         f"{str(r.ERRORMESSAGE or '')[:50]}": str(r.ADJ_ID)
+                         for r in _open_rows.itertuples()}
+                _pick = st.selectbox("Failed adjustment", list(_opts.keys()),
+                                     key="home_ack_pick")
+                _note = st.text_input("Note (why it is OK to acknowledge)",
+                                      key="home_ack_note", max_chars=500,
+                                      placeholder="e.g. resubmitted as ADJ-1234")
+                if st.button("Acknowledge", key="home_ack_btn", type="primary"):
+                    _n = _note.strip()
+                    try:
+                        run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                            SET ERROR_ACK_BY = '{_esc(_me)}',
+                                ERROR_ACK_AT = CONVERT_TIMEZONE('Europe/London',
+                                                   CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9),
+                                ERROR_ACK_NOTE = {("'" + _esc(_n) + "'") if _n else "NULL"}
+                            WHERE ADJ_ID = '{_esc(_opts[_pick])}' AND RUN_STATUS = 'Failed'
+                        """)
+                        safe_rerun()
+                    except Exception as ex:
+                        st.error(f"Could not acknowledge: {ex}")
+            else:
+                st.caption("No open failures in this COB range.")
+            if not _ack_rows.empty:
+                _ropts = {f"{fmt_adj_id(r.DIMENSION_ADJ_ID)} · {r.PROCESS_TYPE} · "
+                          f"ack by {r.ERROR_ACK_BY or '?'}": str(r.ADJ_ID)
+                          for r in _ack_rows.itertuples()}
+                _rpick = st.selectbox("Acknowledged failure", list(_ropts.keys()),
+                                      key="home_unack_pick")
+                if st.button("Re-open (count it again)", key="home_unack_btn"):
+                    try:
+                        run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                            SET ERROR_ACK_BY = NULL, ERROR_ACK_AT = NULL,
+                                ERROR_ACK_NOTE = NULL
+                            WHERE ADJ_ID = '{_esc(_ropts[_rpick])}'
+                        """)
+                        safe_rerun()
+                    except Exception as ex:
+                        st.error(f"Could not re-open: {ex}")
 
     # ── Top Submitters ───────────────────────────────────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
