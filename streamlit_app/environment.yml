@@ -2,11 +2,10 @@ name: adjustment-engine
 channels:
   - snowflake
 dependencies:
-  # 1.22.0 is the newest Streamlit this Snowflake account's SiS actually
-  # supports (confirmed live 2026-09; st.toggle/1.23+ APIs raise there).
-  # Requesting a version the snowflake channel cannot resolve can leave the
-  # app on a stale/fallback environment — keep this pin at a supported
-  # version, and keep the API guards in the app (bordered_container,
-  # safe_rerun, grid-selection fallback, no st.toggle/st.dataframe).
-  - streamlit=1.22.0
+  # 1.50.0 — the same runtime as the RAPTOR BAU Operations app on this
+  # account (Marcos, 2026-09-08). Brings the native st.dataframe toolbar
+  # (search / CSV download / fullscreen), column_config, hide_index, row
+  # selection and st.container(border=True). The app keeps its API guards so
+  # it still degrades on older runtimes.
+  - streamlit=1.50.0
   - plotly

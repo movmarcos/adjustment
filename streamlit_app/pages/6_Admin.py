@@ -9,7 +9,7 @@ import pandas as pd
 
 st.set_page_config(page_title="Admin · MUFG", page_icon="⚙️", layout="wide", initial_sidebar_state="expanded")
 
-from utils.styles import (inject_css, render_sidebar, section_title, P,
+from utils.styles import (wide_kwargs, inject_css, render_sidebar, section_title, P,
                           SCOPE_CONFIG, SCOPE_LABEL_HELP, icon, render_df_table,
                           kpi_card, fmt_user_dt, set_flash, render_flash,
                           confirm_gate)
@@ -859,7 +859,7 @@ with tab_notify:
     with nc3:
         st.markdown("<br/>", unsafe_allow_html=True)
         if st.button("Save settings", key="ntf_save", type="primary",
-                     use_container_width=True):
+                     **wide_kwargs()):
             try:
                 for key, val in (("NOTIFICATIONS_ENABLED",
                                   "true" if n_enabled else "false"),
@@ -890,7 +890,7 @@ with tab_notify:
             placeholder="e.g. your.name@mufg.com")
     with t2:
         st.markdown("<br/>", unsafe_allow_html=True)
-        if st.button("Send test", key="ntf_test_btn", use_container_width=True,
+        if st.button("Send test", key="ntf_test_btn", **wide_kwargs(),
                      disabled=not test_email.strip(),
                      help="Enter a recipient first — the test bypasses the master switch"):
             try:

@@ -50,7 +50,7 @@ def test_df_table_is_native_dataframe_with_full_values(harness):
     data, kwargs = dfs[0]
     frame = getattr(data, "data", data)           # Styler or DataFrame
     assert list(frame["User"]) == [long] * 20     # full values, all rows
-    assert kwargs.get("use_container_width") is True
+    assert kwargs.get("use_container_width") is True or kwargs.get("width") == "stretch"
 
 
 def test_df_table_formats_go_to_column_config(harness):
@@ -127,7 +127,7 @@ def test_activity_grid_is_fixed_height_dataframe(harness):
     assert _grids(md) == []                       # canvas, not HTML
     _, kwargs = dfs[0]
     assert kwargs.get("height") == 380
-    assert kwargs.get("use_container_width") is True
+    assert kwargs.get("use_container_width") is True or kwargs.get("width") == "stretch"
 
 
 def test_data_grid_small_is_native_and_fitted(harness):

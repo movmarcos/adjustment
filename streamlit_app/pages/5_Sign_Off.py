@@ -21,7 +21,7 @@ import pandas as pd
 
 st.set_page_config(page_title="Sign-Off · MUFG", page_icon="🔒", layout="wide", initial_sidebar_state="expanded")
 
-from utils.styles import (inject_css, render_sidebar, section_title, P,
+from utils.styles import (wide_kwargs, inject_css, render_sidebar, section_title, P,
                           ALL_SCOPES, icon, bordered_container, fmt_user_dt,
                           SCOPE_CONFIG, render_df_table,
                           set_flash, render_flash, confirm_gate,
@@ -117,7 +117,7 @@ with _hd2:
     st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
     # Secondary on purpose (S-M4): "Sign off now" is the page's one primary.
     if st.button("⟳  Sync from upstream feed", key="signoff_sync_btn",
-                 type="secondary", use_container_width=True,
+                 type="secondary", **wide_kwargs(),
                  help="Pulls every COB/scope/entity from the publish feed: "
                       "not signed off → OPEN, signed off → SIGNED_OFF. Also "
                       "runs automatically every 30 minutes."):
@@ -441,7 +441,7 @@ with tab_act:
                 _can_s = bool(_sel_s and _rsn_s.strip() and _conf_s)
                 if st.button(("Request sign-off" if _appr_s else "Sign off now"),
                              key="so_signoff_btn", type="primary",
-                             use_container_width=True, disabled=not _can_s):
+                             **wide_kwargs(), disabled=not _can_s):
                     _request(_sel_s[0], _sel_s[1], _sel_s[2], "SIGNOFF",
                              "Sign-off", _rsn_s, _appr_s,
                              reset_keys=("so_signoff_target", "so_signoff_reason")
@@ -480,7 +480,7 @@ with tab_act:
                             disabled=True, key="so_reopen_appr")
                 _can_r = bool(_sel_r and _rsn_r.strip())
                 if st.button("Request re-open", key="so_reopen_btn",
-                             use_container_width=True, disabled=not _can_r):
+                             **wide_kwargs(), disabled=not _can_r):
                     _request(_sel_r[0], _sel_r[1], _sel_r[2], "REOPEN",
                              "Re-open", _rsn_r, True,
                              reset_keys=("so_reopen_target", "so_reopen_reason"))

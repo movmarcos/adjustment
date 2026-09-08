@@ -10,7 +10,7 @@ import pandas as pd
 
 st.set_page_config(page_title="Adjustments · MUFG", page_icon="📋", layout="wide", initial_sidebar_state="expanded")
 
-from utils.styles import (
+from utils.styles import (wide_kwargs, 
     inject_css, render_sidebar, render_filter_chips, render_status_timeline,
     render_lifecycle_bar, fmt_user_dt,
     status_badge, section_title, P, SCOPE_CONFIG, STAGE_CONFIG, ALL_SCOPES,
@@ -296,7 +296,7 @@ with bordered_container():
         st.caption(f"{_applied_n} filter(s) applied." if _applied_n else
                    "No filters applied — showing the newest 200 adjustments.")
     with fc2:
-        if st.button("Clear filters", key="adj_clear_btn", use_container_width=True,
+        if st.button("Clear filters", key="adj_clear_btn", **wide_kwargs(),
                      disabled=not _applied_n):
             st.session_state["_adj_clear_filters"] = True
             safe_rerun()
@@ -830,7 +830,7 @@ def render_adj_card(row, expanded=False):
                 confirmed = confirm_gate(
                     f"Confirm — permanently delete this adjustment{_extra}",
                     key=f"delcf_{adj_id}")
-                if st.button("Delete", key=f"del_{adj_id}", use_container_width=True,
+                if st.button("Delete", key=f"del_{adj_id}", **wide_kwargs(),
                              disabled=not confirmed):
                     _do_delete()
                     safe_rerun()
@@ -843,7 +843,7 @@ def render_adj_card(row, expanded=False):
         elif run_status == "Failed":
             with act_cols[0]:
                 if st.button("Retry", key=f"retry_{adj_id}",
-                             use_container_width=True, type="primary"):
+                             **wide_kwargs(), type="primary"):
                     try:
                         if _transition("Pending",
                                        extra_set=", ERRORMESSAGE = NULL, CLAIM_TOKEN = NULL",
@@ -862,7 +862,7 @@ def render_adj_card(row, expanded=False):
         elif run_status == "Pending Approval":
             with act_cols[0]:
                 if st.button("Recall to Pending", key=f"recall_{adj_id}",
-                             use_container_width=True):
+                             **wide_kwargs()):
                     try:
                         if _transition("Pending", comment="Recalled by submitter"):
                             set_flash(_FLASH, "success", "Recalled to Pending.")
@@ -924,7 +924,7 @@ def render_adj_card(row, expanded=False):
             with cc3:
                 st.markdown("<br/>", unsafe_allow_html=True)
                 if st.button("Clone", key=f"clone_btn_{adj_id}",
-                             use_container_width=True,
+                             **wide_kwargs(),
                              disabled=_clone_cob is None):
                     _do_clone(adj_id, _clone_cob, requires_approval=_clone_appr)
 
@@ -959,7 +959,7 @@ with bordered_container():
         st.download_button(
             "⬇ Export CSV", view_df.to_csv(index=False).encode("utf-8-sig"),
             file_name="adjustments_export.csv", mime="text/csv",
-            use_container_width=True,
+            **wide_kwargs(),
             help="Download the filtered list for Excel.")
 
 # The grid renders BARE on the page, outside the card: Grid Lab proved the
@@ -1032,7 +1032,7 @@ if len(_failed_view) >= 2:
                 key="bulk_retry_confirm", value=False)
         with br2:
             if st.button("Retry all failed", key="bulk_retry_btn",
-                         type="primary", use_container_width=True,
+                         type="primary", **wide_kwargs(),
                          disabled=not _br_confirm):
                 _ok, _skipped = 0, 0
                 for _, _fr in _failed_view.iterrows():

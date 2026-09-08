@@ -1931,6 +1931,21 @@ def _styler_cellmap(styler, func, subset):
     return styler.applymap(func, subset=subset)
 
 
+def _st_version():
+    try:
+        return tuple(int(x) for x in st.__version__.split(".")[:2])
+    except Exception:
+        return (0, 0)
+
+
+def wide_kwargs():
+    """Full-width kwargs for st.dataframe / buttons / charts: `width="stretch"`
+    on Streamlit ≥ 1.48 (where use_container_width is deprecated and warns
+    in the app), `**wide_kwargs()` before that."""
+    return {"width": "stretch"} if _st_version() >= (1, 48) \
+        else {"use_container_width": True}
+
+
 def _supports_df_selection(st):
     """True if this Streamlit can do st.dataframe row-selection (>= 1.35).
     Older Streamlit-in-Snowflake runtimes ship pre-1.35 and lack it (the same
@@ -1966,7 +1981,7 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
                                 lambda v: STATUS_STYLE.get(v, ""), ["Status"])
     except Exception:
         shown = grid_df   # very old pandas: plain values beat no grid
-    st.dataframe(shown, use_container_width=True, height=height)
+    st.dataframe(shown, **wide_kwargs(), height=height)
     return SELECTION_UNSUPPORTED if selectable else None
 
 
@@ -2014,10 +2029,10 @@ def render_data_grid(df, height=380, empty_msg="No rows."):
         return
     fit = 35 * (len(df) + 1) + 3
     try:
-        st.dataframe(df, use_container_width=True, hide_index=True,
+        st.dataframe(df, **wide_kwargs(), hide_index=True,
                      height=min(fit, int(height)))
     except TypeError:   # pre-1.24 runtime: no hide_index kwarg
-        st.dataframe(df, use_container_width=True,
+        st.dataframe(df, **wide_kwargs(),
                      height=min(fit, int(height)))
 
 
@@ -2256,7 +2271,7 @@ def render_df_table(df, max_rows=200, height=None, highlight=None,
     # ── render ─────────────────────────────────────────────────────────────
     fit = 35 * (len(show) + 1) + 3
     cap = int(height) if height else 560
-    kw = dict(use_container_width=True, hide_index=True,
+    kw = dict(**wide_kwargs(), hide_index=True,
               height=min(fit, cap))
     if cfg:
         kw["column_config"] = cfg

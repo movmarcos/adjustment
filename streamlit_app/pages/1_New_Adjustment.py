@@ -18,7 +18,7 @@ st.set_page_config(
     layout="wide", initial_sidebar_state="expanded",
 )
 
-from utils.styles import (
+from utils.styles import (wide_kwargs, 
     inject_css, render_sidebar,
     P, SCOPE_CONFIG, TYPE_CONFIG, CATEGORY_CONFIG, render_df_table,
     render_data_grid, fmt_adj_id, icon, bordered_container,
@@ -690,7 +690,7 @@ def _pill_row(options, selected, key_prefix, fmt=None, icons=None, descs=None):
             if _btn(fmt(opt) if fmt else str(opt),
                     icon_name=(icons or {}).get(opt),
                     key=_k(f"{key_prefix}_{opt}"),
-                    use_container_width=True,
+                    **wide_kwargs(),
                     type="primary" if opt == selected else "secondary"):
                 clicked = opt
             if descs and descs.get(opt):
@@ -2028,7 +2028,7 @@ def render_direct_form() -> None:
                 with bc1:
                     if _btn("Add row to batch", icon_name=":material/playlist_add:",
                             key=_k("dr_add"), type="primary",
-                            use_container_width=True):
+                            **wide_kwargs()):
                         if not (vals.get("ENTITY_CODE") or "").strip() \
                                 or not vals.get("VALUE_USD"):
                             _add_err = ("Entity Code and Value (USD) are "
@@ -2039,12 +2039,12 @@ def render_direct_form() -> None:
                             safe_rerun()
                 with bc2:
                     if rows and _btn("Remove last", key=_k("dr_pop"),
-                                     use_container_width=True):
+                                     **wide_kwargs()):
                         wiz["direct_rows"] = rows[:-1]
                         safe_rerun()
                 with bc3:
                     if rows and _btn("Clear batch", key=_k("dr_clear"),
-                                     use_container_width=True):
+                                     **wide_kwargs()):
                         wiz["direct_rows"] = []
                         safe_rerun()
                 if _add_err:
@@ -3269,7 +3269,7 @@ def _render_signoff_panel() -> bool:
                 "Reason for re-opening", key=_k(f"reopen_reason_{scope}"),
                 placeholder="Why does this need to be re-opened?")
             if st.button(f"Request re-open — {scope} ({ent_txt})",
-                         key=_k(f"reopen_btn_{scope}"), use_container_width=True,
+                         key=_k(f"reopen_btn_{scope}"), **wide_kwargs(),
                          disabled=not reason.strip()):
                 try:
                     ok, msg = _request_reopen(scope, cobid, gov_ent,
@@ -3301,7 +3301,7 @@ def _render_signoff_panel() -> bool:
                 f"and block new submissions again",
                 key=_k(f"resign_confirm_{scope}"), value=False)
             if st.button(f"Sign off {scope} ({ent_txt}) again",
-                         key=_k(f"resign_btn_{scope}"), use_container_width=True,
+                         key=_k(f"resign_btn_{scope}"), **wide_kwargs(),
                          disabled=not confirm):
                 try:
                     ok, msg = _resign_off(scope, cobid, gov_ent,
@@ -3400,7 +3400,7 @@ if wiz["step"] == 3:
             unsafe_allow_html=True)
 
     st.markdown("<br/>", unsafe_allow_html=True)
-    if st.button("Create Another Adjustment", use_container_width=True,
+    if st.button("Create Another Adjustment", **wide_kwargs(),
                  type="secondary", key="new_adj"):
         reset_wizard()
         safe_rerun()
@@ -3472,7 +3472,7 @@ with right:
     zero_rows = False
     if cat == "Scaling Adjustment" and not missing:
         if _btn("Run impact preview", icon_name=":material/visibility:",
-                use_container_width=True, key=_k("run_preview")):
+                **wide_kwargs(), key=_k("run_preview")):
             with st.spinner("Calculating impact…"):
                 _run_preview()
             safe_rerun()
@@ -3536,7 +3536,7 @@ with right:
 
     # ── Submit ────────────────────────────────────────────────────────────
     if _btn("Submit Adjustment", icon_name=":material/send:", type="primary",
-            use_container_width=True, key=_k("submit"),
+            **wide_kwargs(), key=_k("submit"),
             disabled=bool(missing) or not dup_ok or not eroll_ok or zero_rows
                      or signoff_blocked):
         wiz["result"] = None

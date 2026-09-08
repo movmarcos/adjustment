@@ -26,7 +26,7 @@ import pandas as pd
 st.set_page_config(page_title="Tasks & Cost · MUFG", page_icon="📊",
                    layout="wide", initial_sidebar_state="expanded")
 
-from utils.styles import (inject_css, render_sidebar, section_title, P,
+from utils.styles import (wide_kwargs, inject_css, render_sidebar, section_title, P,
                           kpi_card, render_df_table, set_flash, render_flash,
                           confirm_gate)
 from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
@@ -250,7 +250,7 @@ else:
             text=alt.Text("Credits:Q", format=",.2f"),
         ))
     st.altair_chart((_daily_chart + _dlbl).properties(height=300),
-                    use_container_width=True)
+                    **wide_kwargs())
 
 # ── Monthly cost — ALWAYS the last 3 months, independent of the window above.
 # Its own query (last 3 calendar months) so the daily Window selector never
@@ -311,7 +311,7 @@ else:
         ))
     st.altair_chart(
         (_bar + _lbl).properties(height=max(150, 74 * len(_last3))),
-        use_container_width=True)
+        **wide_kwargs())
 
     # Exact numbers: month × task, with a Total column.
     _piv = (_m3.pivot_table(index="Month", columns="Task", values="Cost",

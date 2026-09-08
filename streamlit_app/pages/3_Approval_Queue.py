@@ -10,7 +10,7 @@ import pandas as pd
 
 st.set_page_config(page_title="Approval Queue · MUFG", page_icon="✅", layout="wide", initial_sidebar_state="expanded")
 
-from utils.styles import (
+from utils.styles import (wide_kwargs, 
     inject_css, render_sidebar, render_filter_chips, fmt_user_dt,
     section_title, status_badge, P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, icon, bordered_container,
     render_df_table, fmt_adj_id, set_flash, render_flash, confirm_gate,
@@ -420,7 +420,7 @@ else:
 
                     # Approve
                     if st.button("Approve", key=f"approve_{adj_id}",
-                                 use_container_width=True, type="primary",
+                                 **wide_kwargs(), type="primary",
                                  disabled=not actions_enabled):
                         try:
                             _decide("Approved", f"Approved by {user}")
@@ -444,7 +444,7 @@ else:
                                      and bool((reject_reason or "").strip())
                                      and _reject_confirmed)
                     if st.button("Reject", key=f"reject_{adj_id}",
-                                 use_container_width=True,
+                                 **wide_kwargs(),
                                  disabled=not _reject_ready):
                         try:
                             _decide("Rejected", reject_reason.strip())
@@ -547,12 +547,12 @@ if len(_bulk_rows) >= 2:
         b1, b2 = st.columns(2)
         with b1:
             if st.button(f"Approve selected ({_n_sel})", key="apq_bulk_ok",
-                         type="primary", use_container_width=True,
+                         type="primary", **wide_kwargs(),
                          disabled=not _bulk_ready):
                 _bulk_decide("Approved")
         with b2:
             if st.button(f"Reject selected ({_n_sel})", key="apq_bulk_no",
-                         use_container_width=True,
+                         **wide_kwargs(),
                          disabled=not (_bulk_ready and _bulk_comment.strip())):
                 _bulk_decide("Rejected")
         st.caption("Bulk reject needs a comment — it is recorded against every "
@@ -684,7 +684,7 @@ else:
                 _enabled = _can_scope and not _own_req and _identity_ok
                 if st.button(f"Approve {r_verb.lower()}",
                              key=f"ro_ok_{r_cob}_{r_scope}_{r_ent}_{r_sub}",
-                             type="primary", use_container_width=True,
+                             type="primary", **wide_kwargs(),
                              disabled=not _enabled):
                     try:
                         _decide_signoff_change(
@@ -698,7 +698,7 @@ else:
                     label_visibility="collapsed",
                     placeholder="Rejection reason")
                 if st.button("Reject", key=f"ro_no_{r_cob}_{r_scope}_{r_ent}_{r_sub}",
-                             use_container_width=True, disabled=not _enabled):
+                             **wide_kwargs(), disabled=not _enabled):
                     try:
                         _decide_signoff_change(
                             r_cob, r_scope, r_ent, r_sub, False,

@@ -32,7 +32,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from utils.styles import (
+from utils.styles import (wide_kwargs, 
     inject_css, render_sidebar, section_title,
     P, SCOPE_CONFIG, icon, bordered_container, status_badge,
 )
@@ -320,7 +320,7 @@ def _render_ai_assistant() -> None:
                         "Why is my VaR adjustment blocked? Which COBs are signed off?")
         c1, c2, _ = st.columns([1, 2, 3])
         with c1:
-            _go = st.button("Ask", type="primary", use_container_width=True,
+            _go = st.button("Ask", type="primary", **wide_kwargs(),
                             disabled=not q.strip())
         with c2:
             st.caption(f"Model: {model}")
@@ -338,7 +338,7 @@ def _render_ai_assistant() -> None:
         ec = st.columns(len(_examples))
         for _c, _q in zip(ec, _examples):
             if _c.button(_q, key=f"ai_ex_{hash(_q) & 0xffff}",
-                         use_container_width=True):
+                         **wide_kwargs()):
                 st.session_state["ai_q"] = _q
                 try:
                     st.rerun()

@@ -17,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from utils.styles import (inject_css, render_sidebar, section_title, P, SCOPE_CONFIG,
+from utils.styles import (wide_kwargs, inject_css, render_sidebar, section_title, P, SCOPE_CONFIG,
                           STATUS_COLORS, fmt_adj_id, icon, render_activity_grid,
                           render_df_table, set_flash, render_flash)
 from utils.snowflake_conn import run_query_df, run_query, current_user_name, safe_rerun
@@ -333,7 +333,7 @@ with col_charts:
                 font_family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif",
                 hoverlabel=dict(bgcolor="white", font_size=12),
             )
-            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(fig, **wide_kwargs(), config={"displayModeBar": False})
         else:
             st.info("No adjustment data yet.")
     except Exception as e:
@@ -398,7 +398,7 @@ with col_charts:
                     font_family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif",
                     hoverlabel=dict(bgcolor="white", font_size=12),
                 )
-                st.plotly_chart(fig1, use_container_width=True, config={"displayModeBar": False})
+                st.plotly_chart(fig1, **wide_kwargs(), config={"displayModeBar": False})
 
             with ch2:
                 st.markdown(
@@ -430,7 +430,7 @@ with col_charts:
                     font_family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif",
                     hoverlabel=dict(bgcolor="white", font_size=12),
                 )
-                st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
+                st.plotly_chart(fig2, **wide_kwargs(), config={"displayModeBar": False})
         else:
             st.info("No COB data available yet.")
     except Exception as e:
