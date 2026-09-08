@@ -23,7 +23,7 @@ if ENV not in _VALID_ENVS:
     raise ValueError(f"ADJ_ENV '{ENV}' is not one of {sorted(_VALID_ENVS)}")
 
 # ─── Derived names ──────────────────────────────────────────────────────────
-DATABASE   = f"{ENV}_RAPTOR_NEWADJ"   # app database (deploy session + app + tests)
+DATABASE   = f"{ENV}_RAPTOR_NEWADJ_4"   # app database (deploy session + app + tests)
 SCHEMA     = "ADJUSTMENT_APP"         # app schema (same name in every environment)
 WAREHOUSE  = f"{ENV}_RAPTOR_WH"       # THE warehouse: deploy session, Streamlit
                                       # QUERY_WAREHOUSE and dynamic tables all use
