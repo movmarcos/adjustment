@@ -5,7 +5,6 @@ Main entry point. Live overview of all adjustments, queue, and pending actions.
 Reads from: VW_DASHBOARD_KPI, DT_DASHBOARD, DT_OVERLAP_ALERTS, VW_RECENT_ACTIVITY.
 """
 import streamlit as st
-import html as _htmlmod
 import plotly.graph_objects as go
 import pandas as pd
 from datetime import datetime
@@ -20,7 +19,7 @@ st.set_page_config(
 
 from utils.styles import (inject_css, render_sidebar, section_title, P, SCOPE_CONFIG,
                           STATUS_COLORS, fmt_adj_id, icon, render_activity_grid,
-                          set_flash, render_flash)
+                          render_df_table, set_flash, render_flash)
 from utils.snowflake_conn import run_query_df, run_query, current_user_name, safe_rerun
 
 inject_css()
@@ -483,52 +482,34 @@ with col_alerts:
             unsafe_allow_html=True)
     else:
         count = len(df_overlaps)
-        rows_html = ""
-        _cell = lambda v: _htmlmod.escape(str(v if v is not None and not pd.isna(v) else "") or "—")
-        for _, r in df_overlaps.iterrows():
-            id_a = _htmlmod.escape(fmt_adj_id(r.get("DIM_A"), adj_id=r.get("ADJ_ID_A")))
-            id_b = _htmlmod.escape(fmt_adj_id(r.get("DIM_B"), adj_id=r.get("ADJ_ID_B")))
-            full_msg = _htmlmod.escape(str(r.get("ALERT_MESSAGE", "") or "").strip(), quote=True)
-            where_a = f'{_cell(r.get("ENTITY_A"))} / {_cell(r.get("BOOK_A"))}'
-            where_b = f'{_cell(r.get("ENTITY_B"))} / {_cell(r.get("BOOK_B"))}'
-            rows_html += (
-                f'<tr style="border-bottom:1px solid #FFF8E1" title="{full_msg}">'
-                f'<td style="padding:7px 8px;font-size:0.75rem;font-weight:700;'
-                f'color:{P["warning"]};white-space:nowrap">'
-                f'{id_a}<br/>↔ {id_b}</td>'
-                f'<td style="padding:7px 6px;font-size:0.73rem;color:{P["grey_700"]}">'
-                f'{r.get("PROCESS_TYPE","")}</td>'
-                f'<td style="padding:7px 6px;font-size:0.73rem;color:{P["grey_700"]}">'
-                f'{r.get("COBID","")}</td>'
-                f'<td style="padding:7px 6px;font-size:0.72rem;color:{P["grey_700"]};'
-                f'white-space:nowrap">'
-                f'{where_a}<br/>↔ {where_b}</td>'
-                f'</tr>'
-            )
+        _cell = lambda v: str(v if v is not None and not pd.isna(v) else "") or "—"
+        df_ov = pd.DataFrame({
+            "Adj ID A": [fmt_adj_id(r.get("DIM_A"), adj_id=r.get("ADJ_ID_A"))
+                         for _, r in df_overlaps.iterrows()],
+            "Adj ID B": [fmt_adj_id(r.get("DIM_B"), adj_id=r.get("ADJ_ID_B"))
+                         for _, r in df_overlaps.iterrows()],
+            "Scope":    [_cell(r.get("PROCESS_TYPE")) for _, r in df_overlaps.iterrows()],
+            "COB":      [_cell(r.get("COBID")) for _, r in df_overlaps.iterrows()],
+            "Entity / Book A": [f'{_cell(r.get("ENTITY_A"))} / {_cell(r.get("BOOK_A"))}'
+                                for _, r in df_overlaps.iterrows()],
+            "Entity / Book B": [f'{_cell(r.get("ENTITY_B"))} / {_cell(r.get("BOOK_B"))}'
+                                for _, r in df_overlaps.iterrows()],
+            "Alert":    [str(r.get("ALERT_MESSAGE", "") or "").strip()
+                         for _, r in df_overlaps.iterrows()],
+        })
         st.markdown(
-            f'<div style="background:white;border:1px solid {P["border"]};border-radius:10px;'
-            f'overflow:hidden;margin-bottom:0.8rem">'
-            f'<div style="background:#FFF8E1;border-bottom:2px solid #FFD54F;padding:0.55rem 0.8rem;'
+            f'<div style="background:#FFF8E1;border:1px solid #FFD54F;border-radius:10px;'
+            f'padding:0.55rem 0.8rem;margin-bottom:0.4rem;'
             f'display:flex;justify-content:space-between;align-items:center">'
             f'<span style="font-size:0.78rem;font-weight:700;color:#E65100">{icon("alert-triangle", size=13, color=P["warning"])} Overlapping adjustments</span>'
             f'<span style="background:#E65100;color:white;border-radius:99px;'
             f'padding:1px 9px;font-size:0.7rem;font-weight:700">{count}</span>'
-            f'</div>'
-            f'<div style="max-height:220px;overflow-y:auto">'
-            f'<table style="width:100%;border-collapse:collapse">'
-            f'<thead><tr style="background:#FAFAFA">'
-            f'<th style="padding:6px 8px;font-size:0.72rem;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:.06em;color:{P["grey_700"]};text-align:left;white-space:nowrap">ADJ IDs</th>'
-            f'<th style="padding:6px 6px;font-size:0.72rem;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:.06em;color:{P["grey_700"]};text-align:left">Scope</th>'
-            f'<th style="padding:6px 6px;font-size:0.72rem;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:.06em;color:{P["grey_700"]};text-align:left">COB</th>'
-            f'<th style="padding:6px 6px;font-size:0.72rem;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:.06em;color:{P["grey_700"]};text-align:left;white-space:nowrap">Entity / Book</th>'
-            f'</tr></thead>'
-            f'<tbody>{rows_html}</tbody>'
-            f'</table></div></div>',
+            f'</div>',
             unsafe_allow_html=True)
+        _warn_col = lambda v: P["warning"]
+        render_df_table(df_ov, max_rows=100, height=220,
+                        color_cols={"Adj ID A": _warn_col, "Adj ID B": _warn_col},
+                        key="home_overlaps")
 
     # ── Errors ───────────────────────────────────────────────────────────────
     section_title("Current Errors", "x-circle")
@@ -577,55 +558,38 @@ with col_alerts:
         _ack_mask = df_errors["IS_ACKNOWLEDGED"].fillna(False).astype(bool)
         count = int((~_ack_mask).sum())          # OPEN failures drive the badge
         acked_count = int(_ack_mask.sum())
-        rows_html = ""
+        _err_rows = []
+        _adj_col = {}          # Adj ID label → text colour (red open / grey acknowledged)
         for _, r in df_errors.iterrows():
-            full_msg = str(r.get("ERRORMESSAGE", "") or "").strip()
-            msg = _htmlmod.escape(full_msg[:70])
-            # Full text on hover — the cell is ellipsised at 70 chars.
-            msg_title = _htmlmod.escape(full_msg or "Unknown error", quote=True)
+            full_msg = str(r.get("ERRORMESSAGE", "") or "").strip() or "Unknown error"
             adj_label = fmt_adj_id(r.get("DIMENSION_ADJ_ID"), adj_id=r.get("ADJ_ID"))
             _is_ack = bool(r.get("IS_ACKNOWLEDGED") or False)
-            _ack_by = _htmlmod.escape(str(r.get("ERROR_ACK_BY") or ""))
-            _row_col = P["grey_400"] if _is_ack else P["danger"]
-            _ack_tag = (f' <span title="acknowledged by {_ack_by}" style="background:{P["grey_100"]};'
-                        f'color:{P["grey_700"]};border-radius:99px;padding:0 6px;'
-                        f'font-size:0.7rem;font-weight:700">ACK</span>' if _is_ack else "")
-            rows_html += (
-                f'<tr style="border-bottom:1px solid #FFEBEE{";opacity:.6" if _is_ack else ""}">'
-                f'<td style="padding:7px 8px;font-size:0.75rem;font-weight:700;'
-                f'color:{_row_col};white-space:nowrap">{adj_label}{_ack_tag}</td>'
-                f'<td style="padding:7px 6px;font-size:0.73rem;color:{P["grey_700"]}">'
-                f'{r.get("PROCESS_TYPE","")}</td>'
-                f'<td title="{msg_title}" style="padding:7px 6px;font-size:0.72rem;color:{P["grey_700"]};'
-                f'max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
-                f'{msg or "Unknown error"}</td>'
-                f'</tr>'
-            )
+            _adj_col[adj_label] = P["grey_400"] if _is_ack else P["danger"]
+            _err_rows.append({
+                "Adj ID":          adj_label,
+                "Scope":           str(r.get("PROCESS_TYPE") or ""),
+                "Entity":          str(r.get("ENTITY_CODE") or ""),
+                "Error":           full_msg,
+                "Ack":             "Yes" if _is_ack else "",
+                "Acknowledged by": str(r.get("ERROR_ACK_BY") or "") if _is_ack else "",
+            })
+        df_err_grid = pd.DataFrame(_err_rows)
         st.markdown(
-            f'<div style="background:white;border:1px solid {P["border"]};border-radius:10px;'
-            f'overflow:hidden">'
-            f'<div style="background:#FFEBEE;border-bottom:2px solid #FFCDD2;padding:0.55rem 0.8rem;'
+            f'<div style="background:#FFEBEE;border:1px solid #FFCDD2;border-radius:10px;'
+            f'padding:0.55rem 0.8rem;margin-bottom:0.4rem;'
             f'display:flex;justify-content:space-between;align-items:center">'
             f'<span style="font-size:0.78rem;font-weight:700;color:{P["danger"]}">{icon("x-circle", size=13, color=P["danger"])} Failed adjustments</span>'
             f'<span style="background:{P["danger"]};color:white;border-radius:99px;'
             f'padding:1px 9px;font-size:0.7rem;font-weight:700">{count} open'
             + (f' · {acked_count} acknowledged' if acked_count else "") + '</span>'
-            f'</div>'
-            f'<div style="max-height:220px;overflow-y:auto">'
-            f'<table style="width:100%;border-collapse:collapse">'
-            f'<thead><tr style="background:#FAFAFA">'
-            f'<th style="padding:6px 8px;font-size:0.72rem;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:.06em;color:{P["grey_700"]};text-align:left;white-space:nowrap">ADJ ID</th>'
-            f'<th style="padding:6px 6px;font-size:0.72rem;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:.06em;color:{P["grey_700"]};text-align:left">Scope</th>'
-            f'<th style="padding:6px 6px;font-size:0.72rem;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:.06em;color:{P["grey_700"]};text-align:left">Error</th>'
-            f'</tr></thead>'
-            f'<tbody>{rows_html}</tbody>'
-            f'</table></div></div>',
+            f'</div>',
             unsafe_allow_html=True)
-        st.caption("Hover an error for the full text. Full messages and Retry: "
-                   "Logs › Errors, and the Adjustments page.")
+        render_df_table(df_err_grid, max_rows=100, height=220,
+                        highlight=lambda d: d.get("Ack") != "Yes",   # open failures tinted
+                        color_cols={"Adj ID": lambda v: _adj_col.get(v, ""),
+                                    "Ack": {"Yes": P["grey_700"]}},
+                        key="home_errors")
+        st.caption("Full messages and Retry: Logs › Errors, and the Adjustments page.")
 
         # ── Acknowledge / re-open ─────────────────────────────────────────
         # Acknowledging records who/when/why on the header and takes the

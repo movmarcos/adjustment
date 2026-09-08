@@ -13,7 +13,7 @@ st.set_page_config(page_title="Approval Queue · MUFG", page_icon="✅", layout=
 from utils.styles import (
     inject_css, render_sidebar, render_filter_chips, fmt_user_dt,
     section_title, status_badge, P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, icon, bordered_container,
-    render_grid, fmt_adj_id, set_flash, render_flash, confirm_gate,
+    render_df_table, fmt_adj_id, set_flash, render_flash, confirm_gate,
     SIGNOFF_STATUS_META, signoff_status_label,
 )
 from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
@@ -23,6 +23,21 @@ import html as _htmlmod
 def _esc(val):
     """Escape single quotes for safe SQL interpolation."""
     return str(val).replace("\\", "\\\\").replace("'", "''") if val is not None else ""
+
+
+def _txt(v):
+    """Plain display text for a grid cell: '—' for empty, a whole float
+    (a COB read back as 20250101.0) shown as an integer, no markup."""
+    if v is None:
+        return "—"
+    try:
+        if pd.isna(v):
+            return "—"
+    except (TypeError, ValueError):
+        pass
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return " ".join(str(v).split()) or "—"
 
 
 def _pill(text, color):
@@ -288,26 +303,17 @@ else:
                 st.markdown(status_badge("Pending Approval"), unsafe_allow_html=True)
                 st.markdown("<br/>", unsafe_allow_html=True)
 
-                # Key details
-                meta_html = (
-                    f'<table style="font-size:0.85rem;border-collapse:collapse;width:100%">'
-                    f'<tr><td style="color:{P["grey_700"]};padding:3px 12px 3px 0;width:30%">COB</td>'
-                    f'<td style="font-weight:600">{row.get("COBID", "—")}</td></tr>'
-                    f'<tr><td style="color:{P["grey_700"]};padding:3px 12px 3px 0">Source COB</td>'
-                    f'<td style="font-weight:600">{row.get("SOURCE_COBID", "—") if row.get("SOURCE_COBID") else "—"}</td></tr>'
-                    f'<tr><td style="color:{P["grey_700"]};padding:3px 12px 3px 0">Type</td>'
-                    f'<td style="font-weight:600">{adj_type}</td></tr>'
-                    f'<tr><td style="color:{P["grey_700"]};padding:3px 12px 3px 0">Entity</td>'
-                    f'<td style="font-weight:600">{entity}</td></tr>'
-                    f'<tr><td style="color:{P["grey_700"]};padding:3px 12px 3px 0">Book</td>'
-                    f'<td style="font-weight:600">{book}</td></tr>'
-                    f'<tr><td style="color:{P["grey_700"]};padding:3px 12px 3px 0">Submitted</td>'
-                    f'<td>{submitted_at}</td></tr>'
-                    f'<tr><td style="color:{P["grey_700"]};padding:3px 12px 3px 0">By</td>'
-                    f'<td>{submitted_by}</td></tr>'
-                    f'</table>'
-                )
-                st.markdown(meta_html, unsafe_allow_html=True)
+                # Key details — a two-column Field/Value grid.
+                _meta_df = pd.DataFrame(
+                    [("COB", _txt(row.get("COBID"))),
+                     ("Source COB", _txt(row.get("SOURCE_COBID"))),
+                     ("Type", adj_type or "—"),
+                     ("Entity", entity),
+                     ("Book", book),
+                     ("Submitted", _txt(submitted_at)),
+                     ("By", submitted_by or "—")],
+                    columns=["Field", "Value"])
+                render_df_table(_meta_df, key=f"aq_meta_{adj_id}")
 
                 section_title("Filters Applied", "search")
                 render_filter_chips(row.to_dict())
@@ -323,32 +329,24 @@ else:
                             lambda r: r["ADJ_ID_B"] if r["ADJ_ID_A"] == adj_id
                                       else r["ADJ_ID_A"], axis=1
                         ).tolist()
-                        rows_html = "".join(
-                            f'<tr>'
-                            f'<td style="padding:3px 10px 3px 0;font-size:0.78rem;'
-                            f'font-weight:700;white-space:nowrap">'
-                            f'ADJ {_htmlmod.escape(fmt_adj_id(None, adj_id=(r["ADJ_ID_B"] if r["ADJ_ID_A"] == adj_id else r["ADJ_ID_A"])))}'
-                            f'</td>'
-                            f'<td style="padding:3px 0;font-size:0.78rem;color:{P["grey_700"]}">'
-                            f'{_htmlmod.escape(str(r.get("ALERT_MESSAGE","")).strip()) or "Overlapping filters on same COB"}'
-                            f'</td>'
-                            f'</tr>'
-                            for _, r in adj_overlaps.iterrows()
-                        )
+                        _ov_df = pd.DataFrame([
+                            {"Adjustment": "ADJ " + str(fmt_adj_id(
+                                 None, adj_id=(r["ADJ_ID_B"] if r["ADJ_ID_A"] == adj_id
+                                               else r["ADJ_ID_A"]))),
+                             "Alert": (_txt(r.get("ALERT_MESSAGE"))
+                                       if _txt(r.get("ALERT_MESSAGE")) != "—"
+                                       else "Overlapping filters on same COB")}
+                            for _, r in adj_overlaps.iterrows()])
                         st.markdown(
-                            f'<div style="background:#FFF8E1;border:1px solid #FFD54F;'
-                            f'border-left:4px solid #F9A825;border-radius:8px;'
-                            f'padding:0.7rem 1rem;margin:0.8rem 0">'
                             f'<div style="font-weight:700;font-size:0.82rem;color:#E65100;'
-                            f'margin-bottom:0.4rem">{icon("alert-triangle", size=13, color=P["warning"])} Overlap Detected with '
-                            f'{len(other_ids)} adjustment(s)</div>'
-                            f'<table style="width:100%;border-collapse:collapse">'
-                            f'{rows_html}</table>'
-                            f'<div style="font-size:0.75rem;color:#795548;margin-top:0.4rem">'
-                            f'These adjustments target overlapping data. '
-                            f'Review carefully before approving.</div>'
-                            f'</div>',
+                            f'margin:0.8rem 0 0.3rem">'
+                            f'{icon("alert-triangle", size=13, color=P["warning"])} '
+                            f'Overlap Detected with {len(other_ids)} adjustment(s)</div>',
                             unsafe_allow_html=True)
+                        render_df_table(_ov_df, key=f"aq_overlap_{adj_id}",
+                                        wrap_cols={"Alert": 520})
+                        st.caption("These adjustments target overlapping data. "
+                                   "Review carefully before approving.")
 
                 st.markdown(
                     f'<br/><div style="font-size:0.85rem"><strong>Business Reason:</strong><br/>'
@@ -716,23 +714,6 @@ else:
 st.markdown("<br/>", unsafe_allow_html=True)
 section_title("Recently Approved / Rejected", "file-text")
 
-def _rc_pill(text, color):
-    return (f'<span style="background:{color}18;color:{color};'
-            f'border:1px solid {color}55;border-radius:99px;padding:1px 10px;'
-            f'font-size:0.74rem;font-weight:700;white-space:nowrap">{text}</span>')
-
-
-def _rc_scope_pill(scope):
-    cfg = SCOPE_CONFIG.get(str(scope), {})
-    return _rc_pill(_htmlmod.escape(str(scope) or "—"),
-                    cfg.get("color", P["grey_700"]))
-
-
-def _rc_cell(v):
-    s = "" if v is None else " ".join(str(v).split())
-    return _htmlmod.escape(s).replace("$", "&#36;")
-
-
 try:
     df_recent = run_query_df("""
         SELECT h.ADJ_ID, h.DIMENSION_ADJ_ID, h.COBID, h.PROCESS_TYPE,
@@ -780,43 +761,27 @@ try:
         if _d.empty:
             st.info("Nothing matches the filters.")
         else:
-            _rows = []
-            for _, r in _d.iterrows():
-                _out = str(r.get("NEW_STATUS") or "")
-                _oc = STATUS_COLORS.get(_out, P["grey_700"])
-                _rows.append([
-                    f'<strong>{_htmlmod.escape(str(fmt_adj_id(r.get("DIMENSION_ADJ_ID"), adj_id=r.get("ADJ_ID"))))}</strong>',
-                    _rc_pill(_htmlmod.escape(_out.upper()), _oc),
-                    f'<strong>{"" if pd.isna(r.get("COBID")) else int(r.get("COBID"))}</strong>',
-                    _rc_scope_pill(r.get("PROCESS_TYPE")),
-                    _rc_cell(r.get("ADJUSTMENT_TYPE")) or "—",
-                    _rc_cell(r.get("ENTITY_CODE")) or "—",
-                    _rc_cell(r.get("SUBMITTED_BY")) or "—",
-                    _rc_cell(r.get("ACTIONED_BY")) or "—",
-                    fmt_user_dt(r.get("CHANGED_AT"), "%d %b %Y %H:%M"),
-                    # Bounded width so a long comment WRAPS instead of
-                    # widening the table past the page (a wide table grows a
-                    # horizontal scrollbar — the one structural difference
-                    # vs the clean grids, and scrollbars are where the white
-                    # block appears in the users' environment).
-                    # Truncate BEFORE escaping so an entity like &amp; is never
-                    # cut mid-way; the full (escaped) text sits in the title
-                    # attribute for hover.
-                    f'<span style="color:{P["grey_700"]};display:inline-block;'
-                    f'max-width:340px;white-space:normal" '
-                    f'title="{_rc_cell(r.get("COMMENT")).replace(chr(34), "&quot;")}">'
-                    f'{_rc_cell(str(r.get("COMMENT") or "")[:160])}'
-                    f'{"…" if len(str(r.get("COMMENT") or "")) > 160 else ""}</span>',
-                ])
-            render_grid(
-                ["Adj", "Outcome", "COB", "Scope", "Type", "Entity",
-                 "Submitted by", "Decided by", "When", "Comment"],
-                _rows,
+            _rows = [{
+                "Adj": str(fmt_adj_id(r.get("DIMENSION_ADJ_ID"), adj_id=r.get("ADJ_ID"))),
+                "Outcome": _txt(r.get("NEW_STATUS")).upper(),
+                "COB": _txt(r.get("COBID")),
+                "Scope": _txt(r.get("PROCESS_TYPE")),
+                "Type": _txt(r.get("ADJUSTMENT_TYPE")),
+                "Entity": _txt(r.get("ENTITY_CODE")),
+                "Submitted by": _txt(r.get("SUBMITTED_BY")),
+                "Decided by": _txt(r.get("ACTIONED_BY")),
+                "When": fmt_user_dt(r.get("CHANGED_AT"), "%d %b %Y %H:%M"),
+                # Full comment — no truncation; the grid wraps it.
+                "Comment": _txt(r.get("COMMENT")),
+            } for _, r in _d.iterrows()]
+            render_df_table(
+                pd.DataFrame(_rows), max_rows=len(_rows), key="aq_recent",
                 color_cols={
                     "Outcome": {"APPROVED": STATUS_COLORS.get("Approved", P["success"]),
                                 "REJECTED": STATUS_COLORS.get("Rejected", P["danger"])},
                     "Scope": lambda v: SCOPE_CONFIG.get(str(v), {}).get("color", P["grey_700"]),
-                })
+                },
+                wrap_cols={"Comment": 420})
             st.caption(f"{len(_d)} decision(s), newest first.")
 except Exception as _ex:
     st.info(f"No approval history available yet. ({_ex})")

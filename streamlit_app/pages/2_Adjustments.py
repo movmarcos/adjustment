@@ -15,7 +15,8 @@ from utils.styles import (
     render_lifecycle_bar, fmt_user_dt,
     status_badge, section_title, P, SCOPE_CONFIG, STAGE_CONFIG, ALL_SCOPES,
     STATUS_COLORS, STATUS_ICONS,
-    fmt_adj_id, icon, render_activity_grid, SELECTION_UNSUPPORTED, bordered_container,
+    fmt_adj_id, icon, render_activity_grid, render_df_table, SELECTION_UNSUPPORTED,
+    bordered_container,
     set_flash, render_flash, confirm_gate, ACTION_LABELS,
 )
 from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
@@ -600,6 +601,7 @@ def render_adj_card(row, expanded=False):
                                      str(row.get("ADJUSTMENT_OCCURRENCE") or "").upper(),
                                      str(row.get("ADJUSTMENT_OCCURRENCE") or "—"))),
             ]
+            _meta_val_col = {}     # Value text → colour (Report Status only)
             # Report status (for Processed adjustments)
             if run_status == "Processed" and not df_track.empty:
                 tr_match = df_track[df_track["ADJ_ID"] == adj_id]
@@ -615,13 +617,6 @@ def render_adj_card(row, expanded=False):
                                 or _pbi_started or _pbi_queued)
                     _rs_time_str = fmt_user_dt(_rs_time, "%d %b %H:%M")
 
-                    _rs_icons = {
-                        "Reports Ready": "check-circle",
-                        "Refreshing": "refresh-cw",
-                        "Queued": "clock",
-                        "Awaiting": "clock",
-                        "Rebuild Triggered": "check-circle",
-                    }
                     _rs_messages = {
                         "Reports Ready": f"Reports Ready ({_rs_time_str})",
                         "Refreshing": f"Refreshing ({_rs_time_str})",
@@ -639,21 +634,16 @@ def render_adj_card(row, expanded=False):
                         "Rebuild Triggered": P["success"],
                     }
                     color = _rs_colors.get(_rs_status, "#64748B")
-                    _rs_icon = icon(_rs_icons.get(_rs_status, ""), size=12, color=color)
                     msg = _rs_messages.get(_rs_status, _rs_status)
-                    meta_rows.append(("Report Status",
-                        f'<span style="color:{color};font-weight:600">{_rs_icon} {msg}</span>'))
-            rows_html = "".join(
-                f'<tr><td style="color:{P["grey_700"]};padding:3px 0;font-size:0.8rem;'
-                f'white-space:nowrap;padding-right:12px">{k}</td>'
-                f'<td style="font-size:0.82rem;font-weight:600">{v}</td></tr>'
-                for k, v in meta_rows if v and v != "—"
-            )
-            st.markdown(
-                f'<div class="mcard" style="padding:0.8rem">'
-                f'<table style="width:100%;border-collapse:collapse">{rows_html}</table>'
-                f'</div>',
-                unsafe_allow_html=True)
+                    meta_rows.append(("Report Status", msg))
+                    _meta_val_col[msg] = color
+            df_meta = pd.DataFrame(
+                [(k, v) for k, v in meta_rows if v and v != "—"],
+                columns=["Field", "Value"])
+            with bordered_container():
+                render_df_table(df_meta, max_rows=len(df_meta),
+                                color_cols={"Value": lambda v: _meta_val_col.get(v, "")},
+                                key=f"adj_meta_{adj_id}")
 
         # ── Status history ──────────────────────────────────────────────────
         st.markdown("---")

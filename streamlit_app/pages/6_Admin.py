@@ -443,18 +443,13 @@ with tab_scopes:
                     c1, c2 = st.columns(2)
                     with c1:
                         section_title("Configuration")
-                        st.markdown(
-                            f'<table style="font-size:0.85rem;border-collapse:collapse;width:100%">'
-                            f'<tr><td style="color:{P["grey_700"]};padding:4px 12px 4px 0;width:40%">Fact Table</td>'
-                            f'<td><code>{row["FACT_TABLE"]}</code></td></tr>'
-                            f'<tr><td style="color:{P["grey_700"]};padding:4px 12px 4px 0">Primary Key</td>'
-                            f'<td><code>{row["FACT_TABLE_PK"]}</code></td></tr>'
-                            f'<tr><td style="color:{P["grey_700"]};padding:4px 12px 4px 0">Metric (Local)</td>'
-                            f'<td><code>{row["METRIC_NAME"]}</code></td></tr>'
-                            f'<tr><td style="color:{P["grey_700"]};padding:4px 12px 4px 0">Metric (USD)</td>'
-                            f'<td><code>{row["METRIC_USD_NAME"]}</code></td></tr>'
-                            f'</table>',
-                            unsafe_allow_html=True)
+                        df_cfg = pd.DataFrame(
+                            [("Fact Table",     str(row["FACT_TABLE"] or "")),
+                             ("Primary Key",    str(row["FACT_TABLE_PK"] or "")),
+                             ("Metric (Local)", str(row["METRIC_NAME"] or "")),
+                             ("Metric (USD)",   str(row["METRIC_USD_NAME"] or ""))],
+                            columns=["Setting", "Value"])
+                        render_df_table(df_cfg, max_rows=4, key=f"scope_cfg_{scope}")
                     with c2:
                         section_title("Timestamps")
                         created = fmt_user_dt(row.get("CREATED_DATE", ""))

@@ -3,12 +3,17 @@ Logs — Processing Runs, Activity & Errors
 =========================================
 Technical-ops view of what the engine did, redesigned for scanability:
 
-  • Processing Runs : one aligned row per batch with a status chip — pick a
+  • Processing Runs : one row per batch with a coloured Outcome — pick a
                       run to inspect its adjustments and errors below.
-  • Activity Feed   : a real feed (day-grouped, status badges, actor, detail)
-                      instead of a raw dataframe dump.
+  • Activity Feed   : one grid, newest first, with a Day column (user
+                      timezone) and Event / Now coloured by status.
   • Errors          : failed adjustments as always-visible cards with the
                       message and the fix (Retry on the Adjustments page).
+  • Sign-Off        : every lifecycle transition as one grid, newest first.
+
+Tabular lists render through render_df_table (the app's standard grid);
+only the Errors cards stay as HTML because they carry multi-line messages
+and the acknowledgement note.
 
 Reads from ADJ_HEADER, VW_RECENT_ACTIVITY, VW_ERRORS — no extra tables.
 """
@@ -23,7 +28,7 @@ st.set_page_config(
 from utils.styles import (
     inject_css, render_sidebar, section_title,
     P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, fmt_adj_id, icon,
-    fmt_user_dt, render_grid,
+    fmt_user_dt, render_df_table,
 )
 from utils.snowflake_conn import run_query, run_query_df
 
@@ -75,11 +80,46 @@ def _fmt_int(v):
         return str(v)
 
 
+def _txt(v, default="—") -> str:
+    """Plain text for a grid cell: None/NaN/blank → `default`."""
+    if v is None:
+        return default
+    try:
+        if pd.isna(v):
+            return default
+    except (TypeError, ValueError):
+        pass
+    s = str(v).strip()
+    return s if s else default
+
+
+def _id_str(v) -> str:
+    """Identifiers (run id, COB) as plain strings so the grid never
+    thousand-separates them the way it does numeric counts."""
+    try:
+        return str(int(v))
+    except (TypeError, ValueError):
+        return _txt(v)
+
+
+def _day_str(v) -> str:
+    """Calendar day in the USER's timezone (same clock as the row times), so
+    an event never lands under the wrong date."""
+    return fmt_user_dt(v, "%A %d %b %Y") or "Unknown date"
+
+
+def _scope_color(v) -> str:
+    return SCOPE_CONFIG.get(str(v), {}).get("color", P["grey_700"])
+
+
+def _status_color(v) -> str:
+    return STATUS_COLORS.get(str(v), P["grey_700"])
+
+
 def _esc_html(v) -> str:
-    """HTML-escape, whitespace-normalize AND neutralize '$': newlines end
-    the markdown HTML block, and a $...$ pair (two amounts in one comment)
-    triggers Streamlit's LaTeX math and swallows the table markup between
-    them — either way the grid renders as a blank white box."""
+    """HTML-escape, whitespace-normalize AND neutralize '$' for the Errors
+    cards (the one place this page still composes HTML): newlines end the
+    markdown HTML block, and a $...$ pair triggers Streamlit's LaTeX math."""
     import html
     if v is None:
         return ""
@@ -87,25 +127,14 @@ def _esc_html(v) -> str:
 
 
 def _pill(text, color) -> str:
+    """Inline chip used only inside the Errors cards."""
     return (f'<span style="background:{color}18;color:{color};border:1px solid {color}55;'
             f'border-radius:99px;padding:1px 9px;font-size:0.75rem;font-weight:700;'
             f'white-space:nowrap">{text}</span>')
 
 
 def _scope_pill(scope) -> str:
-    cfg = SCOPE_CONFIG.get(str(scope), {})
-    return _pill(str(scope) or "—", cfg.get("color", P["grey_700"]))
-
-
-def _status_pill(status) -> str:
-    return _pill(str(status) or "—", STATUS_COLORS.get(str(status), P["grey_700"]))
-
-
-def _table(headers, rows, aligns=None) -> str:
-    """Canonical grid (shared .mgrid look) as an HTML string, so existing
-    `st.markdown(_table(...))` callers keep working."""
-    return render_grid(list(headers), list(rows), aligns=aligns,
-                       return_html=True)
+    return _pill(_esc_html(_txt(scope)), _scope_color(scope))
 
 
 # ── filters ───────────────────────────────────────────────────────────────────
@@ -212,32 +241,32 @@ with tab_runs:
                 unsafe_allow_html=True)
         st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
 
-        def _run_outcome(r):
+        def _run_outcome(r) -> str:
             if int(r.get("RUNNING_COUNT", 0) or 0) > 0:
-                return _pill("Running", P["info"])
+                return "Running"
             if int(r.get("FAILED_COUNT", 0) or 0) > 0:
-                return _pill("Failed", P["danger"])
-            return _pill("OK", P["success"])
+                return "Failed"
+            return "OK"
 
-        rows = []
-        for _, r in df_runs.iterrows():
-            rows.append([
-                _run_outcome(r),
-                f'<strong>{int(r["RUN_LOG_ID"])}</strong>',
-                _scope_pill(r.get("PROCESS_TYPE")),
-                _esc_html(r.get("ADJUSTMENT_ACTION") or "—"),
-                int(r["COBID"]) if pd.notna(r.get("COBID")) else "—",
-                int(r.get("ADJ_COUNT", 0)),
-                _fmt_int(r.get("TOTAL_RECORDS")),
-                _fmt_dur(r.get("DURATION_SEC")),
-                _fmt_ts(r.get("ENDED")),
-            ])
-        _html_table = _table(
-            ["Outcome", "Run", "Scope", "Action", "COB", "Adj", "Rows", "Duration", "Ended"],
-            rows,
-            aligns=["left", "right", "left", "left", "right", "right", "right",
-                    "right", "right"])
-        st.markdown(_html_table, unsafe_allow_html=True)
+        _OUTCOME_COLORS = {"Running": P["info"], "Failed": P["danger"],
+                           "OK": P["success"]}
+        df_runs_grid = pd.DataFrame([{
+            "Outcome":  _run_outcome(r),
+            "Run":      _id_str(r.get("RUN_LOG_ID")),
+            "Scope":    _txt(r.get("PROCESS_TYPE")),
+            "Action":   _txt(r.get("ADJUSTMENT_ACTION")),
+            "COB":      _id_str(r.get("COBID")),
+            "Adj":      int(r.get("ADJ_COUNT", 0) or 0),
+            "Rows":     _fmt_int(r.get("TOTAL_RECORDS")),
+            "Duration": _fmt_dur(r.get("DURATION_SEC")),
+            "Ended":    _fmt_ts(r.get("ENDED")),
+        } for _, r in df_runs.iterrows()])
+        render_df_table(
+            df_runs_grid, max_rows=int(row_limit),
+            color_cols={"Outcome": _OUTCOME_COLORS, "Scope": _scope_color},
+            right_cols=("Run", "COB", "Adj", "Rows", "Duration", "Ended"),
+            nowrap_cols=("Outcome", "Run", "Scope", "COB", "Ended"),
+            key="lg_runs_grid")
 
         # ── Drill-down: pick a run ────────────────────────────────────────────
         st.markdown("<br/>", unsafe_allow_html=True)
@@ -283,28 +312,28 @@ with tab_runs:
             st.warning(f"Could not load run detail: {e}")
 
         if not df_adj.empty:
-            adj_rows = []
-            for _, a in df_adj.iterrows():
-                adj_rows.append([
-                    f'<strong>{fmt_adj_id(a.get("DIMENSION_ADJ_ID"))}</strong>',
-                    _esc_html(a.get("ADJUSTMENT_TYPE") or "—"),
-                    _esc_html(a.get("ENTITY_CODE") or "—"),
-                    _esc_html(a.get("BOOK_CODE") or "—"),
-                    _status_pill(a.get("RUN_STATUS")),
-                    _fmt_int(a.get("RECORD_COUNT")),
-                    _fmt_dur(
-                        (pd.Timestamp(a["PROCESS_DATE"]) - pd.Timestamp(a["START_DATE"])).total_seconds()
-                        if pd.notna(a.get("START_DATE")) and pd.notna(a.get("PROCESS_DATE"))
-                        else None),
-                    _esc_html(a.get("USERNAME") or "—"),
-                ])
-            st.markdown(_table(
-                ["Adj ID", "Type", "Entity", "Book", "Status", "Rows",
-                 "Duration", "Submitted by"],
-                adj_rows,
-                aligns=["left", "left", "left", "left", "left", "right",
-                        "right", "left"]),
-                unsafe_allow_html=True)
+            def _adj_dur(a):
+                if pd.notna(a.get("START_DATE")) and pd.notna(a.get("PROCESS_DATE")):
+                    return _fmt_dur((pd.Timestamp(a["PROCESS_DATE"])
+                                     - pd.Timestamp(a["START_DATE"])).total_seconds())
+                return _fmt_dur(None)
+
+            df_adj_grid = pd.DataFrame([{
+                "Adj ID":       fmt_adj_id(a.get("DIMENSION_ADJ_ID")),
+                "Type":         _txt(a.get("ADJUSTMENT_TYPE")),
+                "Entity":       _txt(a.get("ENTITY_CODE")),
+                "Book":         _txt(a.get("BOOK_CODE")),
+                "Status":       _txt(a.get("RUN_STATUS")),
+                "Rows":         _fmt_int(a.get("RECORD_COUNT")),
+                "Duration":     _adj_dur(a),
+                "Submitted by": _txt(a.get("USERNAME")),
+            } for _, a in df_adj.iterrows()])
+            render_df_table(
+                df_adj_grid, max_rows=len(df_adj_grid),
+                color_cols={"Status": _status_color},
+                right_cols=("Rows", "Duration"),
+                nowrap_cols=("Adj ID", "Status"),
+                key="lg_run_adj_grid")
 
             for _, a in df_adj[df_adj["ERRORMESSAGE"].notna()].iterrows():
                 st.markdown(
@@ -344,45 +373,36 @@ with tab_activity:
     if df_act.empty:
         st.info("No activity matches the filters.")
     else:
-        # Day-grouped feed with badges — scannable, unlike a raw dataframe.
-        # Days are grouped in the USER's timezone (same clock as the row times),
-        # so an event never lands under the wrong date header.
-        df_act["_DAY"] = df_act["EVENT_TIME"].apply(
-            lambda v: fmt_user_dt(v, "%A %d %b %Y") or "Unknown date")
+        # ONE grid for the whole feed. The query is ORDER BY EVENT_TIME DESC,
+        # so rows (and therefore the Day column) run newest first; Day is the
+        # USER's timezone calendar day, the same clock as the Time column.
+        # "Event" = what happened at that moment (EVENT_TYPE);
+        # "Now"   = where the adjustment is today (CURRENT_STATUS).
+        def _where(ev) -> str:
+            bits = [b for b in (_txt(ev.get("ENTITY_CODE"), ""),
+                                _txt(ev.get("BOOK_CODE"), "")) if b]
+            return " · ".join(bits) if bits else "All"
 
-        for day, day_df in df_act.groupby("_DAY", sort=False):
-            st.markdown(
-                f'<div style="font-size:0.78rem;font-weight:700;'
-                f'text-transform:uppercase;letter-spacing:.06em;'
-                f'color:{P["grey_700"]};margin:0.9rem 0 0.3rem 0">{day}</div>',
-                unsafe_allow_html=True)
-            feed_rows = []
-            for _, ev in day_df.iterrows():
-                detail_bits = [b for b in [
-                    _esc_html(ev.get("ENTITY_CODE") or ""),
-                    _esc_html(ev.get("BOOK_CODE") or "")] if b]
-                where_txt = " · ".join(detail_bits) if detail_bits else "All"
-                # "Event" = what happened at that moment (EVENT_TYPE);
-                # "Now" = where the adjustment is today (CURRENT_STATUS).
-                feed_rows.append([
-                    _fmt_ts(ev.get("EVENT_TIME"), "%H:%M:%S"),
-                    _status_pill(ev.get("EVENT_TYPE")),
-                    _status_pill(ev.get("CURRENT_STATUS")),
-                    f'<strong>{fmt_adj_id(ev.get("DIMENSION_ADJ_ID"))}</strong>',
-                    _scope_pill(ev.get("PROCESS_TYPE")),
-                    _esc_html(ev.get("ADJUSTMENT_TYPE") or "—"),
-                    where_txt,
-                    _esc_html(ev.get("ACTOR") or "—"),
-                    f'<span style="color:{P["grey_700"]}">'
-                    f'{_esc_html(ev.get("EVENT_DETAIL") or "")}</span>',
-                ])
-            st.markdown(_table(
-                ["Time", "Event", "Now", "Adj", "Scope", "Type", "Entity / Book",
-                 "By", "Detail"],
-                feed_rows,
-                aligns=["right", "left", "left", "left", "left", "left", "left",
-                        "left", "left"]),
-                unsafe_allow_html=True)
+        df_feed = pd.DataFrame([{
+            "Day":           _day_str(ev.get("EVENT_TIME")),
+            "Time":          _fmt_ts(ev.get("EVENT_TIME"), "%H:%M:%S"),
+            "Event":         _txt(ev.get("EVENT_TYPE")),
+            "Now":           _txt(ev.get("CURRENT_STATUS")),
+            "Adj":           fmt_adj_id(ev.get("DIMENSION_ADJ_ID")),
+            "Scope":         _txt(ev.get("PROCESS_TYPE")),
+            "Type":          _txt(ev.get("ADJUSTMENT_TYPE")),
+            "Entity / Book": _where(ev),
+            "By":            _txt(ev.get("ACTOR")),
+            "Detail":        _txt(ev.get("EVENT_DETAIL"), ""),
+        } for _, ev in df_act.iterrows()])
+        render_df_table(
+            df_feed, max_rows=int(row_limit),
+            color_cols={"Event": _status_color, "Now": _status_color,
+                        "Scope": _scope_color},
+            right_cols=("Time",),
+            nowrap_cols=("Day", "Time", "Event", "Now", "Adj", "Scope"),
+            wrap_cols={"Detail": 360},
+            key="lg_activity_grid")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -559,50 +579,38 @@ with tab_signoff:
                 "REOPEN_REQUESTED":  ("RE-OPEN REQUESTED",  "#B45309"),
             }
 
-            def _so_pill(status):
-                lbl, col = _SO_EVENT.get(str(status).upper(),
-                                         (str(status) or "—", P["grey_700"]))
-                return _pill(lbl, col)
+            def _so_label(status) -> str:
+                s = _txt(status, "")
+                if not s:
+                    return "—"
+                return _SO_EVENT.get(s.upper(), (s, P["grey_700"]))[0]
 
-            def _cob_str(v):
-                try:
-                    return str(int(v))
-                except (TypeError, ValueError):
-                    return _esc_html(v) or "—"
+            def _so_entity(ev) -> str:
+                ent = _txt(ev.get("ENTITY_CODE"), "*")
+                sub = _txt(ev.get("SUB_TYPE"), "")
+                return f"{ent} / {sub}" if sub else ent
 
-            _df = _df.copy()
-            _df["_DAY"] = _df["ACTION_AT"].apply(
-                lambda v: fmt_user_dt(v, "%A %d %b %Y") or "Unknown date")
-            _rows, _cur = [], None
-            for _, ev in _df.iterrows():
-                if ev["_DAY"] != _cur:
-                    _cur = ev["_DAY"]
-                    _rows.append({"divider": _esc_html(_cur)})
-                _sub = ev.get("SUB_TYPE")
-                _sub = "" if (_sub is None or pd.isna(_sub)) else str(_sub)
-                ent = _esc_html(ev.get("ENTITY_CODE") or "*") + (
-                    f' <span style="color:{P["grey_700"]}">/ '
-                    f'{_esc_html(_sub)}</span>' if _sub else "")
-                _old = str(ev.get("OLD_STATUS") or "").upper()
-                frm = (_so_pill(_old) if _old else
-                       f'<span style="color:{P["grey_700"]}">—</span>')
-                _rows.append([
-                    fmt_user_dt(ev.get("ACTION_AT"), "%H:%M:%S"),
-                    _so_pill(ev.get("NEW_STATUS")),
-                    f'<strong>{_cob_str(ev.get("COBID"))}</strong>',
-                    _scope_pill(ev.get("PROCESS_TYPE")),
-                    ent, frm,
-                    _esc_html(ev.get("ACTION_BY") or "—"),
-                    f'<span style="color:{P["grey_700"]}">'
-                    f'{_esc_html(ev.get("COMMENT") or "")}</span>',
-                ])
+            # ONE grid, newest first (query is ORDER BY ACTION_AT DESC); Day
+            # is the user-timezone calendar day, same clock as Time.
+            df_so_grid = pd.DataFrame([{
+                "Day":     _day_str(ev.get("ACTION_AT")),
+                "Time":    fmt_user_dt(ev.get("ACTION_AT"), "%H:%M:%S") or "—",
+                "Event":   _so_label(ev.get("NEW_STATUS")),
+                "COB":     _id_str(ev.get("COBID")),
+                "Scope":   _txt(ev.get("PROCESS_TYPE")),
+                "Entity":  _so_entity(ev),
+                "From":    _so_label(ev.get("OLD_STATUS")),
+                "By":      _txt(ev.get("ACTION_BY")),
+                "Comment": _txt(ev.get("COMMENT"), ""),
+            } for _, ev in _df.iterrows()])
             _ev_colors = {lbl: col for (lbl, col) in _SO_EVENT.values()}
-            render_grid(
-                ["Time", "Event", "COB", "Scope", "Entity", "From", "By",
-                 "Comment"], _rows,
-                color_cols={
-                    "Event": _ev_colors, "From": _ev_colors,
-                    "Scope": lambda v: SCOPE_CONFIG.get(str(v), {}).get("color", P["grey_700"]),
-                })
+            render_df_table(
+                df_so_grid, max_rows=int(row_limit),
+                color_cols={"Event": _ev_colors, "From": _ev_colors,
+                            "Scope": _scope_color},
+                right_cols=("Time", "COB"),
+                nowrap_cols=("Day", "Time", "Event", "COB", "Scope", "From"),
+                wrap_cols={"Comment": 360},
+                key="lg_signoff_grid")
     except Exception as _ex:
         st.info(f"Sign-off history not available: {_ex}")

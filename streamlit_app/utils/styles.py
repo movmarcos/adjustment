@@ -684,8 +684,10 @@ def inject_css():
     div[class*="st-key-submit"] button[data-testid="stBaseButton-primary"]:hover {{
         background: var(--brand-dk) !important; border-color: var(--brand-dk) !important;
     }}
+    /* no overflow:hidden here — the st.dataframe toolbar (search / CSV /
+       fullscreen) is positioned above the grid box and would be clipped */
     [data-testid="stDataFrame"] {{
-        border-radius: var(--r-sm); overflow: hidden;
+        border-radius: var(--r-sm);
         border: 1px solid var(--border);
     }}
     /* Expanders sit INSIDE white section cards — a faint border on a white
@@ -1981,7 +1983,10 @@ def download_csv_link(data, filename, label="⬇ Download CSV",
     extracts (the callers cap at ~1,000 rows); Streamlit trims markdown
     over a few MB.
 
-    data: bytes or str (the CSV content). filename: the save-as name."""
+    data: bytes or str (the CSV content). filename: the save-as name.
+
+    Only FRTB Explore keeps this named download; everywhere else the CSV
+    download is the native st.dataframe toolbar (render_df_table)."""
     import base64 as _b64
 
     raw = data.encode("utf-8-sig") if isinstance(data, str) else bytes(data)
@@ -2001,9 +2006,9 @@ def render_data_grid(df, height=380, empty_msg="No rows."):
     """Data-preview grid for wide/long frames (Direct upload previews).
 
     Hybrid, tuned live with the user (2026-09-03/04):
-    - SMALL AND NARROW (≤ 15 rows and ≤ 12 columns) → the .mgrid HTML
-      table, sized exactly to its rows: no empty filler lines, no canvas
-      repaint flicker while interacting.
+    - SMALL AND NARROW (≤ 15 rows and ≤ 12 columns) → render_df_table
+      (native grid since 2026-09, fitted exactly to its rows, long text
+      columns width-capped via wrap_cols="auto").
     - Anything else → st.dataframe (expandable, internal scroll BOTH axes),
       height fitted to the rows and capped at `height`. WIDE frames must
       take this path regardless of row count: a 60-column FRTB template as
@@ -2018,7 +2023,12 @@ def render_data_grid(df, height=380, empty_msg="No rows."):
         render_df_table(df, max_rows=len(df), wrap_cols="auto")
         return
     fit = 35 * (len(df) + 1) + 3
-    st.dataframe(df, use_container_width=True, height=min(fit, int(height)))
+    try:
+        st.dataframe(df, use_container_width=True, hide_index=True,
+                     height=min(fit, int(height)))
+    except TypeError:   # pre-1.24 runtime: no hide_index kwarg
+        st.dataframe(df, use_container_width=True,
+                     height=min(fit, int(height)))
 
 
 def bordered_container():
@@ -2038,115 +2048,288 @@ def bordered_container():
         return c
 
 
+_PY_FMT_RE = re.compile(
+    r"^(?P<pre>[^{}]*)\{(?::(?P<spec>[^{}]*))?\}(?P<post>[^{}]*)$")
+_PY_SPEC_RE = re.compile(
+    r"^(?P<grp>[,_])?(?:\.(?P<prec>\d+))?(?P<type>[fFd%])?$")
+
+
+def _py_format_to_sprintf(py_fmt):
+    """Map a python str.format string to the printf-style format that
+    st.column_config.NumberColumn understands.
+
+    Returns (sprintf_format, multiplier) or None when the format has no
+    faithful printf equivalent (render_df_table then falls back to a
+    pre-formatted string column). Thousands separators are dropped: the
+    native grid's sprintf has no grouping flag.
+
+        "${:,.2f}" -> ("$%.2f", 1)      "{:,.4f}" -> ("%.4f", 1)
+        "{:,.0f}"  -> ("%.0f", 1)       "{:d}" / "{:,}" -> ("%d", 1)
+        "{:.1%}"   -> ("%.1f%%", 100)   "{} {:>10} {:.3}" -> None
+    """
+    m = _PY_FMT_RE.match(py_fmt or "")
+    if not m:
+        return None
+    s = _PY_SPEC_RE.match(m.group("spec") or "")
+    if not s:
+        return None
+    grp, prec, typ = s.group("grp"), s.group("prec"), s.group("type")
+    pre = m.group("pre").replace("%", "%%")
+    post = m.group("post").replace("%", "%%")
+    if typ in ("f", "F"):
+        return f"{pre}%.{prec or 6}f{post}", 1
+    if typ == "%":
+        return f"{pre}%.{prec or 6}f%%{post}", 100
+    if typ == "d" and prec is None:
+        return f"{pre}%d{post}", 1
+    if typ is None and grp and prec is None:      # "{:,}" — grouped int
+        return f"{pre}%d{post}", 1
+    return None
+
+
+def _is_datetime_objects(series):
+    """True for an object column whose non-null values are all datetimes
+    (Snowflake TIMESTAMP columns often arrive as object dtype). Pure dates
+    are NOT datetimes: they must not be timezone-shifted."""
+    import datetime as _dt
+    vals = series.dropna()
+    if len(vals) == 0:
+        return False
+    return all(isinstance(v, _dt.datetime) for v in vals.head(50))
+
+
+def _is_decimal_objects(series):
+    from decimal import Decimal as _D
+    vals = series.dropna()
+    return len(vals) > 0 and all(isinstance(v, _D) for v in vals.head(50))
+
+
 def render_df_table(df, max_rows=200, height=None, highlight=None,
                     formats=None, color_cols=None, column_config=None,
                     right_cols=(), key=None, wrap_cols=None, nowrap_cols=()):
-    """READ-ONLY table restored to the pre-redesign (26 Aug) behaviour the
-    user asked to return to: full values (NO truncation), no pagination, the
-    table flows in the page. The ONLY change from 26 Aug is that the header
-    is not sticky — the frozen header was the one confirmed problem
-    ('we had a quite decent grid except when we freeze the header').
+    """READ-ONLY table on the NATIVE st.dataframe grid (sort / search /
+    fullscreen / CSV toolbar). Replaces the .mgrid HTML table for tabular
+    data (2026-09); the signature is unchanged so no caller moves.
 
-    highlight:  callable(row_dict)->bool; True tints the row red.
-    formats:    {column: python_format}, e.g. {"COST": "${:,.2f}"}.
-    color_cols: {column: {value: '#hex'}} or {column: callable(value)->'#hex'}
-                — colours that column's TEXT by value.
-    wrap_cols:  {column: max_px} — that column's text wraps within a bounded
-                width instead of widening the table (a too-wide table grows
-                a horizontal scrollbar, and scrollbars are where the white
-                block appears in the users' environment). Full text kept.
-                The string "auto" bounds ANY long cell (>26 chars) at 240px —
-                for preview grids whose columns vary by template.
-    height/column_config/key: accepted for compatibility; unused.
+    highlight:     callable(row_dict)->bool; True tints the row (danger_lt)
+                   via a pandas Styler. row_dict carries the ORIGINAL values.
+    formats:       {column: python_format}, e.g. {"COST": "${:,.2f}"}.
+                   Mapped to NumberColumn(format=printf) where possible
+                   (see _py_format_to_sprintf) so the column stays numeric
+                   and sorts correctly; "{:.1%}" scales the column by 100
+                   with a "%.1f%%" format. Unmappable formats are applied to
+                   a string copy of the column instead.
+    color_cols:    {column: {value: '#hex'}} or {column: callable(v)->'#hex'}
+                   — colours that column's TEXT by (original) value.
+    wrap_cols:     {column: max_px} or "auto" — bounds the column width
+                   (TextColumn width small/medium/large). The native grid
+                   never widens the page; "auto" caps any long text column.
+    nowrap_cols:   accepted for compatibility — the native grid keeps every
+                   cell on one line already (full text in the cell tooltip /
+                   fullscreen), so nothing to do.
+    right_cols:    numeric columns to force to NumberColumn (right-aligned).
+    column_config: caller config, merged OVER the generated one.
+    height:        max pixel height; the grid is fitted to its rows (no
+                   filler) and capped here (560 when None).
+    key:           passed through to st.dataframe on runtimes that take it.
+    Datetime columns are converted to the user's display timezone
+    (fmt_user_dt semantics) and shown as "DD MMM YYYY HH:mm".
     """
-    import html as _hm
     import pandas as _pd
 
     if df is None or len(df) == 0:
         st.caption("No rows.")
         return
-    show = df.head(int(max_rows))
+    max_rows = int(max_rows)
+    orig = df.head(max_rows).reset_index(drop=True)
+    show = orig.copy()
     formats = formats or {}
-    numeric = set(right_cols or ()) | {
-        c for c in show.columns
-        if _pd.api.types.is_numeric_dtype(show[c])}
+    cc = getattr(st, "column_config", None)
+    cfg = {}
 
-    def _clean(s):
-        # escape, then guard the two markdown killers: '$' triggers KaTeX
-        # (e4927e9) and a newline ends the raw-HTML block (c360960).
-        return " ".join(_hm.escape(str(s)).replace("$", "&#36;").split())
-
-    def _fmt(col, v):
+    def _fmt_str(fmt, v):
         try:
             if v is None or _pd.isna(v):
-                return "—"
+                return None
         except (TypeError, ValueError):
             pass
-        if col in formats:
-            try:
-                return _clean(formats[col].format(v))
-            except (ValueError, TypeError):
-                pass
-        if isinstance(v, bool):
-            return "TRUE" if v else "FALSE"
-        if isinstance(v, int):
-            return f"{v:,}"
-        if isinstance(v, float):
-            return f"{int(v):,}" if v.is_integer() else f"{v:,.4g}"
-        if hasattr(v, "strftime"):
-            return _clean(fmt_user_dt(v))
-        return _clean(v)
-
-    def _colour(col, v):
-        spec = (color_cols or {}).get(col)
-        if not spec:
-            return ""
         try:
-            got = spec(v) if callable(spec) else spec.get(str(v), "")
-        except Exception:
-            got = ""
-        return f"color:{got};font-weight:700;" if got else ""
+            return fmt.format(v)
+        except (ValueError, TypeError):
+            return str(v)
 
-    th = "".join(
-        f'<th class="{"r" if c in numeric else ""}">{_clean(c)}</th>'
-        for c in show.columns)
-    trs = ""
-    for _, row in show.iterrows():
+    # ── dtype normalisation: Decimal → float, datetimes → user tz ──────────
+    for col in list(show.columns):
+        s = show[col]
         try:
-            hot = bool(highlight(row.to_dict())) if highlight else False
+            if s.dtype == object and _is_decimal_objects(s):
+                show[col] = _pd.to_numeric(s, errors="coerce")
+                continue
+            if _pd.api.types.is_datetime64_any_dtype(s) or (
+                    s.dtype == object and _is_datetime_objects(s)):
+                ts = _pd.to_datetime(s, errors="coerce")
+                if getattr(ts.dt, "tz", None) is None:
+                    ts = ts.dt.tz_localize(STORAGE_TZ, ambiguous=True,
+                                           nonexistent="shift_forward")
+                # wall-clock in the user's zone; naive so the grid shows it as-is
+                show[col] = ts.dt.tz_convert(get_user_tz()).dt.tz_localize(None)
+                if cc is not None:
+                    cfg[col] = cc.DatetimeColumn(format="DD MMM YYYY HH:mm")
         except Exception:
-            hot = False
-        row_bg = f'background:{P["danger_lt"]};' if hot else ""
-        cells = []
-        for c in show.columns:
-            content = _fmt(c, row[c])
-            if wrap_cols == "auto":
-                px = 240 if len(str(content)) > 26 else None
-            else:
-                px = (wrap_cols or {}).get(c)
-            if px and len(str(content)) > 20:
-                content = (f'<span style="display:inline-block;'
-                           f'max-width:{int(px)}px;white-space:normal;'
-                           f'overflow-wrap:anywhere;vertical-align:middle">'
-                           f"{content}</span>")
-            klass = " ".join((["r"] if c in numeric else [])
-                             + (["nw"] if c in (nowrap_cols or ()) else []))
-            cells.append(
-                f'<td class="{klass}" '
-                f'style="{row_bg}{_colour(c, row[c])}">{content}</td>')
-        trs += f"<tr>{''.join(cells)}</tr>"
+            pass   # leave the column as delivered — never lose the grid
 
-    st.markdown(
-        f'<div class="mgrid-wrap"><table class="mgrid">'
-        f"<thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table></div>",
-        unsafe_allow_html=True)
+    # ── formats ────────────────────────────────────────────────────────────
+    styler_fmt = {}
+    for col, fmt in formats.items():
+        if col not in show.columns:
+            continue
+        mapped = _py_format_to_sprintf(fmt) if cc is not None else None
+        num = _pd.to_numeric(show[col], errors="coerce")
+        numeric_ok = num.notna().sum() == show[col].notna().sum()
+        if mapped and numeric_ok:
+            spf, mult = mapped
+            show[col] = num * mult if mult != 1 else num
+            cfg[col] = cc.NumberColumn(format=spf)
+            styler_fmt[col] = (lambda v, f=fmt, m=mult:
+                               "" if _pd.isna(v) else _fmt_str(f, v / m))
+        else:
+            show[col] = show[col].map(lambda v, f=fmt: _fmt_str(f, v))
+            if cc is not None:
+                cfg[col] = cc.TextColumn()
+
+    # ── widths ─────────────────────────────────────────────────────────────
+    def _width(px):
+        return "small" if px <= 150 else ("medium" if px <= 300 else "large")
+
+    if cc is not None:
+        if wrap_cols == "auto":
+            for col in show.columns:
+                if col in cfg or show[col].dtype != object:
+                    continue
+                try:
+                    longest = show[col].dropna().astype(str).str.len().max()
+                except Exception:
+                    longest = 0
+                if longest and longest > 26:
+                    cfg[col] = cc.TextColumn(width="medium")
+        elif isinstance(wrap_cols, dict):
+            for col, px in wrap_cols.items():
+                if col in show.columns and col not in cfg and px:
+                    cfg[col] = cc.TextColumn(width=_width(int(px)))
+        for col in (right_cols or ()):
+            if col in show.columns and col not in cfg and \
+                    _pd.api.types.is_numeric_dtype(show[col]):
+                cfg[col] = cc.NumberColumn()
+    if column_config:
+        cfg.update(column_config)
+
+    # ── Styler (only when asked: a plain frame is faster) ──────────────────
+    data = show
+    if highlight or color_cols:
+        try:
+            sty = show.style
+            if highlight:
+                bg = f"background-color: {P['danger_lt']}"
+
+                def _row(r):
+                    try:
+                        hot = bool(highlight(orig.loc[r.name].to_dict()))
+                    except Exception:
+                        hot = False
+                    return [bg if hot else ""] * len(r)
+                sty = sty.apply(_row, axis=1)
+            for col, spec in (color_cols or {}).items():
+                if col not in show.columns or not spec:
+                    continue
+
+                def _col(s, _spec=spec, _col=col):
+                    out = []
+                    for i in s.index:
+                        v = orig.at[i, _col]
+                        try:
+                            got = _spec(v) if callable(_spec) else \
+                                _spec.get(str(v), "")
+                        except Exception:
+                            got = ""
+                        out.append(f"color: {got}; font-weight: 700"
+                                   if got else "")
+                    return out
+                sty = sty.apply(_col, axis=0, subset=[col])
+            if styler_fmt:
+                # a Styler's display text wins over NumberColumn(format=)
+                # on the frontend, so keep both renderings identical
+                sty = sty.format(styler_fmt, na_rep="")
+            data = sty
+        except Exception:
+            data = show   # duplicate columns etc.: values beat no grid
+
+    # ── render ─────────────────────────────────────────────────────────────
+    fit = 35 * (len(show) + 1) + 3
+    cap = int(height) if height else 560
+    kw = dict(use_container_width=True, hide_index=True,
+              height=min(fit, cap))
+    if cfg:
+        kw["column_config"] = cfg
+    if key is not None:
+        kw["key"] = key
+    try:
+        st.dataframe(data, **kw)
+    except TypeError:
+        # older runtime: no `key` (1.35) / `hide_index` (1.24) kwargs
+        kw.pop("key", None)
+        kw.pop("hide_index", None)
+        try:
+            st.dataframe(data, **kw)
+        except TypeError:
+            # pre-1.23 runtime: no column_config either — plain grid
+            kw.pop("column_config", None)
+            st.dataframe(data, **kw)
     if len(df) > max_rows:
-        st.caption(f"Showing the first {int(max_rows)} of {len(df):,} rows.")
+        st.caption(f"Showing first {max_rows:,} of {len(df):,} rows.")
 
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def df_from_grid(headers, rows):
+    """Turn the legacy render_grid (headers, rows) structure into a plain
+    DataFrame for render_df_table / st.dataframe.
+
+    rows: list of cell lists, or {"cells": [...]} dicts; {"divider": ...}
+    rows are skipped (the native grid has no section rows — callers that
+    need the grouping put it in a column). String cells have their HTML
+    (pill/badge/chip markup) stripped: tags removed, entities unescaped,
+    whitespace collapsed. Non-string cells pass through untouched."""
+    import html as _hm
+    import pandas as _pd
+
+    def _plain(c):
+        if not isinstance(c, str):
+            return c
+        return " ".join(_hm.unescape(_HTML_TAG_RE.sub(" ", c)).split())
+
+    headers = [str(h) for h in headers]
+    n = len(headers)
+    out = []
+    for row in rows or ():
+        if isinstance(row, dict):
+            if "divider" in row:
+                continue
+            cells = row.get("cells", [])
+        else:
+            cells = list(row)
+        cells = [_plain(c) for c in cells][:n]
+        cells += [None] * (n - len(cells))
+        out.append(cells)
+    return _pd.DataFrame(out, columns=headers)
 
 def render_grid(headers, rows, *, aligns=None, height=None, caption=None,
                 return_html=False, color_cols=None):
-    """The legacy (headers, rows) grid — cells are RENDERED AS-IS, so the
+    """LEGACY HTML grid — kept only for Documentation (authored HTML). New
+    tabular content goes through render_df_table / st.dataframe; convert an
+    existing (headers, rows) call site with df_from_grid(headers, rows).
+
+    The legacy (headers, rows) grid — cells are RENDERED AS-IS, so the
     pill/badge/entity-chip markup pages compose (Sign-Off per-entity detail,
     Approval history, Logs) shows exactly as authored — the Logs look the
     user called the canonical style. Divider rows ({"divider": text}) render

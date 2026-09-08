@@ -16,7 +16,6 @@ Reads: ADJ_SIGNOFF_STATUS. Writes via SP_REQUEST_SIGNOFF_CHANGE only;
 approvals happen on the Approval Queue page.
 """
 import json
-import html as _hesc
 import streamlit as st
 import pandas as pd
 
@@ -24,7 +23,7 @@ st.set_page_config(page_title="Sign-Off · MUFG", page_icon="🔒", layout="wide
 
 from utils.styles import (inject_css, render_sidebar, section_title, P,
                           ALL_SCOPES, icon, bordered_container, fmt_user_dt,
-                          SCOPE_CONFIG, render_grid,
+                          SCOPE_CONFIG, render_df_table,
                           set_flash, render_flash, confirm_gate,
                           SIGNOFF_STATUS_META, signoff_status_label)
 from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
@@ -41,6 +40,19 @@ def _pill(text, color) -> str:
     return (f'<span style="background:{color}18;color:{color};border:1px solid {color}55;'
             f'border-radius:99px;padding:1px 10px;font-size:0.75rem;font-weight:700;'
             f'white-space:nowrap">{text}</span>')
+
+
+def _nz(v) -> str:
+    """NaN/None-safe plain text ('' for empty), whitespace-normalized — grid
+    cells are plain values now, no markup."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    return " ".join(str(v).split())
+
+
+# Status label -> colour, straight from the shared sign-off palette; used by
+# both grids' color_cols so a status reads the same everywhere.
+_SIGNOFF_LABEL_COLORS = {m["label"]: m["color"] for m in SIGNOFF_STATUS_META.values()}
 
 
 # status → (label, color, blocks submissions?)
@@ -283,22 +295,6 @@ def _scope_summary(rows):
     return eff, col, sub, P["grey_700"], detail
 
 
-def _entity_chips(rows):
-    """Compact per-entity chips; a lone '*' row means the whole scope."""
-    if (len(rows) == 1 and str(rows.iloc[0]["ENTITY_CODE"]) == "*"
-            and not str(rows.iloc[0]["SUB_TYPE"])):
-        return f'<span style="font-size:0.75rem;color:{P["grey_700"]}">whole scope</span>'
-    chips = []
-    for _, r in rows.sort_values(["ENTITY_CODE", "SUB_TYPE"]).iterrows():
-        lbl, col, _ = _STATUS_META.get(str(r["_SU"]),
-                                       (str(r["_SU"]), P["grey_700"], False))
-        chips.append(
-            f'<span style="background:{col}14;color:{col};border:1px solid {col}44;'
-            f'border-radius:99px;padding:0 8px;font-size:0.75rem;font-weight:700;'
-            f'white-space:nowrap">{_hesc.escape(str(r["_ENT_LBL"]))}&nbsp;·&nbsp;{lbl}</span>')
-    return '<span style="line-height:1.9">' + " ".join(chips) + "</span>"
-
-
 section_title(f"Scope status — COB {sel_cob}", "lock")
 
 _scopes_shown = [s for s in ALL_SCOPES if s != "FRTBALL"]
@@ -502,9 +498,8 @@ with tab_act:
 
     st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Sign-Off Status", "table")
-    st.caption("One line per COB and scope — the entity chips show the per-entity "
-               "state when a scope is split. Follows the selected COB; add more "
-               "COBs here to compare.")
+    st.caption("One line per COB, scope and entity ('*' = the whole scope). "
+               "Follows the selected COB; add more COBs here to compare.")
     g1, g2, g3 = st.columns(3)
     with g1:
         # No `default=` — the value is seeded in session state by the
@@ -521,8 +516,7 @@ with tab_act:
         f_status = st.multiselect(
             "Status", list(_STATUS_META.keys()), default=[], key="so_f_status",
             format_func=lambda v: signoff_status_label(v).title(),
-            help="Keeps a COB/scope line when ANY of its entities has one of "
-                 "the selected statuses.")
+            help="Show only entities in one of the selected statuses.")
 
     df_grid = df_all
     if f_cobs:
@@ -530,46 +524,60 @@ with tab_act:
     if f_scopes:
         df_grid = df_grid[df_grid["PROCESS_TYPE"].isin(f_scopes)]
     if f_status:
-        _keep = df_grid[df_grid["_SU"].isin(f_status)][["COBID", "PROCESS_TYPE"]]
-        df_grid = df_grid.merge(_keep.drop_duplicates(),
-                                on=["COBID", "PROCESS_TYPE"], how="inner")
+        df_grid = df_grid[df_grid["_SU"].isin(f_status)]
 
-    _groups = list(df_grid.groupby(["COBID", "PROCESS_TYPE"], sort=False))
-    if not _groups:
+    if df_grid.empty:
         st.info("Nothing matches the filters.")
     else:
+        def _entity_comment(r):
+            """The human context for an entity line: who asked for what (and
+            why) while a request is pending or after a re-open; blank when
+            the state came straight from the upstream feed."""
+            su = str(r["_SU"])
+            reason = _nz(r.get("REOPEN_REASON"))
+            if su in ("SIGNOFF_REQUESTED", "REOPEN_REQUESTED"):
+                verb = "Sign-off" if su == "SIGNOFF_REQUESTED" else "Re-open"
+                head = (f"{verb} requested by {_nz(r.get('REOPEN_REQUESTED_BY')) or '—'} "
+                        f"{_fmt_ts(r.get('REOPEN_REQUESTED_AT'))} — awaiting approval")
+                return f"{head}: {reason}" if reason else head
+            if su == "REOPENED":
+                head = f"Re-opened (approved by {_nz(r.get('REOPEN_APPROVED_BY')) or '—'})"
+                return f"{head}: {reason}" if reason else head
+            return ""
+
         _rows = []
-        for (g_cob, g_scope), g_rows in _groups:
-            eff, col, sub, sub_col, detail = _scope_summary(g_rows)
-            _detail = _hesc.escape(" ".join(str(detail).split())).replace("$", "&#36;")
-            _rows.append([
-                f'<strong>{int(g_cob)}</strong>',
-                f'<strong>{_hesc.escape(str(g_scope))}</strong>',
-                _pill(eff, col),
-                f'<span style="color:{sub_col};font-weight:700;font-size:0.78rem">{sub}</span>',
-                _entity_chips(g_rows),
-                f'<span style="color:{P["grey_700"]};font-size:0.8rem">{_detail}</span>',
-            ])
-        _signoff_colors = {
-            "SIGNED OFF": P["success"], "OPEN": P["danger"],
-            "RE-OPENED": P["danger"], "PARTIALLY SIGNED OFF": P["warning"],
-            "SIGN-OFF PENDING": P["warning"], "RE-OPEN PENDING": P["warning"],
-        }
-        render_grid(
-            ["COB", "Scope", "Sign-off", "Submissions", "Entities", "Detail"],
-            _rows,
-            color_cols={
-                "Sign-off": _signoff_colors,
-                "Scope": lambda v: SCOPE_CONFIG.get(str(v), {}).get("color", P["grey_700"]),
+        for _, r in df_grid.iterrows():
+            _su = str(r["_SU"])
+            _blocks = _STATUS_META.get(_su, ("", "", False))[2]
+            _rows.append({
+                "COB": str(int(r["COBID"])),
+                "Scope": _nz(r.get("PROCESS_TYPE")) or "—",
+                "Entity": _nz(r.get("_ENT_LBL")) or "*",
+                "Status": signoff_status_label(_su),
+                "Submissions": "Blocked" if _blocks else "Allowed",
+                "Signed off by": (_nz(r.get("SIGN_OFF_BY")) or "—"
+                                  if _su == "SIGNED_OFF" else "—"),
+                "When": (fmt_user_dt(r.get("SIGN_OFF_TIMESTAMP"), "%d %b %Y %H:%M")
+                         if _su == "SIGNED_OFF" else ""),
+                "Source": _nz(r.get("SIGNOFF_SOURCE")) or "—",
+                "Comment": _entity_comment(r),
             })
-        st.caption(f"{len(_groups)} COB/scope line(s) · "
-                   f"{len(df_grid)} underlying entit(y/ies)")
+        render_df_table(
+            pd.DataFrame(_rows), max_rows=len(_rows), key="so_status",
+            color_cols={
+                "Status": _SIGNOFF_LABEL_COLORS,
+                "Scope": lambda v: SCOPE_CONFIG.get(str(v), {}).get("color", P["grey_700"]),
+            },
+            wrap_cols={"Comment": 420})
+        st.caption(f"{len(_rows)} entity line(s) across "
+                   f"{df_grid.groupby(['COBID', 'PROCESS_TYPE']).ngroups} "
+                   f"COB/scope(s)")
 
 
 with tab_hist:
     # ══════════════════════════════════════════════════════════════════════════════
-    # LATEST CHANGES — sign-off lifecycle events, newest first. SAME grid as the
-    # Logs page's Sign-Off tab: day-grouped, pill-badged rows.
+    # LATEST CHANGES — sign-off lifecycle events, newest first, one row per
+    # event (same data as the Logs page's Sign-Off tab).
     # ══════════════════════════════════════════════════════════════════════════════
     st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Latest Changes", "file-text")
@@ -603,76 +611,32 @@ with tab_hist:
         st.info("No sign-off activity for the selected COB(s) in the last 300 "
                 "events — clear the COB filter to see everything.")
     else:
-        def _nz(v):
-            """NaN/None-safe string ('' for empty), whitespace-normalized."""
-            if v is None or (isinstance(v, float) and pd.isna(v)):
-                return ""
-            return " ".join(str(v).split())
-
-        def _cell(v):
-            """User text → safe HTML: escaped + '$' neutralized (a $…$ pair
-            would trigger Streamlit's LaTeX and eat the markup)."""
-            return _hesc.escape(_nz(v)).replace("$", "&#36;")
-
         def _cob(v):
             try:
                 return str(int(v))
             except (TypeError, ValueError):
-                return _cell(v) or "—"
+                return _nz(v) or "—"
 
-        _EVENT_META = {
-            "SIGNED_OFF":        ("SIGNED OFF",         P["success"]),
-            "REOPENED":          ("RE-OPENED",          P["danger"]),
-            "OPEN":              ("OPEN",               P["danger"]),
-            "SIGNOFF_REQUESTED": ("SIGN-OFF REQUESTED", P["warning"]),
-            "REOPEN_REQUESTED":  ("RE-OPEN REQUESTED",  P["warning"]),
-        }
-
-        def _ev_pill(status):
-            lbl, col = _EVENT_META.get(str(status).upper(),
-                                       (str(status) or "—", P["grey_700"]))
-            return _pill(lbl, col)
-
-        def _scope_pill(scope):
-            cfg = SCOPE_CONFIG.get(str(scope), {})
-            return _pill(str(scope) or "—", cfg.get("color", P["grey_700"]))
-
-        # Build rows for the canonical grid: day changes become divider rows.
-        _df = df_hist.copy()
-        _df["_DAY"] = _df["ACTION_AT"].apply(lambda v: fmt_user_dt(v, "%A %d %b %Y"))
         _rows = []
-        _cur_day = None
-        for _, h in _df.iterrows():
-            if h["_DAY"] != _cur_day:
-                _cur_day = h["_DAY"]
-                _rows.append({"divider": _hesc.escape(str(_cur_day))})
+        for _, h in df_hist.iterrows():
             sub = _nz(h.get("SUB_TYPE"))
-            ent = (_cell(h.get("ENTITY_CODE")) or "*") + (
-                f' <span style="color:{P["grey_700"]}">/ {_cell(sub)}</span>'
-                if sub else "")
-            _old = _nz(h.get("OLD_STATUS")).upper()
-            frm = (_ev_pill(_old) if _old
-                   else f'<span style="color:{P["grey_700"]}">—</span>')
-            # Q-L6: truncate the RAW text, then escape; the full comment is
-            # available on hover via the title attribute.
-            _cmt_full = _nz(h.get("COMMENT"))
-            _cmt_short = (_cmt_full[:160] + "…") if len(_cmt_full) > 160 else _cmt_full
-            _rows.append([
-                fmt_user_dt(h.get("ACTION_AT"), "%H:%M:%S"),
-                _ev_pill(h.get("NEW_STATUS")),
-                f'<strong>{_cob(h.get("COBID"))}</strong>',
-                _scope_pill(h.get("PROCESS_TYPE")),
-                ent, frm,
-                _cell(h.get("ACTION_BY")) or "—",
-                f'<span style="color:{P["grey_700"]}" title="{_cell(_cmt_full)}">'
-                f'{_cell(_cmt_short)}</span>',
-            ])
-        _ev_colors = {lbl: col for (lbl, col) in _EVENT_META.values()}
-        render_grid(
-            ["Time", "Event", "COB", "Scope", "Entity", "From", "By", "Comment"],
-            _rows,
-            color_cols={
-                "Event": _ev_colors, "From": _ev_colors,
-                "Scope": lambda v: SCOPE_CONFIG.get(str(v), {}).get("color", P["grey_700"]),
+            _old = _nz(h.get("OLD_STATUS"))
+            _rows.append({
+                "When": fmt_user_dt(h.get("ACTION_AT"), "%d %b %Y %H:%M:%S"),
+                "Event": signoff_status_label(h.get("NEW_STATUS")),
+                "COB": _cob(h.get("COBID")),
+                "Scope": _nz(h.get("PROCESS_TYPE")) or "—",
+                "Entity": (_nz(h.get("ENTITY_CODE")) or "*") + (f" / {sub}" if sub else ""),
+                "From": signoff_status_label(_old) if _old else "—",
+                "By": _nz(h.get("ACTION_BY")) or "—",
+                # Full comment — no truncation; the grid wraps it.
+                "Comment": _nz(h.get("COMMENT")),
             })
-        st.caption(f"{len(_df)} event(s), newest first.")
+        render_df_table(
+            pd.DataFrame(_rows), max_rows=len(_rows), key="so_hist",
+            color_cols={
+                "Event": _SIGNOFF_LABEL_COLORS, "From": _SIGNOFF_LABEL_COLORS,
+                "Scope": lambda v: SCOPE_CONFIG.get(str(v), {}).get("color", P["grey_700"]),
+            },
+            wrap_cols={"Comment": 420})
+        st.caption(f"{len(_rows)} event(s), newest first.")
