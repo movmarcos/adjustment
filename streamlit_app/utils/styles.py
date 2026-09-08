@@ -1375,44 +1375,11 @@ def inject_css():
         padding: 1rem 1.1rem 1.1rem;
         box-shadow: var(--sh-sm);
         box-sizing: border-box;
-        overflow-x: clip;   /* guardrail: nothing may poke past the border */
     }}
-    /* Streamlit 1.26 gives widgets FIXED PIXEL widths (via generated CSS
-       classes, NOT inline styles) measured before the card padding exists,
-       so full-width children — section hairlines, textareas, the Business
-       Context fields — protruded past the card edge. Force every widget
-       wrapper inside a marker card back to fluid width; width:auto beats
-       both the class-based and any inline pixel width. */
-    [data-testid="stVerticalBlock"]:has(> :is(
-        [data-testid="element-container"],
-        [data-testid="stElementContainer"],
-        .element-container) .sec-card-flag) :is(
-        [data-testid="element-container"], [data-testid="stElementContainer"],
-        .element-container, [data-testid="stHorizontalBlock"],
-        .stMarkdown, .stText, .stCaptionContainer,
-        .stTextInput, .stTextArea, .stNumberInput, .stDateInput,
-        .stSelectbox, .stMultiSelect, .stCheckbox, .stRadio,
-        .stButton, .stDownloadButton, .stFileUploader,
-        [style*="width"]):not(:is(
-        [data-testid="stDataFrame"], [data-testid="stDataFrameResizable"],
-        [data-testid="stDataFrame"] *, [data-testid="stDataFrameResizable"] *,
-        :has([data-testid="stDataFrame"]),
-        :has([data-testid="stDataFrameResizable"]))) {{
-        width: auto !important;
-        max-width: 100% !important;
-    }}
-    /* NOTHING width-related may touch st.dataframe or anything around it:
-       its resize observer writes inline pixel widths on itself AND its
-       wrapper element-containers, so forcing ANY of that lineage to
-       width:auto makes the observer re-measure and re-write forever — the
-       grid grows unbounded and locks the page (hit live on the Direct
-       preview inside a card). The :not() above therefore excludes the
-       widget (both testids — the live 1.22 runtime uses
-       stDataFrameResizable), its descendants, AND every ancestor that
-       contains one. */
-    [data-testid="stDataFrameResizable"] {{
-        max-width: 100% !important;
-    }}
+    /* NO width rules on anything inside a card. The earlier "force every
+       widget wrapper to width:auto" rule made st.dataframe's resize observer
+       re-measure forever (grid grows unbounded / expand loop) — removed
+       2026-09-08. Grids now render exactly like a plain st.dataframe. */
     /* the marker's own element wrapper must not eat a flex-gap slot
        (element-containers never nest, so any-depth :has() is safe here) */
     [data-testid="element-container"]:has(.sec-card-flag),
@@ -2003,24 +1970,14 @@ def download_csv_link(data, filename, label="⬇ Download CSV",
 
 
 def render_data_grid(df, height=380, empty_msg="No rows."):
-    """Data-preview grid for wide/long frames (Direct upload previews).
-
-    Hybrid, tuned live with the user (2026-09-03/04):
-    - SMALL AND NARROW (≤ 15 rows and ≤ 12 columns) → render_df_table
-      (native grid since 2026-09, fitted exactly to its rows, long text
-      columns width-capped via wrap_cols="auto").
-    - Anything else → st.dataframe (expandable, internal scroll BOTH axes),
-      height fitted to the rows and capped at `height`. WIDE frames must
-      take this path regardless of row count: a 60-column FRTB template as
-      HTML overflows into a horizontal page scrollbar, which white-boxes in
-      the users' environment (12-row FRTB preview went fully blank)."""
+    """Data-preview grid (upload / staged-row previews): a plain native
+    st.dataframe, height fitted to the rows and capped at `height` — the
+    same call shape as the user's reference page (2026-09-08). No HTML path,
+    no column-width tweaks, nothing for the resize observer to fight."""
     import streamlit as st
 
     if df is None or len(df) == 0:
         st.caption(empty_msg)
-        return
-    if len(df) <= 15 and df.shape[1] <= 12:
-        render_df_table(df, max_rows=len(df), wrap_cols="auto")
         return
     fit = 35 * (len(df) + 1) + 3
     try:
@@ -2423,6 +2380,8 @@ def render_sidebar():
             f'Logged in as</div>'
             f'<div style="font-size:0.82rem;font-weight:600;color:rgba(255,255,255,0.88)">'
             f'{user}</div>'
+            f'<div style="font-size:0.7rem;color:rgba(255,255,255,0.45);margin-top:2px">'
+            f'Streamlit {getattr(st, "__version__", "?")}</div>'
             f'</div>'
             f'</div>',
             unsafe_allow_html=True)
