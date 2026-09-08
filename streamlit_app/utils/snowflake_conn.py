@@ -136,7 +136,7 @@ def current_user_name() -> str:
         GRANT READ SESSION ON ACCOUNT TO ROLE <owner_role>;
     This is the primary and most reliable method.
 
-    Fallback: st.experimental_user / st.user for edge cases.
+    Fallback: st.user for edge cases.
 
     Cached per session: this is called 2-3x on EVERY page render (page top,
     sidebar, helpers) and each rerun — uncached it was 2-3 Snowflake
@@ -155,22 +155,19 @@ def current_user_name() -> str:
     except Exception:
         pass
 
-    # 2. Fallback — st.experimental_user  (SiS warehouse runtime)
-    try:
-        eu = getattr(st, "experimental_user", None)
-        if eu is not None:
-            name = eu.get("user_name") or eu.get("email")
-            if name:
-                st.session_state["_current_user_cached"] = str(name)
-                return str(name)
-    except Exception:
-        pass
-
-    # 3. Fallback — st.user  (newer SiS runtimes)
+    # 2. Fallback — st.user (Streamlit ≥ 1.42; st.experimental_user was
+    #    removed and touching it raises on the 1.50 runtime, so it is gone)
     try:
         u = getattr(st, "user", None)
         if u is not None:
-            name = u.get("user_name") or u.get("email")
+            name = None
+            for k in ("user_name", "email", "name"):
+                try:
+                    name = u.get(k) if hasattr(u, "get") else getattr(u, k, None)
+                except Exception:
+                    name = None
+                if name:
+                    break
             if name:
                 st.session_state["_current_user_cached"] = str(name)
                 return str(name)
