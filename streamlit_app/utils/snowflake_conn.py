@@ -155,8 +155,10 @@ def current_user_name() -> str:
     except Exception:
         pass
 
-    # 2. Fallback — st.user (Streamlit ≥ 1.42; st.experimental_user was
-    #    removed and touching it raises on the 1.50 runtime, so it is gone)
+    # 2. Fallback — st.user (Streamlit ≥ 1.42). Do NOT touch st.experimental_user:
+    #    on 1.50 it still exists as a deprecation proxy, and any attribute/key
+    #    access on it renders a yellow "Please replace st.experimental_user with
+    #    st.user" banner in the app (once per server process). It never raises.
     try:
         u = getattr(st, "user", None)
         if u is not None:
