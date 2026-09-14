@@ -351,10 +351,18 @@ def main(session, p_adjustment):
         src_where   = f"WHERE fact.COBID = {int(source_cobid)}{dim_sql}\n      AND fact.{primary_metric} IS NOT NULL"
         tgt_where   = f"WHERE fact.COBID = {int(cobid)}{dim_sql}\n      AND fact.{primary_metric} IS NOT NULL"
 
+        # The source side is split into original + existing adjustments so
+        # the user can see WHERE the projected value comes from — a source
+        # COB carrying earlier adjustments previewed as an unexplained
+        # projected total (2026-09-14: 202.69K projected against a 23.06K
+        # original, the difference being adjustment rows at the source COB).
         roll_summary = f"""
         SELECT
             ROWS_AFFECTED,
             NONZERO_ROWS,
+            SOURCE_ORIGINAL_VALUE,
+            SOURCE_ADJUSTED_VALUE - SOURCE_ORIGINAL_VALUE AS SOURCE_ADJUSTMENTS_VALUE,
+            SOURCE_ADJUSTED_VALUE,
             TOTAL_CURRENT_VALUE,
             TOTAL_PROJECTED_VALUE - TOTAL_CURRENT_VALUE AS TOTAL_ADJUSTMENT_DELTA,
             TOTAL_PROJECTED_VALUE
@@ -364,6 +372,10 @@ def main(session, p_adjustment):
                    FROM {fact_adj_tbl} fact {src_where})                    AS ROWS_AFFECTED,
                 (SELECT COUNT_IF(fact.{primary_metric} != 0)
                    FROM {fact_adj_tbl} fact {src_where})                    AS NONZERO_ROWS,
+                (SELECT COALESCE(SUM(fact.{primary_metric}), 0)
+                   FROM {fact_tbl} fact {src_where})                        AS SOURCE_ORIGINAL_VALUE,
+                (SELECT COALESCE(SUM(fact.{primary_metric}), 0)
+                   FROM {fact_adj_tbl} fact {src_where})                    AS SOURCE_ADJUSTED_VALUE,
                 (SELECT COALESCE(SUM(fact.{primary_metric}), 0)
                    FROM {fact_tbl} fact {tgt_where})                        AS TOTAL_CURRENT_VALUE,
                 {scale_factor} * (SELECT COALESCE(SUM(fact.{primary_metric}), 0)

@@ -2851,6 +2851,28 @@ def _ticket_row(label: str, value, is_set=None) -> str:
             f'<span class="v {cls}">{disp}</span></div>')
 
 
+def _is_roll_preview(s: dict) -> bool:
+    """True when the preview row came from the cross-COB Roll summary
+    (SP_PREVIEW_ADJUSTMENT returns the source split only for a Roll)."""
+    return s.get("SOURCE_ORIGINAL_VALUE") is not None
+
+
+def _roll_source_rows(s: dict) -> str:
+    """Roll only: show what the projected value is made of — the source
+    COB's original data plus the adjustments already sitting on it, which
+    a Roll carries forward. Without this a source COB that holds earlier
+    adjustments previews as an unexplained projected total."""
+    if not _is_roll_preview(s):
+        return ""
+    src = wiz.get("source_cobid")
+    return (f'<div class="kv"><span class="k">Source {src} original</span>'
+            f'<span class="v">{_fmt_money(s.get("SOURCE_ORIGINAL_VALUE"))}</span></div>'
+            f'<div class="kv"><span class="k">Source {src} adjustments (carried)</span>'
+            f'<span class="v">{_fmt_money(s.get("SOURCE_ADJUSTMENTS_VALUE"))}</span></div>'
+            f'<div class="kv"><span class="k">Source {src} adjusted</span>'
+            f'<span class="v">{_fmt_money(s.get("SOURCE_ADJUSTED_VALUE"))}</span></div>')
+
+
 def _ticket_html(missing: list) -> str:
     cat = wiz.get("category")
     kv = _ticket_row("Category", cat)
@@ -2947,7 +2969,9 @@ def _ticket_html(missing: list) -> str:
                f'<span class="v">{_safe_int(s.get("ROWS_AFFECTED")):,}</span></div>'
                f'<div class="kv"><span class="k">Non-zero rows</span>'
                f'<span class="v">{_safe_int(s.get("NONZERO_ROWS")):,}</span></div>'
-               f'<div class="kv"><span class="k">Original</span>'
+               f'{_roll_source_rows(s)}'
+               f'<div class="kv"><span class="k">'
+               f'{"Target original" if _is_roll_preview(s) else "Original"}</span>'
                f'<span class="v">{_fmt_money(s.get("TOTAL_CURRENT_VALUE"))}</span></div>'
                f'<div class="kv"><span class="k">Adjustment</span>'
                f'<span class="v">{_fmt_money(s.get("TOTAL_ADJUSTMENT_DELTA"))}</span></div>'
