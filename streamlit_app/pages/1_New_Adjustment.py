@@ -1522,6 +1522,7 @@ def render_scaling_form() -> None:
         if tsel and tsel != wiz.get("adjustment_type"):
             wiz["adjustment_type"] = tsel
             wiz["_preview_sum"] = None
+            wiz["_preview_sql"] = None
             # The Source COB field only renders for Roll; a value typed for a
             # Roll must not survive a switch to Scale/Flatten, or the preview
             # and submit send it and the engine treats the same-COB Scale as
@@ -3033,6 +3034,20 @@ def _run_preview() -> None:
         wiz["_preview_sum"] = agg
         wiz["_preview_err"] = None
         wiz["_preview_for"] = json.dumps(payload, sort_keys=True, default=str)
+        # The statement(s) behind the numbers — shown under "Show preview SQL"
+        # so users can run/inspect exactly what the preview executed.
+        try:
+            sqls = []
+            for sub in subtypes:
+                df_sql = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                                    json.dumps({**payload, "process_type": sub,
+                                                "mode": "sql"}))
+                if not df_sql.empty and "PREVIEW_SQL" in df_sql.columns:
+                    sqls.append((f"-- {sub}\n" if len(subtypes) > 1 else "")
+                                + str(df_sql.iloc[0]["PREVIEW_SQL"]))
+            wiz["_preview_sql"] = "\n\n".join(sqls) or None
+        except Exception:
+            wiz["_preview_sql"] = None
     except Exception as exc:
         wiz["_preview_err"] = str(exc)
         wiz["_preview_sum"] = None
@@ -3525,6 +3540,11 @@ with right:
             safe_rerun()
         if wiz.get("_preview_err"):
             st.warning(f"Preview not available: {wiz['_preview_err']}")
+        if wiz.get("_preview_sum") is not None and wiz.get("_preview_sql"):
+            with st.expander("Show preview SQL", expanded=False):
+                st.caption("Exactly what the impact preview ran. Copy it into "
+                           "a worksheet to check the numbers yourself.")
+                st.code(wiz["_preview_sql"], language="sql")
         s = wiz.get("_preview_sum")
         preview_current = (s is not None and wiz.get("_preview_for")
                            == json.dumps(_preview_payload(), sort_keys=True, default=str))
