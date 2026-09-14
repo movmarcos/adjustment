@@ -2876,9 +2876,8 @@ def _roll_source_rows(s: dict) -> str:
 
 def _overlap_rows(s: dict) -> str:
     """Scope-level overlap: adjustments already sitting on the target COB
-    inside this filter (from the preview's EXISTING_ADJ_* columns). Positions
-    the new adjustment touches will be superseded; positions it does not
-    touch keep their existing rows."""
+    inside this filter (from the preview's EXISTING_ADJ_* columns). The engine
+    supersedes by filter scope, so every one of those rows is replaced."""
     n = _safe_int(s.get("EXISTING_ADJ_COUNT"))
     if n <= 0:
         return ""
@@ -2888,8 +2887,8 @@ def _overlap_rows(s: dict) -> str:
             f'<span class="v">{n:,} · {_safe_int(s.get("EXISTING_ADJ_ROWS")):,} rows · '
             f'{_fmt_money(s.get("EXISTING_ADJ_VALUE"))}</span></div>'
             f'<div style="font-size:0.78rem;color:{P["warning"]};margin-top:3px">'
-            f'Already adjusted here: {ids_txt}. Positions this adjustment touches '
-            f'will supersede those rows; positions it does not touch keep them.'
+            f'Already adjusted here: {ids_txt}. Submitting replaces every one of '
+            f'those rows inside this filter at this COB (newest adjustment wins).'
             f'</div>')
 
 

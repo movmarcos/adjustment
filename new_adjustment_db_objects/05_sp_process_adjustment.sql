@@ -1523,127 +1523,140 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
 
             # 1. BOOK_KEY → BOOK_CODE, DEPARTMENT_CODE, TRADER_CODE,
             #               GUARANTEED_ENTITY, REGION_KEY
-            if "BOOK_KEY" in fact_cols and _any_has(
-                    'BOOK_CODE', 'DEPARTMENT_CODE', 'TRADER_CODE',
-                    'GUARANTEED_ENTITY', 'REGION_KEY'):
-                from_where += (
-                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.BOOK bk "
-                    "WHERE bk.BOOK_KEY = COALESCE(fact.BOOK_KEY, -1) "
-                    "AND (bk.BOOK_CODE = adjust.BOOK_CODE OR adjust.BOOK_CODE IS NULL) "
-                    "AND (bk.DEPARTMENT_CODE = adjust.DEPARTMENT_CODE OR adjust.DEPARTMENT_CODE IS NULL) "
-                    "AND (bk.PRIMARY_TRADER_CODE = adjust.TRADER_CODE OR adjust.TRADER_CODE IS NULL) "
-                    "AND (bk.GUARANTEED_ENTITY = adjust.GUARANTEED_ENTITY OR adjust.GUARANTEED_ENTITY IS NULL) "
-                    "AND (bk.REGION_KEY = adjust.REGION_KEY OR adjust.REGION_KEY IS NULL))"
-                )
+            # ── Dimension filters, built once per (alias, column set) ─────────
+            # Called for the fact table (alias `fact`, the legs' reads) and again
+            # for the ADJUSTMENTS_TABLE (alias `fa`, the scope supersede below):
+            # the same EXISTS predicates, so "what this adjustment covers" is one
+            # definition. Each EXISTS is emitted only if the key column exists on
+            # the table being filtered.
+            def _dim_filters(alias, cols):
+                fact_cols = cols
+                out = ""
+                if "BOOK_KEY" in fact_cols and _any_has(
+                        'BOOK_CODE', 'DEPARTMENT_CODE', 'TRADER_CODE',
+                        'GUARANTEED_ENTITY', 'REGION_KEY'):
+                    out += (
+                        "\n AND EXISTS (SELECT 1 FROM DIMENSION.BOOK bk "
+                        "WHERE bk.BOOK_KEY = COALESCE(fact.BOOK_KEY, -1) "
+                        "AND (bk.BOOK_CODE = adjust.BOOK_CODE OR adjust.BOOK_CODE IS NULL) "
+                        "AND (bk.DEPARTMENT_CODE = adjust.DEPARTMENT_CODE OR adjust.DEPARTMENT_CODE IS NULL) "
+                        "AND (bk.PRIMARY_TRADER_CODE = adjust.TRADER_CODE OR adjust.TRADER_CODE IS NULL) "
+                        "AND (bk.GUARANTEED_ENTITY = adjust.GUARANTEED_ENTITY OR adjust.GUARANTEED_ENTITY IS NULL) "
+                        "AND (bk.REGION_KEY = adjust.REGION_KEY OR adjust.REGION_KEY IS NULL))"
+                    )
 
-            # 2. TRADE_KEY → TRADE_CODE, STRATEGY, TRADE_TYPOLOGY
-            if "TRADE_KEY" in fact_cols and _any_has(
-                    'TRADE_CODE', 'STRATEGY', 'TRADE_TYPOLOGY'):
-                from_where += (
-                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.TRADE td "
-                    "WHERE td.TRADE_KEY = COALESCE(fact.TRADE_KEY, -1) "
-                    "AND (td.TRADE_CODE = adjust.TRADE_CODE OR adjust.TRADE_CODE IS NULL) "
-                    "AND (td.STRATEGY = adjust.STRATEGY OR adjust.STRATEGY IS NULL) "
-                    "AND (td.TRADE_TYPOLOGY = adjust.TRADE_TYPOLOGY OR adjust.TRADE_TYPOLOGY IS NULL))"
-                )
+                # 2. TRADE_KEY → TRADE_CODE, STRATEGY, TRADE_TYPOLOGY
+                if "TRADE_KEY" in fact_cols and _any_has(
+                        'TRADE_CODE', 'STRATEGY', 'TRADE_TYPOLOGY'):
+                    out += (
+                        "\n AND EXISTS (SELECT 1 FROM DIMENSION.TRADE td "
+                        "WHERE td.TRADE_KEY = COALESCE(fact.TRADE_KEY, -1) "
+                        "AND (td.TRADE_CODE = adjust.TRADE_CODE OR adjust.TRADE_CODE IS NULL) "
+                        "AND (td.STRATEGY = adjust.STRATEGY OR adjust.STRATEGY IS NULL) "
+                        "AND (td.TRADE_TYPOLOGY = adjust.TRADE_TYPOLOGY OR adjust.TRADE_TYPOLOGY IS NULL))"
+                    )
 
-            # 3. ENTITY_KEY → ENTITY_CODE (SENSITIVITY_MEASURES, STRESS_MEASURES)
-            if ("ENTITY_KEY" in fact_cols and "ENTITY_CODE" not in fact_cols
-                    and _any_has('ENTITY_CODE')):
-                from_where += (
-                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.ENTITY ent "
-                    "WHERE ent.ENTITY_KEY = COALESCE(fact.ENTITY_KEY, -1) "
-                    "AND (ent.ENTITY_CODE = adjust.ENTITY_CODE OR adjust.ENTITY_CODE IS NULL))"
-                )
+                # 3. ENTITY_KEY → ENTITY_CODE (SENSITIVITY_MEASURES, STRESS_MEASURES)
+                if ("ENTITY_KEY" in fact_cols and "ENTITY_CODE" not in fact_cols
+                        and _any_has('ENTITY_CODE')):
+                    out += (
+                        "\n AND EXISTS (SELECT 1 FROM DIMENSION.ENTITY ent "
+                        "WHERE ent.ENTITY_KEY = COALESCE(fact.ENTITY_KEY, -1) "
+                        "AND (ent.ENTITY_CODE = adjust.ENTITY_CODE OR adjust.ENTITY_CODE IS NULL))"
+                    )
 
-            # 4. COMMON_INSTRUMENT_KEY → INSTRUMENT_CODE
-            if ("COMMON_INSTRUMENT_KEY" in fact_cols and "INSTRUMENT_CODE" not in fact_cols
-                    and _any_has('INSTRUMENT_CODE')):
-                from_where += (
-                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.COMMON_INSTRUMENT ci "
-                    "WHERE ci.COMMON_INSTRUMENT_KEY = COALESCE(fact.COMMON_INSTRUMENT_KEY, -1) "
-                    "AND (ci.INSTRUMENT_CODE = adjust.INSTRUMENT_CODE OR adjust.INSTRUMENT_CODE IS NULL))"
-                )
+                # 4. COMMON_INSTRUMENT_KEY → INSTRUMENT_CODE
+                if ("COMMON_INSTRUMENT_KEY" in fact_cols and "INSTRUMENT_CODE" not in fact_cols
+                        and _any_has('INSTRUMENT_CODE')):
+                    out += (
+                        "\n AND EXISTS (SELECT 1 FROM DIMENSION.COMMON_INSTRUMENT ci "
+                        "WHERE ci.COMMON_INSTRUMENT_KEY = COALESCE(fact.COMMON_INSTRUMENT_KEY, -1) "
+                        "AND (ci.INSTRUMENT_CODE = adjust.INSTRUMENT_CODE OR adjust.INSTRUMENT_CODE IS NULL))"
+                    )
 
-            # 5. STRESS_SIMULATION_KEY → SIMULATION_NAME, SIMULATION_SOURCE
-            if ("STRESS_SIMULATION_KEY" in fact_cols
-                    and _any_has('SIMULATION_NAME', 'SIMULATION_SOURCE')):
-                from_where += (
-                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.STRESS_SIMULATION ss "
-                    "WHERE ss.STRESS_SIMULATION_KEY = COALESCE(fact.STRESS_SIMULATION_KEY, -1) "
-                    "AND (ss.STRESS_SIMULATION_NAME = adjust.SIMULATION_NAME OR adjust.SIMULATION_NAME IS NULL) "
-                    "AND (ss.SIMULATION_SOURCE = adjust.SIMULATION_SOURCE OR adjust.SIMULATION_SOURCE IS NULL))"
-                )
+                # 5. STRESS_SIMULATION_KEY → SIMULATION_NAME, SIMULATION_SOURCE
+                if ("STRESS_SIMULATION_KEY" in fact_cols
+                        and _any_has('SIMULATION_NAME', 'SIMULATION_SOURCE')):
+                    out += (
+                        "\n AND EXISTS (SELECT 1 FROM DIMENSION.STRESS_SIMULATION ss "
+                        "WHERE ss.STRESS_SIMULATION_KEY = COALESCE(fact.STRESS_SIMULATION_KEY, -1) "
+                        "AND (ss.STRESS_SIMULATION_NAME = adjust.SIMULATION_NAME OR adjust.SIMULATION_NAME IS NULL) "
+                        "AND (ss.SIMULATION_SOURCE = adjust.SIMULATION_SOURCE OR adjust.SIMULATION_SOURCE IS NULL))"
+                    )
 
-            # 6. VAR_SUBCOMPONENT_ID → VAR_COMPONENT_(ID|NAME),
-            #    VAR_SUB_COMPONENT_(ID|NAME), DAY_TYPE.
-            #    Users now filter by NAME (the form captures the names); the
-            #    legacy *_ID columns are still matched for pre-existing rows.
-            if ("VAR_SUBCOMPONENT_ID" in fact_cols
-                    and _any_has('VAR_COMPONENT_ID', 'VAR_SUB_COMPONENT_ID',
-                                 'VAR_COMPONENT_NAME', 'VAR_SUB_COMPONENT_NAME',
-                                 'DAY_TYPE')):
-                from_where += (
-                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.VAR_SUB_COMPONENT vsc "
-                    "WHERE vsc.VAR_SUB_COMPONENT_ID = COALESCE(fact.VAR_SUBCOMPONENT_ID, -1) "
-                    "AND (vsc.VAR_COMPONENT_ID = adjust.VAR_COMPONENT_ID OR adjust.VAR_COMPONENT_ID IS NULL) "
-                    "AND (vsc.VAR_SUB_COMPONENT_ID = adjust.VAR_SUB_COMPONENT_ID OR adjust.VAR_SUB_COMPONENT_ID IS NULL) "
-                    "AND (vsc.VAR_COMPONENT_NAME = adjust.VAR_COMPONENT_NAME OR adjust.VAR_COMPONENT_NAME IS NULL) "
-                    "AND (vsc.VAR_SUB_COMPONENT_NAME = adjust.VAR_SUB_COMPONENT_NAME OR adjust.VAR_SUB_COMPONENT_NAME IS NULL) "
-                    "AND (vsc.VAR_SUB_COMPONENT_DAY_TYPE = adjust.DAY_TYPE OR adjust.DAY_TYPE IS NULL))"
-                )
+                # 6. VAR_SUBCOMPONENT_ID → VAR_COMPONENT_(ID|NAME),
+                #    VAR_SUB_COMPONENT_(ID|NAME), DAY_TYPE.
+                #    Users now filter by NAME (the form captures the names); the
+                #    legacy *_ID columns are still matched for pre-existing rows.
+                if ("VAR_SUBCOMPONENT_ID" in fact_cols
+                        and _any_has('VAR_COMPONENT_ID', 'VAR_SUB_COMPONENT_ID',
+                                     'VAR_COMPONENT_NAME', 'VAR_SUB_COMPONENT_NAME',
+                                     'DAY_TYPE')):
+                    out += (
+                        "\n AND EXISTS (SELECT 1 FROM DIMENSION.VAR_SUB_COMPONENT vsc "
+                        "WHERE vsc.VAR_SUB_COMPONENT_ID = COALESCE(fact.VAR_SUBCOMPONENT_ID, -1) "
+                        "AND (vsc.VAR_COMPONENT_ID = adjust.VAR_COMPONENT_ID OR adjust.VAR_COMPONENT_ID IS NULL) "
+                        "AND (vsc.VAR_SUB_COMPONENT_ID = adjust.VAR_SUB_COMPONENT_ID OR adjust.VAR_SUB_COMPONENT_ID IS NULL) "
+                        "AND (vsc.VAR_COMPONENT_NAME = adjust.VAR_COMPONENT_NAME OR adjust.VAR_COMPONENT_NAME IS NULL) "
+                        "AND (vsc.VAR_SUB_COMPONENT_NAME = adjust.VAR_SUB_COMPONENT_NAME OR adjust.VAR_SUB_COMPONENT_NAME IS NULL) "
+                        "AND (vsc.VAR_SUB_COMPONENT_DAY_TYPE = adjust.DAY_TYPE OR adjust.DAY_TYPE IS NULL))"
+                    )
 
-            # ── 1:1 code→key dimensions ─────────────────────────────────────
-            # The fact tables key these dimensions by surrogate key, but the app
-            # captures the code. Without resolving the code → key the filter is
-            # silently ignored (e.g. a Sensitivity adjustment on one MEASURE_TYPE
-            # would otherwise hit every measure type). Resolution rules mirror the
-            # dbt base model (context/codes/adjustment/adjustment__adjustments_base.sql).
+                # ── 1:1 code→key dimensions ─────────────────────────────────────
+                # The fact tables key these dimensions by surrogate key, but the app
+                # captures the code. Without resolving the code → key the filter is
+                # silently ignored (e.g. a Sensitivity adjustment on one MEASURE_TYPE
+                # would otherwise hit every measure type). Resolution rules mirror the
+                # dbt base model (context/codes/adjustment/adjustment__adjustments_base.sql).
 
-            # 7. MEASURE_TYPE_KEY → MEASURE_TYPE_CODE (SENSITIVITY_MEASURES, FRTB*)
-            if "MEASURE_TYPE_KEY" in fact_cols and _any_has('MEASURE_TYPE_CODE'):
-                from_where += (
-                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.MEASURE_TYPE mt "
-                    "WHERE mt.MEASURE_TYPE_KEY = COALESCE(fact.MEASURE_TYPE_KEY, -1) "
-                    "AND (mt.MEASURE_TYPE_CODE = adjust.MEASURE_TYPE_CODE OR adjust.MEASURE_TYPE_CODE IS NULL))"
-                )
+                # 7. MEASURE_TYPE_KEY → MEASURE_TYPE_CODE (SENSITIVITY_MEASURES, FRTB*)
+                if "MEASURE_TYPE_KEY" in fact_cols and _any_has('MEASURE_TYPE_CODE'):
+                    out += (
+                        "\n AND EXISTS (SELECT 1 FROM DIMENSION.MEASURE_TYPE mt "
+                        "WHERE mt.MEASURE_TYPE_KEY = COALESCE(fact.MEASURE_TYPE_KEY, -1) "
+                        "AND (mt.MEASURE_TYPE_CODE = adjust.MEASURE_TYPE_CODE OR adjust.MEASURE_TYPE_CODE IS NULL))"
+                    )
 
-            # 8. TENOR_CURRENCY_KEY → TENOR_CODE + CURRENCY_CODE; the dim code is
-            #    CONCAT(tenor_code, '_', COALESCE(currency_code, 'USD')).
-            if "TENOR_CURRENCY_KEY" in fact_cols and _any_has('TENOR_CODE'):
-                from_where += (
-                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.TENOR_CURRENCY tc "
-                    "WHERE tc.TENOR_CURRENCY_KEY = COALESCE(fact.TENOR_CURRENCY_KEY, -1) "
-                    "AND (tc.TENOR_CURRENCY_CODE = CONCAT(adjust.TENOR_CODE, '_', COALESCE(adjust.CURRENCY_CODE, 'USD')) "
-                    "OR adjust.TENOR_CODE IS NULL))"
-                )
+                # 8. TENOR_CURRENCY_KEY → TENOR_CODE + CURRENCY_CODE; the dim code is
+                #    CONCAT(tenor_code, '_', COALESCE(currency_code, 'USD')).
+                if "TENOR_CURRENCY_KEY" in fact_cols and _any_has('TENOR_CODE'):
+                    out += (
+                        "\n AND EXISTS (SELECT 1 FROM DIMENSION.TENOR_CURRENCY tc "
+                        "WHERE tc.TENOR_CURRENCY_KEY = COALESCE(fact.TENOR_CURRENCY_KEY, -1) "
+                        "AND (tc.TENOR_CURRENCY_CODE = CONCAT(adjust.TENOR_CODE, '_', COALESCE(adjust.CURRENCY_CODE, 'USD')) "
+                        "OR adjust.TENOR_CODE IS NULL))"
+                    )
 
-            # 9. CURVE_CURRENCY_KEY → CURVE_CODE
-            if "CURVE_CURRENCY_KEY" in fact_cols and _any_has('CURVE_CODE'):
-                from_where += (
-                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.CURVE_CURRENCY cc "
-                    "WHERE cc.CURVE_CURRENCY_KEY = COALESCE(fact.CURVE_CURRENCY_KEY, -1) "
-                    "AND (cc.CURVE_CODE = adjust.CURVE_CODE OR adjust.CURVE_CODE IS NULL))"
-                )
+                # 9. CURVE_CURRENCY_KEY → CURVE_CODE
+                if "CURVE_CURRENCY_KEY" in fact_cols and _any_has('CURVE_CODE'):
+                    out += (
+                        "\n AND EXISTS (SELECT 1 FROM DIMENSION.CURVE_CURRENCY cc "
+                        "WHERE cc.CURVE_CURRENCY_KEY = COALESCE(fact.CURVE_CURRENCY_KEY, -1) "
+                        "AND (cc.CURVE_CODE = adjust.CURVE_CODE OR adjust.CURVE_CODE IS NULL))"
+                    )
 
-            # 10. UNDERLYING_TENOR_CURRENCY_KEY → UNDERLYING_TENOR_CODE
-            #     (dim column is UNDERYLING_TENOR_CODE — sic, as in the dbt model)
-            if "UNDERLYING_TENOR_CURRENCY_KEY" in fact_cols and _any_has('UNDERLYING_TENOR_CODE'):
-                from_where += (
-                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.UNDERLYING_TENOR_CURRENCY ut "
-                    "WHERE ut.UNDERLYING_TENOR_CURRENCY_KEY = COALESCE(fact.UNDERLYING_TENOR_CURRENCY_KEY, -1) "
-                    "AND (ut.UNDERYLING_TENOR_CODE = adjust.UNDERLYING_TENOR_CODE OR adjust.UNDERLYING_TENOR_CODE IS NULL))"
-                )
+                # 10. UNDERLYING_TENOR_CURRENCY_KEY → UNDERLYING_TENOR_CODE
+                #     (dim column is UNDERYLING_TENOR_CODE — sic, as in the dbt model)
+                if "UNDERLYING_TENOR_CURRENCY_KEY" in fact_cols and _any_has('UNDERLYING_TENOR_CODE'):
+                    out += (
+                        "\n AND EXISTS (SELECT 1 FROM DIMENSION.UNDERLYING_TENOR_CURRENCY ut "
+                        "WHERE ut.UNDERLYING_TENOR_CURRENCY_KEY = COALESCE(fact.UNDERLYING_TENOR_CURRENCY_KEY, -1) "
+                        "AND (ut.UNDERYLING_TENOR_CODE = adjust.UNDERLYING_TENOR_CODE OR adjust.UNDERLYING_TENOR_CODE IS NULL))"
+                    )
 
-            # 11. PRODUCT_CATEGORY_ATTRIBUTES_KEY → PRODUCT_CATEGORY_ATTRIBUTES
-            #     (space-insensitive match on PCA_CONCAT_KEY, as in the dbt model)
-            if "PRODUCT_CATEGORY_ATTRIBUTES_KEY" in fact_cols and _any_has('PRODUCT_CATEGORY_ATTRIBUTES'):
-                from_where += (
-                    "\n AND EXISTS (SELECT 1 FROM DIMENSION.PRODUCT_CATEGORY_ATTRIBUTES pca "
-                    "WHERE pca.PRODUCT_CATEGORY_ATTRIBUTES_KEY = COALESCE(fact.PRODUCT_CATEGORY_ATTRIBUTES_KEY, -1) "
-                    "AND (REPLACE(pca.PCA_CONCAT_KEY, ' ', '') = REPLACE(adjust.PRODUCT_CATEGORY_ATTRIBUTES, ' ', '') "
-                    "OR adjust.PRODUCT_CATEGORY_ATTRIBUTES IS NULL))"
-                )
+                # 11. PRODUCT_CATEGORY_ATTRIBUTES_KEY → PRODUCT_CATEGORY_ATTRIBUTES
+                #     (space-insensitive match on PCA_CONCAT_KEY, as in the dbt model)
+                if "PRODUCT_CATEGORY_ATTRIBUTES_KEY" in fact_cols and _any_has('PRODUCT_CATEGORY_ATTRIBUTES'):
+                    out += (
+                        "\n AND EXISTS (SELECT 1 FROM DIMENSION.PRODUCT_CATEGORY_ATTRIBUTES pca "
+                        "WHERE pca.PRODUCT_CATEGORY_ATTRIBUTES_KEY = COALESCE(fact.PRODUCT_CATEGORY_ATTRIBUTES_KEY, -1) "
+                        "AND (REPLACE(pca.PCA_CONCAT_KEY, ' ', '') = REPLACE(adjust.PRODUCT_CATEGORY_ATTRIBUTES, ' ', '') "
+                        "OR adjust.PRODUCT_CATEGORY_ATTRIBUTES IS NULL))"
+                    )
+
+                return out.replace("fact.", alias + ".")
+
+            from_where += _dim_filters("fact", fact_cols)
 
             # ── Direct join conditions (auto-detected column matches) ───────
             # Also skip conditions where no adjustment in the batch has a value.
@@ -1889,50 +1902,38 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             if has_cross_cob:
                 _erlog(session, _sqlog, "scd2_key_fix", scd2_update)
 
-            # ── Supersede older adjustments at the positions this batch occupies ──
-            # MUST run AFTER the SCD2 key-fix: for a cross-COB Roll the rows just
-            # written now carry source-COB TRADE/INSTRUMENT keys, exactly like any
-            # earlier Roll already stored. Matching the newly-written rows (cur,
-            # this batch) against the existing rows (fa, other adjustments) on the
-            # full position key therefore lines up — including rolled positions
-            # whose trade/instrument SCD2 version drifts between source and target
-            # COB, which the previous (pre-SCD2, TEMP-based) supersede missed and
-            # left stranded on the old adjustment ID.
-            #
-            # The DENSE_RANK in the CTE only resolves overlaps WITHIN this batch;
-            # this step resolves overlaps ACROSS batches. For every position this
-            # batch now occupies, delete the row belonging to any OTHER adjustment
-            # so the current (newest) batch wins — the overlapping positions
-            # migrate to this adjustment's ID. Non-overlapping positions of older
-            # adjustments are untouched (they are not in this batch's row set).
-            _supersede_dims = [k for k in pk_parts if k.upper() != 'COBID']
-            if _supersede_dims:
-                # dim_ids_str holds DIMENSION.ADJUSTMENT NUMBERs — no quoting needed.
-                # NULL-safe equality, expressed as sentinel-coalesced `=` (the
-                # netting CTE's exact surrogate-key convention) rather than
-                # EQUAL_NULL: EQUAL_NULL(a, b) is not an `expr = expr`
-                # predicate, so the optimizer could not hash-join the EXISTS
-                # and degraded to an effectively cartesian join — a 1M-row
-                # FRTB flatten went from ~3 to ~16 minutes. COALESCE(CAST(..
-                # AS TEXT), sentinel) = COALESCE(..) keeps NULL = NULL
-                # matching (no double counting) AND the hash-joinable shape.
-                _pos_join = " AND ".join(
-                    f"COALESCE(CAST(fa.{k} AS TEXT), '_dbt_utils_surrogate_key_null_') = "
-                    f"COALESCE(CAST(cur.{k} AS TEXT), '_dbt_utils_surrogate_key_null_')"
-                    for k in _supersede_dims
-                )
-                supersede_sql = f"""
-                    DELETE FROM {fact_adj_tbl_name} fa
-                    WHERE fa.COBID = {cobid}
-                      AND COALESCE(fa.ADJUSTMENT_ID, -1) NOT IN ({dim_ids_str})
-                      AND EXISTS (
-                          SELECT 1 FROM {fact_adj_tbl_name} cur
-                          WHERE cur.COBID = {cobid}
-                            AND cur.ADJUSTMENT_ID IN ({dim_ids_str})
-                            AND {_pos_join}
-                      )
-                """
-                _erlog(session, _sqlog, "supersede_delete", supersede_sql)
+            # ── Supersede earlier adjustments INSIDE this batch's filter scope ──
+            # Rule (Marcos, 2026-09-14): the newest adjustment replaces every
+            # earlier adjustment row at the target COB that falls inside its
+            # filter — the same scope the preview reports as "existing
+            # adjustments in scope". It is NOT a surrogate-key position match
+            # any more: a cross-COB Roll writes the source COB's rows, whose
+            # keys (SCD2 trade/instrument versions, scenario ids) never line up
+            # with the target's positions, so a later Flatten/Scale on the same
+            # filter matched nothing, left the rolled value in the combined
+            # view and, once deleted, stranded a meaningless residue.
+            # The predicates are the legs' own dimension filters + direct
+            # column matches, applied to the ADJUSTMENTS_TABLE (alias fa).
+            _fa_join_cond = '\n'.join([
+                f"AND (adjust.{c} = fa.{c} OR adjust.{c} IS NULL)"
+                for c in join_cols
+                if _has.get(c, True) and c in fact_adj_cols
+            ])
+            supersede_sql = f"""
+                DELETE FROM {fact_adj_tbl_name} fa
+                WHERE fa.COBID = {cobid}
+                  AND COALESCE(fa.ADJUSTMENT_ID, -1) NOT IN ({dim_ids_str})
+                  AND EXISTS (
+                      SELECT 1 FROM {adj_base_tbl_name} adjust
+                      WHERE adjust.COBID = {cobid}
+                        AND adjust.ADJ_ID IN ({adj_ids_str})
+                        AND adjust.IS_DELETED = FALSE
+                        AND adjust.RUN_STATUS = 'Running'
+                        {_dim_filters("fa", fact_adj_cols)}
+                        {_fa_join_cond}
+                  )
+            """
+            _erlog(session, _sqlog, "supersede_delete (filter scope)", supersede_sql)
 
             # ── Rebuild summary (atomic delete + insert) ─────────────────
             # One transaction: readers never see the COB's summary empty, and

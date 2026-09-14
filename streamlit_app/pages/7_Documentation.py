@@ -153,8 +153,9 @@ error; Retry re-queues and cleans up first), Rejected, Rejected - SignedOff
 Processing: four scope tasks run every minute (serverless) and call
 SP_RUN_PIPELINE which polls ADJ_HEADER — reap dead runs (stuck >4h -> Failed),
 serialise overlapping rows, claim eligible rows with a token, process, release
-blocked rows. Overlapping adjustments are serialised and the newest wins
-(superseded, never double-counted).
+blocked rows. Overlapping adjustments are serialised and the newest wins:
+when it is processed, every earlier adjustment row at that COB inside its
+filter is removed (superseded by filter scope, never double-counted).
 
 Sign-off: owned by the upstream publish feed (synced every 30 min; also checked
 live at submit). Granularity is COB+entity+scope (+optional SUB_TYPE). Once
