@@ -1658,6 +1658,26 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
 
             from_where += _dim_filters("fact", fact_cols)
 
+            def _dim_joins(alias, cols):
+                """The same dimension filters as comma-joined tables + WHERE
+                predicates, for use INSIDE an EXISTS that is itself correlated
+                to `alias`. Snowflake rejects an EXISTS nested inside another
+                EXISTS when the inner one references the outer-outer table
+                ("Unsupported subquery type cannot be evaluated", 2026-09-14)
+                — flattening the dimension lookups into the single EXISTS keeps
+                one level of correlation, which it does support. Every lookup
+                key is unique on its dimension, so the joins never multiply."""
+                tables, preds = [], []
+                for part in _dim_filters(alias, cols).split("\n AND EXISTS (SELECT 1 FROM ")[1:]:
+                    part = part.rstrip()
+                    assert part.endswith(")"), part[-40:]
+                    part = part[:-1]                       # drop the EXISTS' own ')'
+                    tbl, cond = part.split(" WHERE ", 1)
+                    tables.append(tbl.strip())
+                    preds.append(cond.strip())
+                return (("".join(", " + t for t in tables)),
+                        ("".join("\n AND " + c for c in preds)))
+
             # ── Direct join conditions (auto-detected column matches) ───────
             # Also skip conditions where no adjustment in the batch has a value.
             join_cond = '\n'.join([
@@ -1919,17 +1939,18 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 for c in join_cols
                 if _has.get(c, True) and c in fact_adj_cols
             ])
+            _fa_dim_tables, _fa_dim_preds = _dim_joins("fa", fact_adj_cols)
             supersede_sql = f"""
                 DELETE FROM {fact_adj_tbl_name} fa
                 WHERE fa.COBID = {cobid}
                   AND COALESCE(fa.ADJUSTMENT_ID, -1) NOT IN ({dim_ids_str})
                   AND EXISTS (
-                      SELECT 1 FROM {adj_base_tbl_name} adjust
+                      SELECT 1 FROM {adj_base_tbl_name} adjust{_fa_dim_tables}
                       WHERE adjust.COBID = {cobid}
                         AND adjust.ADJ_ID IN ({adj_ids_str})
                         AND adjust.IS_DELETED = FALSE
                         AND adjust.RUN_STATUS = 'Running'
-                        {_dim_filters("fa", fact_adj_cols)}
+                        {_fa_dim_preds}
                         {_fa_join_cond}
                   )
             """
