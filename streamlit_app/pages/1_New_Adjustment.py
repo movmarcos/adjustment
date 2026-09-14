@@ -2874,6 +2874,25 @@ def _roll_source_rows(s: dict) -> str:
             f'<span class="v">{_fmt_money(s.get("SOURCE_ADJUSTED_VALUE"))}</span></div>')
 
 
+def _overlap_rows(s: dict) -> str:
+    """Scope-level overlap: adjustments already sitting on the target COB
+    inside this filter (from the preview's EXISTING_ADJ_* columns). Positions
+    the new adjustment touches will be superseded; positions it does not
+    touch keep their existing rows."""
+    n = _safe_int(s.get("EXISTING_ADJ_COUNT"))
+    if n <= 0:
+        return ""
+    ids = str(s.get("EXISTING_ADJ_IDS") or "")
+    ids_txt = ", ".join(fmt_adj_id(i.strip()) for i in ids.split(",") if i.strip())
+    return (f'<div class="kv"><span class="k">Existing adjustments in scope</span>'
+            f'<span class="v">{n:,} · {_safe_int(s.get("EXISTING_ADJ_ROWS")):,} rows · '
+            f'{_fmt_money(s.get("EXISTING_ADJ_VALUE"))}</span></div>'
+            f'<div style="font-size:0.78rem;color:{P["warning"]};margin-top:3px">'
+            f'Already adjusted here: {ids_txt}. Positions this adjustment touches '
+            f'will supersede those rows; positions it does not touch keep them.'
+            f'</div>')
+
+
 def _ticket_html(missing: list) -> str:
     cat = wiz.get("category")
     kv = _ticket_row("Category", cat)
@@ -2978,6 +2997,7 @@ def _ticket_html(missing: list) -> str:
                f'<span class="v">{_fmt_money(s.get("TOTAL_ADJUSTMENT_DELTA"))}</span></div>'
                f'<div class="kv"><span class="k">Projected</span>'
                f'<span class="v">{_fmt_money(s.get("TOTAL_PROJECTED_VALUE"))}</span></div>'
+               f'{_overlap_rows(s)}'
                f'{note}</div>')
 
     # ── Completion progress ──────────────────────────────────────────────

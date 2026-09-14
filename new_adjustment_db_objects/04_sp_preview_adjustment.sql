@@ -77,6 +77,7 @@ def main(session, p_adjustment):
     s = settings_row[0]
     fact_tbl     = s["FACT_TABLE"]
     fact_adj_tbl = s["FACT_ADJUSTED_TABLE"] if "FACT_ADJUSTED_TABLE" in s else None
+    adj_rows_tbl = s["ADJUSTMENTS_TABLE"] if "ADJUSTMENTS_TABLE" in s else None
     metric_name  = s["METRIC_NAME"].upper()
     metric_usd   = s["METRIC_USD_NAME"].upper()
 
@@ -344,6 +345,47 @@ def main(session, p_adjustment):
         app can show users exactly what the preview executes."""
         return session.create_dataframe([[sql_text.strip()]], schema=["PREVIEW_SQL"])
 
+    # ── Existing adjustments in scope (overlap, scope level) ─────────────
+    # What is ALREADY adjusted at the target COB inside this filter, read
+    # from the small, COB-pruned ADJUSTMENTS_TABLE (never the combined view)
+    # — a fraction of the preview's own cost. Scope level only: it does not
+    # say which positions the new adjustment will supersede (that would need
+    # a surrogate-key join against the fact and double the preview time).
+    # Runs eagerly and defensively: any failure (e.g. a filter column the
+    # adjustment table lacks) yields NULLs and never breaks the preview.
+    _ov_filters = where_clauses[1:]
+    _ov_dim_sql = ("\n      AND " + "\n      AND ".join(_ov_filters)) if _ov_filters else ""
+    overlap_sql = (f"""
+        SELECT COUNT(DISTINCT fact.ADJUSTMENT_ID)                 AS EXISTING_ADJ_COUNT,
+               COUNT(*)                                           AS EXISTING_ADJ_ROWS,
+               COALESCE(SUM(fact.{primary_metric}), 0)            AS EXISTING_ADJ_VALUE,
+               LISTAGG(DISTINCT fact.ADJUSTMENT_ID, ', ')
+                   WITHIN GROUP (ORDER BY fact.ADJUSTMENT_ID)     AS EXISTING_ADJ_IDS
+        FROM {adj_rows_tbl} fact
+        WHERE fact.COBID = {int(cobid)}{_ov_dim_sql}
+        """ if adj_rows_tbl else "")
+    ov = {"EXISTING_ADJ_COUNT": "NULL", "EXISTING_ADJ_ROWS": "NULL",
+          "EXISTING_ADJ_VALUE": "NULL", "EXISTING_ADJ_IDS": "NULL"}
+    if overlap_sql and mode != "sql":
+        try:
+            r = session.sql(overlap_sql).collect()[0]
+            ov = {"EXISTING_ADJ_COUNT": str(int(r["EXISTING_ADJ_COUNT"] or 0)),
+                  "EXISTING_ADJ_ROWS":  str(int(r["EXISTING_ADJ_ROWS"] or 0)),
+                  "EXISTING_ADJ_VALUE": repr(float(r["EXISTING_ADJ_VALUE"] or 0)),
+                  "EXISTING_ADJ_IDS":   f"'{_esc(r['EXISTING_ADJ_IDS'])}'"
+                                        if r["EXISTING_ADJ_IDS"] else "NULL"}
+        except Exception:
+            pass
+    overlap_cols = (f"{ov['EXISTING_ADJ_COUNT']} AS EXISTING_ADJ_COUNT, "
+                    f"{ov['EXISTING_ADJ_ROWS']} AS EXISTING_ADJ_ROWS, "
+                    f"{ov['EXISTING_ADJ_VALUE']} AS EXISTING_ADJ_VALUE, "
+                    f"{ov['EXISTING_ADJ_IDS']} AS EXISTING_ADJ_IDS")
+
+    def _with_overlap_sql(sql_text):
+        """mode='sql': the main statement plus the overlap statement."""
+        return sql_text + ("\n\n-- Existing adjustments in scope (overlap)\n"
+                           + overlap_sql if overlap_sql else "")
+
     if is_roll and not (fact_adj_tbl and fact_adj_tbl != fact_tbl):
         # Mirror the processing engine's refusal (05:cross-COB roll needs
         # FACT_ADJUSTED_TABLE): without it the generic summary below would
@@ -392,11 +434,12 @@ def main(session, p_adjustment):
             src_adj.SOURCE_ADJUSTED_VALUE,
             tgt.TOTAL_CURRENT_VALUE,
             {scale_factor} * src_adj.SOURCE_ADJUSTED_VALUE - tgt.TOTAL_CURRENT_VALUE AS TOTAL_ADJUSTMENT_DELTA,
-            {scale_factor} * src_adj.SOURCE_ADJUSTED_VALUE                           AS TOTAL_PROJECTED_VALUE
+            {scale_factor} * src_adj.SOURCE_ADJUSTED_VALUE                           AS TOTAL_PROJECTED_VALUE,
+            {overlap_cols}
         FROM src_adj, src_orig, tgt
         """
         if mode == "sql":
-            return _as_sql_row(roll_summary)
+            return _as_sql_row(_with_overlap_sql(roll_summary))
         return session.sql(roll_summary)
 
     # ── MODE: summary — single aggregated row, NO row transfer ───────────
@@ -411,12 +454,13 @@ def main(session, p_adjustment):
             COUNT_IF({m_cur} != 0)          AS NONZERO_ROWS,
             COALESCE(SUM({m_cur}),  0)      AS TOTAL_CURRENT_VALUE,
             COALESCE(SUM({m_del}),  0)      AS TOTAL_ADJUSTMENT_DELTA,
-            COALESCE(SUM({m_proj}), 0)      AS TOTAL_PROJECTED_VALUE
+            COALESCE(SUM({m_proj}), 0)      AS TOTAL_PROJECTED_VALUE,
+            {overlap_cols}
         FROM {fact_source} fact
         {base_where}
         """
         if mode == "sql":
-            return _as_sql_row(summary_sql)
+            return _as_sql_row(_with_overlap_sql(summary_sql))
         return session.sql(summary_sql)
 
     # ── MODE: breakdown — server-side GROUP BY dimensions ────────────────
