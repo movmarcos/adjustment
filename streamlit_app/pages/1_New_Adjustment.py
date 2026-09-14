@@ -166,7 +166,7 @@ def _build_payload() -> dict:
         "process_type":          wiz["process_type"],
         "adjustment_type":       wiz["adjustment_type"],
         "username":              current_user_name(),
-        "source_cobid":          wiz.get("source_cobid") or wiz["cobid"],
+        "source_cobid":          _scaling_source_cobid(),
         "scale_factor":          wiz.get("scale_factor", 1.0),
         "reason":                wiz.get("reason", ""),
         "adjustment_occurrence": wiz.get("occurrence", "ADHOC"),
@@ -855,12 +855,21 @@ def _render_reference(key: str, required: bool, placeholder: str = "") -> None:
     wiz["global_reference"] = rv.strip() or None
 
 
+def _scaling_source_cobid():
+    """Source COB for a Scaling payload: the typed value for Roll only.
+    Scale / Flatten always act on their own COB — never let a source COB
+    left over from another type turn them into a cross-COB roll."""
+    if wiz.get("adjustment_type") == "Roll" and wiz.get("source_cobid"):
+        return wiz["source_cobid"]
+    return wiz["cobid"]
+
+
 def _preview_payload() -> dict:
     pj = {
         "cobid":           wiz["cobid"],
         "process_type":    wiz["process_type"],
         "adjustment_type": wiz["adjustment_type"],
-        "source_cobid":    wiz.get("source_cobid") or wiz["cobid"],
+        "source_cobid":    _scaling_source_cobid(),
         "scale_factor":    wiz.get("scale_factor", 1.0),
     }
     for key in FILTER_KEYS:
@@ -1507,6 +1516,12 @@ def render_scaling_form() -> None:
         if tsel and tsel != wiz.get("adjustment_type"):
             wiz["adjustment_type"] = tsel
             wiz["_preview_sum"] = None
+            # The Source COB field only renders for Roll; a value typed for a
+            # Roll must not survive a switch to Scale/Flatten, or the preview
+            # and submit send it and the engine treats the same-COB Scale as
+            # a cross-COB roll (delta = factor × source, projected doubles).
+            if tsel != "Roll":
+                wiz["source_cobid"] = None
             safe_rerun()
         if wiz.get("adjustment_type"):
             st.caption(f"Formula: {TYPE_CONFIG[wiz['adjustment_type']]['formula']}")
@@ -3431,6 +3446,7 @@ with left:
                 except Exception:
                     pass
             wiz.update({"category": cat, "process_type": None, "adjustment_type": None,
+                        "source_cobid": None,
                         "uploaded_df": None, "uploaded_file_name": None,
                         "_preview_sum": None, "_preview_err": None,
                         "direct_batch_id": None, "direct_ndf": None,

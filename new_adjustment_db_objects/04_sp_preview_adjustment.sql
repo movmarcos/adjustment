@@ -108,6 +108,15 @@ def main(session, p_adjustment):
     primary_metric = metric_usd if has_metric_usd else metric_name
 
     # ── Compute effective scale factor ───────────────────────────────────
+    # Scale / Flatten are single-COB (same rule as SP_SUBMIT_ADJUSTMENT): a
+    # foreign source COB would preview the cross-COB formula — delta =
+    # factor × source, projected doubled at factor 1 — for a same-COB Scale.
+    if adjustment_type in ("scale", "flatten") and int(source_cobid) != int(cobid):
+        return session.sql(
+            f"SELECT 'Error: {adjustment_type.capitalize()} applies to a single "
+            f"COB — source COB {int(source_cobid)} must equal COB {int(cobid)}. "
+            f"Use Roll to carry another COB forward.' AS MESSAGE")
+
     if adjustment_type == "flatten":
         sf_adjusted = -1.0
     elif adjustment_type in ("scale", "roll"):

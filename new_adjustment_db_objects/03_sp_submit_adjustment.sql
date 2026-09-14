@@ -314,6 +314,18 @@ def main(session, p_adjustment):
         sf_adjusted = compute_scale_factor_adjusted(
             adjustment_type, scale_factor, cobid, source_cobid)
 
+        # Scale / Flatten act on a single COB. A source COB that differs
+        # from the COB would make the engine run its cross-COB roll leg
+        # (delta = factor × source, target flattened) under a Scale label —
+        # the app once sent a stale Roll source COB this way (2026-09-14).
+        if adjustment_type.lower() in ("scale", "flatten") \
+                and source_cobid is not None and int(source_cobid) != int(cobid):
+            return {"adj_id": None, "status": "Error",
+                    "message": (f"{adjustment_type} applies to a single COB: "
+                                f"source_cobid {source_cobid} must equal cobid "
+                                f"{cobid}. Use Roll to carry another COB's "
+                                f"values forward.")}
+
         occurrence  = adj.get("adjustment_occurrence", "ADHOC").upper()
 
         # ── Validate scope is active ─────────────────────────────────────
