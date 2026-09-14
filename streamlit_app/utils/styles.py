@@ -435,13 +435,23 @@ def inject_css():
         font-size: 0.83rem !important;
         white-space: nowrap !important;
     }}
-    /* Rename "app" → "Home" for the main page nav link */
+    /* Rename "app" → "Home" for the main page nav link.
+       Streamlit 1.50 gives the link-text span its own ::after (content =
+       page label, visibility:hidden, height:0, display:block) to reserve
+       width for the bold active state. Our "Home" label lands in that same
+       pseudo-element, so every one of those properties must be overridden
+       or the first row renders blank. */
     [data-testid="stSidebarNav"] li:first-child a span {{
         font-size: 0 !important;
     }}
     [data-testid="stSidebarNav"] li:first-child a span::after {{
-        content: "Home";
+        content: "Home" !important;
         font-size: 0.83rem !important;
+        font-weight: inherit !important;
+        visibility: visible !important;
+        display: inline !important;
+        height: auto !important;
+        width: auto !important;
     }}
     [data-testid="stSidebarNav"] {{
         flex: 0 0 auto !important;
