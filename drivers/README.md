@@ -11,8 +11,14 @@ macOS / Linux:
 ```sh
 cd drivers
 cat snowflake-jdbc-4.3.4.jar.part* > snowflake-jdbc-4.3.4.jar
-shasum -a 256 -c snowflake-jdbc-4.3.4.jar.sha256
+shasum -a 256 snowflake-jdbc-4.3.4.jar
+cat snowflake-jdbc-4.3.4.jar.sha256
+# the two hashes must match:
+# b2556c6fa200aa1a7839c42a8b2ef7a11f104018c7638c8c6f40e42dee0b409b
 ```
+
+Run every command from inside the `drivers` folder. `shasum -c` is not
+used on purpose: a Windows checkout with CRLF line endings breaks its parsing.
 
 Windows (PowerShell):
 
@@ -20,7 +26,7 @@ Windows (PowerShell):
 cd drivers
 Get-Content snowflake-jdbc-4.3.4.jar.part* -Raw -AsByteStream | Set-Content snowflake-jdbc-4.3.4.jar -AsByteStream
 (Get-FileHash snowflake-jdbc-4.3.4.jar -Algorithm SHA256).Hash.ToLower()
-# compare with the hash in snowflake-jdbc-4.3.4.jar.sha256
+# must print b2556c6fa200aa1a7839c42a8b2ef7a11f104018c7638c8c6f40e42dee0b409b
 ```
 
 Windows (cmd):
@@ -29,6 +35,7 @@ Windows (cmd):
 cd drivers
 copy /b snowflake-jdbc-4.3.4.jar.part00 + snowflake-jdbc-4.3.4.jar.part01 + snowflake-jdbc-4.3.4.jar.part02 snowflake-jdbc-4.3.4.jar
 certutil -hashfile snowflake-jdbc-4.3.4.jar SHA256
+rem must print b2556c6fa200aa1a7839c42a8b2ef7a11f104018c7638c8c6f40e42dee0b409b
 ```
 
 ## Re-split (if the driver is ever replaced)
