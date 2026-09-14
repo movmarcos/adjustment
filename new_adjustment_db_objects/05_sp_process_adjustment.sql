@@ -1667,22 +1667,63 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 'adjust.SCALE_FACTOR_ADJUSTED', '-1'
             )
 
-            # ── Cross-COB Roll leg ② reads the SOURCE COB's ORIGINAL rows ──────
-            # Roll = flatten the target's original rows in the filter (leg ③)
-            # and bring in the source COB's ORIGINAL rows for the same filter
-            # (× factor). Netting sums both per position →
-            #   adjusted(target) = factor × original(source) − original(target).
-            # The source leg reads the base FACT_TABLE (same from_where as the
-            # Scale leg, COB swapped) — NOT the combined/adjusted view: existing
-            # adjustments at the source COB are not carried forward (decided
-            # 2026-09-14; the combined view brought unrelated adjustment rows
-            # into the roll and re-scanned an expensive view).
+            # ── Cross-COB (Roll) reads the ADJUSTED view ─────────────────────
+            # A cross-COB Roll carries the source COB's *adjusted* value (original
+            # + existing adjustments) forward, not the raw original. So leg ② reads
+            # FACT_ADJUSTED_TABLE — a combined view with the same schema as the fact
+            # table (e.g. FACT.VAR_MEASURES_COMBINED, FACT.SENSITIVITY_MEASURES_ADJUSTED).
+            # Falls back to the original fact table when no adjusted view is configured.
+            from_where_adj = (
+                from_where.replace(fact_tbl_name, fact_adjusted_tbl_name)
+                if fact_adjusted_tbl_name and fact_adjusted_tbl_name != fact_tbl_name
+                else from_where
+            )
+
+            # Cross-COB Roll leg ② — included only for a cross-COB roll with a
+            # distinct adjusted view configured. It reads the source COB's adjusted
+            # value (× factor) from FACT_ADJUSTED_TABLE and is UNION ALL'd with
+            # leg ③ (flatten of the target original); netting then sums both per
+            # position → adjusted(target) = factor × adjusted(source) − original(target),
+            # carrying every source position forward (source-only nets to Σsource).
             roll_leg = ""
-            if has_cross_cob:
+            if has_cross_cob and (not fact_adjusted_tbl_name
+                                  or fact_adjusted_tbl_name == fact_tbl_name):
+                # Without a distinct combined/adjusted view the roll leg cannot
+                # be built — processing would silently degrade to leg ③ alone
+                # and WIPE the target COB instead of rolling the source
+                # forward. Fail loudly instead (mirrors the EntityRoll guard).
+                raise Exception(
+                    f"Cross-COB Roll for {process_type} requires "
+                    f"FACT_ADJUSTED_TABLE to be configured in "
+                    f"ADJUSTMENTS_SETTINGS (distinct from FACT_TABLE). "
+                    f"Refusing to process — without the adjusted view the "
+                    f"roll would flatten the target COB instead of carrying "
+                    f"the source COB forward.")
+            if has_cross_cob and fact_adjusted_tbl_name and fact_adjusted_tbl_name != fact_tbl_name:
+                # The combined view may not expose every column the _ADJUSTMENT
+                # table expects. Select the columns it HAS and default the rest to
+                # -1 (KEY/ID) or NULL, so the UNION column list stays aligned.
+                try:
+                    _view_cols = set(session.table(fact_adjusted_tbl_name).columns)
+                except Exception:
+                    _view_cols = set()
+
+                def _adj_default(c):
+                    return "-1" if c.split('_')[-1].upper() in ('KEY', 'ID') else "NULL"
+
+                select_non_metric_adj = ', '.join(
+                    (f"fact.{c}" if c in _view_cols else f"{_adj_default(c)} AS {c}")
+                    for c in fact_non_metric_matched
+                )
+                select_scale_adj = (
+                    select_scale.replace(select_non_metric, select_non_metric_adj, 1)
+                    if select_non_metric else select_scale
+                )
                 roll_leg = f"""
                 UNION ALL
-                -- ② Roll cross-COB: source COB's ORIGINAL rows × factor
-                {select_scale} {from_where}
+                -- ② Roll cross-COB: source COB's ADJUSTED value from FACT_ADJUSTED_TABLE
+                --    (columns the combined view lacks default to -1 / NULL)
+                {select_scale_adj} {from_where_adj}
                 AND fact.COBID = adjust.SOURCE_COBID
                 AND adjust.COBID <> adjust.SOURCE_COBID
                 {join_cond}"""

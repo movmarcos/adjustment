@@ -431,7 +431,7 @@ with tab_overview:
         ["<strong>Scaling Adjustment</strong>",
          "Scale, flatten or roll fact-table data by a factor. "
          "<em>Flatten</em> zeroes the selected scope; <em>Scale</em> multiplies "
-         "it; <em>Roll</em> replaces the scope with another COB's original values.",
+         "it; <em>Roll</em> carries another COB's adjusted values forward.",
          "No (optional)"],
         ["<strong>Direct Adjustment</strong>",
          "Exact values. <em>VaR, Stress, Sensitivity:</em> paste or upload a "
@@ -511,10 +511,9 @@ with tab_create:
          "(combined value becomes 0).", "−1"],
         ["<strong>Scale</strong>", "Multiplies the selected scope. Factor 1.10 "
          "means +10%.", "factor − 1 (incremental delta)"],
-        ["<strong>Roll</strong>", "Flattens the target COB's original values in "
-         "the filter and brings in the source COB's <em>original</em> values for "
-         "the same filter (× factor). Adjustments already on the source COB are "
-         "not carried.", "full factor on the source leg"],
+        ["<strong>Roll</strong>", "Carries the source COB's <em>adjusted</em> "
+         "values (original + its adjustments) forward to the target COB, "
+         "flattening what was there.", "full factor on the source leg"],
     ]))
     _html(_card(
         f'{icon("eye", size=13, color=P["info"])} <strong>Impact preview:</strong> '
