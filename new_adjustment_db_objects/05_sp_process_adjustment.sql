@@ -1437,6 +1437,41 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                         if c in _adj_set])
             perm_col_list = ', '.join(_perm)
 
+            # ── Exact-total rounding, per adjustment ─────────────────────
+            # The netted metric is Σ(original × factor) at 8 dp, but the perm
+            # table stores it at the column's own scale (VaR: NUMBER(19,4)),
+            # so every row was rounded on insert and the residues did not
+            # cancel: a 0.95 VaR Scale over ~20k rows stored 964.1595 against
+            # an exact 964.1637 (found 2026-09-14). Round each row explicitly
+            # to the target scale and put the adjustment's whole rounding
+            # residual on its largest row, so Σ(stored) = ROUND(Σ exact, scale)
+            # and the stored total matches the preview at column precision.
+            # Columns without a fixed scale (FLOAT) are left untouched.
+            def _num_scale(tbl, colname):
+                try:
+                    for _f in tbl.schema.fields:
+                        if _f.name.strip('"').upper() == colname.upper():
+                            if type(_f.datatype).__name__ == 'LongType':
+                                return 0
+                            return getattr(_f.datatype, 'scale', None)
+                except Exception:
+                    pass
+                return None
+
+            _largest_row = (f"ROW_NUMBER() OVER (PARTITION BY ADJUSTMENT_ID "
+                            f"ORDER BY ABS({metric_usd_name}) DESC) = 1")
+            _final_metric = []
+            for _m in [mc.strip() for mc in metric_col_list.split(',')]:
+                _sc = _num_scale(fact_adj_tbl, _m)
+                if _sc is None:
+                    _final_metric.append(_m)
+                else:
+                    _final_metric.append(
+                        f"ROUND(ROUND({_m}, {_sc}) + IFF({_largest_row}, "
+                        f"SUM({_m} - ROUND({_m}, {_sc})) "
+                        f"OVER (PARTITION BY ADJUSTMENT_ID), 0), {_sc}) AS {_m}")
+            metric_final_list = ', '.join(_final_metric)
+
             # ── Base FROM/WHERE ──────────────────────────────────────────
             # Scoped to THIS batch's ADJ_IDs — the exact rows claimed and
             # collected into adj_ids above. Filtering on RUN_STATUS/PROCESS_TYPE
@@ -1763,7 +1798,7 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             SELECT
                 COBID, ADJUSTMENT_ID, ADJUSTMENT_CREATED_TIMESTAMP,
                 {insert_non_metric},
-                {metric_col_list},
+                {metric_final_list},
                 {run_log_id} AS RUN_LOG_ID,
                 CURRENT_TIMESTAMP() AS LOAD_TIMESTAMP
             FROM ranked
