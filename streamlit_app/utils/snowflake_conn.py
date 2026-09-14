@@ -62,6 +62,47 @@ def run_query_df(sql: str):
     return get_session().sql(sql).to_pandas()
 
 
+def _cached_df_impl():
+    """st.cache_data-wrapped reader, built once (cache_data needs ≥1.18;
+    older runtimes fall back to the uncached reader)."""
+    import streamlit as st
+    if not hasattr(st, "cache_data"):
+        return run_query_df
+
+    @st.cache_data(ttl=60, show_spinner=False)
+    def _read(sql: str):
+        return get_session().sql(sql).to_pandas()
+    return _read
+
+
+_CACHED_DF = None
+
+
+def run_query_df_cached(sql: str):
+    """run_query_df with a 60-second server-side cache keyed by the SQL text.
+
+    For page-load reads that every widget interaction reruns (the
+    Adjustments page re-executed three queries per keystroke — the picker
+    felt broken). Any WHERE that depends on the user is part of the SQL
+    string, so the key is user-safe. Actions that change data must call
+    bust_query_cache() before rerunning so the page reflects them at once."""
+    global _CACHED_DF
+    if _CACHED_DF is None:
+        _CACHED_DF = _cached_df_impl()
+    return _CACHED_DF(sql)
+
+
+def bust_query_cache():
+    """Drop every cached read (call after delete / retry / recall / clone /
+    submit, before the rerun)."""
+    try:
+        import streamlit as st
+        if hasattr(st, "cache_data"):
+            st.cache_data.clear()
+    except Exception:
+        pass
+
+
 def call_procedure(proc_name: str, *args):
     """Call a stored procedure and return the result. String args are escaped
     Snowflake-style (backslashes doubled FIRST, then quotes — see call_sp_df)."""

@@ -19,8 +19,16 @@ from utils.styles import (wide_kwargs,
     bordered_container,
     set_flash, render_flash, confirm_gate, ACTION_LABELS,
 )
-from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
+from utils.snowflake_conn import (run_query, run_query_df, run_query_df_cached,
+                                  bust_query_cache, current_user_name,
                                   safe_rerun, friendly_error)
+
+
+def _rerun():
+    """Rerun after an action: drop the 60-second read cache first so the
+    grid shows the new status immediately."""
+    bust_query_cache()
+    safe_rerun()
 
 inject_css()
 render_sidebar()
@@ -28,7 +36,7 @@ render_sidebar()
 user = current_user_name()
 
 # Page-level flash key — every action on this page stores its outcome here
-# (set_flash) BEFORE safe_rerun() and it is rendered ONCE, below the header,
+# (set_flash) BEFORE _rerun() and it is rendered ONCE, below the header,
 # so it survives the rerun and never appears under a different adjustment.
 _FLASH = "adjustments"
 
@@ -94,7 +102,7 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # ──────────────────────────────────────────────────────────────────────────────
 df_pipe = pd.DataFrame()
 try:
-    df_pipe = run_query_df("""
+    df_pipe = run_query_df_cached("""
         SELECT CURRENT_STAGE, RUN_STATUS, BLOCKED_BY_ADJ_ID,
                PROCESS_TYPE, ENTITY_CODE, BOOK_CODE
         FROM ADJUSTMENT_APP.VW_ADJUSTMENT_TRACK
@@ -246,6 +254,7 @@ _FILTER_WIDGET_KEYS = ["mw_status", "mw_scope", "mw_type", "mw_cob",
 if st.session_state.pop("_adj_clear_filters", False):
     for _fk in _FILTER_WIDGET_KEYS:
         st.session_state[_fk] = []
+    st.session_state["mw_find"] = ""
     st.session_state["mw_mine"] = False
     st.session_state["mw_deleted"] = False
 
@@ -289,8 +298,16 @@ with bordered_container():
     with f8:
         filter_user = st.multiselect("User", user_opts, default=[], key="mw_user")
 
+    f9, _f10 = st.columns([2, 2])
+    with f9:
+        find_id = st.text_input(
+            "Find by ID", key="mw_find", placeholder="paste an ADJ_ID or #number",
+            help="Paste the internal ADJ_ID (or its first characters) or the "
+                 "#number shown in the grid. The list narrows to that "
+                 "adjustment and opens it below.")
     _applied_n = sum(bool(st.session_state.get(k)) for k in _FILTER_WIDGET_KEYS) \
-        + (1 if mine_only else 0) + (1 if show_deleted else 0)
+        + (1 if mine_only else 0) + (1 if show_deleted else 0) \
+        + (1 if (find_id or "").strip() else 0)
     fc1, fc2 = st.columns([5, 1])
     with fc1:
         st.caption(f"{_applied_n} filter(s) applied." if _applied_n else
@@ -299,7 +316,7 @@ with bordered_container():
         if st.button("Clear filters", key="adj_clear_btn", **wide_kwargs(),
                      disabled=not _applied_n):
             st.session_state["_adj_clear_filters"] = True
-            safe_rerun()
+            _rerun()
 
 st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
 
@@ -311,6 +328,14 @@ try:
     # Deleted rows are loaded too — they live in their own "Deleted" tab; the
     # active-status tabs filter them out below.
     where_clauses = ["1=1"]
+    _find = (find_id or "").strip().lstrip("#").strip()
+    if _find:
+        _fesc = _find.replace("\\", "\\\\").replace("'", "''")
+        if _find.isdigit():
+            where_clauses.append(
+                f"(DIMENSION_ADJ_ID = {int(_find)} OR ADJ_ID LIKE '{_fesc}%')")
+        else:
+            where_clauses.append(f"ADJ_ID LIKE '{_fesc}%'")
     if mine_only:
         where_clauses.append(f"SUBMITTED_BY = '{user}'")
     if filter_status:
@@ -336,7 +361,7 @@ try:
         where_clauses.append(f"SUBMITTED_BY IN ({in_list})")
 
     where_sql = " AND ".join(where_clauses)
-    df_adjs = run_query_df(f"""
+    df_adjs = run_query_df_cached(f"""
         SELECT *
         FROM ADJUSTMENT_APP.VW_MY_WORK
         WHERE {where_sql}
@@ -359,7 +384,7 @@ if not df_adjs.empty and "ADJ_ID" in df_adjs.columns:
         _in = ",".join(
             "'" + i.replace("\\", "\\\\").replace("'", "''") + "'" for i in _ids)
         try:
-            df_track = run_query_df(f"""
+            df_track = run_query_df_cached(f"""
                 SELECT ADJ_ID, CURRENT_STAGE, REPORT_STATUS,
                        SUBMITTED_AT, APPROVAL_REQUESTED_AT, APPROVED_AT,
                        PROCESSING_STARTED_AT, PROCESSING_ENDED_AT,
@@ -428,7 +453,7 @@ def _do_clone(src_adj_id, new_cob, requires_approval: bool = False) -> None:
         if not src_rows:
             set_flash(_FLASH, "warning",
                       "Clone failed — the source adjustment was not found.")
-            safe_rerun()
+            _rerun()
             return
         src = dict(src_rows[0].as_dict()) if hasattr(src_rows[0], "as_dict") \
             else dict(src_rows[0])
@@ -479,7 +504,7 @@ def _do_clone(src_adj_id, new_cob, requires_approval: bool = False) -> None:
                                  in ("FRTB", "FRTBDRC", "FRTBRRAO")):
                 set_flash(_FLASH, "warning",
                           "Clone failed — the source upload has no line items to copy.")
-                safe_rerun()
+                _rerun()
                 return
             if _copied > 0:
                 payload["adj_id"] = new_id
@@ -511,7 +536,7 @@ def _do_clone(src_adj_id, new_cob, requires_approval: bool = False) -> None:
             except Exception:
                 pass
         set_flash(_FLASH, "warning", f"Clone failed. {friendly_error(ex)}")
-    safe_rerun()
+    _rerun()
 
 
 def render_adj_card(row, expanded=False):
@@ -833,7 +858,7 @@ def render_adj_card(row, expanded=False):
                 if st.button("Delete", key=f"del_{adj_id}", **wide_kwargs(),
                              disabled=not confirmed):
                     _do_delete()
-                    safe_rerun()
+                    _rerun()
 
         if run_status == "Pending":
             # No "Submit for Approval" here: approval is chosen at submission
@@ -851,7 +876,7 @@ def render_adj_card(row, expanded=False):
                             set_flash(_FLASH, "success",
                                       "Queued for retry — the pipeline picks it up "
                                       "within a minute.")
-                        safe_rerun()
+                        _rerun()
                     except Exception as ex:
                         st.error(f"Retry failed. {friendly_error(ex)}")
             _delete_button(act_cols[1])
@@ -866,7 +891,7 @@ def render_adj_card(row, expanded=False):
                     try:
                         if _transition("Pending", comment="Recalled by submitter"):
                             set_flash(_FLASH, "success", "Recalled to Pending.")
-                        safe_rerun()
+                        _rerun()
                     except Exception as ex:
                         st.error(f"Recall failed. {friendly_error(ex)}")
 
@@ -985,6 +1010,8 @@ if selected is SELECTION_UNSUPPORTED:
         _pick_pos.setdefault(_pid, _i)
     _pick_options = [None] + list(_pick_pos.keys())
     _remembered = st.session_state.get("_adj_pick_id")
+    if len(_pick_pos) == 1 and (find_id or "").strip():
+        _remembered = next(iter(_pick_pos))      # Find-by-ID hit: open it
     _pick_index = (_pick_options.index(_remembered)
                    if _remembered in _pick_pos else 0)
 
@@ -1003,6 +1030,7 @@ if selected is SELECTION_UNSUPPORTED:
         ]
         if _created:
             parts.append(_created)
+        parts.append(f"id {str(aid)[:8]}")   # searchable by the internal id too
         return " · ".join(parts)
 
     # Breathing room between the grid and the picker so they don't crowd.
@@ -1066,7 +1094,7 @@ if len(_failed_view) >= 2:
                     msg += (f" {_skipped} skipped (status changed or the "
                             f"update failed).")
                 set_flash(_FLASH, "success" if _ok and not _skipped else "warning", msg)
-                safe_rerun()
+                _rerun()
 
 if selected is not None:
     st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
