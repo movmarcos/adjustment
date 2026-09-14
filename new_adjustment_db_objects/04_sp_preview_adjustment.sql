@@ -139,6 +139,8 @@ def main(session, p_adjustment):
     #             at any scale. This is the default and what the metric cards use.
     # breakdown : server-side GROUP BY entity/book/department (small result).
     # sample    : up to 1,000 row-level rows (LIMIT enforced server-side).
+    # sql       : the summary statement as text (PREVIEW_SQL), not executed —
+    #             lets the app show users exactly what the preview runs.
     # Older callers that omit "mode" get the summary, which never crashes.
     mode = str(adj.get("mode", "summary")).lower()
 
@@ -337,51 +339,49 @@ def main(session, p_adjustment):
     # that apply (alias `fact`) to both the original fact and the combined
     # adjusted view (the adjusted view has the same schema as the fact table).
     # ═════════════════════════════════════════════════════════════════════
-    if is_roll and not (fact_adj_tbl and fact_adj_tbl != fact_tbl):
-        # Mirror the processing engine's refusal (05:cross-COB roll needs
-        # FACT_ADJUSTED_TABLE): without it the generic summary below would
-        # silently compute plausible-looking WRONG numbers from the source COB.
-        return session.sql(
-            "SELECT 'Error: cross-COB Roll preview needs FACT_ADJUSTED_TABLE "
-            "configured for this scope (ADJUSTMENTS_SETTINGS)' AS MESSAGE")
+    def _as_sql_row(sql_text):
+        """mode='sql': hand the statement back instead of running it, so the
+        app can show users exactly what the preview executes."""
+        return session.create_dataframe([[sql_text.strip()]], schema=["PREVIEW_SQL"])
 
-    if is_roll and fact_adj_tbl and fact_adj_tbl != fact_tbl:
+    if is_roll:
+        # Roll = flatten the target COB's ORIGINAL rows in the filter and bring
+        # in the SOURCE COB's ORIGINAL rows for the same filter (× factor):
+        #   projected = factor × Σ original(source), delta = projected − current.
+        # The source side reads the base FACT_TABLE, never the combined view:
+        # existing adjustments at the source COB are NOT carried (decided
+        # 2026-09-14 — reading the combined view previewed 202.69K against a
+        # 23.06K original, and each scalar subquery re-scanned the view).
+        # One aggregate per table (2 pruned scans) instead of 6 subqueries.
         dim_filters = where_clauses[1:]
         dim_sql     = ("\n      AND " + "\n      AND ".join(dim_filters)) if dim_filters else ""
         src_where   = f"WHERE fact.COBID = {int(source_cobid)}{dim_sql}\n      AND fact.{primary_metric} IS NOT NULL"
         tgt_where   = f"WHERE fact.COBID = {int(cobid)}{dim_sql}\n      AND fact.{primary_metric} IS NOT NULL"
 
-        # The source side is split into original + existing adjustments so
-        # the user can see WHERE the projected value comes from — a source
-        # COB carrying earlier adjustments previewed as an unexplained
-        # projected total (2026-09-14: 202.69K projected against a 23.06K
-        # original, the difference being adjustment rows at the source COB).
         roll_summary = f"""
+        WITH src AS (
+            SELECT COUNT(*)                                 AS ROWS_AFFECTED,
+                   COUNT_IF(fact.{primary_metric} != 0)     AS NONZERO_ROWS,
+                   COALESCE(SUM(fact.{primary_metric}), 0)  AS SOURCE_ORIGINAL_VALUE
+            FROM {fact_tbl} fact
+            {src_where}
+        ),
+        tgt AS (
+            SELECT COALESCE(SUM(fact.{primary_metric}), 0)  AS TOTAL_CURRENT_VALUE
+            FROM {fact_tbl} fact
+            {tgt_where}
+        )
         SELECT
-            ROWS_AFFECTED,
-            NONZERO_ROWS,
-            SOURCE_ORIGINAL_VALUE,
-            SOURCE_ADJUSTED_VALUE - SOURCE_ORIGINAL_VALUE AS SOURCE_ADJUSTMENTS_VALUE,
-            SOURCE_ADJUSTED_VALUE,
-            TOTAL_CURRENT_VALUE,
-            TOTAL_PROJECTED_VALUE - TOTAL_CURRENT_VALUE AS TOTAL_ADJUSTMENT_DELTA,
-            TOTAL_PROJECTED_VALUE
-        FROM (
-            SELECT
-                (SELECT COUNT(*)
-                   FROM {fact_adj_tbl} fact {src_where})                    AS ROWS_AFFECTED,
-                (SELECT COUNT_IF(fact.{primary_metric} != 0)
-                   FROM {fact_adj_tbl} fact {src_where})                    AS NONZERO_ROWS,
-                (SELECT COALESCE(SUM(fact.{primary_metric}), 0)
-                   FROM {fact_tbl} fact {src_where})                        AS SOURCE_ORIGINAL_VALUE,
-                (SELECT COALESCE(SUM(fact.{primary_metric}), 0)
-                   FROM {fact_adj_tbl} fact {src_where})                    AS SOURCE_ADJUSTED_VALUE,
-                (SELECT COALESCE(SUM(fact.{primary_metric}), 0)
-                   FROM {fact_tbl} fact {tgt_where})                        AS TOTAL_CURRENT_VALUE,
-                {scale_factor} * (SELECT COALESCE(SUM(fact.{primary_metric}), 0)
-                   FROM {fact_adj_tbl} fact {src_where})                    AS TOTAL_PROJECTED_VALUE
-        ) q
+            src.ROWS_AFFECTED,
+            src.NONZERO_ROWS,
+            src.SOURCE_ORIGINAL_VALUE,
+            tgt.TOTAL_CURRENT_VALUE,
+            {scale_factor} * src.SOURCE_ORIGINAL_VALUE - tgt.TOTAL_CURRENT_VALUE AS TOTAL_ADJUSTMENT_DELTA,
+            {scale_factor} * src.SOURCE_ORIGINAL_VALUE                           AS TOTAL_PROJECTED_VALUE
+        FROM src, tgt
         """
+        if mode == "sql":
+            return _as_sql_row(roll_summary)
         return session.sql(roll_summary)
 
     # ── MODE: summary — single aggregated row, NO row transfer ───────────
@@ -389,7 +389,7 @@ def main(session, p_adjustment):
     # needed here. This runs as a server-side aggregate and returns one row
     # regardless of how many fact rows match — the fix for large-scope
     # (e.g. entity + department) adjustments that previously OOM'd the app.
-    if mode == "summary":
+    if mode in ("summary", "sql"):
         summary_sql = f"""
         SELECT
             COUNT(*)                        AS ROWS_AFFECTED,
@@ -400,6 +400,8 @@ def main(session, p_adjustment):
         FROM {fact_source} fact
         {base_where}
         """
+        if mode == "sql":
+            return _as_sql_row(summary_sql)
         return session.sql(summary_sql)
 
     # ── MODE: breakdown — server-side GROUP BY dimensions ────────────────
