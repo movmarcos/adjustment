@@ -1,0 +1,46 @@
+-- Check what a Flatten left behind on a COB that already carried a Roll (VaR).
+-- Replace <COBID> (the target COB, e.g. 20260902) and <ENTITY>.
+-- Add your book / department condition if the filter was narrower than the entity.
+--
+-- How to read the result (one row per adjustment still present at the COB):
+--   * Roll rows remain and ROWS_WITH_NO_TARGET_ORIGINAL is most of them
+--       -> positions the source COB had and the target did not; the Flatten
+--          never touches them, so a residue stays in the combined view.
+--   * Roll rows remain and ROWS_WITH_NO_TARGET_ORIGINAL is ~0
+--       -> the supersede did not match those positions (engine bug to trace).
+--   * The Flatten has no row at all
+--       -> it failed or did not run; check its status in the grid / Logs page.
+
+SELECT a.ADJUSTMENT_ID,
+       d.ADJUSTMENT_TYPE,
+       d.RUN_STATUS,
+       COUNT(*)                        AS ROWS_,
+       SUM(a.PNL_VECTOR_VALUE_IN_USD)  AS VALUE_USD,
+       COUNT_IF(f.COBID IS NULL)       AS ROWS_WITH_NO_TARGET_ORIGINAL
+FROM FACT.VAR_MEASURES_ADJUSTMENT a
+LEFT JOIN DIMENSION.ADJUSTMENT d
+  ON d.ADJUSTMENT_ID = a.ADJUSTMENT_ID
+LEFT JOIN FACT.VAR_MEASURES f
+  ON  f.COBID = a.COBID
+  AND EQUAL_NULL(f.ENTITY_CODE, a.ENTITY_CODE)
+  AND EQUAL_NULL(f.BOOK_KEY, a.BOOK_KEY)
+  AND EQUAL_NULL(f.TRADE_KEY, a.TRADE_KEY)
+  AND EQUAL_NULL(f.COMMON_INSTRUMENT_KEY, a.COMMON_INSTRUMENT_KEY)
+  AND EQUAL_NULL(f.COMMON_INSTRUMENT_FCD_KEY, a.COMMON_INSTRUMENT_FCD_KEY)
+  AND EQUAL_NULL(f.CURRENCY_CODE, a.CURRENCY_CODE)
+  AND EQUAL_NULL(f.SOURCE_SYSTEM_CODE, a.SOURCE_SYSTEM_CODE)
+  AND EQUAL_NULL(f.VAR_SUBCOMPONENT_ID, a.VAR_SUBCOMPONENT_ID)
+  AND EQUAL_NULL(f.SCENARIO_DATE_ID, a.SCENARIO_DATE_ID)
+  AND EQUAL_NULL(f.IS_OFFICIAL_SOURCE, a.IS_OFFICIAL_SOURCE)
+WHERE a.COBID = <COBID>
+  AND a.ENTITY_CODE = '<ENTITY>'
+GROUP BY ALL
+ORDER BY a.ADJUSTMENT_ID;
+
+
+-- Optional: the combined view total for the same scope (should be 0 after a
+-- full Flatten). Replace the same placeholders.
+SELECT COUNT(*) AS ROWS_, SUM(PNL_VECTOR_VALUE_IN_USD) AS COMBINED_VALUE_USD
+FROM FACT.VAR_MEASURES_COMBINED
+WHERE COBID = <COBID>
+  AND ENTITY_CODE = '<ENTITY>';
