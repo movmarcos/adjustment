@@ -1,0 +1,30 @@
+REASSEMBLE snowflake-jdbc-4.3.4.jar
+====================================
+Run every command from inside the drivers folder.
+Expected SHA-256 of the assembled jar:
+b2556c6fa200aa1a7839c42a8b2ef7a11f104018c7638c8c6f40e42dee0b409b
+
+
+--- macOS / Linux / Git Bash -------------------------------------------
+
+cd drivers
+cat snowflake-jdbc-4.3.4.jar.part* > snowflake-jdbc-4.3.4.jar
+shasum -a 256 snowflake-jdbc-4.3.4.jar
+
+
+--- Windows PowerShell -------------------------------------------------
+
+cd drivers
+Get-Content snowflake-jdbc-4.3.4.jar.part* -Raw -AsByteStream | Set-Content snowflake-jdbc-4.3.4.jar -AsByteStream
+(Get-FileHash snowflake-jdbc-4.3.4.jar -Algorithm SHA256).Hash.ToLower()
+
+
+--- Windows cmd --------------------------------------------------------
+
+cd drivers
+copy /b snowflake-jdbc-4.3.4.jar.part00 + snowflake-jdbc-4.3.4.jar.part01 + snowflake-jdbc-4.3.4.jar.part02 snowflake-jdbc-4.3.4.jar
+certutil -hashfile snowflake-jdbc-4.3.4.jar SHA256
+
+
+The printed hash must equal the expected hash above. If it does, the jar
+is intact and ready to use.
