@@ -992,6 +992,12 @@ def _completion_checks() -> list:
         if wiz.get("adjustment_type") in ("Scale", "Roll"):
             # None = empty / not a number / out of range (see _float_input)
             checks.append(("Scale Factor", wiz.get("scale_factor") is not None))
+        # A Scale at factor 1 is a no-op (delta 0) — block it. Roll is
+        # different: 1 is its normal factor (carry the source COB as-is).
+        if wiz.get("adjustment_type") == "Scale" \
+                and wiz.get("scale_factor") is not None \
+                and float(wiz["scale_factor"]) == 1.0:
+            checks.append(("Scale Factor is not 1", False))
         if wiz.get("occurrence") == "RECURRING":
             _rs, _re = wiz.get("recurring_start_cobid"), wiz.get("recurring_end_cobid")
             checks += [("Start COB", bool(_rs)),
@@ -1585,8 +1591,9 @@ def _render_schedule_fields() -> None:
     if (wiz.get("adjustment_type") == "Scale"
             and wiz.get("scale_factor") is not None
             and float(wiz["scale_factor"]) == 1.0):
-        st.warning("A scale factor of 1 changes nothing — enter e.g. 1.05 "
-                   "for +5% or 0.95 for −5%.")
+        st.error("A scale factor of 1 changes nothing, so a Scale cannot be "
+                 "submitted with it — enter e.g. 1.05 for +5% or 0.95 for −5%. "
+                 "To carry another COB's values forward as they are, use Roll.")
 
     if _recurring:
         # Start / End always side by side on their own row, whatever the type.

@@ -314,6 +314,14 @@ def main(session, p_adjustment):
         sf_adjusted = compute_scale_factor_adjusted(
             adjustment_type, scale_factor, cobid, source_cobid)
 
+        # A Scale at factor 1 is a zero-delta no-op — reject it (the form
+        # blocks it too). Roll legitimately uses factor 1.
+        if adjustment_type.lower() == "scale" and float(scale_factor) == 1.0:
+            return {"adj_id": None, "status": "Error",
+                    "message": ("Scale factor 1 changes nothing. Enter e.g. "
+                                "1.05 (+5%) or 0.95 (-5%), or use Roll to "
+                                "carry another COB's values forward.")}
+
         # Scale / Flatten act on a single COB. A source COB that differs
         # from the COB would make the engine run its cross-COB roll leg
         # (delta = factor × source, target flattened) under a Scale label —
