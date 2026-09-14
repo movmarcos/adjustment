@@ -1949,9 +1949,14 @@ def _st_version():
 
 
 def wide_kwargs():
-    """Full-width kwargs for st.dataframe / buttons / charts: `width="stretch"`
-    on Streamlit ≥ 1.48 (where use_container_width is deprecated and warns
-    in the app), `**wide_kwargs()` before that."""
+    """Full-width kwargs for st.dataframe / buttons: `width="stretch"` on
+    Streamlit ≥ 1.48 (where use_container_width is deprecated and warns in
+    the app), `use_container_width=True` before that.
+
+    NOT for st.plotly_chart: on 1.50 it has no `width` parameter, so a
+    `width=` kwarg falls into its deprecated Plotly-config **kwargs and shows
+    "The keyword arguments have been deprecated..." in the app. Pass
+    `use_container_width=True` to plotly_chart explicitly instead."""
     return {"width": "stretch"} if _st_version() >= (1, 48) \
         else {"use_container_width": True}
 
