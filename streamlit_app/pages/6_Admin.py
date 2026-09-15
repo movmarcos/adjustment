@@ -9,7 +9,7 @@ import pandas as pd
 
 st.set_page_config(page_title="Admin · MUFG", page_icon="⚙️", layout="wide", initial_sidebar_state="expanded")
 
-from utils.styles import (wide_kwargs, inject_css, render_sidebar, section_title, P,
+from utils.styles import (scope_label, scope_meta, wide_kwargs, inject_css, render_sidebar, section_title, P,
                           SCOPE_CONFIG, SCOPE_LABEL_HELP, icon, render_df_table,
                           kpi_card, fmt_user_dt, set_flash, render_flash,
                           confirm_gate)
@@ -438,8 +438,8 @@ with tab_scopes:
         if not df_settings.empty:
             for _, row in df_settings.iterrows():
                 scope = str(row["PROCESS_TYPE"])
-                cfg = SCOPE_CONFIG.get(scope, {})
-                with st.expander(f'{scope} — {row["FACT_TABLE"]}'):
+                cfg = scope_meta(scope)
+                with st.expander(f'{scope_label(scope)} — {row["FACT_TABLE"]}'):
                     c1, c2 = st.columns(2)
                     with c1:
                         section_title("Configuration")

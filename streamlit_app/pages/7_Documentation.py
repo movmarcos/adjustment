@@ -32,7 +32,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from utils.styles import (wide_kwargs, 
+from utils.styles import (scope_label, scope_meta, wide_kwargs, 
     inject_css, render_sidebar, section_title,
     P, SCOPE_CONFIG, icon, bordered_container, status_badge,
 )
@@ -416,13 +416,13 @@ with tab_overview:
     for name, cfg in SCOPE_CONFIG.items():
         scope_rows.append([
             f'{icon(cfg.get("icon", ""), size=13, color=cfg.get("color", "#333"))} '
-            f'<strong>{name}</strong>',
+            f'<strong>{cfg.get("label", name)}</strong>',
             cfg.get("desc", "—"),
         ])
     _html(_table(["Scope", "Description"], scope_rows))
     _html(_card(
         f'{icon("info", size=13, color=P["info"])} The three FRTB sub-types '
-        f'(FRTB, FRTBDRC, FRTBRRAO) are processed by one shared FRTB pipeline. '
+        f'(FRTBSBM, FRTBDRC, FRTBRRAO) are processed by one shared FRTB pipeline. '
         f'Choosing <strong>“All FRTB”</strong> on the New Adjustment page simply '
         f'creates one adjustment per sub-type — three sibling tickets that '
         f'process one after another.', P["info"]))
@@ -525,7 +525,7 @@ with tab_create:
     _html(_card(
         f'{icon("layers", size=13, color="#7E22CE")} <strong>All FRTB:</strong> '
         f'selecting “All FRTB” submits three sibling adjustments — one each for '
-        f'FRTB, FRTBDRC and FRTBRRAO. They overlap by design, so the pipeline '
+        f'FRTBSBM, FRTBDRC and FRTBRRAO. They overlap by design, so the pipeline '
         f'runs them in sequence; the preview shown is the sum across the three.',
         "#7E22CE"))
 
@@ -795,7 +795,7 @@ with tab_reports:
          "it as <em>pending</em>. The refresh scheduler picks pending actions "
          "up (~every 5 minutes), stamps start and completion times, and the "
          "refreshed reports include the adjustment."],
-        ["<strong>Sensitivity, FRTB / DRC / RRAO</strong>", "dbt rebuild via Control-M",
+        ["<strong>Sensitivity, FRTBSBM / DRC / RRAO</strong>", "dbt rebuild via Control-M",
          "A dummy dataset row (<code>DUMMY_Sensitivity_Adjustment</code> / "
          "<code>DUMMY_FRTB_Adjustment</code>) is written to "
          "<code>RAVEN.LOG_STAGE_ME_STATUS</code>. A Control-M job polls that "

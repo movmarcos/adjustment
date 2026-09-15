@@ -21,7 +21,7 @@ import pandas as pd
 
 st.set_page_config(page_title="Sign-Off · MUFG", page_icon="🔒", layout="wide", initial_sidebar_state="expanded")
 
-from utils.styles import (wide_kwargs, inject_css, render_sidebar, section_title, P,
+from utils.styles import (scope_label, scope_meta, wide_kwargs, inject_css, render_sidebar, section_title, P,
                           ALL_SCOPES, icon, bordered_container, fmt_user_dt,
                           SCOPE_CONFIG, render_df_table,
                           set_flash, render_flash, confirm_gate,
@@ -387,7 +387,7 @@ with tab_act:
                                                "REOPEN_REQUESTED"])]
     if not _pending_rows.empty:
         _plist = " · ".join(
-            f"{r['PROCESS_TYPE']} {r['_ENT_LBL']} "
+            f"{scope_label(r['PROCESS_TYPE'])} {r['_ENT_LBL']} "
             f"({'sign-off' if r['_SU'] == 'SIGNOFF_REQUESTED' else 're-open'} "
             f"by {r.get('REOPEN_REQUESTED_BY') or '—'})"
             for _, r in _pending_rows.iterrows())
@@ -511,7 +511,8 @@ with tab_act:
     with g2:
         f_scopes = st.multiselect("Scope",
                                   sorted(df_all["PROCESS_TYPE"].unique().tolist()),
-                                  default=[], key="so_f_scope")
+                                  default=[], key="so_f_scope",
+                                  format_func=scope_label)
     with g3:
         f_status = st.multiselect(
             "Status", list(_STATUS_META.keys()), default=[], key="so_f_status",
@@ -551,7 +552,7 @@ with tab_act:
             _blocks = _STATUS_META.get(_su, ("", "", False))[2]
             _rows.append({
                 "COB": str(int(r["COBID"])),
-                "Scope": _nz(r.get("PROCESS_TYPE")) or "—",
+                "Scope": scope_label(_nz(r.get("PROCESS_TYPE"))) or "—",
                 "Entity": _nz(r.get("_ENT_LBL")) or "*",
                 "Status": signoff_status_label(_su),
                 "Submissions": "Blocked" if _blocks else "Allowed",
@@ -566,7 +567,7 @@ with tab_act:
             pd.DataFrame(_rows), max_rows=len(_rows), key="so_status",
             color_cols={
                 "Status": _SIGNOFF_LABEL_COLORS,
-                "Scope": lambda v: SCOPE_CONFIG.get(str(v), {}).get("color", P["grey_700"]),
+                "Scope": lambda v: scope_meta(str(v)).get("color", P["grey_700"]),
             },
             wrap_cols={"Comment": 420})
         st.caption(f"{len(_rows)} entity line(s) across "
@@ -625,7 +626,7 @@ with tab_hist:
                 "When": fmt_user_dt(h.get("ACTION_AT"), "%d %b %Y %H:%M:%S"),
                 "Event": signoff_status_label(h.get("NEW_STATUS")),
                 "COB": _cob(h.get("COBID")),
-                "Scope": _nz(h.get("PROCESS_TYPE")) or "—",
+                "Scope": scope_label(_nz(h.get("PROCESS_TYPE"))) or "—",
                 "Entity": (_nz(h.get("ENTITY_CODE")) or "*") + (f" / {sub}" if sub else ""),
                 "From": signoff_status_label(_old) if _old else "—",
                 "By": _nz(h.get("ACTION_BY")) or "—",
@@ -636,7 +637,7 @@ with tab_hist:
             pd.DataFrame(_rows), max_rows=len(_rows), key="so_hist",
             color_cols={
                 "Event": _SIGNOFF_LABEL_COLORS, "From": _SIGNOFF_LABEL_COLORS,
-                "Scope": lambda v: SCOPE_CONFIG.get(str(v), {}).get("color", P["grey_700"]),
+                "Scope": lambda v: scope_meta(str(v)).get("color", P["grey_700"]),
             },
             wrap_cols={"Comment": 420})
         st.caption(f"{len(_rows)} event(s), newest first.")

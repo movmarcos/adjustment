@@ -254,9 +254,39 @@ def fmt_user_dt_series(series, fmt: str = "%d %b %Y %H:%M",
 SCOPE_CONFIG = {
     "VaR":         {"icon": "bar-chart",  "color": "#D50032", "bg": "#FFF0F3", "label": "VaR"},
     "Stress":      {"icon": "activity",   "color": "#1D4ED8", "bg": "#EFF6FF", "label": "Stress"},
-    "FRTB":        {"icon": "landmark",   "color": "#15803D", "bg": "#F0FDF4", "label": "FRTB"},
+    "FRTB":        {"icon": "landmark",   "color": "#15803D", "bg": "#F0FDF4", "label": "FRTBSBM"},
     "Sensitivity": {"icon": "target",     "color": "#B45309", "bg": "#FFFBEB", "label": "Sensitivity"},
 }
+
+# ── Scope display names (presentation only — the database keeps the codes) ──
+# 'FRTB' is the sensitivities-based method; shown as FRTBSBM next to FRTBDRC /
+# FRTBRRAO (Marcos, 2026-09-15). Every place that renders a PROCESS_TYPE goes
+# through scope_label(); lookups that may receive the label use scope_meta().
+SCOPE_DISPLAY = {"FRTB": "FRTBSBM"}
+_SCOPE_LABEL_TO_CODE = {v: k for k, v in SCOPE_DISPLAY.items()}
+
+
+def scope_label(code):
+    """Display name for a PROCESS_TYPE code (identity for everything but the
+    renamed ones; None / blank pass through unchanged)."""
+    if code is None:
+        return code
+    c = str(code)
+    return SCOPE_DISPLAY.get(c, c)
+
+
+def scope_code(value):
+    """Inverse of scope_label(): the PROCESS_TYPE code for a code OR label."""
+    if value is None:
+        return value
+    v = str(value)
+    return _SCOPE_LABEL_TO_CODE.get(v, v)
+
+
+def scope_meta(value):
+    """SCOPE_CONFIG entry for a code or a display label ({} if unknown)."""
+    return SCOPE_CONFIG.get(scope_code(value), {})
+
 
 TYPE_CONFIG = {
     "Flatten": {"icon": "minus-circle", "desc": "Zero out matching positions", "formula": "new = original × 0"},
@@ -1901,7 +1931,7 @@ def build_activity_grid_df(df_source):
                             for d, a in zip(col("DIMENSION_ADJ_ID"), col("ADJ_ID"))],
         "COB":             col("COBID").apply(_grid_int_str),
         "Source COB":      col("SOURCE_COBID").apply(_grid_int_str),
-        "Scope":           col("PROCESS_TYPE").fillna("—").astype(str),
+        "Scope":           col("PROCESS_TYPE").fillna("—").astype(str).map(scope_label),
         "Type":            col("ADJUSTMENT_TYPE").apply(action_label),
         "Status":          col("RUN_STATUS").fillna("—").astype(str),
         "Deleted":         col("IS_DELETED").apply(lambda v: "Deleted" if (v is not None and v == v and bool(v)) else ""),

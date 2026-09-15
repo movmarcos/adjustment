@@ -25,7 +25,7 @@ st.set_page_config(
     layout="wide", initial_sidebar_state="expanded",
 )
 
-from utils.styles import (
+from utils.styles import (scope_label, scope_meta, 
     inject_css, render_sidebar, section_title,
     P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, fmt_adj_id, icon,
     fmt_user_dt, render_df_table,
@@ -109,7 +109,7 @@ def _day_str(v) -> str:
 
 
 def _scope_color(v) -> str:
-    return SCOPE_CONFIG.get(str(v), {}).get("color", P["grey_700"])
+    return scope_meta(str(v)).get("color", P["grey_700"])
 
 
 def _status_color(v) -> str:
@@ -152,7 +152,7 @@ with f1:
     filter_cob = st.selectbox("COB", options=["All"] + cob_options, index=0, key="lg_cob")
 with f2:
     filter_scope = st.multiselect(
-        "Scope", ALL_SCOPES, default=[], key="lg_scope")
+        "Scope", ALL_SCOPES, default=[], key="lg_scope", format_func=scope_label)
 with f3:
     row_limit = st.selectbox(
         "Max rows per tab", options=[100, 200, 500, 1000], index=1, key="lg_limit",
@@ -253,7 +253,7 @@ with tab_runs:
         df_runs_grid = pd.DataFrame([{
             "Outcome":  _run_outcome(r),
             "Run":      _id_str(r.get("RUN_LOG_ID")),
-            "Scope":    _txt(r.get("PROCESS_TYPE")),
+            "Scope":    scope_label(_txt(r.get("PROCESS_TYPE"))),
             "Action":   _txt(r.get("ADJUSTMENT_ACTION")),
             "COB":      _id_str(r.get("COBID")),
             "Adj":      int(r.get("ADJ_COUNT", 0) or 0),
@@ -389,7 +389,7 @@ with tab_activity:
             "Event":         _txt(ev.get("EVENT_TYPE")),
             "Now":           _txt(ev.get("CURRENT_STATUS")),
             "Adj":           fmt_adj_id(ev.get("DIMENSION_ADJ_ID")),
-            "Scope":         _txt(ev.get("PROCESS_TYPE")),
+            "Scope":         scope_label(_txt(ev.get("PROCESS_TYPE"))),
             "Type":          _txt(ev.get("ADJUSTMENT_TYPE")),
             "Entity / Book": _where(ev),
             "By":            _txt(ev.get("ACTOR")),
@@ -597,7 +597,7 @@ with tab_signoff:
                 "Time":    fmt_user_dt(ev.get("ACTION_AT"), "%H:%M:%S") or "—",
                 "Event":   _so_label(ev.get("NEW_STATUS")),
                 "COB":     _id_str(ev.get("COBID")),
-                "Scope":   _txt(ev.get("PROCESS_TYPE")),
+                "Scope":   scope_label(_txt(ev.get("PROCESS_TYPE"))),
                 "Entity":  _so_entity(ev),
                 "From":    _so_label(ev.get("OLD_STATUS")),
                 "By":      _txt(ev.get("ACTION_BY")),

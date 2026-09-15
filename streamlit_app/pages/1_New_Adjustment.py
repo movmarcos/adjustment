@@ -18,7 +18,7 @@ st.set_page_config(
     layout="wide", initial_sidebar_state="expanded",
 )
 
-from utils.styles import (wide_kwargs, 
+from utils.styles import (scope_label, scope_meta, wide_kwargs, 
     inject_css, render_sidebar,
     P, SCOPE_CONFIG, TYPE_CONFIG, CATEGORY_CONFIG, render_df_table,
     render_data_grid, fmt_adj_id, icon, bordered_container,
@@ -614,7 +614,7 @@ def _do_submit() -> dict:
 
 FRTB_SUBTYPES = ["FRTB", "FRTBDRC", "FRTBRRAO", "FRTBALL"]
 FRTB_SUBTYPE_CONFIG = {
-    "FRTB":     "Standard FRTB",
+    "FRTB":     "Sensitivities-based method (SBM)",
     "FRTBDRC":  "Default Risk Charge",
     "FRTBRRAO": "Residual Risk Add-On",
     "FRTBALL":  "All FRTB — submits one adjustment per sub-type",
@@ -1037,7 +1037,8 @@ def _render_scope_pills(include_frtball: bool = True) -> None:
     current_group = "FRTB" if wiz.get("process_type") in FRTB_SUBTYPES \
                     else wiz.get("process_type")
     clicked = _pill_row(list(SCOPE_CONFIG.keys()), current_group,
-                        f"scope_{wiz.get('category')}", icons=SCOPE_BTN_ICONS)
+                        f"scope_{wiz.get('category')}", icons=SCOPE_BTN_ICONS,
+                        fmt=scope_label)
     if clicked and clicked != current_group:
         wiz["process_type"] = clicked  # FRTB group starts on the plain FRTB sub-type
         wiz["_preview_sum"] = None
@@ -1067,7 +1068,7 @@ def _render_scope_pills(include_frtball: bool = True) -> None:
         subtypes = [k for k in FRTB_SUBTYPE_CONFIG
                     if include_frtball or k != "FRTBALL"]
         sub = _pill_row(subtypes, wiz["process_type"],
-                        f"frtbsub_{wiz.get('category')}")
+                        f"frtbsub_{wiz.get('category')}", fmt=scope_label)
         if sub and sub != wiz["process_type"]:
             wiz["process_type"] = sub
             wiz["_preview_sum"] = None
@@ -2901,14 +2902,14 @@ def _ticket_html(missing: list) -> str:
 
     if cat == "Entity Roll":
         roll_set = bool(wiz.get("source_cobid") and wiz.get("cobid"))
-        kv += _ticket_row("Scope",  wiz.get("process_type"))
+        kv += _ticket_row("Scope",  scope_label(wiz.get("process_type")))
         kv += _ticket_row("Entity", wiz.get("entity_code"))
         kv += _ticket_row("Roll",
                           f'{wiz.get("source_cobid")} → {wiz.get("cobid")}'
                           if roll_set else None, roll_set)
     elif cat == "VaR Upload" or _is_frtb_file_direct():
         df_up = wiz.get("uploaded_df")
-        kv += _ticket_row("Scope",     wiz.get("process_type"))
+        kv += _ticket_row("Scope",     scope_label(wiz.get("process_type")))
         kv += _ticket_row("COB",       wiz.get("cobid"))
         kv += _ticket_row("Reference", wiz.get("global_reference"))
         kv += _ticket_row("CSV rows",
@@ -2919,7 +2920,7 @@ def _ticket_html(missing: list) -> str:
         d_verdicts = wiz.get("direct_verdicts") or []
         n_valid    = sum(1 for v in d_verdicts if v["IS_VALID"])
         n_bad      = len(d_verdicts) - n_valid
-        kv += _ticket_row("Scope", wiz.get("process_type"))
+        kv += _ticket_row("Scope", scope_label(wiz.get("process_type")))
         kv += _ticket_row("COB",   wiz.get("cobid"))
         kv += _ticket_row("Rows" if wiz.get("_direct_in_mode") == "Enter rows"
                           else "CSV rows",
@@ -2936,7 +2937,7 @@ def _ticket_html(missing: list) -> str:
         cob_txt = wiz.get("cobid")
         if wiz.get("adjustment_type") == "Roll" and wiz.get("source_cobid") and cob_txt:
             cob_txt = f'{wiz.get("source_cobid")} → {cob_txt}'
-        kv += _ticket_row("Scope", wiz.get("process_type"))
+        kv += _ticket_row("Scope", scope_label(wiz.get("process_type")))
         kv += _ticket_row("Type",  type_txt)
         kv += _ticket_row("Schedule",
                           "Ad hoc" if wiz.get("occurrence", "ADHOC") == "ADHOC"

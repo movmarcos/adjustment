@@ -10,7 +10,7 @@ import pandas as pd
 
 st.set_page_config(page_title="Adjustments · MUFG", page_icon="📋", layout="wide", initial_sidebar_state="expanded")
 
-from utils.styles import (wide_kwargs, 
+from utils.styles import (scope_label, scope_meta, wide_kwargs, 
     inject_css, render_sidebar, render_filter_chips, render_status_timeline,
     render_lifecycle_bar, fmt_user_dt,
     status_badge, section_title, P, SCOPE_CONFIG, STAGE_CONFIG, ALL_SCOPES,
@@ -177,7 +177,7 @@ if not df_pipe.empty:
             _ih = ""
             for _, _r in _items.head(10).iterrows():
                 _sc = str(_r.get("PROCESS_TYPE", "") or "")
-                _sccfg = SCOPE_CONFIG.get(_sc, {})
+                _sccfg = scope_meta(_sc)
                 _dp = [x for x in [str(_r.get("ENTITY_CODE", "") or ""),
                                    str(_r.get("BOOK_CODE", "") or "")] if x]
                 _det = " · ".join(_dp) if _dp else "All"
@@ -273,7 +273,7 @@ with bordered_container():
     with f2:
         filter_scope = st.multiselect(
             "Scope", ALL_SCOPES,
-            key="mw_scope")
+            key="mw_scope", format_func=scope_label)
     with f3:
         # Option values are the raw ADJUSTMENT_TYPE codes (used directly in the SQL
         # filter); the label maps the cryptic "EROL" code to "Entity Roll".
@@ -558,10 +558,10 @@ def render_adj_card(row, expanded=False):
         record_cnt = int(record_cnt) if record_cnt and record_cnt == record_cnt else 0
     except (ValueError, TypeError):
         record_cnt = 0
-    scope_cfg   = SCOPE_CONFIG.get(scope, {})
+    scope_cfg   = scope_meta(scope)
 
     with st.expander(
-        f'ADJ {adj_label} · {scope} · '
+        f'ADJ {adj_label} · {scope_label(scope)} · '
         f'{type_label} · {run_status} · {record_cnt} rows',
         expanded=expanded,
     ):

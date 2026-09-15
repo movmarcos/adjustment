@@ -59,7 +59,7 @@ MAX_ROWS = 1000
 # measure for the summary, and the reporting columns (the fields used to
 # report the adjustment — mirrors the _ADJUSTMENT fact layout).
 _TYPES = {
-    "SBM (Sensitivities)": dict(
+    "FRTBSBM (Sensitivities)": dict(
         code="SBM", scope="FRTB",
         table="FACT.FRTBSA_SENSITIVITY_MEASURES_SBM_OFFICIAL",
         risk_col="RISK_CLASS", risk_label="Risk class",

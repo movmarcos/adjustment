@@ -17,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from utils.styles import (wide_kwargs, inject_css, render_sidebar, section_title, P, SCOPE_CONFIG,
+from utils.styles import (scope_label, scope_meta, wide_kwargs, inject_css, render_sidebar, section_title, P, SCOPE_CONFIG,
                           STATUS_COLORS, fmt_adj_id, icon, render_activity_grid,
                           render_df_table, set_flash, render_flash)
 from utils.snowflake_conn import run_query_df, run_query, current_user_name, safe_rerun
@@ -317,7 +317,7 @@ with col_charts:
                 ]
                 if any(v > 0 for v in vals):
                     fig.add_trace(go.Bar(
-                        x=[str(s) for s in scopes], y=vals,
+                        x=[scope_label(s) for s in scopes], y=vals,
                         name=status, marker_color=color_map.get(status, P["grey_400"]),
                         marker_line_width=0,
                     ))
@@ -368,7 +368,7 @@ with col_charts:
             cobs        = sorted(df_cob["COBID"].unique())
             cob_labels  = [str(c) for c in cobs]
             scopes      = df_cob["PROCESS_TYPE"].unique()
-            scope_colors = [SCOPE_CONFIG.get(s, {}).get("color", P["grey_400"]) for s in scopes]
+            scope_colors = [scope_meta(s).get("color", P["grey_400"]) for s in scopes]
 
             ch1, ch2 = st.columns(2)
 
@@ -385,7 +385,7 @@ with col_charts:
                         if ((df_cob["COBID"] == c) & (df_cob["PROCESS_TYPE"] == scope)).any() else 0
                         for c in cobs
                     ]
-                    fig1.add_trace(go.Bar(x=cob_labels, y=vals, name=scope,
+                    fig1.add_trace(go.Bar(x=cob_labels, y=vals, name=scope_label(scope),
                                           marker_color=color, marker_line_width=0))
                 fig1.update_layout(
                     barmode="stack", plot_bgcolor="white", paper_bgcolor="white",
@@ -414,7 +414,7 @@ with col_charts:
                         for c in cobs
                     ]
                     fig2.add_trace(go.Scatter(
-                        x=cob_labels, y=vals, name=scope,
+                        x=cob_labels, y=vals, name=scope_label(scope),
                         mode="lines+markers",
                         line=dict(color=color, width=2.5),
                         marker=dict(color=color, size=7, line=dict(color="white", width=1.5)),

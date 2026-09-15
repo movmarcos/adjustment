@@ -10,7 +10,7 @@ import pandas as pd
 
 st.set_page_config(page_title="Approval Queue · MUFG", page_icon="✅", layout="wide", initial_sidebar_state="expanded")
 
-from utils.styles import (wide_kwargs, 
+from utils.styles import (scope_label, scope_meta, wide_kwargs, 
     inject_css, render_sidebar, render_filter_chips, fmt_user_dt,
     section_title, status_badge, P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, icon, bordered_container,
     render_df_table, fmt_adj_id, set_flash, render_flash, confirm_gate,
@@ -47,7 +47,7 @@ def _pill(text, color):
 
 
 def _scope_pill(scope):
-    cfg = SCOPE_CONFIG.get(str(scope), {})
+    cfg = scope_meta(str(scope))
     return _pill(_htmlmod.escape(str(scope) or "—"), cfg.get("color", P["grey_700"]))
 
 
@@ -277,7 +277,7 @@ else:
         submitted_by = str(row.get("SUBMITTED_BY", ""))
         submitted_at = row.get("SUBMITTED_AT", "")
         reason      = _htmlmod.escape(str(row.get("REASON", "")) or "—")
-        scope_cfg   = SCOPE_CONFIG.get(scope, {})
+        scope_cfg   = scope_meta(scope)
 
         if hasattr(submitted_at, "strftime"):
             submitted_at = fmt_user_dt(submitted_at)
@@ -288,7 +288,7 @@ else:
         ))
         _cob_lbl = row.get("COBID", "—")
         expander_label = (
-            f'ADJ {adj_short} · COB {_cob_lbl} · {scope} · {adj_type} · '
+            f'ADJ {adj_short} · COB {_cob_lbl} · {scope_label(scope)} · {adj_type} · '
             f'entity {entity} · book {book} · by {submitted_by}'
             + ("  — ⚠ OVERLAP" if has_overlap else "")
         )
@@ -387,7 +387,7 @@ else:
                             f'<div style="background:#F8D7DA;border:1px solid #F5C2C7;'
                             f'border-radius:6px;padding:0.6rem;font-size:0.8rem;text-align:center;'
                             f'color:#842029;margin-bottom:0.5rem">'
-                            f'{icon("lock", size=13, color=P["grey_700"])} Not authorized for {scope}</div>',
+                            f'{icon("lock", size=13, color=P["grey_700"])} Not authorized for {scope_label(scope)}</div>',
                             unsafe_allow_html=True)
 
                     actions_enabled = (is_approver and can_approve_scope
@@ -494,7 +494,7 @@ if len(_bulk_rows) >= 2:
         def _bulk_label(i):
             r = _bulk_rows[i]
             return (f'{fmt_adj_id(r.get("DIMENSION_ADJ_ID"), adj_id=r.get("ADJ_ID"))} · '
-                    f'{_nz(r.get("PROCESS_TYPE"))} · {_nz(r.get("ADJUSTMENT_TYPE"))} · '
+                    f'{scope_label(_nz(r.get("PROCESS_TYPE")))} · {_nz(r.get("ADJUSTMENT_TYPE"))} · '
                     f'COB {_nz(r.get("COBID"))} · entity {_nz(r.get("ENTITY_CODE"))} · '
                     f'book {_nz(r.get("BOOK_CODE"))} · by {_nz(r.get("SUBMITTED_BY"))}')
 
@@ -591,11 +591,11 @@ def _decide_signoff_change(cobid, scope, entity, sub, approve, comment, verb):
         _new_lbl = signoff_status_label(str(out.get("new_status") or "?"))
         done = (f"{verb} approved — now {_new_lbl}"
                 if approve else f"{verb} request rejected")
-        set_flash("approval", "success", f"COB {cobid} / {scope}: {done}.")
+        set_flash("approval", "success", f"COB {cobid} / {scope_label(scope)}: {done}.")
     else:
         set_flash(
             "approval", "warning",
-            f"COB {cobid} / {scope} was NOT changed — "
+            f"COB {cobid} / {scope_label(scope)} was NOT changed — "
             f"{out.get('message', 'the decision was not applied')}")
 
 
@@ -745,7 +745,7 @@ try:
         with _rc2:
             f_scope = st.multiselect(
                 "Scope", sorted(df_recent["PROCESS_TYPE"].dropna().unique().tolist()),
-                default=[], key="rc_f_scope")
+                default=[], key="rc_f_scope", format_func=scope_label)
         with _rc3:
             f_out = st.multiselect("Outcome", ["Approved", "Rejected"],
                                    default=[], key="rc_f_out")
@@ -765,7 +765,7 @@ try:
                 "Adj": str(fmt_adj_id(r.get("DIMENSION_ADJ_ID"), adj_id=r.get("ADJ_ID"))),
                 "Outcome": _txt(r.get("NEW_STATUS")).upper(),
                 "COB": _txt(r.get("COBID")),
-                "Scope": _txt(r.get("PROCESS_TYPE")),
+                "Scope": scope_label(_txt(r.get("PROCESS_TYPE"))),
                 "Type": _txt(r.get("ADJUSTMENT_TYPE")),
                 "Entity": _txt(r.get("ENTITY_CODE")),
                 "Submitted by": _txt(r.get("SUBMITTED_BY")),
@@ -779,7 +779,7 @@ try:
                 color_cols={
                     "Outcome": {"APPROVED": STATUS_COLORS.get("Approved", P["success"]),
                                 "REJECTED": STATUS_COLORS.get("Rejected", P["danger"])},
-                    "Scope": lambda v: SCOPE_CONFIG.get(str(v), {}).get("color", P["grey_700"]),
+                    "Scope": lambda v: scope_meta(str(v)).get("color", P["grey_700"]),
                 },
                 wrap_cols={"Comment": 420})
             st.caption(f"{len(_d)} decision(s), newest first.")
