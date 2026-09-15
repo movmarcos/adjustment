@@ -880,7 +880,9 @@ def _preview_payload() -> dict:
 
 
 def _fmt_money(v):
-    """Compact money formatting (K/M/B/T) so big totals fit the ticket rows."""
+    """Compact money formatting (K/M/B/T) so big totals fit the ticket rows.
+    Below 1,000 the value is shown with 2 decimals: a Stress preview of
+    4.937383 read as "5" (2026-09-15), which hides what the adjustment is."""
     try:
         if v is None or pd.isna(v):
             return "—"
@@ -891,7 +893,7 @@ def _fmt_money(v):
     for div, suf in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
         if a >= div:
             return f"{n / div:,.2f}{suf}"
-    return f"{n:,.0f}"
+    return f"{n:,.2f}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
