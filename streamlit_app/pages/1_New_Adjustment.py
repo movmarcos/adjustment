@@ -2472,7 +2472,7 @@ def _render_frtb_direct_body(scope: str) -> None:
     one adjustment (Upload action internally); rows become ADJ_LINE_ITEM_JSON
     payloads and the pipeline's per-scope writer (15_direct_frtb_upload.sql
     views) maps them into the FRTBSA_* adjustment tables."""
-    _FRTB_LABELS = {"FRTB": "SBM (FRTB)", "FRTBDRC": "DRC", "FRTBRRAO": "RRAO"}
+    _FRTB_LABELS = {"FRTB": "FRTBSBM", "FRTBDRC": "DRC", "FRTBRRAO": "RRAO"}
 
     schema = _direct_schema(scope)
     expected  = [c.get("name") for c in schema["expected"] if c.get("name")]
