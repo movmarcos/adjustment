@@ -79,7 +79,13 @@ def _payload_expr(field, ftype):
     """SQL expression to read PAYLOAD:<field> as a typed value."""
     f = field.replace('"', '')
     if ftype == "number":
-        return f'TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"{f}"))'
+        # Explicit (38, 10): TRY_TO_NUMBER's default scale is 0, which rounded
+        # every uploaded value to a whole number — Stress values such as
+        # 0.000015 became 0 and were dropped by the non-zero filter, and
+        # 4.937383 would have been stored as 5 (found 2026-09-15). 10 dp
+        # covers every scope's column scale (VaR 4, Stress/Sensitivity 6);
+        # the target column rounds to its own scale on insert.
+        return f'TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"{f}"), 38, 10)'
     return f'TO_VARCHAR(j.PAYLOAD:"{f}")'
 
 
@@ -105,9 +111,11 @@ def build_direct_extract_sql(cfg, adj_ids_str):
             mv = str(measure_value).replace("\\", "\\\\").replace("'", "''")
             sel.append(f"'{mv}' AS {name_field}")
             sel.append(f"{_payload_expr(csv_col, 'number')} AS METRIC_VALUE")
-            # METRIC_VALUE = TRY_TO_NUMBER(payload:col); rows where it is 0 or NULL
-            # are excluded (NULL <> 0 is NULL → filtered), matching the legacy
-            # writer which skipped NaN/zero measures.
+            # METRIC_VALUE = TRY_TO_NUMBER(payload:col, 38, 10); rows where it is
+            # exactly 0 or NULL are excluded (NULL <> 0 is NULL → filtered),
+            # matching the legacy writer which skipped NaN/zero measures. The
+            # comparison is exact at 10 dp: 0.000015 is kept, only a true zero
+            # goes.
             legs.append(
                 "SELECT " + ", ".join(sel) + " " + base_from +
                 f" AND {_payload_expr(csv_col, 'number')} <> 0")
