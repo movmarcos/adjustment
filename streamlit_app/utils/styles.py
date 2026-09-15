@@ -1953,10 +1953,11 @@ def wide_kwargs():
     Streamlit ≥ 1.48 (where use_container_width is deprecated and warns in
     the app), `use_container_width=True` before that.
 
-    NOT for st.plotly_chart: on 1.50 it has no `width` parameter, so a
-    `width=` kwarg falls into its deprecated Plotly-config **kwargs and shows
-    "The keyword arguments have been deprecated..." in the app. Pass
-    `use_container_width=True` to plotly_chart explicitly instead."""
+    NOT for charts. On 1.50 neither st.plotly_chart nor st.altair_chart has
+    a `width` parameter: plotly_chart swallows it into its deprecated
+    Plotly-config **kwargs (warning in the app), altair_chart raises
+    TypeError "unexpected keyword argument 'width'" (Tasks & Cost page,
+    2026-09-15). Pass `use_container_width=True` to charts explicitly."""
     return {"width": "stretch"} if _st_version() >= (1, 48) \
         else {"use_container_width": True}
 

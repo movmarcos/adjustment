@@ -249,8 +249,10 @@ else:
             y=alt.Y("Credits:Q"),
             text=alt.Text("Credits:Q", format=",.2f"),
         ))
+    # use_container_width, not wide_kwargs(): st.altair_chart on 1.50 has no
+    # width parameter (TypeError "unexpected keyword argument 'width'").
     st.altair_chart((_daily_chart + _dlbl).properties(height=300),
-                    **wide_kwargs())
+                    use_container_width=True)
 
 # ── Monthly cost — ALWAYS the last 3 months, independent of the window above.
 # Its own query (last 3 calendar months) so the daily Window selector never
@@ -311,7 +313,7 @@ else:
         ))
     st.altair_chart(
         (_bar + _lbl).properties(height=max(150, 74 * len(_last3))),
-        **wide_kwargs())
+        use_container_width=True)
 
     # Exact numbers: month × task, with a Total column.
     _piv = (_m3.pivot_table(index="Month", columns="Task", values="Cost",
