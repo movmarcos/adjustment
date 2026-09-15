@@ -258,6 +258,10 @@ if st.session_state.pop("_adj_clear_filters", False):
     st.session_state["mw_mine"] = False
     st.session_state["mw_deleted"] = False
 
+# Filter widgets carry NO explicit default/value: "Clear filters" and the
+# ?status= deep link set their values through session_state, and Streamlit
+# 1.50 shows an in-app warning for a widget that has both a default and a
+# programmatic value. The implicit defaults are the same ([] / False).
 with bordered_container():
     section_title("Filters", "search")
     f1, f2, f3, f4 = st.columns(4)
@@ -265,11 +269,11 @@ with bordered_container():
         filter_status = st.multiselect(
             "Status",
             list(STATUS_COLORS.keys()),
-            default=[], key="mw_status")
+            key="mw_status")
     with f2:
         filter_scope = st.multiselect(
             "Scope", ALL_SCOPES,
-            default=[], key="mw_scope")
+            key="mw_scope")
     with f3:
         # Option values are the raw ADJUSTMENT_TYPE codes (used directly in the SQL
         # filter); the label maps the cryptic "EROL" code to "Entity Roll".
@@ -278,25 +282,25 @@ with bordered_container():
             _type_labels[_code] = ACTION_LABELS.get(_code, _code)
         filter_type = st.multiselect(
             "Type", list(_type_labels.keys()),
-            default=[], key="mw_type",
+            key="mw_type",
             format_func=lambda v: _type_labels.get(v, v))
     with f4:
-        mine_only = st.checkbox("Only my adjustments", value=False, key="mw_mine",
+        mine_only = st.checkbox("Only my adjustments", key="mw_mine",
                                 help="When checked, shows only adjustments you submitted.")
         show_deleted = st.checkbox(
-            "Show deleted", value=False, key="mw_deleted",
+            "Show deleted", key="mw_deleted",
             help="Include deleted adjustments. Hidden by default.")
 
     f5, f6, f7, f8 = st.columns(4)
     with f5:
-        filter_cob = st.multiselect("COB", cob_opts, default=[], key="mw_cob",
+        filter_cob = st.multiselect("COB", cob_opts, key="mw_cob",
                                     format_func=lambda v: str(v))
     with f6:
-        filter_entity = st.multiselect("Entity", entity_opts, default=[], key="mw_entity")
+        filter_entity = st.multiselect("Entity", entity_opts, key="mw_entity")
     with f7:
-        filter_dept = st.multiselect("Department", dept_opts, default=[], key="mw_dept")
+        filter_dept = st.multiselect("Department", dept_opts, key="mw_dept")
     with f8:
-        filter_user = st.multiselect("User", user_opts, default=[], key="mw_user")
+        filter_user = st.multiselect("User", user_opts, key="mw_user")
 
     f9, _f10 = st.columns([2, 2])
     with f9:

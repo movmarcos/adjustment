@@ -742,13 +742,15 @@ def inject_css():
     ::-webkit-scrollbar-thumb {{ background: var(--ink-3); border-radius: 4px; }}
     ::-webkit-scrollbar-track {{ background: transparent; }}
 
-    /* Segmented pill selectors — st.pills, and horizontal st.radio fallback */
-    [data-testid="stPills"] button {{
+    /* Segmented pill selectors — st.pills (stButtonGroup on ≥1.40; stPills
+       on older runtimes), and the horizontal st.radio fallback */
+    [data-testid="stPills"] button, [data-testid="stButtonGroup"] button {{
         border-radius: 999px !important;
         font-weight: 600 !important;
         font-size: 0.82rem !important;
     }}
-    [data-testid="stPills"] button[data-testid="stBaseButton-pillsActive"] {{
+    [data-testid="stPills"] button[data-testid="stBaseButton-pillsActive"],
+    [data-testid="stButtonGroup"] button[data-testid="stBaseButton-pillsActive"] {{
         background: var(--brand) !important;
         border-color: var(--brand) !important;
         color: #fff !important;
@@ -768,8 +770,11 @@ def inject_css():
     }}
     .stRadio [role="radiogroup"] label:has(input:checked) p {{ color: var(--brand) !important; font-weight: 700; }}
 
-    /* Bordered containers as section cards (New Adjustment) */
-    [data-testid="stVerticalBlockBorderWrapper"] {{
+    /* Bordered containers as section cards (New Adjustment).
+       ≤1.49: the wrapper test-id. 1.50+: the container itself, found by the
+       st-key-card<n> class that bordered_container() assigns. */
+    [data-testid="stVerticalBlockBorderWrapper"],
+    [data-testid="stVerticalBlock"][class*="st-key-card"] {{
         background: var(--card);
         border: 1px solid var(--border) !important;
         border-radius: var(--r-lg) !important;
@@ -778,6 +783,9 @@ def inject_css():
     }}
     [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] {{
         padding: 0.35rem 0.4rem;
+    }}
+    [data-testid="stVerticalBlock"][class*="st-key-card"] {{
+        padding: 0.8rem 0.9rem 0.9rem !important;
     }}
 
     /* Numbered section headers */
@@ -1271,7 +1279,8 @@ def inject_css():
         background-color: {P["grey_100"]} !important;
     }}
     [data-testid="stExpander"] summary svg {{ fill: var(--ink-2) !important; }}
-    [data-testid="stVerticalBlockBorderWrapper"] {{
+    [data-testid="stVerticalBlockBorderWrapper"],
+    [data-testid="stVerticalBlock"][class*="st-key-card"] {{
         border-color: var(--border) !important;
         background-color: var(--card) !important;
     }}
@@ -1433,6 +1442,7 @@ def inject_css():
 
     </style>
     """, unsafe_allow_html=True)
+    st.session_state["_card_seq"] = 0     # bordered_container() keys restart per run
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2061,6 +2071,19 @@ def bordered_container():
     without :has() (pre-Chrome 105) just see a plain container.
     Catches broadly on purpose — some runtimes surface the unknown-kwarg as
     a StreamlitAPIException rather than a TypeError."""
+    # Streamlit 1.50 dropped the stVerticalBlockBorderWrapper test-id that the
+    # section-card CSS targeted; a bordered container is now a plain
+    # stVerticalBlock whose border is an emotion style, so it cannot be
+    # selected by test-id. Give every card a key → Streamlit adds the class
+    # st-key-card<n>, and the CSS paints [class*="st-key-card"] as a card.
+    # The per-session counter restarts in inject_css() (called first on every
+    # page), so keys are unique per run and stable across reruns.
+    n = st.session_state.get("_card_seq", 0) + 1
+    st.session_state["_card_seq"] = n
+    try:
+        return st.container(border=True, key=f"card{n}")
+    except Exception:
+        pass
     try:
         return st.container(border=True)
     except Exception:
