@@ -1349,6 +1349,13 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 col('COBID') != col('SOURCE_COBID')
             ).count() > 0
 
+            # Transfer Book rows (SOURCE_BOOK_CODE set): same COB, book swapped.
+            # They use the adjusted view like a cross-COB Roll (leg ②T) and the
+            # flatten leg ③ on the TARGET book; never leg ①.
+            has_transfer = df_adj_scale.filter(
+                col('SOURCE_BOOK_CODE').isNotNull()
+            ).count() > 0
+
             # Store RUN_LOG_ID in ADJ_HEADER for traceability
             session.sql(f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER
@@ -1727,31 +1734,35 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             # position → adjusted(target) = factor × adjusted(source) − original(target),
             # carrying every source position forward (source-only nets to Σsource).
             roll_leg = ""
-            if has_cross_cob and (not fact_adjusted_tbl_name
-                                  or fact_adjusted_tbl_name == fact_tbl_name):
-                # Without a distinct combined/adjusted view the roll leg cannot
-                # be built — processing would silently degrade to leg ③ alone
-                # and WIPE the target COB instead of rolling the source
-                # forward. Fail loudly instead (mirrors the EntityRoll guard).
+            transfer_leg = ""
+            # Both the cross-COB Roll leg ② and the Transfer Book leg ②T read
+            # the adjusted (combined) view. Without a distinct view neither leg
+            # can be built — processing would silently degrade to leg ③ alone
+            # and WIPE the target COB / target book instead of replacing it.
+            # Fail loudly instead (mirrors the EntityRoll guard).
+            needs_adjusted_view = has_cross_cob or has_transfer
+            if needs_adjusted_view and (not fact_adjusted_tbl_name
+                                        or fact_adjusted_tbl_name == fact_tbl_name):
                 raise Exception(
-                    f"Cross-COB Roll for {process_type} requires "
-                    f"FACT_ADJUSTED_TABLE to be configured in "
-                    f"ADJUSTMENTS_SETTINGS (distinct from FACT_TABLE). "
-                    f"Refusing to process — without the adjusted view the "
-                    f"roll would flatten the target COB instead of carrying "
-                    f"the source COB forward.")
-            if has_cross_cob and fact_adjusted_tbl_name and fact_adjusted_tbl_name != fact_tbl_name:
-                # The combined view may not expose every column the _ADJUSTMENT
-                # table expects. Select the columns it HAS and default the rest to
-                # -1 (KEY/ID) or NULL, so the UNION column list stays aligned.
+                    f"Cross-COB Roll / Transfer Book for {process_type} requires "
+                    f"FACT_ADJUSTED_TABLE to be configured in ADJUSTMENTS_SETTINGS "
+                    f"(distinct from FACT_TABLE). Refusing to process — without the "
+                    f"adjusted view the target would be flattened instead of replaced.")
+
+            # The combined view may not expose every column the _ADJUSTMENT
+            # table expects. Select the columns it HAS and default the rest to
+            # -1 (KEY/ID) or NULL, so the UNION column list stays aligned.
+            _view_cols = set()
+            if needs_adjusted_view:
                 try:
                     _view_cols = set(session.table(fact_adjusted_tbl_name).columns)
                 except Exception:
                     _view_cols = set()
 
-                def _adj_default(c):
-                    return "-1" if c.split('_')[-1].upper() in ('KEY', 'ID') else "NULL"
+            def _adj_default(c):
+                return "-1" if c.split('_')[-1].upper() in ('KEY', 'ID') else "NULL"
 
+            if has_cross_cob:
                 select_non_metric_adj = ', '.join(
                     (f"fact.{c}" if c in _view_cols else f"{_adj_default(c)} AS {c}")
                     for c in fact_non_metric_matched
@@ -1767,7 +1778,68 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 {select_scale_adj} {from_where_adj}
                 AND fact.COBID = adjust.SOURCE_COBID
                 AND adjust.COBID <> adjust.SOURCE_COBID
+                AND adjust.SOURCE_BOOK_CODE IS NULL
                 {join_cond}"""
+
+            if has_transfer:
+                # ②T Transfer Book — the SOURCE book's adjusted rows at the COB,
+                # RE-KEYED to the target book INSIDE the select: the surrogate
+                # key (fact_key) is built from these columns, so leg ③'s
+                # flattened target rows and these rows share a key per position
+                # and `netted` cancels them → combined(target) = adjusted(source).
+                # Only the source book + optional trade code filter the source
+                # (the header's ENTITY/BOOK/DEPT describe the TARGET), so this
+                # leg uses neither from_where nor join_cond.
+                # TRADE_KEY: the same trade code's version under the target
+                # book at the COB (tt), else the target book's
+                # '<BOOK>/Adjustment' trade (ta), else the source key.
+                def _transfer_col(c):
+                    cu = c.upper()
+                    if cu == "BOOK_KEY":        return "tb.BOOK_KEY AS BOOK_KEY"
+                    if cu == "BOOK_CODE":       return "adjust.BOOK_CODE AS BOOK_CODE"
+                    if cu == "DEPARTMENT_CODE": return "tb.DEPARTMENT_CODE AS DEPARTMENT_CODE"
+                    if cu == "ENTITY_KEY":      return "te.ENTITY_KEY AS ENTITY_KEY"
+                    if cu == "ENTITY_CODE":     return "tb.ENTITY_CODE AS ENTITY_CODE"
+                    if cu == "TRADE_KEY":
+                        return "COALESCE(tt.TRADE_KEY, ta.TRADE_KEY, fact.TRADE_KEY) AS TRADE_KEY"
+                    return f"fact.{c}" if c in _view_cols else f"{_adj_default(c)} AS {c}"
+                select_non_metric_trf = ', '.join(_transfer_col(c) for c in fact_non_metric_matched)
+                _cob_date = f"TO_DATE('{int(cobid)}', 'YYYYMMDD')"
+                transfer_leg = f"""
+                UNION ALL
+                -- ②T Transfer Book: source book's ADJUSTED rows at the COB, re-keyed to the target book
+                SELECT adjust.COBID, adjust.DIMENSION_ADJ_ID AS ADJUSTMENT_ID,
+                       adjust.CREATED_DATE AS ADJUSTMENT_CREATED_TIMESTAMP,
+                       {select_non_metric_trf}, {select_measure}
+                FROM {fact_adjusted_tbl_name} fact
+                INNER JOIN {adj_base_tbl_name} adjust
+                    ON  adjust.COBID = {cobid}
+                    AND adjust.ADJ_ID IN ({adj_ids_str})
+                    AND adjust.IS_DELETED = FALSE
+                    AND adjust.RUN_STATUS = 'Running'
+                    AND adjust.SOURCE_BOOK_CODE IS NOT NULL
+                    AND fact.COBID = adjust.SOURCE_COBID
+                LEFT JOIN DIMENSION.BOOK tb
+                    ON  UPPER(tb.BOOK_CODE) = UPPER(adjust.BOOK_CODE)
+                    AND tb.IS_CURRENT_ROW = TRUE
+                LEFT JOIN DIMENSION.ENTITY te
+                    ON  UPPER(te.ENTITY_CODE) = UPPER(tb.ENTITY_CODE)
+                LEFT JOIN DIMENSION.TRADE st
+                    ON  st.TRADE_KEY = COALESCE(fact.TRADE_KEY, -1)
+                LEFT JOIN DIMENSION.TRADE tt
+                    ON  UPPER(tt.TRADE_CODE) = UPPER(st.TRADE_CODE)
+                    AND UPPER(tt.BOOK_CODE)  = UPPER(adjust.BOOK_CODE)
+                    AND {_cob_date} BETWEEN tt.EFFECTIVE_START_DATE AND tt.EFFECTIVE_END_DATE
+                LEFT JOIN DIMENSION.TRADE ta
+                    ON  UPPER(ta.TRADE_CODE) = UPPER(adjust.BOOK_CODE || '/Adjustment')
+                    AND UPPER(ta.BOOK_CODE)  = UPPER(adjust.BOOK_CODE)
+                    AND {_cob_date} BETWEEN ta.EFFECTIVE_START_DATE AND ta.EFFECTIVE_END_DATE
+                WHERE fact.{metric_usd_name} IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM DIMENSION.BOOK sb
+                              WHERE sb.BOOK_KEY = COALESCE(fact.BOOK_KEY, -1)
+                                AND UPPER(sb.BOOK_CODE) = UPPER(adjust.SOURCE_BOOK_CODE))
+                  AND (adjust.TRADE_CODE IS NULL
+                       OR UPPER(st.TRADE_CODE) = UPPER(adjust.TRADE_CODE))"""
 
             # Build the key expression
             select_with_keys = "*" if key_name == pk_expr else f"{pk_expr}, *"
@@ -1795,12 +1867,13 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 {select_scale} {from_where}
                 AND fact.COBID = adjust.SOURCE_COBID
                 AND adjust.COBID = adjust.SOURCE_COBID
-                {join_cond}{roll_leg}
+                AND adjust.SOURCE_BOOK_CODE IS NULL
+                {join_cond}{roll_leg}{transfer_leg}
                 UNION ALL
-                -- ③ Flatten current COB (offsets existing values at target COB for cross-COB roll)
+                -- ③ Flatten current COB (offsets existing values at target COB for cross-COB roll, or in the TARGET book for a transfer)
                 {select_flatten} {from_where}
                 AND fact.COBID = adjust.COBID
-                AND adjust.COBID <> adjust.SOURCE_COBID
+                AND (adjust.COBID <> adjust.SOURCE_COBID OR adjust.SOURCE_BOOK_CODE IS NOT NULL)
                 {join_cond}
             ),
             fact_key AS (
@@ -1927,6 +2000,8 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             # runs the whole multi-dimension join plan. Skip it entirely when the
             # batch has no cross-COB Roll; earlier Rolls were already SCD2-fixed
             # when they were processed.
+            # Transfer rows are re-keyed inside leg ②T and are same-COB, so
+            # adj_cte (COBID <> SOURCE_COBID) already excludes them.
             if has_cross_cob:
                 _erlog(session, _sqlog, "scd2_key_fix", scd2_update)
 
