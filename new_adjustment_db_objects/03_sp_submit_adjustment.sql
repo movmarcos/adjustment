@@ -41,6 +41,7 @@ ACTION_MAP = {
     "flatten":      "Scale",
     "scale":        "Scale",
     "roll":         "Scale",
+    "transfer":     "Scale",
     "erol":         "EntityRoll",
     "entity_roll":  "EntityRoll",   # legacy alias (pre-EROL rename)
     "upload":       "Upload",
@@ -125,6 +126,8 @@ def compute_scale_factor_adjusted(adj_type, scale_factor, cobid, source_cobid):
     t = adj_type.lower()
     if t == "flatten":
         return -1.0
+    elif t == "transfer":
+        return float(scale_factor)               # book swap: full factor (1.0), never sf-1
     elif t in ("scale", "roll"):
         if source_cobid and int(source_cobid) != int(cobid):
             return float(scale_factor)           # cross-COB → full factor
@@ -241,7 +244,7 @@ def main(session, p_adjustment):
     Expected JSON keys (all optional except marked required):
       cobid              (required)  int     COB date as YYYYMMDD
       process_type       (required)  str     VaR | Stress | FRTB | FRTBDRC | FRTBRRAO | Sensitivity | ES
-      adjustment_type    (required)  str     Flatten | Scale | Roll | Upload | Direct | EROL
+      adjustment_type    (required)  str     Flatten | Scale | Roll | Transfer | Upload | Direct | EROL
       username           (required)  str     Streamlit user
       source_cobid                   int     Defaults to cobid
       scale_factor                   float   Defaults to 1.0
@@ -333,6 +336,49 @@ def main(session, p_adjustment):
                                 f"source_cobid {source_cobid} must equal cobid "
                                 f"{cobid}. Use Roll to carry another COB's "
                                 f"values forward.")}
+
+        # ── Transfer Book: source book → target book at ONE COB ──────────
+        # BOOK_CODE is the TARGET (the scope being replaced — like Roll's
+        # filters describe the target COB); SOURCE_BOOK_CODE is where the
+        # values come from. The entity is DERIVED from the target book so the
+        # sign-off check, overlap check and every grid work unchanged.
+        if adjustment_type.lower() == "transfer":
+            src_book = str(adj.get("source_book_code") or "").strip()
+            tgt_book = str(adj.get("book_code") or "").strip()
+            if not src_book or not tgt_book:
+                return {"adj_id": None, "status": "Error",
+                        "message": "Transfer Book needs both a source book and a target book."}
+            if src_book.upper() == tgt_book.upper():
+                return {"adj_id": None, "status": "Error",
+                        "message": "Source and target book must differ."}
+            if source_cobid is not None and int(source_cobid) != int(cobid):
+                return {"adj_id": None, "status": "Error",
+                        "message": "Transfer Book applies within one COB: source_cobid must equal cobid."}
+            def _book_entity(code):
+                r = session.sql(f"""
+                    SELECT MAX(ENTITY_CODE) AS E, COUNT(*) AS N FROM DIMENSION.BOOK
+                    WHERE UPPER(BOOK_CODE) = UPPER('{_esc(code)}') AND IS_CURRENT_ROW = TRUE
+                """).collect()
+                return (r[0]["E"], int(r[0]["N"])) if r else (None, 0)
+            src_ent, src_n = _book_entity(src_book)
+            tgt_ent, tgt_n = _book_entity(tgt_book)
+            if src_n == 0:
+                return {"adj_id": None, "status": "Error",
+                        "message": f"Source book '{src_book}' is not a current book in DIMENSION.BOOK."}
+            if tgt_n == 0:
+                return {"adj_id": None, "status": "Error",
+                        "message": f"Target book '{tgt_book}' is not a current book in DIMENSION.BOOK."}
+            adj["entity_code"] = tgt_ent
+            adj["book_code"] = tgt_book
+            adj["source_book_code"] = src_book
+            for _k in ("department_code", "source_system_code", "currency_code", "trade_typology",
+                       "strategy", "instrument_code", "simulation_name", "simulation_source",
+                       "measure_type_code", "trader_code", "guaranteed_entity", "region_key",
+                       "scenario_date_id", "tenor_code", "underlying_tenor_code", "curve_code",
+                       "product_category_attributes", "var_component_name",
+                       "var_sub_component_name", "day_type"):
+                adj.pop(_k, None)          # a transfer carries no other filters
+            source_cobid = cobid
 
         occurrence  = adj.get("adjustment_occurrence", "ADHOC").upper()
 
@@ -577,6 +623,7 @@ def main(session, p_adjustment):
             "SOURCE_SYSTEM_CODE":          adj.get("source_system_code"),
             "DEPARTMENT_CODE":             adj.get("department_code"),
             "BOOK_CODE":                   adj.get("book_code"),
+            "SOURCE_BOOK_CODE":            adj.get("source_book_code"),
             "CURRENCY_CODE":               adj.get("currency_code"),
             "TRADE_TYPOLOGY":              adj.get("trade_typology"),
             "TRADE_CODE":                  adj.get("trade_code"),
