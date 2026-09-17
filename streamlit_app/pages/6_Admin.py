@@ -1026,6 +1026,98 @@ with tab_notify:
         st.info(f"Notification log not available: {ex}")
 
 
+    # ── AI Assistant (Documentation page) ────────────────────────────────────
+    section_title("AI Assistant (Documentation page)", "zap")
+    st.markdown(
+        f'<div style="background:{P["info_lt"]};border:1px solid #90CAF9;border-radius:8px;'
+        f'padding:0.7rem 1rem;margin-bottom:1rem;font-size:0.85rem">'
+        f'The assistant runs on <strong>Snowflake Cortex</strong> inside this '
+        f'account. It uses the <strong>quick model</strong> by default and the '
+        f'<strong>larger model</strong> when a user ticks "Think harder". Model '
+        f'availability depends on the account region — use <em>Test models</em> '
+        f'after changing a name. If a model is not served in this region, ask the '
+        f'DBA to enable cross-region inference '
+        f'(<code>CORTEX_ENABLED_CROSS_REGION</code>) or pick one that is.'
+        f'</div>',
+        unsafe_allow_html=True)
+    try:
+        _ai_rows = run_query("""
+            SELECT CONFIG_KEY, CONFIG_VALUE FROM ADJUSTMENT_APP.ADJ_APP_CONFIG
+            WHERE CONFIG_KEY IN ('AI_ASSISTANT_ENABLED', 'AI_ASSISTANT_MODEL',
+                                 'AI_ASSISTANT_SMART_MODEL')
+        """)
+        _ai = {str(r["CONFIG_KEY"]): str(r["CONFIG_VALUE"] or "")
+               for r in (_ai_rows or [])}
+    except Exception as ex:
+        _ai = {}
+        st.warning(f"Could not read AI assistant config: {ex}")
+
+    ai1, ai2, ai3 = st.columns([1, 2, 2])
+    with ai1:
+        ai_enabled = st.checkbox(
+            "Assistant enabled", key="ai_cfg_enabled",
+            value=_ai.get("AI_ASSISTANT_ENABLED", "true").strip().lower() == "true")
+    with ai2:
+        ai_quick = st.text_input(
+            "Quick model (default)", key="ai_cfg_quick",
+            value=_ai.get("AI_ASSISTANT_MODEL", "llama3.1-70b"),
+            help="Cortex model for everyday questions, e.g. llama3.1-70b, "
+                 "llama3.3-70b, mistral-large2, claude-haiku-4-5.")
+    with ai3:
+        ai_smart = st.text_input(
+            "Larger model (\"Think harder\")", key="ai_cfg_smart",
+            value=_ai.get("AI_ASSISTANT_SMART_MODEL", "claude-sonnet-4-6"),
+            help="Cortex model for tricky questions, e.g. claude-sonnet-4-6, "
+                 "claude-opus-4-7, openai-gpt-5.")
+    ab1, ab2, _ = st.columns([1, 1, 3])
+    with ab1:
+        if st.button("Save AI settings", key="ai_cfg_save", type="primary",
+                     **wide_kwargs()):
+            try:
+                for key, val in (("AI_ASSISTANT_ENABLED",
+                                  "true" if ai_enabled else "false"),
+                                 ("AI_ASSISTANT_MODEL", ai_quick.strip()),
+                                 ("AI_ASSISTANT_SMART_MODEL", ai_smart.strip())):
+                    run_query(f"""
+                        MERGE INTO ADJUSTMENT_APP.ADJ_APP_CONFIG t
+                        USING (SELECT '{_esc(key)}' AS CONFIG_KEY,
+                                      '{_esc(val)}' AS CONFIG_VALUE) s
+                        ON t.CONFIG_KEY = s.CONFIG_KEY
+                        WHEN MATCHED THEN UPDATE SET
+                            CONFIG_VALUE = s.CONFIG_VALUE,
+                            UPDATED_BY = '{_esc(user)}',
+                            UPDATED_AT = CURRENT_TIMESTAMP()
+                        WHEN NOT MATCHED THEN INSERT (CONFIG_KEY, CONFIG_VALUE,
+                            DESCRIPTION, UPDATED_BY, UPDATED_AT)
+                        VALUES (s.CONFIG_KEY, s.CONFIG_VALUE,
+                            'Set from Admin (AI Assistant settings).',
+                            '{_esc(user)}', CURRENT_TIMESTAMP())
+                    """)
+                set_flash("admin", "success", "AI assistant settings saved.")
+                safe_rerun()
+            except Exception as ex:
+                st.error(f"Failed to save AI settings: {ex}")
+    with ab2:
+        if st.button("Test models", key="ai_cfg_test", **wide_kwargs(),
+                     help="Sends a one-word prompt to each model and reports "
+                          "whether Cortex served it from this account."):
+            for label, mdl in (("Quick", ai_quick.strip()),
+                               ("Larger", ai_smart.strip())):
+                if not mdl:
+                    st.warning(f"{label} model: no name set.")
+                    continue
+                try:
+                    with st.spinner(f"Testing {mdl}…"):
+                        _r = run_query(
+                            f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{_esc(mdl)}', "
+                            f"'Reply with the single word OK.') AS A")
+                    _a = str(_r[0][0]).strip() if _r and _r[0][0] is not None else ""
+                    st.success(f"{label} model {mdl}: available "
+                               f"(replied: {_a[:40] or '—'})")
+                except Exception as ex:
+                    st.error(f"{label} model {mdl}: NOT available — {ex}")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 5 — SCHEMA REFERENCE
 # ══════════════════════════════════════════════════════════════════════════════

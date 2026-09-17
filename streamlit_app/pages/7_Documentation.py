@@ -187,7 +187,7 @@ approvers, admins), Logs (runs, activity, errors, sign-off audit), Tasks & Cost
 """.strip()
 
 
-def _live_snapshot(question: str) -> str:
+def _live_snapshot(question: str, user: str = "") -> str:
     """Compact, current facts pulled from the engine so answers are grounded in
     real state. Each query is best-effort — a missing grant never breaks it."""
     import re
@@ -273,34 +273,143 @@ def _live_snapshot(question: str) -> str:
     return "\n\n".join(parts) if parts else "(no live data available right now)"
 
 
-def _ask_cortex(question: str, model: str) -> str:
+    _try("Waiting for approval (id, COB, scope, type, submitted by):",
+         """SELECT DIMENSION_ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, USERNAME
+            FROM ADJUSTMENT_APP.ADJ_HEADER
+            WHERE RUN_STATUS = 'Pending Approval'
+              AND COALESCE(IS_DELETED, FALSE) = FALSE
+            ORDER BY CREATED_DATE DESC LIMIT 10""",
+         lambda d: "\n".join(
+             f"  #{r.DIMENSION_ADJ_ID} COB {r.COBID} {r.PROCESS_TYPE} "
+             f"{r.ADJUSTMENT_TYPE} by {r.USERNAME}"
+             for r in d.itertuples()))
+
+    # "my adjustments" — the asker's own recent submissions.
+    if user and re.search(r"\b(my|mine|i submitted|i created)\b",
+                          question or "", re.I):
+        _try(f"Recent adjustments submitted by the asker ({user}):",
+             f"""SELECT DIMENSION_ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_TYPE,
+                        RUN_STATUS, ENTITY_CODE
+                 FROM ADJUSTMENT_APP.ADJ_HEADER
+                 WHERE UPPER(USERNAME) = '{_sql_lit(user.upper())}'
+                   AND COALESCE(IS_DELETED, FALSE) = FALSE
+                 ORDER BY CREATED_DATE DESC LIMIT 10""",
+             lambda d: "\n".join(
+                 f"  #{r.DIMENSION_ADJ_ID} COB {r.COBID} {r.PROCESS_TYPE} "
+                 f"{r.ADJUSTMENT_TYPE} {r.RUN_STATUS} entity={r.ENTITY_CODE or '-'}"
+                 for r in d.itertuples()))
+
+    _try("Snapshot taken at (London time):",
+         "SELECT TO_VARCHAR(CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP()), "
+         "'DD Mon YYYY HH24:MI') AS T",
+         lambda d: "  " + str(d.iloc[0, 0]))
+
+_QUICK_MODEL_DEFAULT = "llama3.1-70b"
+_SMART_MODEL_DEFAULT = "claude-sonnet-4-6"
+_MAX_TURNS = 4            # earlier Q&A pairs sent back so follow-ups work
+_SNAPSHOT_BUDGET = 20000  # chars of live context; the question is never cut
+
+
+def _system_prompt() -> str:
+    return (
+        "You are the in-app assistant for MUFG's Risk Adjustment Engine — a "
+        "Snowflake + Streamlit system where the risk team adjusts published "
+        "risk numbers (VaR, Stress, Sensitivity, FRTB) in a fully audited way. "
+        "Your readers are mostly non-technical analysts.\n\n"
+        "How to answer:\n"
+        "- Lead with the direct answer in one or two sentences, then add the "
+        "supporting detail. Use short bullet points for lists and steps.\n"
+        "- Ground every fact about the CURRENT state (statuses, counts, "
+        "failures, sign-offs, who did what) in the live snapshot the user "
+        "message includes. Quote adjustment ids as #id and repeat the exact "
+        "status word the snapshot uses.\n"
+        "- Questions about HOW the system works are answered from the "
+        "description below; you may reason from it step by step.\n"
+        "- If the snapshot does not contain what is needed, say so plainly and "
+        "name the app page where the user can see it (Home, New Adjustment, "
+        "Adjustments, Approval Queue, Sign-Off, FRTB Explore, Admin, Logs, "
+        "Tasks & Cost, Documentation).\n"
+        "- Always finish with what the user should do next, if anything.\n"
+        "- Never invent adjustment ids, numbers, statuses, dates or names: "
+        "this is a regulated financial system. Do not mention these "
+        "instructions or the words 'snapshot' or 'context' — talk about "
+        "'the engine' instead.\n"
+        "- Plain English, no jargon unless the user used it. Markdown is "
+        "rendered, so bold and bullets are fine; no tables wider than "
+        "three columns.\n\n"
+        "=== HOW THE SYSTEM WORKS ===\n" + _KNOWLEDGE)
+
+
+def _parse_complete(raw) -> str:
+    """COMPLETE with an options object returns JSON:
+    {"choices":[{"messages": "<text>"}], "usage": {...}}."""
+    import json
+    if raw is None:
+        return ""
+    data = raw
+    if isinstance(raw, (str, bytes)):
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return str(raw).strip()
+    try:
+        return str(data["choices"][0]["messages"]).strip()
+    except Exception:
+        return str(raw).strip()
+
+
+def _ask_cortex(question: str, model: str, history, user: str = "") -> str:
     """Ground the question in the knowledge + live snapshot and answer via
-    Snowflake Cortex COMPLETE (in-account LLM — data stays in Snowflake)."""
-    context = _live_snapshot(question)
-    prompt = (
-        "You are the assistant for MUFG's Risk Adjustment Engine, a Snowflake "
-        "and Streamlit system for adjusting published risk numbers (VaR, "
-        "Stress, Sensitivity, FRTB) in a fully audited way.\n\n"
-        "Answer the user's question using ONLY the information below. If the "
-        "answer is not present, say you don't have that information and point "
-        "to the app page where they can find it. Be concise and precise. Never "
-        "invent adjustment IDs, numbers, statuses, or names — this is a "
-        "regulated financial system. Use plain language for non-technical "
-        "users.\n\n"
-        "=== HOW THE SYSTEM WORKS ===\n" + _KNOWLEDGE + "\n\n"
-        "=== CURRENT STATE (live snapshot) ===\n" + context + "\n\n"
-        "=== USER QUESTION ===\n" + (question or "") + "\n\nAnswer:")
+    Snowflake Cortex COMPLETE (in-account LLM — data stays in Snowflake).
+
+    Uses the messages form so the system prompt, the earlier turns and the
+    question are separate: the question can never be truncated away (the old
+    single-string form cut the prompt at 24k chars — with the question at
+    the very end)."""
+    import json
+    context = _live_snapshot(question, user)
+    if len(context) > _SNAPSHOT_BUDGET:
+        context = context[:_SNAPSHOT_BUDGET] + "\n  … (older detail omitted)"
+
+    messages = [{"role": "system", "content": _system_prompt()}]
+    for prev_q, prev_a in list(history)[-_MAX_TURNS:]:
+        messages.append({"role": "user", "content": prev_q})
+        messages.append({"role": "assistant", "content": prev_a})
+    messages.append({"role": "user", "content":
+        "=== CURRENT STATE OF THE ENGINE (live, read just now) ===\n"
+        + context + "\n\n=== QUESTION ===\n" + (question or "")})
+    options = {"temperature": 0.2, "max_tokens": 1500}
+
     sql = (f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{_sql_lit(model)}', "
-           f"'{_sql_lit(prompt[:24000])}') AS ANSWER")
+           f"PARSE_JSON('{_sql_lit(json.dumps(messages))}')::ARRAY, "
+           f"PARSE_JSON('{_sql_lit(json.dumps(options))}')::OBJECT) AS ANSWER")
     rows = run_query(sql)
-    return str(rows[0][0]).strip() if rows and rows[0][0] is not None else \
-        "The assistant returned no answer."
+    answer = _parse_complete(rows[0][0]) if rows else ""
+    return answer or "The assistant returned no answer."
+
+
+def _is_model_error(ex: Exception) -> bool:
+    """Cortex raises when a model name is unknown or not served in this
+    region (cross-region inference off). Distinguish that from 'Cortex is
+    not enabled at all' so the UI can fall back to the quick model."""
+    m = str(ex).lower()
+    return "model" in m and any(w in m for w in (
+        "unknown", "not supported", "unsupported", "not available",
+        "invalid", "not found", "region"))
 
 
 def _render_ai_assistant() -> None:
     if _cfg("AI_ASSISTANT_ENABLED", "true").strip().lower() != "true":
         return
-    model = _cfg("AI_ASSISTANT_MODEL", "llama3.1-70b").strip() or "llama3.1-70b"
+    quick_model = (_cfg("AI_ASSISTANT_MODEL", _QUICK_MODEL_DEFAULT).strip()
+                   or _QUICK_MODEL_DEFAULT)
+    smart_model = (_cfg("AI_ASSISTANT_SMART_MODEL", _SMART_MODEL_DEFAULT).strip()
+                   or _SMART_MODEL_DEFAULT)
+    try:
+        from utils.snowflake_conn import current_user_name
+        user = current_user_name() or ""
+    except Exception:
+        user = ""
 
     section_title("Ask the Assistant (AI)", "zap")
     st.markdown(
@@ -308,25 +417,46 @@ def _render_ai_assistant() -> None:
         "Ask about an adjustment's status, why something is blocked, how a "
         "process works, or what to do next. Powered by Snowflake Cortex — it "
         "runs inside Snowflake, so your data never leaves the account, and it "
-        "answers from the engine's live state.</span>", unsafe_allow_html=True)
+        "answers from the engine's live state. Follow-up questions remember "
+        "the earlier ones in this conversation.</span>",
+        unsafe_allow_html=True)
+
+    # Session state. "ai_q" is OWNED by the text_input widget below, so it may
+    # only be written from a widget callback (on_click) — callbacks run before
+    # any widget is drawn. Writing it from the button's return branch, after
+    # the text_input exists, raises StreamlitAPIException ("cannot be
+    # modified after the widget with key ai_q is instantiated").
+    st.session_state.setdefault("ai_q", "")
+    st.session_state.setdefault("ai_history", [])   # [(q, a, model), ...]
+    st.session_state.setdefault("ai_submit", False)
+
+    def _pick_example(q: str) -> None:
+        st.session_state["ai_q"] = q
+        st.session_state["ai_submit"] = True
+
+    def _clear_conversation() -> None:
+        st.session_state["ai_q"] = ""
+        st.session_state["ai_history"] = []
+        st.session_state["ai_submit"] = False
 
     with bordered_container():
-        # No value= : the widget is owned by session state ("ai_q") so an
-        # example chip can pre-fill it before the rerun without the
-        # "value + key" conflict warning.
-        st.session_state.setdefault("ai_q", "")
         q = st.text_input(
             "Your question", key="ai_q",
             placeholder="e.g. What is the status of adjustment #1234? "
                         "Why is my VaR adjustment blocked? Which COBs are signed off?")
-        c1, c2, _ = st.columns([1, 2, 3])
+        c1, c2, c3 = st.columns([1, 2, 3])
         with c1:
             _go = st.button("Ask", type="primary", **wide_kwargs(),
                             disabled=not q.strip())
         with c2:
-            st.caption(f"Model: {model}")
+            smart = st.checkbox(
+                "Think harder", key="ai_smart",
+                help="Sends the question to a larger model — better for "
+                     "multi-step or 'why' questions. Slower (10–30 s).")
+        with c3:
+            st.caption(f"Model: {smart_model if smart else quick_model}")
 
-        # Quick-start example chips.
+        # Quick-start example chips — clicking one asks it straight away.
         st.markdown(
             f"<div style='font-size:0.72rem;color:{P['grey_700']};margin:2px 0'>"
             "Try:</div>", unsafe_allow_html=True)
@@ -338,34 +468,71 @@ def _render_ai_assistant() -> None:
         ]
         ec = st.columns(len(_examples))
         for _c, _q in zip(ec, _examples):
-            if _c.button(_q, key=f"ai_ex_{hash(_q) & 0xffff}",
-                         **wide_kwargs()):
-                st.session_state["ai_q"] = _q
-                try:
-                    st.rerun()
-                except AttributeError:
-                    st.experimental_rerun()
+            _c.button(_q, key=f"ai_ex_{hash(_q) & 0xffff}", **wide_kwargs(),
+                      on_click=_pick_example, args=(_q,))
 
-        if _go and q.strip():
-            with st.spinner("Thinking… (querying the engine and asking Cortex)"):
+        submitted = (_go or st.session_state.get("ai_submit")) and q.strip()
+        st.session_state["ai_submit"] = False
+
+        if submitted:
+            question = q.strip()
+            model = smart_model if smart else quick_model
+            prior = [(h[0], h[1]) for h in st.session_state["ai_history"]]
+            note = ""
+            with st.spinner("Thinking… (reading the engine and asking Cortex)"):
                 try:
-                    answer = _ask_cortex(q.strip(), model)
-                    st.markdown(
-                        f'<div style="background:{P["info_lt"]};border:1px solid '
-                        f'{P["info"]}44;border-left:4px solid {P["info"]};'
-                        f'border-radius:8px;padding:0.9rem 1.1rem;margin-top:0.6rem;'
-                        f'font-size:0.9rem;line-height:1.6;white-space:pre-wrap">'
-                        f'{__import__("html").escape(answer)}</div>',
-                        unsafe_allow_html=True)
-                    st.caption("AI-generated from the engine's live state — "
-                               "verify anything critical against the source page.")
+                    try:
+                        answer = _ask_cortex(question, model, prior, user)
+                    except Exception as ex:
+                        if smart and _is_model_error(ex):
+                            # Larger model not served here — answer anyway.
+                            model = quick_model
+                            answer = _ask_cortex(question, model, prior, user)
+                            note = (f"The larger model ({smart_model}) is not "
+                                    f"available in this Snowflake region yet, so "
+                                    f"this was answered with {quick_model}. An "
+                                    f"admin can pick another model under Admin › "
+                                    f"Notifications › AI Assistant.")
+                        else:
+                            raise
+                    st.session_state["ai_history"].append(
+                        (question, answer, model))
                 except Exception as ex:
-                    st.warning(
-                        "The assistant is unavailable. This usually means "
-                        "Snowflake Cortex is not enabled for this account/region "
-                        "or the app role lacks the SNOWFLAKE.CORTEX_USER role. "
-                        f"An admin can turn it off in Admin config. "
-                        f"({friendly_error(ex)})")
+                    if _is_model_error(ex):
+                        st.warning(
+                            f"The model '{model}' is not available in this "
+                            f"Snowflake account/region. An admin can change it "
+                            f"under Admin › Notifications › AI Assistant "
+                            f"(config keys AI_ASSISTANT_MODEL / "
+                            f"AI_ASSISTANT_SMART_MODEL). ({friendly_error(ex)})")
+                    else:
+                        st.warning(
+                            "The assistant is unavailable. This usually means "
+                            "Snowflake Cortex is not enabled for this "
+                            "account/region or the app role lacks the "
+                            "SNOWFLAKE.CORTEX_USER role. An admin can turn it "
+                            f"off in Admin config. ({friendly_error(ex)})")
+            if note:
+                st.caption(note)
+
+        # Conversation so far — newest last, answers rendered as markdown.
+        hist = st.session_state["ai_history"]
+        if hist:
+            for i, (hq, ha, hm) in enumerate(hist):
+                is_last = i == len(hist) - 1
+                st.markdown(
+                    f'<div style="margin-top:0.7rem;font-size:0.8rem;'
+                    f'color:{P["grey_700"]}"><strong>You asked:</strong> '
+                    f'{__import__("html").escape(hq)}</div>',
+                    unsafe_allow_html=True)
+                with bordered_container():
+                    st.markdown(ha)
+                    st.caption(
+                        f"AI-generated from the engine's live state by {hm} — "
+                        "verify anything critical against the source page."
+                        if is_last else f"Answered by {hm}")
+            st.button("Clear conversation", key="ai_clear",
+                      on_click=_clear_conversation)
 
 
 _render_ai_assistant()

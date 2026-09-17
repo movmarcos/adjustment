@@ -993,7 +993,10 @@ USING (
            'Master switch for the Cortex-powered assistant on the Documentation page. Set false to hide it if Cortex is not available for this account.'
     UNION ALL
     SELECT 'AI_ASSISTANT_MODEL', 'llama3.1-70b',
-           'Snowflake Cortex COMPLETE model the Documentation assistant uses (e.g. llama3.1-70b, mistral-large2, llama3.1-8b).'
+           'Snowflake Cortex COMPLETE model the Documentation assistant uses by default (e.g. llama3.1-70b, llama3.3-70b, mistral-large2). Editable on Admin > Notifications > AI Assistant.'
+    UNION ALL
+    SELECT 'AI_ASSISTANT_SMART_MODEL', 'claude-sonnet-4-6',
+           'Larger Cortex model used when a user ticks "Think harder" on the Documentation assistant (e.g. claude-sonnet-4-6, claude-opus-4-7, openai-gpt-5). Must be served in the account region or via cross-region inference. Editable on Admin > Notifications > AI Assistant.'
 ) s
 ON t.CONFIG_KEY = s.CONFIG_KEY
 WHEN NOT MATCHED THEN INSERT (CONFIG_KEY, CONFIG_VALUE, DESCRIPTION)
