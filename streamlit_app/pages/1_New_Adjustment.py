@@ -18,14 +18,17 @@ st.set_page_config(
     layout="wide", initial_sidebar_state="expanded",
 )
 
-from utils.styles import (scope_label, scope_meta, wide_kwargs, 
+from utils.styles import (scope_label, scope_meta, wide_kwargs,
     inject_css, render_sidebar,
     P, SCOPE_CONFIG, TYPE_CONFIG, CATEGORY_CONFIG, render_df_table,
     render_data_grid, fmt_adj_id, icon, bordered_container,
+    ALL_SCOPES, _st_version,
 )
 from utils.snowflake_conn import (run_query, call_sp_df, current_user_name,
                                   signoff_access, can_sign_off,
                                   safe_rerun, friendly_error)
+from utils.scope_filters import (FIELD_LABELS, MAIN_FIELDS_SINGLE, VAR_ONLY_FIELDS,
+                                 filter_layout, allowed_filter_keys)
 
 inject_css()
 render_sidebar()
@@ -40,6 +43,7 @@ _WIZ_DEFAULTS: dict = {
     "category": None,
     # Scaling
     "process_type":           None,
+    "process_types":          [],    # Scaling / Entity Roll: one adjustment per scope
     "adjustment_type":        None,
     "occurrence":             "ADHOC",
     "source_cobid":           None,
@@ -179,15 +183,7 @@ def _build_payload() -> dict:
     if wiz.get("occurrence") == "RECURRING":
         payload["recurring_start_cobid"] = wiz.get("recurring_start_cobid")
         payload["recurring_end_cobid"]   = wiz.get("recurring_end_cobid")
-    for key in ["entity_code", "source_system_code", "department_code",
-                "book_code", "currency_code", "trade_typology",
-                "strategy", "instrument_code", "simulation_name",
-                "simulation_source", "measure_type_code", "trade_code",
-                "trader_code", "var_component_name", "var_sub_component_name",
-                "guaranteed_entity", "region_key", "scenario_date_id",
-                "tenor_code", "underlying_tenor_code", "curve_code",
-                "day_type", "product_category_attributes",
-                "batch_region_area", "murex_family", "murex_group"]:
+    for key in FILTER_KEYS + list(_RETIRED_FILTER_KEYS):
         val = wiz.get(key)
         if val and str(val).strip():
             payload[key] = str(val).strip()
@@ -613,57 +609,10 @@ def _do_submit() -> dict:
 # UI HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-FRTB_SUBTYPES = ["FRTB", "FRTBDRC", "FRTBRRAO", "FRTBALL"]
-FRTB_SUBTYPE_CONFIG = {
-    "FRTB":     "Sensitivities-based method (SBM)",
-    "FRTBDRC":  "Default Risk Charge",
-    "FRTBRRAO": "Residual Risk Add-On",
-    "FRTBALL":  "All FRTB — submits one adjustment per sub-type",
-}
-
-# Scope-specific filter fields (tier 2)
-SCOPE_FIELDS = {
-    "VaR":         [],
-    "Stress":      [("simulation_name",   "Simulation Name",   "e.g. MRM_GLB_Std_EQ_M_PriceDnVolUp"),
-                    ("trade_typology",    "Trade Typology",    "e.g. EQTT"),
-                    ("instrument_code",   "Instrument Code",   "e.g. US4642872422 US")],
-    "Sensitivity": [("measure_type_code", "Measure Type Code", "e.g. FxDeltaExp"),
-                    ("strategy",          "Strategy",          "e.g. SSA00306"),
-                    ("trade_typology",    "Trade Typology",    "e.g. FEXF"),
-                    ("instrument_code",   "Instrument Code",   "e.g. US46090E1038 US")],
-    "FRTB":        [("measure_type_code", "Measure Type Code", "e.g. FRTBCSRDelta"),
-                    ("instrument_code",   "Instrument Code",   "e.g. US92826C8394 US"),
-                    ("strategy",          "Strategy",          "e.g. SSU00332")],
-}
-for _fst in FRTB_SUBTYPES:
-    SCOPE_FIELDS.setdefault(_fst, SCOPE_FIELDS["FRTB"])
-
-ALL_EXTRA_FIELDS = [
-    ("currency_code",                "Currency Code",                "e.g. USD"),
-    ("trade_typology",               "Trade Typology",               "e.g. FEXF"),
-    ("trade_code",                   "Trade Code",                   ""),
-    ("strategy",                     "Strategy",                     ""),
-    ("instrument_code",              "Instrument Code",              ""),
-    ("simulation_name",              "Simulation Name",              ""),
-    ("simulation_source",            "Simulation Source",            ""),
-    ("measure_type_code",            "Measure Type Code",            ""),
-    ("trader_code",                  "Trader Code",                  ""),
-    ("guaranteed_entity",            "Guaranteed Entity",            ""),
-    ("region_key",                   "Region Key",                   ""),
-    ("scenario_date_id",             "Scenario Date ID",             ""),
-    ("tenor_code",                   "Tenor Code",                   ""),
-    ("underlying_tenor_code",        "Underlying Tenor Code",        ""),
-    ("curve_code",                   "Curve Code",                   ""),
-    ("product_category_attributes",  "Product Category Attributes",  ""),
-    ("batch_region_area",            "Batch Region Area",            ""),
-    ("murex_family",                 "Murex Family",                 ""),
-    ("murex_group",                  "Murex Group",                  ""),
-]
-
-# Every filter key (used for the ticket's applied-filter chips)
-FILTER_KEYS = ["entity_code", "source_system_code", "department_code", "book_code",
-               "var_component_name", "var_sub_component_name", "day_type"] + \
-              [k for k, _, _ in ALL_EXTRA_FIELDS]
+# Every filter key (payload + ticket chips). Order = catalogue order.
+FILTER_KEYS = list(FIELD_LABELS.keys())
+# Legacy keys still on old headers / wiz defaults but never offered any more.
+_RETIRED_FILTER_KEYS = ("batch_region_area", "murex_family", "murex_group")
 
 
 def _btn(label, *, icon_name=None, **kwargs):
@@ -1033,48 +982,51 @@ def _missing_fields() -> list:
 # LEFT COLUMN — FORM SECTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _render_scope_pills(include_frtball: bool = True) -> None:
-    """Scope pill buttons + FRTB sub-type row. Sets wiz['process_type']."""
-    current_group = "FRTB" if wiz.get("process_type") in FRTB_SUBTYPES \
-                    else wiz.get("process_type")
-    clicked = _pill_row(list(SCOPE_CONFIG.keys()), current_group,
-                        f"scope_{wiz.get('category')}", icons=SCOPE_BTN_ICONS,
-                        fmt=scope_label)
-    if clicked and clicked != current_group:
-        wiz["process_type"] = clicked  # FRTB group starts on the plain FRTB sub-type
-        wiz["_preview_sum"] = None
-        # Filters that the NEW scope does not offer must not ride along
-        # invisibly (a VaR Component picked under VaR used to survive a switch
-        # to Stress, hidden from the form but still in the payload).
-        _var_only = {"var_component_name", "var_sub_component_name", "day_type"}
-        _allowed = ({k for k, _, _ in SCOPE_FIELDS.get(clicked, [])}
-                    | {k for k, _, _ in ALL_EXTRA_FIELDS})
-        if clicked == "VaR":
-            _allowed |= _var_only
-        for _fk in FILTER_KEYS:
-            if _fk in ("entity_code", "source_system_code",
-                       "department_code", "book_code"):
-                continue
-            if _fk not in _allowed:
-                wiz[_fk] = None
-        if clicked != "VaR":
-            # The dropdown widgets keep their own state; drop it so a later
-            # switch back to VaR starts blank rather than resurrecting the
-            # old selection.
-            for _wk in ("var_comp_dd", "var_sub_dd"):
-                st.session_state.pop(_k(_wk), None)
-        safe_rerun()
+def _selected_scopes() -> list:
+    """Scope codes this draft submits to — one adjustment per code."""
+    if wiz.get("category") in ("Scaling Adjustment", "Entity Roll"):
+        return list(wiz.get("process_types") or [])
+    return [wiz["process_type"]] if wiz.get("process_type") else []
 
-    if wiz.get("process_type") in FRTB_SUBTYPES:
-        subtypes = [k for k in FRTB_SUBTYPE_CONFIG
-                    if include_frtball or k != "FRTBALL"]
-        sub = _pill_row(subtypes, wiz["process_type"],
-                        f"frtbsub_{wiz.get('category')}", fmt=scope_label)
-        if sub and sub != wiz["process_type"]:
-            wiz["process_type"] = sub
-            wiz["_preview_sum"] = None
-            safe_rerun()
-        st.caption(FRTB_SUBTYPE_CONFIG.get(wiz["process_type"], ""))
+
+def _purge_filters_for(scopes: list) -> None:
+    """Drop filter values the new selection no longer offers (a VaR Component
+    picked under VaR must not ride into a Stress submission invisibly)."""
+    allowed = allowed_filter_keys(scopes)
+    for _fk in FILTER_KEYS:
+        if _fk in MAIN_FIELDS_SINGLE:
+            continue
+        if _fk not in allowed:
+            wiz[_fk] = None
+    if "VaR" not in scopes or len(scopes) > 1:
+        for _wk in ("var_comp_dd", "var_sub_dd"):
+            st.session_state.pop(_k(_wk), None)
+
+
+def _render_scope_pills() -> None:
+    """Multi-select scope pills. Sets wiz['process_types'] (list of codes);
+    one adjustment is created per selected scope."""
+    current = [s for s in (wiz.get("process_types") or []) if s in ALL_SCOPES]
+    key = _k(f"scopes_{wiz.get('category')}")
+    if _st_version() >= (1, 40):
+        picked = st.pills("Data scopes", ALL_SCOPES, selection_mode="multi",
+                          default=current, format_func=scope_label, key=key,
+                          label_visibility="collapsed")
+    else:
+        picked = st.multiselect("Data scopes", ALL_SCOPES, default=current,
+                                format_func=scope_label, key=key,
+                                label_visibility="collapsed")
+    picked = [s for s in ALL_SCOPES if s in (picked or [])]   # stable order
+    if picked != current:
+        wiz["process_types"] = picked
+        wiz["process_type"]  = picked[0] if picked else None   # legacy readers
+        wiz["_preview_sum"] = None
+        wiz["_preview_sql"] = None
+        _purge_filters_for(picked)
+        safe_rerun()
+    n = len(picked)
+    st.caption("Pick one or more scopes — one adjustment is created per scope."
+               + (f" **{n} adjustments** will be created." if n > 1 else ""))
 
 
 # ── Reference-data dropdowns (entity / department / book) ───────────────────
@@ -2753,7 +2705,7 @@ def render_entity_roll_form() -> None:
 
     with _card():
         _sec(2, "Data Scope", "Select the data scope to roll.")
-        _render_scope_pills(include_frtball=False)
+        _render_scope_pills()
     if not wiz.get("process_type"):
         st.info("Select a scope to continue.")
         return
@@ -2967,7 +2919,7 @@ def _ticket_html(missing: list) -> str:
                      "var_component_name": "VaR Comp",
                      "var_sub_component_name": "VaR Sub",
                      "day_type": "Day Type"}
-        label_map.update({k: l for k, l, _ in ALL_EXTRA_FIELDS})
+        label_map.update({k: v[0].rstrip(" *†") for k, v in FIELD_LABELS.items()})
         chips = "".join(
             f'<span class="filter-chip">{label_map.get(k, k)}: {v}</span>'
             for k, v in applied)
