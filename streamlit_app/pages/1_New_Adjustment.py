@@ -29,6 +29,7 @@ from utils.snowflake_conn import (run_query, call_sp_df, current_user_name,
                                   safe_rerun, friendly_error)
 from utils.scope_filters import (FIELD_LABELS, MAIN_FIELDS_SINGLE, VAR_ONLY_FIELDS,
                                  filter_layout, allowed_filter_keys)
+from utils.submit_fanout import submit_fanout as _submit_fanout_pure
 
 inject_css()
 render_sidebar()
@@ -476,6 +477,14 @@ def _submit_one(payload: dict) -> dict:
     return json.loads(str(raw)) if isinstance(raw, str) else raw
 
 
+def _submit_fanout(payload: dict, scopes: list) -> dict:
+    """One SP_SUBMIT_ADJUSTMENT call per scope (same payload, scope swapped).
+    Thin wrapper around the pure `submit_fanout` helper (see
+    utils/submit_fanout.py) so the logic is unit-testable without a
+    Snowflake session."""
+    return _submit_fanout_pure(payload, scopes, _submit_one, _is_submit_success, scope_label)
+
+
 def _do_submit() -> dict:
     """Call SP_SUBMIT_ADJUSTMENT. Returns result dict (never raises)."""
     import uuid as _uuid
@@ -554,29 +563,9 @@ def _do_submit() -> dict:
 
         payload = _build_payload()
 
-        # "All FRTB": FRTBALL is not a processable scope — submit one sibling
-        # adjustment per real FRTB sub-type instead. The pipeline serialises
-        # them (same data scope, same pipeline), so they apply in sequence.
-        if payload.get("process_type") == "FRTBALL":
-            created, failures, statuses = [], [], []
-            for sub in ("FRTB", "FRTBDRC", "FRTBRRAO"):
-                sub_res = _submit_one({**payload, "process_type": sub})
-                if _is_submit_success(sub_res):
-                    created.append(sub)
-                    statuses.append(sub_res.get("status"))
-                else:
-                    failures.append(f"{sub}: {sub_res.get('message', 'not accepted')}")
-            if not failures:
-                return {"status": statuses[0],
-                        "message": ("Created 3 adjustments — one per FRTB sub-type "
-                                    "(FRTB, FRTBDRC, FRTBRRAO). They are queued and "
-                                    "will be processed in sequence.")}
-            partial = (f" Already created: {', '.join(created)} — delete them from "
-                       f"the Adjustments page if they are no longer wanted."
-                       if created else "")
-            return {"status": "Error",
-                    "message": ("Not all FRTB sub-types were accepted. "
-                                + " | ".join(failures) + partial)}
+        scopes = _selected_scopes()
+        if wiz.get("category") in ("Scaling Adjustment", "Entity Roll") and len(scopes) > 1:
+            return _submit_fanout(payload, scopes)
 
         # For VaR Upload: write line items BEFORE the SP call so that
         # navigating away can't interrupt the write. Pre-generate the
@@ -2687,7 +2676,7 @@ def render_entity_roll_form() -> None:
     with _card():
         _sec(2, "Data Scope", "Select the data scope to roll.")
         _render_scope_pills()
-    if not wiz.get("process_type"):
+    if not _selected_scopes():
         st.info("Select a scope to continue.")
         return
 
@@ -2710,10 +2699,13 @@ def render_entity_roll_form() -> None:
     # more than ADJ_HEADER. Show all three counts and whether they match; the
     # roll removes every one of them.
     wiz["_eroll_remove_count"] = 0
-    if wiz.get("cobid") and (wiz.get("entity_code") or "").strip() and wiz.get("process_type"):
+    _recon_rows = []
+    for _pt_code in _selected_scopes():
+        if not (wiz.get("cobid") and (wiz.get("entity_code") or "").strip()):
+            break
         _cob = int(wiz["cobid"])
         _ent = wiz["entity_code"].strip().replace("\\", "\\\\").replace("'", "''")
-        _pt  = wiz["process_type"].replace("\\", "\\\\").replace("'", "''")
+        _pt  = _pt_code.replace("\\", "\\\\").replace("'", "''")
         h_cnt = d_cnt = f_cnt = None
         try:
             _hd = run_query(f"""
@@ -2741,27 +2733,31 @@ def render_entity_roll_form() -> None:
                 f_cnt = int(_fc[0][0]) if _fc else None
         except Exception:
             f_cnt = None
-        wiz["_eroll_remove_count"] = max(d_cnt or 0, f_cnt or 0)
-        if wiz["_eroll_remove_count"] > 0:
+        _recon_rows.append((scope_label(_pt_code), h_cnt, d_cnt, f_cnt))
+        wiz["_eroll_remove_count"] += max(d_cnt or 0, f_cnt or 0)
+    if wiz["_eroll_remove_count"] > 0:
+        _lines = []
+        for lbl, h_cnt, d_cnt, f_cnt in _recon_rows:
             _match = (d_cnt is not None and f_cnt is not None and d_cnt == f_cnt)
             _fact_txt = "n/a" if f_cnt is None else str(f_cnt)
-            _recon = (f"sources — header {h_cnt} · dimension {d_cnt} · fact {_fact_txt}"
+            _recon = (f"{lbl}: header {h_cnt} · dimension {d_cnt} · fact {_fact_txt}"
                       + ("&nbsp; · match ✓" if _match
                          else ("&nbsp; · ⚠ mismatch" if f_cnt is not None else "")))
-            st.markdown(
-                f'<div style="background:{P["danger_lt"]};border:1px solid #FECACA;border-radius:10px;'
-                f'padding:0.8rem 1rem;margin:0.2rem 0 0.6rem">'
-                f'<div style="font-weight:700;font-size:0.88rem;color:{P["danger"]};margin-bottom:0.25rem">'
-                f'{icon("alert-triangle", size=14, color=P["danger"])} '
-                f'{wiz["_eroll_remove_count"]} existing adjustment(s) will be permanently removed</div>'
-                f'<div style="font-size:0.82rem;color:{P["danger"]}">'
-                f'Processing this roll deletes <strong>all</strong> adjustment data for '
-                f'<strong>{wiz["entity_code"].strip()}</strong> at COB '
-                f'<strong>{wiz["cobid"]}</strong> (including any loaded by other systems) '
-                f'and rebuilds the entity from the source COB.<br/>'
-                f'<span style="font-size:0.78rem;opacity:0.85">{_recon}</span>'
-                f'</div></div>',
-                unsafe_allow_html=True)
+            _lines.append(f'<span style="font-size:0.78rem;opacity:0.85">{_recon}</span>')
+        st.markdown(
+            f'<div style="background:{P["danger_lt"]};border:1px solid #FECACA;border-radius:10px;'
+            f'padding:0.8rem 1rem;margin:0.2rem 0 0.6rem">'
+            f'<div style="font-weight:700;font-size:0.88rem;color:{P["danger"]};margin-bottom:0.25rem">'
+            f'{icon("alert-triangle", size=14, color=P["danger"])} '
+            f'{wiz["_eroll_remove_count"]} existing adjustment(s) will be permanently removed</div>'
+            f'<div style="font-size:0.82rem;color:{P["danger"]}">'
+            f'Processing this roll deletes <strong>all</strong> adjustment data for '
+            f'<strong>{wiz["entity_code"].strip()}</strong> at COB '
+            f'<strong>{wiz["cobid"]}</strong> (including any loaded by other systems) '
+            f'and rebuilds the entity from the source COB.<br/>'
+            + "<br/>".join(_lines)
+            + '</div></div>',
+            unsafe_allow_html=True)
 
     with _card():
         _sec(4, "Business Context", "Why is this roll needed?")
@@ -2836,7 +2832,9 @@ def _ticket_html(missing: list) -> str:
 
     if cat == "Entity Roll":
         roll_set = bool(wiz.get("source_cobid") and wiz.get("cobid"))
-        kv += _ticket_row("Scope",  scope_label(wiz.get("process_type")))
+        _scs = _selected_scopes()
+        kv += _ticket_row("Scope" if len(_scs) <= 1 else f"Scopes ({len(_scs)} adjustments)",
+                          ", ".join(scope_label(s) for s in _scs) if _scs else None, bool(_scs))
         kv += _ticket_row("Entity", wiz.get("entity_code"))
         kv += _ticket_row("Roll",
                           f'{wiz.get("source_cobid")} → {wiz.get("cobid")}'
@@ -2871,7 +2869,9 @@ def _ticket_html(missing: list) -> str:
         cob_txt = wiz.get("cobid")
         if wiz.get("adjustment_type") == "Roll" and wiz.get("source_cobid") and cob_txt:
             cob_txt = f'{wiz.get("source_cobid")} → {cob_txt}'
-        kv += _ticket_row("Scope", scope_label(wiz.get("process_type")))
+        _scs = _selected_scopes()
+        kv += _ticket_row("Scope" if len(_scs) <= 1 else f"Scopes ({len(_scs)} adjustments)",
+                          ", ".join(scope_label(s) for s in _scs) if _scs else None, bool(_scs))
         kv += _ticket_row("Type",  type_txt)
         kv += _ticket_row("Schedule",
                           "Ad hoc" if wiz.get("occurrence", "ADHOC") == "ADHOC"
@@ -2961,12 +2961,9 @@ def _ticket_html(missing: list) -> str:
 def _run_preview() -> None:
     """Run the summary-mode preview SP and stash the single aggregate row.
 
-    "All FRTB" (FRTBALL) previews each real sub-type and sums the numeric
-    totals — FRTBALL itself is not a previewable/processable scope."""
+    Several scopes: previews each and sums the numeric totals."""
     payload = _preview_payload()
-    subtypes = (["FRTB", "FRTBDRC", "FRTBRRAO"]
-                if payload.get("process_type") == "FRTBALL"
-                else [payload.get("process_type")])
+    subtypes = _selected_scopes() or [payload.get("process_type")]
     try:
         agg = None
         for sub in subtypes:
@@ -3019,10 +3016,7 @@ def _run_preview() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _signoff_scopes() -> list:
-    pt = wiz.get("process_type")
-    if pt == "FRTBALL":
-        return ["FRTB", "FRTBDRC", "FRTBRRAO"]
-    return [pt] if pt else []
+    return _selected_scopes()
 
 
 _SIGNOFF_BLOCKED = ("SIGNED_OFF", "REOPEN_REQUESTED", "SIGNOFF_REQUESTED")
@@ -3385,6 +3379,10 @@ if wiz["step"] == 3:
     noun      = "adjustments" if plural else "adjustment"
     title     = (f"{n_created} Adjustments Submitted Successfully" if plural
                  else "Adjustment Submitted Successfully")
+    if (result.get("message") or "").startswith("Created "):
+        # Multi-scope fan-out (_submit_fanout): the message already names the
+        # count and the scopes — show it verbatim as the headline.
+        title = result.get("message")
     if status == "Pending Approval":
         next_html = (f'<strong>Waiting for approval</strong> — an approver must '
                      f'action {"them" if plural else "it"} on the Approval Queue '
@@ -3613,10 +3611,10 @@ with right:
 
 
 # ── Full-width preview detail (breakdown / sample) ───────────────────────────
-# (Not for "All FRTB": the summary above is an aggregate over three sub-types;
-#  per-row breakdown/sample only makes sense per sub-type.)
+# (Single scope only: the summary for several scopes is an aggregate; per-row
+#  breakdown/sample only makes sense per scope.)
 if wiz.get("category") == "Scaling Adjustment" and wiz.get("_preview_sum") \
-        and wiz.get("process_type") != "FRTBALL" \
+        and len(_selected_scopes()) == 1 \
         and not missing:
     s = wiz["_preview_sum"]
     total_rows = _safe_int(s.get("ROWS_AFFECTED"))
