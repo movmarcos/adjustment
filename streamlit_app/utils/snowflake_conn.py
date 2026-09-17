@@ -169,6 +169,43 @@ def friendly_error(exc) -> str:
             f"contact support with this detail: {raw[:220]}")
 
 
+def signoff_access(user: str):
+    """Who may sign off / request re-open, from ADJ_SIGNOFF_USERS (Admin page).
+
+    Returns None while the list has no active user — bootstrap rule, everyone
+    may act (SP_REQUEST_SIGNOFF_CHANGE applies the same rule). Otherwise the
+    set of scope codes the user may act on, with "*" meaning every scope; an
+    empty set means the user is not listed. Best-effort: if the table cannot
+    be read the page falls back to "everyone" and the SP remains the gate."""
+    try:
+        rows_ = get_session().sql(f"""
+            SELECT UPPER(USERNAME) AS U, PROCESS_TYPE AS PT
+            FROM ADJUSTMENT_APP.ADJ_SIGNOFF_USERS
+            WHERE IS_ACTIVE = TRUE
+        """).collect()
+    except Exception:
+        return None
+    if not rows_:
+        return None
+    me = str(user or "").strip().upper()
+    scopes = set()
+    for r in rows_:
+        if str(r["U"] or "").strip().upper() != me:
+            continue
+        pt = r["PT"]
+        if pt is None or not str(pt).strip():
+            return {"*"}
+        scopes.add(str(pt).strip().upper())
+    return scopes
+
+
+def can_sign_off(access, scope) -> bool:
+    """True when `access` (from signoff_access) allows acting on `scope`."""
+    if access is None or "*" in access:
+        return True
+    return str(scope or "").strip().upper() in access
+
+
 def current_user_name() -> str:
     """Get the logged-in user identity.
 

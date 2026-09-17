@@ -24,6 +24,7 @@ from utils.styles import (scope_label, scope_meta, wide_kwargs,
     render_data_grid, fmt_adj_id, icon, bordered_container,
 )
 from utils.snowflake_conn import (run_query, call_sp_df, current_user_name,
+                                  signoff_access, can_sign_off,
                                   safe_rerun, friendly_error)
 
 inject_css()
@@ -3319,10 +3320,18 @@ def _render_signoff_panel() -> bool:
         (st.success if flash[0] == "success" else st.warning)(flash[1])
 
     blocked = False
+    # Sign-off user list (Admin page); None = empty list, everyone may act.
+    _access = signoff_access(current_user_name())
+
+    def _not_listed(scope_):
+        st.caption(f"Only users on the sign-off list for {scope_} can do this "
+                   f"— ask an admin (Admin page › Authorized Sign-Off Users).")
+
     for scope in scopes:
         state = _signoff_state(scope, cobid, entity)
         if not state:
             continue
+        _may_act = can_sign_off(_access, scope)
         status  = state["status"]
         gov_ent = state.get("entity")
         ent_txt = ("all entities" if gov_ent == "*"
@@ -3348,6 +3357,9 @@ def _render_signoff_panel() -> bool:
                      f"New adjustments are blocked. If the business needs to "
                      f"adjust it, request a re-open below — it goes to the "
                      f"Approval Queue.")
+            if not _may_act:
+                _not_listed(scope)
+                continue
             reason = st.text_input(
                 "Reason for re-opening", key=_k(f"reopen_reason_{scope}"),
                 placeholder="Why does this need to be re-opened?")
@@ -3379,6 +3391,9 @@ def _render_signoff_panel() -> bool:
             st.info(f"**{label} is re-opened** (approved by "
                     f"{state.get('REOPEN_APPROVED_BY') or '—'}). Submit the "
                     f"adjustments needed, then sign off again below.")
+            if not _may_act:
+                _not_listed(scope)
+                continue
             confirm = st.checkbox(
                 f"Confirm — all adjustments for {label} are done; sign off "
                 f"and block new submissions again",

@@ -26,7 +26,8 @@ from utils.styles import (scope_label, scope_meta, wide_kwargs, inject_css, rend
                           SCOPE_CONFIG, render_df_table,
                           set_flash, render_flash, confirm_gate,
                           SIGNOFF_STATUS_META, signoff_status_label)
-from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
+from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
+                                  safe_rerun, signoff_access, can_sign_off)
 
 _FLASH_KEY = "signoff"
 
@@ -72,6 +73,14 @@ inject_css()
 render_sidebar()
 
 user = current_user_name()
+# Sign-off user list (Admin page). None = list empty, everyone may act.
+_so_access = signoff_access(user)
+
+
+def _not_listed_note(scope_code: str) -> str:
+    return (f"You are not on the sign-off user list for "
+            f"{scope_label(scope_code)} — ask an admin to add you "
+            f"(Admin page › Authorized Sign-Off Users).")
 
 
 def _sync_summary(raw) -> str:
@@ -438,7 +447,8 @@ with tab_act:
                         f"on COB {sel_cob} are complete — submissions will be "
                         f"blocked immediately",
                         key=_conf_key)
-                _can_s = bool(_sel_s and _rsn_s.strip() and _conf_s)
+                _allowed_s = (_sel_s is None) or can_sign_off(_so_access, _sel_s[0])
+                _can_s = bool(_sel_s and _rsn_s.strip() and _conf_s and _allowed_s)
                 if st.button(("Request sign-off" if _appr_s else "Sign off now"),
                              key="so_signoff_btn", type="primary",
                              **wide_kwargs(), disabled=not _can_s):
@@ -446,7 +456,9 @@ with tab_act:
                              "Sign-off", _rsn_s, _appr_s,
                              reset_keys=("so_signoff_target", "so_signoff_reason")
                              + ((_conf_key,) if _conf_key else ()))
-                if not _can_s:
+                if _sel_s and not _allowed_s:
+                    st.warning(_not_listed_note(_sel_s[0]))
+                elif not _can_s:
                     st.caption("Choose a scope/entity and enter a reason"
                                + (" — then tick the confirmation"
                                   if (_sel_s and not _appr_s) else "")
@@ -478,13 +490,16 @@ with tab_act:
                 # Re-open approval is REQUIRED by policy — ticked and locked.
                 st.checkbox("Request approval (required by policy)", value=True,
                             disabled=True, key="so_reopen_appr")
-                _can_r = bool(_sel_r and _rsn_r.strip())
+                _allowed_r = (_sel_r is None) or can_sign_off(_so_access, _sel_r[0])
+                _can_r = bool(_sel_r and _rsn_r.strip() and _allowed_r)
                 if st.button("Request re-open", key="so_reopen_btn",
                              **wide_kwargs(), disabled=not _can_r):
                     _request(_sel_r[0], _sel_r[1], _sel_r[2], "REOPEN",
                              "Re-open", _rsn_r, True,
                              reset_keys=("so_reopen_target", "so_reopen_reason"))
-                if not _can_r:
+                if _sel_r and not _allowed_r:
+                    st.warning(_not_listed_note(_sel_r[0]))
+                elif not _can_r:
                     st.caption("Choose a scope/entity and enter a reason to enable")
 
     st.markdown("<br/>", unsafe_allow_html=True)

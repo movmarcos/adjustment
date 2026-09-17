@@ -203,3 +203,45 @@ def test_sgn09_subtype_granularity(session, feed_table, ev):
             "SIGNOFF", "UAT automation — empty sub targets NULL row", False, U_SUBMIT)
     ev.check("empty-string sub-type addresses the NULL-sub row",
              _status(ev, ENT_D, "") == "SIGNED_OFF")
+
+
+@pytest.mark.uat("SGN-10", title="Sign-off user list gates who may sign off", priority="P1")
+def test_sgn10_signoff_user_list(session, ev):
+    """ADJ_SIGNOFF_USERS (Admin › Authorized Sign-Off Users). Bootstrap rule:
+    empty list = everyone may; once someone is listed, only listed users may
+    sign off / request re-open. ENT_C is OPEN again after SGN-06's rejection."""
+    before = _status(ev, ENT_C)
+    ev.note("ENT_C status before", str(before))
+    try:
+        # Only the approver bot is a sign-off user, for FRTB only.
+        session.sql(f"""
+            INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_USERS
+                (USERNAME, PROCESS_TYPE, IS_ACTIVE, ADDED_BY)
+            VALUES ('{U_APPROVE}', 'FRTB', TRUE, 'UAT_AUTOMATION')
+        """).collect()
+
+        res = call_sp(session, SP_REQ, FAKE_COB, "FRTB", ENT_C, "",
+                      "SIGNOFF", "UAT automation — unlisted caller", False, U_SUBMIT)
+        ev.note("Unlisted caller result", str(res)[:300])
+        ev.check("unlisted caller is refused (not_authorized)",
+                 isinstance(res, dict) and res.get("status") == "not_authorized")
+        ev.check("status unchanged by the refused call", _status(ev, ENT_C) == before)
+
+        res2 = call_sp(session, SP_REQ, FAKE_COB, "FRTB", ENT_C, "",
+                       "REOPEN", "UAT automation — unlisted re-open", True, U_SUBMIT)
+        ev.check("unlisted caller cannot request a re-open either",
+                 isinstance(res2, dict) and res2.get("status") == "not_authorized")
+
+        if before in ("OPEN", "REOPENED"):
+            res3 = call_sp(session, SP_REQ, FAKE_COB, "FRTB", ENT_C, "",
+                           "SIGNOFF", "UAT automation — listed caller", False, U_APPROVE)
+            ev.note("Listed caller result", str(res3)[:300])
+            ev.check("listed caller signs off", _status(ev, ENT_C) == "SIGNED_OFF")
+    finally:
+        session.sql("DELETE FROM ADJUSTMENT_APP.ADJ_SIGNOFF_USERS "
+                    "WHERE ADDED_BY = 'UAT_AUTOMATION'").collect()
+
+    res4 = call_sp(session, SP_REQ, FAKE_COB, "FRTB", ENT_A, "",
+                   "REOPEN", "UAT automation — list empty again", True, U_SUBMIT)
+    ev.check("with the list empty again, anyone may act (bootstrap rule)",
+             isinstance(res4, dict) and res4.get("status") != "not_authorized")

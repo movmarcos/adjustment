@@ -177,7 +177,7 @@ LANGUAGE PYTHON
 RUNTIME_VERSION = '3.11'
 PACKAGES = ('snowflake-snowpark-python')
 HANDLER = 'main'
-COMMENT = 'Raise a COB sign-off or re-open request (approval-gated by default): guarded transition from the compatible current status + sign-off history. Requester recorded in REOPEN_REQUESTED_BY/AT/REASON for both request types.'
+COMMENT = 'Raise a COB sign-off or re-open request (approval-gated by default). Caller must be an active ADJ_SIGNOFF_USERS entry for the scope once that list is non-empty. Guarded transition from the compatible current status + sign-off history. Requester recorded in REOPEN_REQUESTED_BY/AT/REASON for both request types.'
 EXECUTE AS CALLER
 AS
 $$
@@ -288,6 +288,33 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_sub_type,
 
     cobid  = int(p_cobid)
     scope  = _esc(p_process_type)
+
+    # Sign-off user list (ADJ_SIGNOFF_USERS, managed on the Admin page).
+    # Bootstrap rule: while NO active row exists, everyone may sign off /
+    # request re-open (pre-2026-09 behaviour). Once anyone is listed, the
+    # caller must be active for this scope (NULL PROCESS_TYPE = all scopes).
+    # Checked here — before the state machine — so EVERY app path (Sign-Off
+    # page, New Adjustment quick actions) is covered by the one gate.
+    any_signer = session.sql("""
+        SELECT 1 FROM ADJUSTMENT_APP.ADJ_SIGNOFF_USERS
+        WHERE IS_ACTIVE = TRUE LIMIT 1
+    """).collect()
+    if any_signer:
+        signer = session.sql(f"""
+            SELECT 1 FROM ADJUSTMENT_APP.ADJ_SIGNOFF_USERS
+            WHERE UPPER(USERNAME) = UPPER('{_esc(caller)}')
+              AND IS_ACTIVE = TRUE
+              AND (PROCESS_TYPE IS NULL
+                   OR UPPER(PROCESS_TYPE) = UPPER('{scope}'))
+            LIMIT 1
+        """).collect()
+        if not signer:
+            verb = "sign off" if action == "SIGNOFF" else "request a re-open of"
+            return json.dumps({"status": "not_authorized",
+                               "message": f"{caller} is not on the sign-off "
+                                          f"user list for scope {p_process_type} "
+                                          f"and cannot {verb} this COB. An admin "
+                                          f"can add you on the Admin page."})
     entity = _esc(p_entity_code) if p_entity_code and str(p_entity_code).strip() else "*"
     sub = _esc(str(p_sub_type).strip()) if p_sub_type and str(p_sub_type).strip() else ""
     sub_pred = f"AND COALESCE(UPPER(SUB_TYPE), '') = UPPER('{sub}')"

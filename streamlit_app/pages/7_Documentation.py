@@ -161,6 +161,9 @@ Sign-off: owned by the upstream publish feed (synced every 30 min; also checked
 live at submit). Granularity is COB+entity+scope (+optional SUB_TYPE). Once
 signed off, no new adjustments can be submitted for that entity. Sign-off can
 apply immediately (approval optional); re-open ALWAYS needs 4-eyes approval.
+Who may sign off or request a re-open is the "Authorized Sign-Off Users" list
+on the Admin page (optionally per scope); while that list is empty everyone
+may. Approving those requests is a separate list: "Authorized Approvers".
 
 Reports hand-off: VaR/Stress -> Power BI refresh (~5 min); Sensitivity/FRTB ->
 dbt rebuild trigger via Control-M. If hand-off fails the numbers are still
@@ -270,9 +273,6 @@ def _live_snapshot(question: str, user: str = "") -> str:
                  f"{r.RUN_STATUS} entity={r.ENTITY_CODE or '-'}"
                  for r in d.itertuples()))
 
-    return "\n\n".join(parts) if parts else "(no live data available right now)"
-
-
     _try("Waiting for approval (id, COB, scope, type, submitted by):",
          """SELECT DIMENSION_ADJ_ID, COBID, PROCESS_TYPE, ADJUSTMENT_TYPE, USERNAME
             FROM ADJUSTMENT_APP.ADJ_HEADER
@@ -303,6 +303,9 @@ def _live_snapshot(question: str, user: str = "") -> str:
          "SELECT TO_VARCHAR(CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP()), "
          "'DD Mon YYYY HH24:MI') AS T",
          lambda d: "  " + str(d.iloc[0, 0]))
+
+    return "\n\n".join(parts) if parts else "(no live data available right now)"
+
 
 _QUICK_MODEL_DEFAULT = "llama3.1-70b"
 _SMART_MODEL_DEFAULT = "claude-sonnet-4-6"
@@ -1092,7 +1095,7 @@ with tab_reference:
          "surrogate key definition, active flag."],
         ["<code>ADJ_SIGNOFF_STATUS</code> / <code>ADJ_SIGNOFF_HISTORY</code>",
          "Sign-off lifecycle per COB + entity + scope ('*' = whole scope) + its audit trail."],
-        ["<code>ADJ_APPROVERS</code> / <code>ADJ_ADMINS</code> / <code>ADJ_CATEGORY</code>",
+        ["<code>ADJ_APPROVERS</code> / <code>ADJ_SIGNOFF_USERS</code> / <code>ADJ_ADMINS</code> / <code>ADJ_CATEGORY</code>",
          "Approver registry (per scope), Admin-page access list, managed "
          "business-category list."],
         ["<code>SP_SUBMIT_ADJUSTMENT</code>",

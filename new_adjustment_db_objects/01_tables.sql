@@ -880,6 +880,27 @@ COMMENT = 'Authorized approvers for the Approval Queue. NULL PROCESS_TYPE means 
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- 7a1. ADJ_SIGNOFF_USERS — who may sign off / request re-open (2026-09-17)
+-- Mirrors ADJ_APPROVERS. Enforced in SP_REQUEST_SIGNOFF_CHANGE and shown in
+-- the Sign-Off page / New Adjustment quick actions. BOOTSTRAP RULE (same as
+-- ADJ_ADMINS): while the table has no ACTIVE row, everyone may sign off —
+-- adding the first user locks it down. Approval of the resulting requests
+-- stays with ADJ_APPROVERS.
+-- ═══════════════════════════════════════════════════════════════════════════
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_SIGNOFF_USERS (
+    SIGNER_ID                   NUMBER(38,0) NOT NULL AUTOINCREMENT,
+    USERNAME                    VARCHAR(50)  NOT NULL,
+    PROCESS_TYPE                VARCHAR(30),            -- NULL = all scopes
+    IS_ACTIVE                   BOOLEAN      DEFAULT TRUE,
+    ADDED_BY                    VARCHAR(50),
+    ADDED_DATE                  TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+
+    CONSTRAINT PK_ADJ_SIGNOFF_USERS PRIMARY KEY (SIGNER_ID)
+)
+COMMENT = 'Users allowed to sign off a COB or request its re-open (Sign-Off page + quick actions). NULL PROCESS_TYPE = any scope. Empty list = everyone may (bootstrap). Managed via Admin page.';
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- 7a2. ADJ_USER_PREFS — per-user display preferences
 --
 -- Timestamps are STORED as NTZ London wall-clock (the engine's convention);

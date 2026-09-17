@@ -586,6 +586,119 @@ with tab_approvers:
                 except Exception as ex:
                     st.error(f"Failed to add approver: {ex}")
 
+    # ── Authorized sign-off users (Sign-Off page + quick actions) ────────────
+    st.markdown("<br/>", unsafe_allow_html=True)
+    section_title("Authorized Sign-Off Users", "check-circle")
+    st.markdown(
+        f'<span style="font-size:0.85rem;color:{P["grey_700"]}">'
+        f'Users listed here can <strong>sign off</strong> a COB and <strong>request a '
+        f're-open</strong> (Sign-Off page and the quick actions on New Adjustment). '
+        f'Approval of those requests stays with the Approvers list above. '
+        f'Set <code>PROCESS_TYPE</code> to limit a user to one scope, or leave blank for all scopes.'
+        f'</span>',
+        unsafe_allow_html=True)
+
+    try:
+        df_signers = run_query_df("""
+            SELECT SIGNER_ID, USERNAME, PROCESS_TYPE, IS_ACTIVE,
+                   ADDED_BY, ADDED_DATE
+            FROM ADJUSTMENT_APP.ADJ_SIGNOFF_USERS
+            ORDER BY IS_ACTIVE DESC, USERNAME
+        """)
+        _n_active_signers = (int(df_signers[df_signers["IS_ACTIVE"] == True].shape[0])
+                             if not df_signers.empty else 0)
+        if _n_active_signers == 0:
+            st.warning("The sign-off user list has no active user, so **everyone** "
+                       "can sign off and request re-opens (bootstrap). Add the "
+                       "first user below to restrict it.")
+
+        if not df_signers.empty:
+            _inactive_signers = len(df_signers) - _n_active_signers
+            st.markdown(
+                f'<span style="font-size:0.85rem">'
+                f'<strong style="color:{P["success"]}">{_n_active_signers} active</strong> · '
+                f'<strong style="color:{P["grey_700"]}">{_inactive_signers} inactive</strong>'
+                f'</span>',
+                unsafe_allow_html=True)
+            render_df_table(df_signers, max_rows=200, height=260)
+
+            st.markdown("<br/>", unsafe_allow_html=True)
+            section_title("Toggle Sign-Off User Status", "refresh-cw")
+            sg_cols = st.columns([2, 1, 1])
+            with sg_cols[0]:
+                signer_options = [
+                    f"{r['USERNAME']} (ID {r['SIGNER_ID']}) — {'Active' if r['IS_ACTIVE'] else 'Inactive'}"
+                    for _, r in df_signers.iterrows()
+                ]
+                sel_signer = st.selectbox("Select sign-off user", signer_options,
+                                          key="toggle_signer")
+            signer_id   = int(sel_signer.split("ID ")[1].split(")")[0])
+            signer_name = sel_signer.split(" (ID ")[0].strip()
+            with sg_cols[1]:
+                if st.button("Activate", key="activate_signer_btn"):
+                    try:
+                        run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_SIGNOFF_USERS
+                            SET IS_ACTIVE = TRUE
+                            WHERE SIGNER_ID = {signer_id}
+                        """)
+                        set_flash("admin", "success", f"Sign-off user {signer_name} activated.")
+                        safe_rerun()
+                    except Exception as ex:
+                        set_flash("admin", "error", f"Failed to activate sign-off user: {ex}")
+                        safe_rerun()
+            with sg_cols[2]:
+                # Deactivating the LAST active user re-opens sign-off to
+                # everyone (bootstrap rule) — two clicks, not one.
+                _cfm_sg = confirm_gate(f"Confirm deactivating {signer_name}",
+                                       key=f"cfm_deact_signer_{signer_id}")
+                if st.button("Deactivate", key="deactivate_signer_btn",
+                             disabled=not _cfm_sg):
+                    try:
+                        run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_SIGNOFF_USERS
+                            SET IS_ACTIVE = FALSE
+                            WHERE SIGNER_ID = {signer_id}
+                        """)
+                        set_flash("admin", "success", f"Sign-off user {signer_name} deactivated.")
+                        safe_rerun()
+                    except Exception as ex:
+                        set_flash("admin", "error", f"Failed to deactivate sign-off user: {ex}")
+                        safe_rerun()
+        else:
+            st.info("No sign-off users configured yet. Add one below.")
+    except Exception as e:
+        st.info(f"Sign-off users table not available: {e}")
+
+    st.markdown("<br/>", unsafe_allow_html=True)
+    section_title("Add New Sign-Off User", "check-circle")
+
+    with st.form("new_signer_form"):
+        sg1, sg2 = st.columns(2)
+        with sg1:
+            s_username = st.text_input("Username", placeholder="e.g. JSMITH", key="signer_user")
+        with sg2:
+            s_scope = st.selectbox("Scope (optional)", ["All Scopes"] + list(SCOPE_CONFIG.keys()),
+                                   key="signer_scope", help=SCOPE_LABEL_HELP)
+
+        s_submit = st.form_submit_button("Add Sign-Off User", type="primary")
+        if s_submit:
+            if not s_username.strip():
+                st.error("Username is required.")
+            else:
+                try:
+                    s_scope_val = "NULL" if s_scope == "All Scopes" else f"'{_esc(s_scope)}'"
+                    run_query(f"""
+                        INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_USERS
+                            (USERNAME, PROCESS_TYPE, IS_ACTIVE, ADDED_BY)
+                        VALUES (UPPER('{_esc(s_username.strip())}'), {s_scope_val}, TRUE, '{_esc(user)}')
+                    """)
+                    set_flash("admin", "success",
+                              f"Sign-off user {s_username.strip().upper()} added.")
+                    safe_rerun()
+                except Exception as ex:
+                    st.error(f"Failed to add sign-off user: {ex}")
+
     # ── Page administrators (gate for THIS Admin page) ────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Page Administrators", "lock")
@@ -1140,6 +1253,7 @@ with tab_schema:
         ("ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS",    "TABLE",         "COB sign-off status per scope+entity. Managed via the Sign-Off page (approval-gated requests)"),
         ("ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY",   "TABLE",         "Append-only audit of sign-off / re-open transitions"),
         ("ADJUSTMENT_APP.ADJ_APPROVERS",         "TABLE",         "Authorized approvers with optional scope restriction. Managed via Admin page"),
+        ("ADJUSTMENT_APP.ADJ_SIGNOFF_USERS",     "TABLE",         "Users allowed to sign off / request re-open, optional scope. Empty = everyone (bootstrap). Managed via Admin page"),
         ("ADJUSTMENT_APP.ADJ_ADMINS",            "TABLE",         "Users and Snowflake roles allowed to open this Admin page. Managed via Admin page"),
         ("ADJUSTMENT_APP.ADJ_APP_CONFIG",        "TABLE",         "App-level key/value config (notification master switch, email integration name)"),
         ("ADJUSTMENT_APP.ADJ_NOTIFICATION_PREFS","TABLE",         "Per-user email notification opt-ins (recipients). Managed via Admin page"),
