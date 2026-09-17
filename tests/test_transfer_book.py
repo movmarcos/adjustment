@@ -83,3 +83,18 @@ def test_trf04_overlap_blocks(session, ev):
     ev.check("transfer is blocked by the earlier Flatten",
              h and h[0]["BLOCKED_BY_ADJ_ID"] is not None
              and h[0]["BLOCKED_BY_ADJ_ID"] == flat.get("adj_id"))
+
+
+@pytest.mark.uat("TRF-03", title="Transfer preview SQL reads the source book and re-keys to the target", priority="P1")
+def test_trf03_preview_sql(session, ev):
+    payload = json.dumps({"cobid": FAKE_COB, "process_type": "VaR", "adjustment_type": "Transfer",
+                          "source_cobid": FAKE_COB, "scale_factor": 1,
+                          "book_code": TGT, "source_book_code": SRC,
+                          "trade_codes": ["UAT-TRADE-1", "UAT-TRADE-2"], "mode": "sql"})
+    r = session.sql(f"CALL {SP_PREVIEW}('{payload}')").collect()
+    txt = str(r[0][0]) if r else ""
+    ev.note("SQL", txt[:600])
+    ev.check("source book predicate", f"UPPER(sb.BOOK_CODE) = UPPER('{SRC}')".upper() in txt.upper())
+    ev.check("target book predicate", TGT.upper() in txt.upper())
+    ev.check("trade list", "UAT-TRADE-1" in txt and "UAT-TRADE-2" in txt)
+    ev.check("fallback trade", "/Adjustment" in txt)

@@ -87,6 +87,25 @@ def main(session, p_adjustment):
     # original, projected = factor × source adjusted.
     is_roll = (adjustment_type == "roll" and int(source_cobid) != int(cobid))
 
+    # Transfer Book: moves adjusted positions from a source book to a target
+    # book within the same COB. Mirrors SP_SUBMIT_ADJUSTMENT's own parsing —
+    # trade_codes may arrive as a list (multi-trade transfer) or fall back to
+    # the single trade_code field used by every other adjustment type.
+    is_transfer = (adjustment_type == "transfer")
+    src_book = str(adj.get("source_book_code") or "").strip()
+    tgt_book = str(adj.get("book_code") or "").strip()
+    trade_codes = adj.get("trade_codes") or ([adj["trade_code"]] if adj.get("trade_code") else [])
+    trade_codes = [str(t).strip() for t in trade_codes if str(t).strip()]
+    if is_transfer and (not src_book or not tgt_book or src_book.upper() == tgt_book.upper()):
+        return session.sql("SELECT 'Error: Transfer Book preview needs a source book and a "
+                           "different target book' AS MESSAGE")
+    if is_transfer:
+        # The generic WHERE builder below must see the TARGET book/trade, not
+        # the source — trade_code is cleared here so its TRADE EXISTS clause
+        # doesn't fire for the source trade list; the target trade predicate
+        # is appended separately once the builder has run (see below).
+        adj["trade_code"] = None
+
     # ── Discover which columns actually exist in the fact table ──────────
     fact_columns = get_table_columns(session, fact_tbl)
 
@@ -125,6 +144,8 @@ def main(session, p_adjustment):
             sf_adjusted = scale_factor        # cross-COB
         else:
             sf_adjusted = scale_factor - 1.0  # same-COB
+    elif adjustment_type == "transfer":
+        sf_adjusted = scale_factor
     else:
         # Direct / Upload — preview shows the uploaded values themselves
         return session.sql(f"""
@@ -327,6 +348,14 @@ def main(session, p_adjustment):
         except (TypeError, ValueError):
             pass
 
+    # Transfer target trade list — mirrors the TRADE EXISTS shape above (alias
+    # `td`, DIMENSION.TRADE, TRADE_KEY join) but matches the target trade_codes
+    # list rather than a single trade_code (cleared above so it can't collide).
+    if is_transfer and trade_codes and has_trade_key:
+        _tl = ", ".join(f"'{_esc(t)}'" for t in trade_codes)
+        where_clauses.append(f"EXISTS (SELECT 1 FROM DIMENSION.TRADE td "
+                             f"WHERE td.TRADE_KEY = fact.TRADE_KEY AND UPPER(td.TRADE_CODE) IN ({_tl.upper()}))")
+
     where_sql = "\n      AND ".join(where_clauses)
     base_where = f"WHERE {where_sql}\n      AND fact.{primary_metric} IS NOT NULL"
 
@@ -385,6 +414,87 @@ def main(session, p_adjustment):
         """mode='sql': the main statement plus the overlap statement."""
         return sql_text + ("\n\n-- Existing adjustments in scope (overlap)\n"
                            + overlap_sql if overlap_sql else "")
+
+    # ═════════════════════════════════════════════════════════════════════
+    # TRANSFER BOOK — preview mirrors the cross-COB Roll shape above, but
+    # within one COB: source and target are different BOOKs, not different
+    # COBs. Source reads FACT_ADJUSTED_TABLE (the combined view — a transfer
+    # carries the source book's *adjusted* values, same as Roll leg ②).
+    #   current   = SUM(original) at the TARGET book
+    #   projected = factor × SUM(adjusted) at the SOURCE book
+    #   delta     = projected − current
+    # ═════════════════════════════════════════════════════════════════════
+    if is_transfer and not (fact_adj_tbl and fact_adj_tbl != fact_tbl):
+        return session.sql(
+            "SELECT 'Error: Transfer Book preview needs FACT_ADJUSTED_TABLE configured "
+            "for this scope (ADJUSTMENTS_SETTINGS)' AS MESSAGE")
+
+    if is_transfer:
+        dim_filters = where_clauses[1:]          # target: book/trade predicates
+        tgt_dim_sql = ("\n      AND " + "\n      AND ".join(dim_filters)) if dim_filters else ""
+        src_preds = [f"EXISTS (SELECT 1 FROM DIMENSION.BOOK sb WHERE sb.BOOK_KEY = fact.BOOK_KEY "
+                     f"AND UPPER(sb.BOOK_CODE) = UPPER('{_esc(src_book)}'))"]
+        if trade_codes and has_trade_key:
+            _tl = ", ".join(f"'{_esc(t).upper()}'" for t in trade_codes)
+            src_preds.append(f"EXISTS (SELECT 1 FROM DIMENSION.TRADE st WHERE st.TRADE_KEY = fact.TRADE_KEY "
+                             f"AND UPPER(st.TRADE_CODE) IN ({_tl}))")
+        src_where = (f"WHERE fact.COBID = {int(cobid)}\n      AND " + "\n      AND ".join(src_preds)
+                     + f"\n      AND fact.{primary_metric} IS NOT NULL")
+        tgt_where = f"WHERE fact.COBID = {int(cobid)}{tgt_dim_sql}\n      AND fact.{primary_metric} IS NOT NULL"
+        _cob_date = f"TO_DATE('{int(cobid)}', 'YYYYMMDD')"
+
+        transfer_summary = f"""
+        WITH src_adj AS (
+            SELECT COUNT(*)                                 AS ROWS_AFFECTED,
+                   COUNT_IF(fact.{primary_metric} != 0)     AS NONZERO_ROWS,
+                   COALESCE(SUM(fact.{primary_metric}), 0)  AS SOURCE_ADJUSTED_VALUE
+            FROM {fact_adj_tbl} fact
+            {src_where}
+        ),
+        src_orig AS (
+            SELECT COALESCE(SUM(fact.{primary_metric}), 0)  AS SOURCE_ORIGINAL_VALUE
+            FROM {fact_tbl} fact
+            {src_where}
+        ),
+        tgt AS (
+            SELECT COALESCE(SUM(fact.{primary_metric}), 0)  AS TOTAL_CURRENT_VALUE
+            FROM {fact_tbl} fact
+            {tgt_where}
+        )
+        SELECT
+            src_adj.ROWS_AFFECTED,
+            src_adj.NONZERO_ROWS,
+            src_orig.SOURCE_ORIGINAL_VALUE,
+            src_adj.SOURCE_ADJUSTED_VALUE - src_orig.SOURCE_ORIGINAL_VALUE      AS SOURCE_ADJUSTMENTS_VALUE,
+            src_adj.SOURCE_ADJUSTED_VALUE,
+            tgt.TOTAL_CURRENT_VALUE,
+            {scale_factor} * src_adj.SOURCE_ADJUSTED_VALUE - tgt.TOTAL_CURRENT_VALUE AS TOTAL_ADJUSTMENT_DELTA,
+            {scale_factor} * src_adj.SOURCE_ADJUSTED_VALUE                           AS TOTAL_PROJECTED_VALUE,
+            {overlap_cols}
+        FROM src_adj, src_orig, tgt
+        """
+        transfer_breakdown = f"""
+        SELECT st.TRADE_CODE                                            AS TRADE_CODE,
+               MAX(CASE WHEN tt.TRADE_KEY IS NOT NULL THEN 'target trade found'
+                        ELSE 'fallback: {_esc(tgt_book)}/Adjustment' END) AS TARGET_TRADE,
+               COUNT(*)                                                 AS ROWS_AFFECTED,
+               COALESCE(SUM(fact.{primary_metric}), 0)                  AS PROJECTED_VALUE
+        FROM {fact_adj_tbl} fact
+        LEFT JOIN DIMENSION.TRADE st ON st.TRADE_KEY = fact.TRADE_KEY
+        LEFT JOIN DIMENSION.TRADE tt
+               ON  UPPER(tt.TRADE_CODE) = UPPER(st.TRADE_CODE)
+               AND UPPER(tt.BOOK_CODE)  = UPPER('{_esc(tgt_book)}')
+               AND {_cob_date} BETWEEN tt.EFFECTIVE_START_DATE AND tt.EFFECTIVE_END_DATE
+        {src_where}
+        GROUP BY 1
+        ORDER BY 1
+        """
+        if mode == "sql":
+            return _as_sql_row(_with_overlap_sql(transfer_summary)
+                               + "\n\n-- Per-trade breakdown\n" + transfer_breakdown)
+        if mode == "breakdown":
+            return session.sql(transfer_breakdown)
+        return session.sql(transfer_summary)
 
     if is_roll and not (fact_adj_tbl and fact_adj_tbl != fact_tbl):
         # Mirror the processing engine's refusal (05:cross-COB roll needs
