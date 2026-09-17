@@ -1966,7 +1966,7 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             _erlog(session, _sqlog, "stage_build (netted temp)", insert_sql)
             if has_transfer:
                 _erlog(session, _sqlog, "transfer_leg (note)",
-                       "SELECT 'batch contains Transfer Book rows - leg 2T "
+                       "SELECT 'batch contains Transfer Book rows - the transfer leg "
                        "re-keys source-book rows to the target book' AS NOTE")
 
             # (Prior-run rows were removed before the temp build, keyed by the
