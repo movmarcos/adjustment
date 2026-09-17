@@ -14,7 +14,7 @@ from utils.styles import (scope_label, scope_meta, wide_kwargs,
     inject_css, render_sidebar, render_filter_chips, fmt_user_dt,
     section_title, status_badge, P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, icon, bordered_container,
     render_df_table, fmt_adj_id, set_flash, render_flash, confirm_gate,
-    SIGNOFF_STATUS_META, signoff_status_label,
+    SIGNOFF_STATUS_META, signoff_status_label, type_label,
 )
 from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
                                   safe_rerun, friendly_error)
@@ -288,7 +288,7 @@ else:
         ))
         _cob_lbl = row.get("COBID", "—")
         expander_label = (
-            f'ADJ {adj_short} · COB {_cob_lbl} · {scope_label(scope)} · {adj_type} · '
+            f'ADJ {adj_short} · COB {_cob_lbl} · {scope_label(scope)} · {type_label(adj_type)} · '
             f'entity {entity} · book {book} · by {submitted_by}'
             + ("  — ⚠ OVERLAP" if has_overlap else "")
         )
@@ -307,7 +307,8 @@ else:
                 _meta_df = pd.DataFrame(
                     [("COB", _txt(row.get("COBID"))),
                      ("Source COB", _txt(row.get("SOURCE_COBID"))),
-                     ("Type", adj_type or "—"),
+                     ("From book", _txt(row.get("SOURCE_BOOK_CODE"))),
+                     ("Type", type_label(adj_type) if adj_type else "—"),
                      ("Entity", entity),
                      ("Book", book),
                      ("Submitted", _txt(submitted_at)),
@@ -494,7 +495,7 @@ if len(_bulk_rows) >= 2:
         def _bulk_label(i):
             r = _bulk_rows[i]
             return (f'{fmt_adj_id(r.get("DIMENSION_ADJ_ID"), adj_id=r.get("ADJ_ID"))} · '
-                    f'{scope_label(_nz(r.get("PROCESS_TYPE")))} · {_nz(r.get("ADJUSTMENT_TYPE"))} · '
+                    f'{scope_label(_nz(r.get("PROCESS_TYPE")))} · {type_label(_nz(r.get("ADJUSTMENT_TYPE")))} · '
                     f'COB {_nz(r.get("COBID"))} · entity {_nz(r.get("ENTITY_CODE"))} · '
                     f'book {_nz(r.get("BOOK_CODE"))} · by {_nz(r.get("SUBMITTED_BY"))}')
 
@@ -766,7 +767,7 @@ try:
                 "Outcome": _txt(r.get("NEW_STATUS")).upper(),
                 "COB": _txt(r.get("COBID")),
                 "Scope": scope_label(_txt(r.get("PROCESS_TYPE"))),
-                "Type": _txt(r.get("ADJUSTMENT_TYPE")),
+                "Type": type_label(_txt(r.get("ADJUSTMENT_TYPE"))),
                 "Entity": _txt(r.get("ENTITY_CODE")),
                 "Submitted by": _txt(r.get("SUBMITTED_BY")),
                 "Decided by": _txt(r.get("ACTIONED_BY")),

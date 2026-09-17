@@ -137,6 +137,11 @@ Adjustment categories:
   Scaling and Entity Roll accept SEVERAL data scopes at once — the app
   creates one adjustment per selected scope. With several scopes the filter
   form offers only the fields every selected scope supports.
+  Transfer Book (Scaling type): at one COB the TARGET book's positions are
+  replaced by the SOURCE book's adjusted values (source untouched); optional
+  trade codes limit it, one adjustment per trade and per scope. The ticket's
+  entity is the target book's entity. Trades with no version under the
+  target book land on the target's '<BOOK>/Adjustment' trade.
 - Direct: exact values. For VaR/Stress/Sensitivity it is PER ROW — paste or
   upload a CSV and each row becomes its own independent adjustment. For
   FRTB/FRTBDRC/FRTBRRAO it is PER FILE — one uploaded file = one Direct

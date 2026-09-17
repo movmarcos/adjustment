@@ -1666,6 +1666,7 @@ def render_filter_chips(row: dict):
     dim_labels = {
         "ENTITY_CODE": "Entity", "SOURCE_SYSTEM_CODE": "Source",
         "DEPARTMENT_CODE": "Dept", "BOOK_CODE": "Book",
+        "SOURCE_BOOK_CODE": "From book",
         "CURRENCY_CODE": "Ccy", "TRADE_TYPOLOGY": "Typology",
         "TRADE_CODE": "Trade", "STRATEGY": "Strategy",
         "INSTRUMENT_CODE": "Instrument", "SIMULATION_NAME": "Simulation",
@@ -1944,7 +1945,7 @@ def build_activity_grid_df(df_source):
         "COB":             col("COBID").apply(_grid_int_str),
         "Source COB":      col("SOURCE_COBID").apply(_grid_int_str),
         "Scope":           col("PROCESS_TYPE").fillna("—").astype(str).map(scope_label),
-        "Type":            col("ADJUSTMENT_TYPE").apply(action_label),
+        "Type":            col("ADJUSTMENT_TYPE").apply(lambda c: type_label(action_label(c))),
         "Status":          col("RUN_STATUS").fillna("—").astype(str),
         "Deleted":         col("IS_DELETED").apply(lambda v: "Deleted" if (v is not None and v == v and bool(v)) else ""),
         "Entity":          col("ENTITY_CODE").fillna("—").astype(str),

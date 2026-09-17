@@ -17,7 +17,7 @@ from utils.styles import (scope_label, scope_meta, wide_kwargs,
     STATUS_COLORS, STATUS_ICONS,
     fmt_adj_id, icon, render_activity_grid, render_df_table, SELECTION_UNSUPPORTED,
     bordered_container,
-    set_flash, render_flash, confirm_gate, ACTION_LABELS,
+    set_flash, render_flash, confirm_gate, ACTION_LABELS, type_label,
 )
 from utils.snowflake_conn import (run_query, run_query_df, run_query_df_cached,
                                   bust_query_cache, current_user_name,
@@ -549,7 +549,7 @@ def render_adj_card(row, expanded=False):
     adj_label   = fmt_adj_id(row.get("DIMENSION_ADJ_ID"), adj_id=adj_id)
     scope       = str(row.get("PROCESS_TYPE", ""))
     adj_type    = str(row.get("ADJUSTMENT_TYPE", ""))
-    type_label  = ACTION_LABELS.get(adj_type, adj_type)
+    type_lbl    = type_label(ACTION_LABELS.get(adj_type, adj_type))
     run_status  = str(row.get("RUN_STATUS", ""))
     entity      = str(row.get("ENTITY_CODE", "")) or "—"
     book        = str(row.get("BOOK_CODE", "")) or "—"
@@ -562,7 +562,7 @@ def render_adj_card(row, expanded=False):
 
     with st.expander(
         f'ADJ {adj_label} · {scope_label(scope)} · '
-        f'{type_label} · {run_status} · {record_cnt} rows',
+        f'{type_lbl} · {run_status} · {record_cnt} rows',
         expanded=expanded,
     ):
         col_info, col_meta = st.columns([2, 1])
@@ -624,6 +624,7 @@ def render_adj_card(row, expanded=False):
                                  and row.get("SCALE_FACTOR")
                                  and float(row.get("SCALE_FACTOR", 1)) != 1 else "—"),
                 ("Source COB",   str(row.get("SOURCE_COBID", "—")) if row.get("SOURCE_COBID") else "—"),
+                ("From book",    str(row.get("SOURCE_BOOK_CODE")) if row.get("SOURCE_BOOK_CODE") else "—"),
                 ("Started",      start_date),
                 ("Ended",        process_date),
                 ("Occurrence",   {"ADHOC": "One-off"}.get(
@@ -1028,7 +1029,7 @@ if selected is SELECTION_UNSUPPORTED:
         parts = [
             fmt_adj_id(r.get("DIMENSION_ADJ_ID"), adj_id=aid),
             str(r.get("PROCESS_TYPE") or "—"),
-            ACTION_LABELS.get(_t, _t) or "—",
+            type_label(ACTION_LABELS.get(_t, _t)) or "—",
             f"COB {r.get('COBID')}" if r.get("COBID") else "—",
             str(r.get("ENTITY_CODE") or "—"),
         ]
