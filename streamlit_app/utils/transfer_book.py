@@ -40,7 +40,8 @@ def book_entity(book_rows, code):
     return None
 
 
-def submit_jobs(jobs, payload, submit_one, is_success, scope_label) -> dict:
+def submit_jobs(jobs, payload, submit_one, is_success, scope_label,
+                on_progress=None) -> dict:
     """Transfer Book: one submit call per (scope, trade). Partial failures are named.
 
     Same contract as `submit_fanout`: every result — success, partial failure
@@ -50,18 +51,26 @@ def submit_jobs(jobs, payload, submit_one, is_success, scope_label) -> dict:
     single-submit message, "Created with status '<status>'.", also starts with
     "Created "). No rollback on a partial failure: the message names what was
     created so the user can delete it from the Adjustments page.
+
+    `on_progress(i, n, label)` — optional, called once per job (i is 1-based)
+    BEFORE that submission runs, so a caller can drive a progress bar. A wide
+    transfer (scopes × trades) can be dozens of sequential calls and a bare
+    spinner gives no sign of where it is.
     """
     if not jobs:
         return {"status": "Error", "message": "No scope selected.",
                 "fanout": True, "created": 0}
 
+    n = len(jobs)
     created, statuses, failures = [], [], []
-    for sc, trade in jobs:
+    for i, (sc, trade) in enumerate(jobs, 1):
+        label = f"{scope_label(sc)}{' / ' + trade if trade else ''}"
+        if on_progress is not None:
+            on_progress(i, n, label)
         p = {**payload, "process_type": sc}
         if trade:
             p["trade_code"] = trade
         res = submit_one(p)
-        label = f"{scope_label(sc)}{' / ' + trade if trade else ''}"
         if is_success(res):
             created.append(label)
             statuses.append(res.get("status"))

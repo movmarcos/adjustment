@@ -200,8 +200,9 @@ def _build_payload() -> dict:
     # BOOK_CODE is the TARGET (the scope being replaced); SOURCE_BOOK_CODE is
     # where the values come from, and the entity is derived from the target
     # book server-side. NOTHING else is sent: any other filter left over from
-    # a Scale/Roll draft would silently narrow the transfer
-    # (03_sp_submit_adjustment.sql rejects stray filter keys for this reason).
+    # a Scale/Roll draft would silently narrow the transfer — the SP strips
+    # (pops) stray filter keys rather than failing, so a key sent by mistake
+    # is dropped without a word (03_sp_submit_adjustment.sql).
     if wiz.get("adjustment_type") == "Transfer":
         payload.update({
             "source_cobid":          wiz["cobid"],     # one COB, never a roll
@@ -526,9 +527,41 @@ def _submit_jobs(payload: dict, jobs: list) -> dict:
     """Transfer Book: one SP_SUBMIT_ADJUSTMENT call per (scope, trade).
     Thin wrapper around the pure `submit_jobs` helper (utils/transfer_book.py)
     — the result carries the same "fanout"/"created" markers the success
-    screen reads."""
-    return _submit_jobs_pure(jobs, payload, _submit_one, _is_submit_success,
-                             scope_label)
+    screen reads.
+
+    The calls are sequential and a wide transfer (scopes × trades) can be
+    dozens of them, so the helper's on_progress callback drives a real
+    progress bar: a bare spinner for a minute-long submit reads as a hang."""
+    bar, note = st.progress(0.0), st.empty()
+
+    def _on_progress(i, n, label):
+        bar.progress(min(1.0, (i - 1) / n))
+        note.caption(f"Submitting {i} of {n} — {label}…")
+
+    try:
+        return _submit_jobs_pure(jobs, payload, _submit_one, _is_submit_success,
+                                 scope_label, on_progress=_on_progress)
+    finally:
+        bar.empty()
+        note.empty()
+
+
+def _planned_submit_count() -> int:
+    """How many SP_SUBMIT_ADJUSTMENT calls this draft will make — drives the
+    spinner copy and the large fan-out confirmation. (Direct batches are ONE
+    set-based call however many rows they carry.)"""
+    if wiz.get("category") == "Scaling Adjustment" \
+            and wiz.get("adjustment_type") == "Transfer":
+        return max(1, len(transfer_jobs(_selected_scopes(),
+                                        wiz.get("transfer_trade_codes"))))
+    if wiz.get("category") in ("Scaling Adjustment", "Entity Roll"):
+        return max(1, len(_selected_scopes()))
+    return 1
+
+
+# Above this many sequential submissions the user must confirm the count
+# before Submit unlocks (a 3-scope × 40-trade transfer is 120 adjustments).
+_FANOUT_CONFIRM_OVER = 20
 
 
 def _do_submit() -> dict:
@@ -1020,8 +1053,12 @@ def _completion_checks() -> list:
             checks += [
                 ("Source book", bool(_src)),
                 ("Target book", bool(_tgt)),
+                # BOOK_CODE is case-insensitive in DIMENSION.BOOK (and the SP
+                # compares UPPER()), so "b1" → "B1" is the same book, not a
+                # transfer.
                 ("Target differs from source",
-                 (_src or "") != (_tgt or "") if _src and _tgt else True),
+                 (_src or "").strip().upper() != (_tgt or "").strip().upper()
+                 if _src and _tgt else True),
             ]
         else:
             _has_var_comp = _selected_scopes() == ["VaR"] and (
@@ -1149,6 +1186,20 @@ def _book_dept_rows():
     return _ref_rows(
         "SELECT DISTINCT BOOK_CODE, DEPARTMENT_CODE, ENTITY_CODE "
         "FROM DIMENSION.BOOK WHERE BOOK_CODE IS NOT NULL", "_ref_books_v2")
+
+
+def _current_book_rows():
+    """DIMENSION.BOOK rows for books that exist TODAY (SCD2: IS_CURRENT_ROW).
+
+    _book_dept_rows() deliberately reads every historical row, because a filter
+    may legitimately name a book that has since been re-keyed. A Transfer,
+    though, writes rows into the target book at this COB — offering a closed
+    book as either side of it is never right."""
+    return _ref_rows(
+        "SELECT DISTINCT BOOK_CODE, DEPARTMENT_CODE, ENTITY_CODE "
+        "FROM DIMENSION.BOOK "
+        "WHERE BOOK_CODE IS NOT NULL AND IS_CURRENT_ROW = TRUE",
+        "_ref_books_current")
 
 
 def _dept_options(entity=None):
@@ -1394,7 +1445,8 @@ def _measure_type_options(process_type=None):
     return codes
 
 
-def _code_select(label, key, value, options, help=None, placeholder="— select —"):
+def _code_select(label, key, value, options, help=None, placeholder="— select —",
+                 fmt=None):
     """Dropdown over reference codes; free-text fallback when none are available.
 
     Controlled-widget pattern: session_state[key] is the SINGLE source of
@@ -1403,7 +1455,10 @@ def _code_select(label, key, value, options, help=None, placeholder="— select 
     rerun and the user must pick twice (bug reported on every combo box).
     We seed session_state[key] from the model only when the widget is new or
     its stored value is no longer valid for the current options (e.g. a parent
-    filter changed the list), then let the widget own it."""
+    filter changed the list), then let the widget own it.
+
+    `fmt` decorates how an option READS (e.g. "B123 — EQDESK"); the stored and
+    returned value is always the bare code."""
     if not options:
         return st.text_input(label, value=value or "", key=key + "_txt",
                              help=help).strip()
@@ -1414,7 +1469,8 @@ def _code_select(label, key, value, options, help=None, placeholder="— select 
     if key not in st.session_state or st.session_state[key] not in opts:
         st.session_state[key] = cur if cur in opts else ""
     return st.selectbox(label, opts, key=key, help=help,
-                        format_func=lambda x: placeholder if x == "" else x)
+                        format_func=lambda x: placeholder if x == ""
+                                    else (fmt(x) if fmt else x))
 
 
 _DAY_TYPE_LABELS = {"": "— both —", "1": "1 — 1-day VaR", "10": "10 — 10-day VaR"}
@@ -1549,14 +1605,23 @@ def _render_transfer_fields() -> None:
     The generic filter keys (book_code / entity_code) are kept in step with
     the TARGET book, because the ticket, the completion checklist and the
     sign-off gate all read them."""
-    books = _book_options(None, None)                    # every current book
-    rows_ = _book_dept_rows()
+    rows_ = _current_book_rows()          # current books only — see the helper
+    books = sorted({str(r[0]) for r in rows_ if r[0] is not None})
+    _dept_of = {str(r[0]): (str(r[1]) if r[1] is not None else "")
+                for r in rows_ if r[0] is not None}
+
+    def _book_lbl(code):
+        """"B123 — EQDESK": the department is what tells two similar book
+        codes apart; the stored value stays the bare code."""
+        d = _dept_of.get(code)
+        return f"{code} — {d}" if d else str(code)
+
     s_col, t_col = st.columns(2)
     with s_col:
         st.markdown("**Source** — values come from")
         wiz["source_book_code"] = _code_select(
             "Source Book Code *", _k("trf_src_book"), wiz.get("source_book_code"),
-            books, placeholder="— select book —") or None
+            books, placeholder="— select book —", fmt=_book_lbl) or None
         src_ent = book_entity(rows_, wiz.get("source_book_code"))
         if wiz.get("source_book_code"):
             st.caption(f"Entity: {src_ent or '—'}")
@@ -1583,7 +1648,7 @@ def _render_transfer_fields() -> None:
         tgt_opts = [b for b in books if b != (wiz.get("source_book_code") or "")]
         wiz["target_book_code"] = _code_select(
             "Target Book Code *", _k("trf_tgt_book"), wiz.get("target_book_code"),
-            tgt_opts, placeholder="— select book —") or None
+            tgt_opts, placeholder="— select book —", fmt=_book_lbl) or None
         tgt_ent = book_entity(rows_, wiz.get("target_book_code"))
         if wiz.get("target_book_code"):
             st.caption(f"Entity: {tgt_ent or '—'}")
@@ -1632,7 +1697,11 @@ def render_scaling_form() -> None:
                     wiz["book_code"] = None
                     wiz["entity_code"] = None
                     for _wk in ("book_dd", "entity_dd"):
+                        # Both widget shapes: the dropdown (key) and the
+                        # free-text fallback _code_select uses when the
+                        # reference list is unavailable (key + "_txt").
                         st.session_state.pop(_k(_wk), None)
+                        st.session_state.pop(_k(_wk) + "_txt", None)
             else:
                 # A Transfer is a single-COB operation — never recurring.
                 wiz["occurrence"] = "ADHOC"
@@ -3719,9 +3788,20 @@ with left:
             # scoped to VaR+Stress that hops to Direct Adjustment and back
             # otherwise comes back still carrying both scopes (and would fan
             # out to them) while the form reads as a fresh start.
+            # Leaving a Transfer draft: its books must go with the type, and
+            # so must the generic book/entity keys the Transfer form wrote
+            # into (widget state included — see the type-switch branch).
+            if wiz.get("adjustment_type") == "Transfer":
+                wiz["book_code"] = None
+                wiz["entity_code"] = None
+                for _wk in ("book_dd", "entity_dd"):
+                    st.session_state.pop(_k(_wk), None)
+                    st.session_state.pop(_k(_wk) + "_txt", None)
             wiz.update({"category": cat, "process_type": None, "process_types": [],
                         "adjustment_type": None,
                         "source_cobid": None,
+                        "source_book_code": None, "target_book_code": None,
+                        "transfer_trade_codes": [],
                         "uploaded_df": None, "uploaded_file_name": None,
                         "_preview_sum": None, "_preview_err": None,
                         "_preview_by_scope": None,
@@ -3844,6 +3924,22 @@ with right:
             f"for this entity at the target COB (including data from other systems).",
             key=_k(f"eroll_confirm_{_er_sig}"), value=False)
 
+    # ── Large fan-out agreement (wide Transfer Book) ─────────────────────
+    fanout_ok = True
+    _n_jobs = _planned_submit_count() if cat else 1
+    if _n_jobs > _FANOUT_CONFIRM_OVER:
+        # The signature covers what the count is about, so changing the books,
+        # the scopes or the trade selection re-keys the checkbox and the user
+        # confirms the number they are actually about to create.
+        _fo_sig = abs(hash((wiz.get("cobid"), wiz.get("source_book_code"),
+                            wiz.get("target_book_code"),
+                            tuple(_selected_scopes()), _n_jobs))) % 10**8
+        fanout_ok = st.checkbox(
+            f"I understand this will create {_n_jobs} adjustments",
+            key=_k(f"fanout_confirm_{_fo_sig}"), value=False,
+            help="Each one is submitted separately and appears as its own row "
+                 "on the Adjustments page.")
+
     # ── Previous submit error ─────────────────────────────────────────────
     _res = wiz.get("result") or {}
     if _res and not _is_submit_success(_res):
@@ -3856,9 +3952,10 @@ with right:
     if _btn("Submit Adjustment", icon_name=":material/send:", type="primary",
             **wide_kwargs(), key=_k("submit"),
             disabled=bool(missing) or not dup_ok or not eroll_ok or zero_rows
-                     or signoff_blocked):
+                     or signoff_blocked or not fanout_ok):
         wiz["result"] = None
-        with st.spinner("Submitting adjustment…"):
+        with st.spinner(f"Submitting {_n_jobs} adjustments…" if _n_jobs > 1
+                        else "Submitting adjustment…"):
             result = _do_submit()
         wiz["result"] = result
         wiz["step"]   = 3 if _is_submit_success(result) else 1
@@ -3881,6 +3978,10 @@ with right:
         st.caption("Submit is blocked: tick the 'I understand this Entity "
                    "Roll will permanently remove…' box in the ticket panel "
                    "to confirm the roll.")
+    elif not fanout_ok:
+        st.caption(f"Submit is blocked: tick the 'I understand this will "
+                   f"create {_n_jobs} adjustments' box to confirm the "
+                   f"number of adjustments.")
 
     # ── Approval flag (Entity Roll is always locked on) ───────────────────
     if cat == "Entity Roll":

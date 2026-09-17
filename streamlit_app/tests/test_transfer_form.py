@@ -94,6 +94,25 @@ def test_submit_jobs_partial_failure_names_what_was_created():
     assert "Already created: VaR / T1" in out["message"]
 
 
+def test_submit_jobs_reports_progress_once_per_job():
+    seen = []
+
+    def submit_one(p):
+        return {"status": "Pending"}
+
+    jobs = transfer_jobs(["VaR", "FRTB"], ["T1", "T2"])
+    out = submit_jobs(jobs, {}, submit_one, _is_success, _scope_label,
+                      on_progress=lambda i, n, label: seen.append((i, n, label)))
+
+    assert [i for i, _, _ in seen] == [1, 2, 3, 4]      # 1..n, in order
+    assert {n for _, n, _ in seen} == {4}
+    assert seen[0][2] == "VaR / T1" and seen[-1][2] == "FRTBSBM / T2"
+    assert out["created"] == 4
+    # Still optional: the default path must not need a callback.
+    assert submit_jobs(jobs, {}, submit_one, _is_success,
+                       _scope_label)["created"] == 4
+
+
 def test_submit_jobs_pending_approval_wins_and_empty_is_guarded():
     def submit_one(p):
         return {"status": "Pending Approval" if p.get("trade_code") == "T2"
@@ -161,8 +180,13 @@ def _load():
 def _seed_ref_data(at):
     """Pre-fill the reference caches _ref_rows() reads (the fake session
     returns no rows), so the book dropdowns and the trade multiselect render
-    with real options."""
-    at.session_state["_ref_books_v2"] = [["B1", "D1", "E1"], ["B2", "D1", "E2"]]
+    with real options.
+
+    The Transfer dropdowns read `_ref_books_current` (current books only);
+    `_ref_books_v2` is the every-row cache the Dimension Filters card uses."""
+    _books = [["B1", "D1", "E1"], ["B2", "D2", "E2"]]
+    at.session_state["_ref_books_current"] = list(_books)
+    at.session_state["_ref_books_v2"] = list(_books)
     at.session_state["_ref_trades_B1"] = [["T1"], ["T2"]]
 
 
@@ -300,6 +324,137 @@ def test_transfer_whole_book_submits_once_without_a_trade_code():
     # A single job is NOT a fan-out — the success screen keeps its singular
     # headline.
     assert not (at.session_state["wiz"]["result"] or {}).get("fanout")
+
+
+def _transfer_wiz(at, **over):
+    base = {**at.session_state["wiz"],
+            "category": "Scaling Adjustment", "adjustment_type": "Transfer",
+            "process_types": ["VaR"], "process_type": "VaR",
+            "cobid": 20260101,
+            "source_book_code": "B1", "target_book_code": "B2",
+            "transfer_trade_codes": ["T1", "T2"],
+            "adjustment_category": "Cat", "reason": "why",
+            "result": None, "step": 1}
+    at.session_state["wiz"] = {**base, **over}
+
+
+def test_transfer_book_dropdowns_offer_current_books_labelled_by_department():
+    """Only IS_CURRENT_ROW books may be transferred (SP_SUBMIT rejects a
+    closed book), and each option reads "<book> — <department>"."""
+    at = _load()
+    _seed_ref_data(at)
+    # A historical-only book sits in the every-row cache but NOT in the
+    # current one — it must not be offered by the Transfer dropdowns.
+    at.session_state["_ref_books_v2"] = (list(at.session_state["_ref_books_v2"])
+                                         + [["BOLD", "D9", "E9"]])
+    _transfer_wiz(at)
+    at.run()
+    assert not at.exception, at.exception
+
+    src = at.selectbox(key=f"trf_src_book_{at.session_state['_wiz_v']}")
+    assert "BOLD" not in src.options
+    assert src.value == "B1"                       # stored value = bare code
+    assert src.format_func("B1") == "B1 — D1"      # label carries the dept
+    tgt = at.selectbox(key=f"trf_tgt_book_{at.session_state['_wiz_v']}")
+    assert "B1" not in tgt.options                 # never transfer onto itself
+    assert tgt.format_func("B2") == "B2 — D2"
+
+
+def test_transfer_preview_payload_carries_trade_codes_and_no_filters():
+    at = _load()
+    _seed_ref_data(at)
+    _transfer_wiz(at, entity_code="E9", department_code="D9")
+    at.run()
+    assert not at.exception, at.exception
+
+    CALLS.clear()
+    at.button(key=f"run_preview_{at.session_state['_wiz_v']}").click().run()
+    assert not at.exception, at.exception
+
+    prev = [c for c in CALLS if "SP_PREVIEW_ADJUSTMENT" in c]
+    assert prev, CALLS
+    raw = prev[0][prev[0].index("('") + 2:prev[0].rindex("')")]
+    pj = json.loads(raw.replace("''", "'").replace("\\\\", "\\"))
+    assert pj["adjustment_type"] == "Transfer"
+    assert pj["trade_codes"] == ["T1", "T2"]
+    assert pj["source_book_code"] == "B1" and pj["book_code"] == "B2"
+    assert pj["source_cobid"] == pj["cobid"] == 20260101
+    assert pj["scale_factor"] == 1
+    # Stale filters from an earlier draft never narrow a transfer.
+    assert "entity_code" not in pj and "department_code" not in pj
+
+
+def test_transfer_has_no_scale_factor_field_or_checklist_row():
+    at = _load()
+    _seed_ref_data(at)
+    _transfer_wiz(at)
+    at.run()
+    assert not at.exception, at.exception
+    assert not any((t.key or "").startswith("sf_") for t in at.text_input)
+    texts = " ".join(m.value for m in at.markdown)
+    assert "Scale Factor" not in texts
+
+
+def test_target_equal_to_source_fails_the_checklist_case_insensitively():
+    at = _load()
+    _seed_ref_data(at)
+    _transfer_wiz(at, source_book_code="B1", target_book_code="b1",
+                  transfer_trade_codes=[])
+    at.run()
+    assert not at.exception, at.exception
+    texts = " ".join(m.value for m in at.markdown)
+    assert "Target differs from source" in texts          # checklist row shown
+    # An incomplete ticket keeps Submit locked and says so.
+    assert any("Submit unlocks when the ticket is complete" in c.value
+               for c in at.caption), [c.value for c in at.caption]
+
+
+def test_wide_transfer_requires_a_count_confirmation_before_submit():
+    at = _load()
+    _seed_ref_data(at)
+    _trades = [f"T{i}" for i in range(1, 26)]            # 25 > the 20 threshold
+    at.session_state["_ref_trades_B1"] = [[t] for t in _trades]
+    _transfer_wiz(at, transfer_trade_codes=_trades)
+    at.run()
+    assert not at.exception, at.exception
+
+    box = next((c for c in at.checkbox
+                if (c.key or "").startswith("fanout_confirm_")), None)
+    assert box is not None, [c.key for c in at.checkbox]
+    assert box.label == "I understand this will create 25 adjustments"
+    assert at.button(key=f"submit_{at.session_state['_wiz_v']}").disabled
+
+    box.check().run()
+    assert not at.exception, at.exception
+    assert not at.button(key=f"submit_{at.session_state['_wiz_v']}").disabled
+
+
+def test_narrow_transfer_has_no_count_confirmation():
+    at = _load()
+    _seed_ref_data(at)
+    _transfer_wiz(at)                                   # 1 scope × 2 trades
+    at.run()
+    assert not at.exception, at.exception
+    assert not any((c.key or "").startswith("fanout_confirm_")
+                   for c in at.checkbox)
+
+
+def test_leaving_the_category_clears_the_transfer_draft():
+    at = _load()
+    _seed_ref_data(at)
+    _transfer_wiz(at)
+    at.run()
+    assert not at.exception, at.exception
+    assert at.session_state["wiz"]["book_code"] == "B2"
+
+    btn = next(b for b in at.button
+               if (b.key or "").startswith("cat_Direct Adjustment_"))
+    btn.click().run()
+    assert not at.exception, at.exception
+    w = at.session_state["wiz"]
+    assert w["source_book_code"] is None and w["target_book_code"] is None
+    assert w["transfer_trade_codes"] == []
+    assert not w["book_code"] and not w["entity_code"]
 
 
 def test_transfer_ticket_shows_the_books_and_trade_count():
