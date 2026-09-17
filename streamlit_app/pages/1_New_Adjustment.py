@@ -3379,9 +3379,13 @@ if wiz["step"] == 3:
     noun      = "adjustments" if plural else "adjustment"
     title     = (f"{n_created} Adjustments Submitted Successfully" if plural
                  else "Adjustment Submitted Successfully")
-    if (result.get("message") or "").startswith("Created "):
+    if (wiz.get("category") in ("Scaling Adjustment", "Entity Roll")
+            and (result.get("message") or "").startswith("Created ")):
         # Multi-scope fan-out (_submit_fanout): the message already names the
-        # count and the scopes — show it verbatim as the headline.
+        # count and the scopes — show it verbatim as the headline. Scoped to
+        # these two categories so the Direct Adjustment batch screen (whose
+        # own "Created N Direct adjustments." message also starts with
+        # "Created ") is unaffected and keeps its original headline.
         title = result.get("message")
     if status == "Pending Approval":
         next_html = (f'<strong>Waiting for approval</strong> — an approver must '
