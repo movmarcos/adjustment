@@ -5,6 +5,7 @@
 #   .\deploy_all.ps1 -Mode all         # force full deploy (DB + Streamlit)
 #   .\deploy_all.ps1 -Mode db          # force DB objects only
 #   .\deploy_all.ps1 -Mode streamlit   # force Streamlit app only
+#   .\deploy_all.ps1 -Branch main      # deploy from main instead of the change branch
 #
 # How "auto" decides (the flag is computed from git, so it can never drift):
 #   - a change under  new_adjustment_db_objects\  (or config.py / deploy.py) -> deploy DB
@@ -15,7 +16,10 @@
 
 param(
     [ValidateSet("auto", "db", "streamlit", "all")]
-    [string]$Mode = "auto"
+    [string]$Mode = "auto",
+    # Git branch to deploy from. Default: the change branch under test.
+    # Switch back to "main" once the branch is merged.
+    [string]$Branch = "feat/multi-scope-transfer-book"
 )
 
 $pythonExe   = "C:/Users/n319464/AppData/Local/Programs/Python/Python313/python.exe"
@@ -23,8 +27,21 @@ $deployScript = "deploy.py"
 $markerFile  = ".last_deploy_commit"
 
 # ── [1/3] Pull ───────────────────────────────────────────────────────────────
-Write-Host "[1/3] Pulling latest changes from git..." -ForegroundColor Cyan
-git pull
+Write-Host "[1/3] Fetching and switching to branch '$Branch'..." -ForegroundColor Cyan
+git fetch origin
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Git fetch failed. Aborting deployment." -ForegroundColor Red
+    exit 1
+}
+$current = (git rev-parse --abbrev-ref HEAD).Trim()
+if ($current -ne $Branch) {
+    git checkout $Branch
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Could not check out branch '$Branch'. Aborting deployment." -ForegroundColor Red
+        exit 1
+    }
+}
+git pull origin $Branch
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Git pull failed. Aborting deployment." -ForegroundColor Red
     exit 1
