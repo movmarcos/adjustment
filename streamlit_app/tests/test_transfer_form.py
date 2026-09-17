@@ -380,8 +380,17 @@ def test_transfer_preview_payload_carries_trade_codes_and_no_filters():
     assert pj["source_book_code"] == "B1" and pj["book_code"] == "B2"
     assert pj["source_cobid"] == pj["cobid"] == 20260101
     assert pj["scale_factor"] == 1
-    # Stale filters from an earlier draft never narrow a transfer.
-    assert "entity_code" not in pj and "department_code" not in pj
+    # The TARGET entity rides along (derived from the target book, B2 → E9
+    # is overwritten with E2): the preview's "current" side must predicate on
+    # the entity exactly as the engine's leg ③ flatten does.
+    assert pj["entity_code"] == "E2"
+    # Every OTHER stale filter from an earlier draft is still dropped — a
+    # transfer is scoped by its two books, never by a leftover department.
+    assert "department_code" not in pj
+    assert not (set(pj) - {"cobid", "process_type", "adjustment_type",
+                           "source_cobid", "scale_factor", "book_code",
+                           "entity_code", "source_book_code", "trade_codes",
+                           "mode"})
 
 
 def test_transfer_has_no_scale_factor_field_or_checklist_row():
@@ -474,3 +483,53 @@ def test_transfer_ticket_shows_the_books_and_trade_count():
     assert "1 selected" in texts          # Trades row
     assert "Transfer Book" in texts       # Type row uses the display label
     assert "Source book" in texts and "Target book" in texts   # checklist
+
+
+def grp_options(at, suffix=""):
+    """Options of the scope pill group (a ButtonGroup). The restricted
+    Transfer list renders under its own key — "..._ltd" — so Streamlit is
+    never handed a stored selection that is no longer in `options`."""
+    grp = at.button_group(key=f"scopes_Scaling Adjustment{suffix}_"
+                              f"{at.session_state['_wiz_v']}")
+    return list(grp.options)
+
+
+def test_transfer_offers_only_var_stress_sensitivity_and_drops_frtb():
+    """v1 restriction (spec §5.3 / controller ruling): Transfer Book runs on
+    VaR, Stress and Sensitivity only — the engine's leg ②T re-keys position
+    by position, which the single-column-PK FRTB tables cannot net, and
+    SP_SUBMIT rejects them. An FRTB scope already in the draft is dropped
+    when the type becomes Transfer, and is NAMED (never silently)."""
+    at = _load()
+    _seed_ref_data(at)
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": "Scaling Adjustment",
+                               "adjustment_type": "Transfer",
+                               "process_types": ["VaR", "FRTB"],
+                               "process_type": "VaR"}
+    at.run()
+    assert not at.exception, at.exception
+
+    # ButtonGroup options come back as rendered labels, not bare codes.
+    opts = " ".join(str(o) for o in grp_options(at, "_ltd"))
+    assert "VaR" in opts and "Stress" in opts and "Sensitivity" in opts
+    assert "FRTB" not in opts
+    assert len(grp_options(at, "_ltd")) == 3
+    assert at.session_state["wiz"]["process_types"] == ["VaR"]
+    assert any("FRTB scopes are not available for Transfer Book yet" in w.value
+               and "FRTBSBM" in w.value for w in at.warning), \
+        [w.value for w in at.warning]
+
+
+def test_non_transfer_types_still_offer_every_scope():
+    """The restriction is Transfer-only — Scale keeps the full pill group
+    under its original widget key."""
+    at = _load()
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": "Scaling Adjustment",
+                               "adjustment_type": "Scale",
+                               "process_types": ["FRTB"], "process_type": "FRTB"}
+    at.run()
+    assert not at.exception, at.exception
+    assert len(grp_options(at)) == 6
+    assert at.session_state["wiz"]["process_types"] == ["FRTB"]

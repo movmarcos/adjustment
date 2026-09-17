@@ -184,7 +184,11 @@ with f1:
         "Filter by Scope", ALL_SCOPES,
         default=[], key="aq_scope")
 with f2:
+    # Option values are the raw ADJUSTMENT_TYPE codes (used directly in the
+    # SQL filter below); only the label is renamed ("Transfer" → "Transfer
+    # Book" via type_label, "EROL" → "Entity Roll").
     _aq_type_labels = {"Flatten": "Flatten", "Scale": "Scale", "Roll": "Roll",
+                       "Transfer": type_label("Transfer"),
                        "Direct": "Direct Adjustment", "Upload": "VaR Upload",
                        "EROL": "Entity Roll"}
     filter_type = st.multiselect(

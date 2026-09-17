@@ -892,9 +892,56 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ## Deploy (Marcos)
 
+**Order matters.** `01_tables.sql` must be deployed before `05` — the Scale
+path references `ADJ_HEADER.SOURCE_BOOK_CODE` on **every** run, transfer or
+not, so a 05 deployed against the old table breaks Scale, Flatten and Roll
+too. `deploy_all.ps1` does this automatically (files run in name order);
+never hand-deploy 05 alone.
+
+**v1 scope.** Transfer Book is limited to **VaR, Stress and Sensitivity**.
+`SP_SUBMIT_ADJUSTMENT` rejects an FRTB scope ("not yet available for FRTB
+scopes") and the New Adjustment page offers only those three in the scope
+pills. Reason: leg ②T re-keys the source rows position by position so leg
+③'s flatten cancels them; the FRTB tables' single opaque-column PK cannot
+net that way.
+
 1. Push; on the Windows box `.\deploy_all.ps1` (auto picks DB + Streamlit).
 2. Run `pytest tests/test_transfer_book.py -q` with `TEST_TRF_SRC_BOOK` / `TEST_TRF_TGT_BOOK` set to two real current books.
 3. Submit one small Transfer (one trade) in DVLP, let the task process it, and read `ADJUSTMENT_APP.VW_EROL_PROCESS_LOG` for the run's `stage_build (netted temp)` SQL to confirm leg ②T.
+
+### DVLP checks after that first processed Transfer
+
+Run these against a **populated** target book (one that actually has rows at
+the COB) — all three must hold:
+
+1. **Leg ③ produced rows.** The flatten of the target book is not empty:
+   ```sql
+   SELECT COUNT(*) FROM <scope>_ADJUSTMENT
+   WHERE COBID = <cob> AND ADJUSTMENT_ID = '<dimension_adj_id>'
+     AND <metric> < 0;          -- leg ③'s negated originals
+   ```
+   0 here means the target predicates (entity + book + trade) matched
+   nothing — the transfer then just adds the source on top instead of
+   replacing.
+2. **Leg ②T row count = the preview's `ROWS_AFFECTED`.** The preview counts
+   the source rows it will carry over; the engine must have written the same
+   number (per adjustment):
+   ```sql
+   SELECT COUNT(*) FROM <scope>_ADJUSTMENT
+   WHERE COBID = <cob> AND ADJUSTMENT_ID = '<dimension_adj_id>'
+     AND <metric> > 0;
+   ```
+   A count that is a clean multiple of the preview's is the SCD2 fan-out
+   signature (a duplicate BOOK / ENTITY / TRADE row defeating a dedup).
+3. **Target book's combined total = the preview's projected value.** The
+   whole point of the feature:
+   ```sql
+   SELECT SUM(<metric>) FROM <combined view>
+   WHERE COBID = <cob> AND BOOK_KEY = (target book's key);
+   ```
+   must equal `TOTAL_PROJECTED_VALUE` from the preview summary (= the source
+   book's adjusted total). A difference of exactly the target's original
+   total means legs ②T and ③ did not net — check the surrogate key columns.
 
 ## Self-review (done while writing)
 

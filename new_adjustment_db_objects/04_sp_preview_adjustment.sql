@@ -352,9 +352,12 @@ def main(session, p_adjustment):
     # `td`, DIMENSION.TRADE, TRADE_KEY join) but matches the target trade_codes
     # list rather than a single trade_code (cleared above so it can't collide).
     if is_transfer and trade_codes and has_trade_key:
-        _tl = ", ".join(f"'{_esc(t)}'" for t in trade_codes)
+        # Per-item upper() (same shape as the source predicate below) — never
+        # .upper() the whole literal list: that would also upper-case an
+        # escaped quote sequence and read differently from its twin.
+        _tl = ", ".join(f"'{_esc(t).upper()}'" for t in trade_codes)
         where_clauses.append(f"EXISTS (SELECT 1 FROM DIMENSION.TRADE td "
-                             f"WHERE td.TRADE_KEY = fact.TRADE_KEY AND UPPER(td.TRADE_CODE) IN ({_tl.upper()}))")
+                             f"WHERE td.TRADE_KEY = fact.TRADE_KEY AND UPPER(td.TRADE_CODE) IN ({_tl}))")
 
     where_sql = "\n      AND ".join(where_clauses)
     base_where = f"WHERE {where_sql}\n      AND fact.{primary_metric} IS NOT NULL"
@@ -481,10 +484,21 @@ def main(session, p_adjustment):
                COALESCE(SUM(fact.{primary_metric}), 0)                  AS PROJECTED_VALUE
         FROM {fact_adj_tbl} fact
         LEFT JOIN DIMENSION.TRADE st ON st.TRADE_KEY = fact.TRADE_KEY
-        LEFT JOIN DIMENSION.TRADE tt
+        -- Same DEDUPLICATED target-trade lookup the engine's leg ②T uses
+        -- (05, `tt`): DIMENSION.TRADE holds several SCD2 rows per
+        -- (trade, book), and a plain join fans each source row out by that
+        -- count — inflating ROWS_AFFECTED and PROJECTED_VALUE here while the
+        -- engine (which dedups) writes the un-inflated figure.
+        LEFT JOIN (
+            SELECT TRADE_KEY, TRADE_CODE, BOOK_CODE
+            FROM DIMENSION.TRADE
+            WHERE {_cob_date} BETWEEN EFFECTIVE_START_DATE AND EFFECTIVE_END_DATE
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY UPPER(TRADE_CODE), UPPER(BOOK_CODE)
+                ORDER BY EFFECTIVE_START_DATE DESC, TRADE_KEY DESC) = 1
+        ) tt
                ON  UPPER(tt.TRADE_CODE) = UPPER(st.TRADE_CODE)
                AND UPPER(tt.BOOK_CODE)  = UPPER('{_esc(tgt_book)}')
-               AND {_cob_date} BETWEEN tt.EFFECTIVE_START_DATE AND tt.EFFECTIVE_END_DATE
         {src_where}
         GROUP BY 1
         ORDER BY 1

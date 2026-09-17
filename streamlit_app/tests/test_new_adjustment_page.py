@@ -176,3 +176,88 @@ def test_multi_scope_fanout_success_screen_shows_count_headline():
     at.run(); assert not at.exception, at.exception
     texts = " ".join(m.value for m in at.markdown)
     assert "2 Adjustments Submitted Successfully" in texts
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Entity Roll — wipe-preview reconciliation cache
+# ══════════════════════════════════════════════════════════════════════════
+
+def _n_recon(calls):
+    """How many times the header/dimension reconciliation query was sent."""
+    return sum(1 for c in calls if "DIMENSION.ADJUSTMENT" in c and "COUNT(*)" in c)
+
+
+def _eroll_draft(at):
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": "Entity Roll",
+                               "process_types": ["VaR"], "process_type": "VaR",
+                               "cobid": 20260101, "source_cobid": 20251231,
+                               "entity_code": "E1"}
+
+
+def test_failed_recon_count_is_not_cached(monkeypatch):
+    """The wipe panel's counts are memoised per (scope, COB, entity) for the
+    session. A FAILED read must never be memoised: the panel would then show
+    "n/a" for the rest of the session while the roll still deletes
+    everything — the user would approve a destruction whose size was never
+    shown. Only a complete (header, dimension, fact) read is cached."""
+    state = {"fail": True}
+
+    class ReconSQL(SQL):
+        def collect(self):
+            if "DIMENSION.ADJUSTMENT" in self.q and "COUNT(*)" in self.q:
+                CALLS.append(self.q)
+                if state["fail"]:
+                    raise RuntimeError("Snowflake said no")
+                return [Row([3, 4])]
+            if "ADJUSTMENTS_TABLE FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS" in self.q:
+                CALLS.append(self.q)
+                return [Row(["FACT.VAR_MEASURES_ADJUSTMENT"])]
+            if "COUNT(DISTINCT ADJUSTMENT_ID)" in self.q:
+                CALLS.append(self.q)
+                return [Row([4])]
+            return SQL.collect(self)
+
+    class ReconSess:
+        def sql(self, q, *a, **k):
+            return ReconSQL(q)
+
+    monkeypatch.setattr(sc, "get_session", lambda: ReconSess())
+    at = _load()
+    _eroll_draft(at)
+
+    at.run(); assert not at.exception, at.exception
+    n1 = _n_recon(CALLS)
+    assert n1 >= 1, CALLS
+
+    # Still failing: the second render must RE-QUERY, not serve a cached
+    # (None, None, None).
+    at.run(); assert not at.exception, at.exception
+    n2 = _n_recon(CALLS)
+    assert n2 > n1, f"failed counts were cached ({n1} → {n2})"
+
+    # Once the read succeeds it IS cached — the next render sends nothing.
+    state["fail"] = False
+    at.run(); assert not at.exception, at.exception
+    n3 = _n_recon(CALLS)
+    assert n3 > n2
+    at.run(); assert not at.exception, at.exception
+    assert _n_recon(CALLS) == n3, "a complete read should have been memoised"
+
+
+def test_reset_wizard_drops_the_recon_cache():
+    """The cache lives in session_state, OUTSIDE wiz — a wizard reset that
+    only rebuilds wiz would leave the previous draft's counts behind, and the
+    next Entity Roll would quote numbers read before the last roll ran."""
+    at = _load()
+    at.session_state["wiz"] = {
+        **at.session_state["wiz"], "step": 3, "category": "Entity Roll",
+        "process_types": ["VaR"],
+        "result": {"status": "Pending", "adj_id": "x",
+                   "message": "Created with status 'Pending'."}}
+    at.session_state["_eroll_recon_cache"] = {("VaR", 20260101, "E1"): (1, 1, 1)}
+    at.run(); assert not at.exception, at.exception
+
+    at.button(key="new_adj").click().run()      # → reset_wizard()
+    assert not at.exception, at.exception
+    assert "_eroll_recon_cache" not in at.session_state

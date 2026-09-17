@@ -28,7 +28,7 @@ st.set_page_config(
 from utils.styles import (scope_label, scope_meta, 
     inject_css, render_sidebar, section_title,
     P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, fmt_adj_id, icon,
-    fmt_user_dt, render_df_table,
+    fmt_user_dt, render_df_table, type_label,
 )
 from utils.snowflake_conn import run_query, run_query_df
 
@@ -320,7 +320,8 @@ with tab_runs:
 
             df_adj_grid = pd.DataFrame([{
                 "Adj ID":       fmt_adj_id(a.get("DIMENSION_ADJ_ID")),
-                "Type":         _txt(a.get("ADJUSTMENT_TYPE")),
+                # Display name only — the SQL above still selects the code.
+                "Type":         type_label(_txt(a.get("ADJUSTMENT_TYPE"))),
                 "Entity":       _txt(a.get("ENTITY_CODE")),
                 "Book":         _txt(a.get("BOOK_CODE")),
                 "Status":       _txt(a.get("RUN_STATUS")),
@@ -390,7 +391,7 @@ with tab_activity:
             "Now":           _txt(ev.get("CURRENT_STATUS")),
             "Adj":           fmt_adj_id(ev.get("DIMENSION_ADJ_ID")),
             "Scope":         scope_label(_txt(ev.get("PROCESS_TYPE"))),
-            "Type":          _txt(ev.get("ADJUSTMENT_TYPE")),
+            "Type":          type_label(_txt(ev.get("ADJUSTMENT_TYPE"))),
             "Entity / Book": _where(ev),
             "By":            _txt(ev.get("ACTOR")),
             "Detail":        _txt(ev.get("EVENT_DETAIL"), ""),
@@ -508,7 +509,7 @@ with tab_errors:
                 f'    <strong>ADJ {fmt_adj_id(e.get("DIMENSION_ADJ_ID"))}</strong>{_ack_tag}'
                 f'    &nbsp;{_scope_pill(e.get("PROCESS_TYPE"))}'
                 f'    &nbsp;<span style="color:{P["grey_700"]};font-size:0.78rem">'
-                f'    {_esc_html(e.get("ADJUSTMENT_TYPE") or "")} · COB '
+                f'    {_esc_html(type_label(e.get("ADJUSTMENT_TYPE") or ""))} · COB '
                 f'    {e.get("COBID", "—")}</span>'
                 f'  </div>'
                 f'  <div style="font-size:0.75rem;color:{P["grey_700"]}">'

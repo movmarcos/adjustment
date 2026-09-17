@@ -121,6 +121,9 @@ def reset_wizard() -> None:
     st.session_state["_wiz_v"] = st.session_state.get("_wiz_v", 0) + 1
     st.session_state["wiz"] = {k: (list(v) if isinstance(v, list) else v)
                                for k, v in _WIZ_DEFAULTS.items()}
+    # The Entity Roll wipe-preview counts are memoised OUTSIDE wiz — a reset
+    # must drop them too, or a fresh draft shows the previous draft's counts.
+    st.session_state.pop("_eroll_recon_cache", None)
 
 
 if "wiz" not in st.session_state:
@@ -910,6 +913,11 @@ def _preview_payload() -> dict:
                 "adjustment_type": "Transfer",
                 "source_cobid": wiz["cobid"], "scale_factor": 1,
                 "book_code": wiz.get("target_book_code"),
+                # The TARGET entity (the Transfer form derives it from the
+                # target book, and SP_SUBMIT derives the same one). The
+                # preview's "current" side must predicate on it exactly as
+                # the engine's leg ③ does, or the two read different rows.
+                "entity_code": wiz.get("entity_code"),
                 "source_book_code": wiz.get("source_book_code"),
                 "trade_codes": list(wiz.get("transfer_trade_codes") or [])}
     for key in FILTER_KEYS:
@@ -1089,6 +1097,13 @@ def _missing_fields() -> list:
 # LEFT COLUMN — FORM SECTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Transfer Book, v1 release scope. The engine's leg ②T re-keys the source
+# rows position by position so leg ③'s flatten cancels them; the FRTB tables'
+# single opaque-column PK cannot net that way, so SP_SUBMIT rejects them too
+# ("not yet available for FRTB scopes").
+TRANSFER_SCOPES = ["VaR", "Stress", "Sensitivity"]
+
+
 def _selected_scopes() -> list:
     """Scope codes this draft submits to — one adjustment per code.
 
@@ -1123,20 +1138,43 @@ def _purge_filters_for(scopes: list) -> None:
             st.session_state.pop(_k(_wk), None)
 
 
-def _render_scope_pills() -> None:
+def _render_scope_pills(options: list = None) -> None:
     """Multi-select scope pills. Sets wiz['process_types'] (list of codes);
-    one adjustment is created per selected scope."""
-    current = [s for s in (wiz.get("process_types") or []) if s in ALL_SCOPES]
-    key = _k(f"scopes_{wiz.get('category')}")
+    one adjustment is created per selected scope.
+
+    `options` narrows what may be picked (Transfer Book v1 offers VaR /
+    Stress / Sensitivity only — see TRANSFER_SCOPES). Scopes already in the
+    draft that the narrowed list no longer offers are dropped and named, the
+    same way _purge_filters_for names a dropped filter."""
+    opts = [s for s in ALL_SCOPES if s in (options or ALL_SCOPES)]
+    stored = [s for s in (wiz.get("process_types") or []) if s in ALL_SCOPES]
+    current = [s for s in stored if s in opts]
+    if current != stored:
+        wiz["process_types"] = current
+        wiz["process_type"]  = current[0] if current else None
+        wiz["_preview_sum"] = None
+        wiz["_preview_sql"] = None
+        wiz["_preview_by_scope"] = None
+        wiz["_scope_drop_note"] = (
+            "FRTB scopes are not available for Transfer Book yet — removed: "
+            + ", ".join(scope_label(s) for s in stored if s not in opts) + ".")
+        # The unrestricted widget still holds the dropped scopes; left in
+        # place it would write them straight back when the user switches the
+        # type away from Transfer.
+        st.session_state.pop(_k(f"scopes_{wiz.get('category')}"), None)
+    # A restricted list gets its own widget key: reusing the unrestricted
+    # one would hand Streamlit a stored selection that is not in `options`.
+    key = _k(f"scopes_{wiz.get('category')}"
+             + ("" if len(opts) == len(ALL_SCOPES) else "_ltd"))
     if _st_version() >= (1, 40):
-        picked = st.pills("Data scopes", ALL_SCOPES, selection_mode="multi",
+        picked = st.pills("Data scopes", opts, selection_mode="multi",
                           default=current, format_func=scope_label, key=key,
                           label_visibility="collapsed")
     else:
-        picked = st.multiselect("Data scopes", ALL_SCOPES, default=current,
+        picked = st.multiselect("Data scopes", opts, default=current,
                                 format_func=scope_label, key=key,
                                 label_visibility="collapsed")
-    picked = [s for s in ALL_SCOPES if s in (picked or [])]   # stable order
+    picked = [s for s in opts if s in (picked or [])]   # stable order
     if picked != current:
         wiz["process_types"] = picked
         wiz["process_type"]  = picked[0] if picked else None   # legacy readers
@@ -1152,6 +1190,9 @@ def _render_scope_pills() -> None:
     if wiz.get("_purged_filters_note"):
         st.warning(wiz["_purged_filters_note"])
         wiz["_purged_filters_note"] = None
+    if wiz.get("_scope_drop_note"):
+        st.warning(wiz["_scope_drop_note"])
+        wiz["_scope_drop_note"] = None
 
 
 # ── Reference-data dropdowns (entity / department / book) ───────────────────
@@ -1713,9 +1754,13 @@ def render_scaling_form() -> None:
         return
 
     # ── Scope(s) ─────────────────────────────────────────────────────────
+    _transfer = wiz.get("adjustment_type") == "Transfer"
     with _card():
-        _sec(3, "Data Scope", "Select one or more data scopes — one adjustment per scope.")
-        _render_scope_pills()
+        _sec(3, "Data Scope",
+             "Select one or more data scopes — one adjustment per scope."
+             + (" Transfer Book covers VaR, Stress and Sensitivity in this "
+                "release." if _transfer else ""))
+        _render_scope_pills(TRANSFER_SCOPES if _transfer else ALL_SCOPES)
     if not _selected_scopes():
         st.info("Select at least one data scope to continue.")
         return
@@ -3025,7 +3070,13 @@ def render_entity_roll_form() -> None:
                 f_cnt = int(_fc[0][0]) if _fc else None
         except Exception:
             f_cnt = None
-        _recon_cache[_ck] = (h_cnt, d_cnt, f_cnt)
+        # Only a COMPLETE read is memoised. A failed count (a transient
+        # Snowflake error, a missing ADJUSTMENTS_TABLE) leaves None here —
+        # caching that would freeze "n/a" on the destructive-wipe panel for
+        # the rest of the session, and the user would approve a roll whose
+        # real count was never shown. Re-query on the next rerun instead.
+        if None not in (h_cnt, d_cnt, f_cnt):
+            _recon_cache[_ck] = (h_cnt, d_cnt, f_cnt)
         _recon_rows.append((scope_label(_pt_code), h_cnt, d_cnt, f_cnt))
         wiz["_eroll_remove_count"] += max(d_cnt or 0, f_cnt or 0)
     if wiz["_eroll_remove_count"] > 0:
@@ -3289,6 +3340,7 @@ def _run_preview() -> None:
                                        else "Couldn't calculate a preview for these filters.")
                 wiz["_preview_sum"] = None
                 wiz["_preview_by_scope"] = None
+                wiz["_transfer_fallbacks"] = None
                 return
             row = df_sum.iloc[0].to_dict()
             by_scope[sub] = _safe_int(row.get("ROWS_AFFECTED"))
@@ -3303,6 +3355,28 @@ def _run_preview() -> None:
         wiz["_preview_sum"] = agg
         wiz["_preview_by_scope"] = by_scope
         wiz["_preview_err"] = None
+        # Transfer Book: how many of the selected trades have NO version in
+        # the target book. Each of those lands on the target's
+        # '<BOOK>/Adjustment' trade, so two that also share every other key
+        # column collapse onto ONE surrogate key and only the newest header's
+        # row survives (engine leg ②T comment; UAT TRF-05). Counted here so
+        # the ticket can warn BEFORE the adjustments are created.
+        if wiz.get("adjustment_type") == "Transfer":
+            _fallbacks = {}
+            for sub in subtypes:
+                try:
+                    df_b = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                                      json.dumps({**payload, "process_type": sub,
+                                                  "mode": "breakdown"}))
+                    if not df_b.empty and "TARGET_TRADE" in df_b.columns:
+                        _fallbacks[sub] = int(
+                            df_b["TARGET_TRADE"].astype(str)
+                            .str.strip().str.lower().str.startswith("fallback").sum())
+                except Exception:
+                    pass        # breakdown is advisory — never fail a preview on it
+            wiz["_transfer_fallbacks"] = _fallbacks
+        else:
+            wiz["_transfer_fallbacks"] = None
         wiz["_preview_for"] = json.dumps(payload, sort_keys=True, default=str)
         # The statement(s) behind the numbers — shown under "Show preview SQL"
         # so users can run/inspect exactly what the preview executed.
@@ -3322,6 +3396,7 @@ def _run_preview() -> None:
         wiz["_preview_err"] = str(exc)
         wiz["_preview_sum"] = None
         wiz["_preview_by_scope"] = None
+        wiz["_transfer_fallbacks"] = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3895,6 +3970,20 @@ with right:
                 f"the filters. Submission is blocked until every selected scope "
                 f"finds matching rows.")
 
+        # Transfer Book: ≥ 2 trades with no version in the target book all
+        # fall back to the same '<BOOK>/Adjustment' trade and can collapse
+        # onto one row. Warn (not block) — the user may know the trades are
+        # distinct on another key.
+        for _fb_sc, _fb_n in ((wiz.get("_transfer_fallbacks") or {})
+                              if preview_current else {}).items():
+            if (_fb_n or 0) >= 2:
+                st.warning(
+                    f"{_fb_n} of the selected trades have no version in the "
+                    f"target book for {scope_label(_fb_sc)}; they will all land "
+                    f"on the target's '/Adjustment' trade and, if their other "
+                    f"keys coincide, only one survives. Deselect them or ask "
+                    f"for the trades to be set up in the target book.")
+
     # ── VaR Upload: replacement confirmation ──────────────────────────────
     dup_ok = True
     if ((cat == "VaR Upload" or _is_frtb_file_direct())
@@ -3959,6 +4048,11 @@ with right:
             result = _do_submit()
         wiz["result"] = result
         wiz["step"]   = 3 if _is_submit_success(result) else 1
+        if wiz["step"] == 3:
+            # An accepted Entity Roll changes the very counts the wipe
+            # preview memoised — a second roll drafted in the same session
+            # must re-read them, not quote the pre-roll numbers.
+            st.session_state.pop("_eroll_recon_cache", None)
         safe_rerun()
     if missing:
         st.caption("Submit unlocks when the ticket is complete.")

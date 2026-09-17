@@ -64,6 +64,18 @@ def test_trf02_guards(session, ev):
     ev.check("cross-COB refused",
              isinstance(r4, dict) and r4.get("status") == "Error"
              and "within one COB" in str(r4.get("message", "")))
+    # A transfer copies the source book as it stands — a factor other than 1
+    # would silently scale the copy.
+    r5 = _submit(session, scale_factor=2)
+    ev.check("scale factor other than 1 refused",
+             isinstance(r5, dict) and r5.get("status") == "Error"
+             and "must be 1" in str(r5.get("message", "")))
+    # v1 release scope: VaR / Stress / Sensitivity only (leg ②T re-keys
+    # position by position, which the single-column-PK FRTB tables cannot net).
+    r6 = _submit(session, process_type="FRTB")
+    ev.check("FRTB scope refused in this release",
+             isinstance(r6, dict) and r6.get("status") == "Error"
+             and "not yet available" in str(r6.get("message", "")))
 
 
 @pytest.mark.uat("TRF-04", title="A pending Flatten on the target book blocks a Transfer", priority="P2")
@@ -98,3 +110,61 @@ def test_trf03_preview_sql(session, ev):
     ev.check("target book predicate", TGT.upper() in txt.upper())
     ev.check("trade list", "UAT-TRADE-1" in txt and "UAT-TRADE-2" in txt)
     ev.check("fallback trade", "/Adjustment" in txt)
+
+
+@pytest.mark.uat("TRF-05", title="Trades with no version in the target book are flagged 'fallback' in the breakdown", priority="P2")
+def test_trf05_fallback_trades_are_flagged(session, ev):
+    """KNOWN LIMITATION this case documents (engine leg ②T comment in
+    05_sp_process_adjustment.sql):
+
+    A transferred trade that has no version under the TARGET book at the COB
+    is re-keyed onto that book's '<BOOK_CODE>/Adjustment' trade. Two such
+    trades that also share every other key column therefore land on the SAME
+    surrogate key — `ranked` keeps the newest header's row and the other
+    one's value is lost. There is no engine-side fix in v1: the preview's
+    `breakdown` mode flags every fallback trade ("fallback: <BOOK>/Adjustment")
+    and the New Adjustment page raises a warning when two or more of the
+    selected trades fall back, so the user deselects them or has the trades
+    set up in the target book first.
+
+    Here: two trade codes that certainly have no version in the target book
+    (made-up ones by default; override with TEST_TRF_FALLBACK_TRADES to use
+    real source-book trades that exist in the fact data, which is what makes
+    the breakdown return rows at all — see the row-count note below).
+    """
+    trades = [t.strip() for t in os.environ.get(
+        "TEST_TRF_FALLBACK_TRADES", "UAT-NO-SUCH-TRADE-1,UAT-NO-SUCH-TRADE-2"
+    ).split(",") if t.strip()]
+    ev.note("Trades under test", ", ".join(trades))
+
+    # Neither may exist under the TARGET book, or the fallback is not what
+    # the breakdown would report.
+    _in = ", ".join(f"UPPER('{t}')" for t in trades)
+    absent = ev.sql("Versions of these trades under the target book", f"""
+        SELECT COUNT(*) AS N FROM DIMENSION.TRADE
+        WHERE UPPER(BOOK_CODE) = UPPER('{TGT}') AND UPPER(TRADE_CODE) IN ({_in})""")
+    ev.check("no version of either trade exists under the target book",
+             absent and int(absent[0]["N"]) == 0)
+
+    payload = json.dumps({"cobid": FAKE_COB, "process_type": "VaR",
+                          "adjustment_type": "Transfer", "source_cobid": FAKE_COB,
+                          "scale_factor": 1, "book_code": TGT, "source_book_code": SRC,
+                          "trade_codes": trades, "mode": "breakdown"})
+    out = rows(session, f"CALL {SP_PREVIEW}('{payload}')")
+    ev.note("Breakdown rows", str(out)[:600])
+
+    # The preview reads the fact/adjusted tables: a COB with no fact rows for
+    # these trades returns nothing, and there is then nothing to flag. That is
+    # reported, not passed off as a success.
+    ev.note("Row count", f"{len(out)} row(s) — 0 means the fake COB carries no "
+                         f"source fact rows for these trades; point "
+                         f"TEST_TRF_FALLBACK_TRADES at real source-book trades "
+                         f"(absent from the target book) to exercise the flag.")
+    # .get(): an error/message row from the SP carries no TARGET_TRADE —
+    # it must fail the check, not raise a KeyError.
+    flagged = [r for r in out
+               if str(r.get("TARGET_TRADE") or "").lower().startswith("fallback")]
+    ev.check("every returned trade is flagged as a fallback (none claims a "
+             "target-book trade)", len(flagged) == len(out))
+    ev.check("the breakdown reports one row per trade under test, all flagged",
+             len(out) == 0 or (len(out) == len(trades) and len(flagged) == len(trades)))

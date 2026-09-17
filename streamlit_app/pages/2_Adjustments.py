@@ -277,7 +277,10 @@ with bordered_container():
     with f3:
         # Option values are the raw ADJUSTMENT_TYPE codes (used directly in the SQL
         # filter); the label maps the cryptic "EROL" code to "Entity Roll".
-        _type_labels = {"Flatten": "Flatten", "Scale": "Scale", "Roll": "Roll"}
+        _type_labels = {"Flatten": "Flatten", "Scale": "Scale", "Roll": "Roll",
+                        # Stored code stays "Transfer"; type_label renders it
+                        # as "Transfer Book" (styles.TYPE_LABELS).
+                        "Transfer": type_label("Transfer")}
         for _code in ("Direct", "Upload", "EROL"):
             _type_labels[_code] = ACTION_LABELS.get(_code, _code)
         filter_type = st.multiselect(
@@ -411,6 +414,9 @@ df_report_status = df_track
 _CLONE_FIELDS = {
     "ENTITY_CODE": "entity_code", "SOURCE_SYSTEM_CODE": "source_system_code",
     "DEPARTMENT_CODE": "department_code", "BOOK_CODE": "book_code",
+    # Transfer Book only — without it a cloned Transfer loses its source book
+    # and SP_SUBMIT rejects it ("needs both a source book and a target book").
+    "SOURCE_BOOK_CODE": "source_book_code",
     "CURRENCY_CODE": "currency_code", "TRADE_TYPOLOGY": "trade_typology",
     "TRADE_CODE": "trade_code", "STRATEGY": "strategy",
     "TRADER_CODE": "trader_code", "VAR_COMPONENT_ID": "var_component_id",
