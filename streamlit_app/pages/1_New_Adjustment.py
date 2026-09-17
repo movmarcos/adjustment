@@ -24,7 +24,8 @@ from utils.styles import (scope_label, scope_meta, wide_kwargs,
     render_data_grid, fmt_adj_id, icon, bordered_container,
     ALL_SCOPES, _st_version, type_label,
 )
-from utils.snowflake_conn import (run_query, call_sp_df, current_user_name,
+from utils.snowflake_conn import (run_query, call_sp_df, call_sp_df_async,
+                                  current_user_name,
                                   signoff_access, can_sign_off,
                                   safe_rerun, friendly_error)
 from utils.scope_filters import (FIELD_LABELS, MAIN_FIELDS_SINGLE,
@@ -1160,6 +1161,7 @@ def _render_scope_pills(options: list = None) -> None:
         wiz["_preview_sum"] = None
         wiz["_preview_sql"] = None
         wiz["_preview_by_scope"] = None
+        wiz["_preview_scopes"] = None
         wiz["_scope_drop_note"] = (
             "FRTB scopes are not available for Transfer Book yet — removed: "
             + ", ".join(scope_label(s) for s in stored if s not in opts) + ".")
@@ -1186,6 +1188,7 @@ def _render_scope_pills(options: list = None) -> None:
         wiz["_preview_sum"] = None
         wiz["_preview_sql"] = None
         wiz["_preview_by_scope"] = None
+        wiz["_preview_scopes"] = None
         _purge_filters_for(picked)
         safe_rerun()
     n = len(picked)
@@ -1724,6 +1727,7 @@ def render_scaling_form() -> None:
             wiz["_preview_sum"] = None
             wiz["_preview_sql"] = None
             wiz["_preview_by_scope"] = None
+            wiz["_preview_scopes"] = None
             # The Source COB field only renders for Roll; a value typed for a
             # Roll must not survive a switch to Scale/Flatten, or the preview
             # and submit send it and the engine treats the same-COB Scale as
@@ -3329,28 +3333,60 @@ def _run_preview() -> None:
     Several scopes: previews each and sums the numeric totals. The summed
     row hides a scope that matched nothing (VaR 1,234 + Stress 0 reads as
     1,234 rows affected), so the per-scope row counts are stashed too —
-    wiz['_preview_by_scope'] — and drive the zero-row block."""
+    wiz['_preview_by_scope'] — and drive the zero-row block. The full
+    per-scope summary rows go to wiz['_preview_scopes'], which feeds the
+    impact-by-scope table.
+
+    Every per-scope call (summary, sql and — for a Transfer — breakdown) is
+    SUBMITTED FIRST and gathered afterwards, so Snowflake runs them
+    concurrently as async jobs instead of one after another: a three-scope
+    preview used to cost the sum of nine round trips. call_sp_df_async falls
+    back to a synchronous call on runtimes without async jobs, so the loop
+    below behaves identically either way."""
     payload = _preview_payload()
     subtypes = _selected_scopes() or [payload.get("process_type")]
+    is_transfer = wiz.get("adjustment_type") == "Transfer"
+
+    def _fail(msg) -> None:
+        wiz["_preview_err"] = msg
+        wiz["_preview_sum"] = None
+        wiz["_preview_by_scope"] = None
+        wiz["_preview_scopes"] = None
+        wiz["_transfer_fallbacks"] = None
+
+    def _submit(sub, mode):
+        return call_sp_df_async("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                                json.dumps({**payload, "process_type": sub,
+                                            "mode": mode}))
+
     try:
+        # ── Submit everything, then gather ───────────────────────────────
+        sum_jobs = [(sub, _submit(sub, "summary")) for sub in subtypes]
+        sql_jobs = [(sub, _submit(sub, "sql")) for sub in subtypes]
+        # Transfer Book: how many of the selected trades have NO version in
+        # the target book. Each of those lands on the target's
+        # '<BOOK>/Adjustment' trade, so two that also share every other key
+        # column collapse onto ONE surrogate key and only the newest header's
+        # row survives (engine leg ②T comment; UAT TRF-05). Counted here so
+        # the ticket can warn BEFORE the adjustments are created.
+        brk_jobs = [(sub, _submit(sub, "breakdown"))
+                    for sub in subtypes] if is_transfer else []
+
         agg = None
         by_scope = {}
-        for sub in subtypes:
-            df_sum = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
-                                json.dumps({**payload, "process_type": sub,
-                                            "mode": "summary"}))
+        per_scope = {}
+        for sub, job in sum_jobs:
+            df_sum = job.result_df()
             if df_sum.empty or "ROWS_AFFECTED" not in df_sum.columns:
                 msg_col = next((c for c in df_sum.columns if "MESSAGE" in c.upper()), None)
-                wiz["_preview_err"] = (str(df_sum.iloc[0][msg_col]) if msg_col and not df_sum.empty
-                                       else "Couldn't calculate a preview for these filters.")
-                wiz["_preview_sum"] = None
-                wiz["_preview_by_scope"] = None
-                wiz["_transfer_fallbacks"] = None
+                _fail(str(df_sum.iloc[0][msg_col]) if msg_col and not df_sum.empty
+                      else "Couldn't calculate a preview for these filters.")
                 return
             row = df_sum.iloc[0].to_dict()
             by_scope[sub] = _safe_int(row.get("ROWS_AFFECTED"))
+            per_scope[sub] = row
             if agg is None:
-                agg = row
+                agg = dict(row)     # copied: per_scope must not alias the total
             else:
                 for k, v in row.items():
                     try:
@@ -3359,20 +3395,13 @@ def _run_preview() -> None:
                         pass    # non-numeric column — keep the first value
         wiz["_preview_sum"] = agg
         wiz["_preview_by_scope"] = by_scope
+        wiz["_preview_scopes"] = per_scope
         wiz["_preview_err"] = None
-        # Transfer Book: how many of the selected trades have NO version in
-        # the target book. Each of those lands on the target's
-        # '<BOOK>/Adjustment' trade, so two that also share every other key
-        # column collapse onto ONE surrogate key and only the newest header's
-        # row survives (engine leg ②T comment; UAT TRF-05). Counted here so
-        # the ticket can warn BEFORE the adjustments are created.
-        if wiz.get("adjustment_type") == "Transfer":
+        if is_transfer:
             _fallbacks = {}
-            for sub in subtypes:
+            for sub, job in brk_jobs:
                 try:
-                    df_b = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
-                                      json.dumps({**payload, "process_type": sub,
-                                                  "mode": "breakdown"}))
+                    df_b = job.result_df()
                     if not df_b.empty and "TARGET_TRADE" in df_b.columns:
                         _fallbacks[sub] = int(
                             df_b["TARGET_TRADE"].astype(str)
@@ -3387,10 +3416,8 @@ def _run_preview() -> None:
         # so users can run/inspect exactly what the preview executed.
         try:
             sqls = []
-            for sub in subtypes:
-                df_sql = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
-                                    json.dumps({**payload, "process_type": sub,
-                                                "mode": "sql"}))
+            for sub, job in sql_jobs:
+                df_sql = job.result_df()
                 if not df_sql.empty and "PREVIEW_SQL" in df_sql.columns:
                     sqls.append((f"-- {sub}\n" if len(subtypes) > 1 else "")
                                 + str(df_sql.iloc[0]["PREVIEW_SQL"]))
@@ -3398,10 +3425,7 @@ def _run_preview() -> None:
         except Exception:
             wiz["_preview_sql"] = None
     except Exception as exc:
-        wiz["_preview_err"] = str(exc)
-        wiz["_preview_sum"] = None
-        wiz["_preview_by_scope"] = None
-        wiz["_transfer_fallbacks"] = None
+        _fail(str(exc))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3884,7 +3908,7 @@ with left:
                         "transfer_trade_codes": [],
                         "uploaded_df": None, "uploaded_file_name": None,
                         "_preview_sum": None, "_preview_err": None,
-                        "_preview_by_scope": None,
+                        "_preview_by_scope": None, "_preview_scopes": None,
                         "direct_batch_id": None, "direct_ndf": None,
                         "direct_verdicts": None, "_direct_sig": None,
                         "direct_rows": None,
@@ -3945,7 +3969,22 @@ with right:
         # changes nothing. Show the split and block on ANY zero scope.
         _by_scope = (wiz.get("_preview_by_scope") or {}) if preview_current else {}
         _zero_scopes = [sc for sc, cnt in _by_scope.items() if cnt == 0]
-        if preview_current and len(_by_scope) > 1:
+        # Multi-scope: the ticket's Impact preview shows ONE summed figure,
+        # which says nothing about where the money lands. Split it per scope
+        # (rows + the three money totals) with the same total underneath.
+        _scope_rows = (wiz.get("_preview_scopes") or {}) if preview_current else {}
+        if preview_current and len(_selected_scopes()) > 1 and _scope_rows:
+            def _imp_row(name, r):
+                return {"Scope": name,
+                        "Rows": f"{_safe_int(r.get('ROWS_AFFECTED')):,}",
+                        "Current": _fmt_money(r.get("TOTAL_CURRENT_VALUE")),
+                        "Adjustment": _fmt_money(r.get("TOTAL_ADJUSTMENT_DELTA")),
+                        "Projected": _fmt_money(r.get("TOTAL_PROJECTED_VALUE"))}
+            st.caption("Impact by scope")
+            render_data_grid(pd.DataFrame(
+                [_imp_row(scope_label(sc), r) for sc, r in _scope_rows.items()]
+                + [_imp_row("Total", s or {})]), height=260)
+        elif preview_current and len(_by_scope) > 1:
             st.caption("Rows by scope: "
                        + " · ".join(f"{scope_label(sc)} {cnt:,}"
                                     for sc, cnt in _by_scope.items()))

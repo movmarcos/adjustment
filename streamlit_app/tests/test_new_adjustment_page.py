@@ -6,13 +6,69 @@ from streamlit.testing.v1 import AppTest
 import utils.snowflake_conn as sc
 
 CALLS = []
+ORDER = []          # ("submit" | "result", sql) — async job lifecycle, in order
+
+
 class Row(list):
     def __getitem__(self, k):
         return list.__getitem__(self, 0 if isinstance(k, str) else k)
+
+
+class DictRow(list):
+    """Row-like with NAMED columns: positional access (what _rows_to_df's
+    `list(r)` needs) plus as_dict() (what it reads the column names from)."""
+    def __init__(self, d):
+        list.__init__(self, list(d.values()))
+        self._d = dict(d)
+
+    def __getitem__(self, k):
+        return self._d[k] if isinstance(k, str) else list.__getitem__(self, k)
+
+    def as_dict(self):
+        return dict(self._d)
+
+
+# Rows each scope's preview matches — deliberately different, so a summed
+# total can be told apart from either half.
+PREVIEW_ROWS = {"VaR": 10, "Stress": 5}
+
+
+def _preview_reply(q):
+    """SP_PREVIEW_ADJUSTMENT's answer for this CALL text — per mode, and per
+    the process_type carried in the payload JSON."""
+    scope = next((s for s in PREVIEW_ROWS if f'"process_type": "{s}"' in q), None)
+    n = PREVIEW_ROWS.get(scope, 1)
+    if '"mode": "summary"' in q:
+        return [DictRow({"ROWS_AFFECTED": n, "NONZERO_ROWS": n,
+                         "TOTAL_CURRENT_VALUE": n * 100.0,
+                         "TOTAL_ADJUSTMENT_DELTA": n * 10.0,
+                         "TOTAL_PROJECTED_VALUE": n * 110.0})]
+    if '"mode": "sql"' in q:
+        return [DictRow({"PREVIEW_SQL": f"SELECT /* {scope} */ 1"})]
+    return []                                   # breakdown: no fallback trades
+
+
+class AsyncJob:
+    """Stand-in for Snowpark's AsyncJob: the query is already "running"; the
+    rows only materialise when .result() is called."""
+    def __init__(self, sql): self._sql = sql
+
+    def result(self):
+        ORDER.append(("result", self._sql.q))
+        return self._sql.collect()
+
+
 class SQL:
     def __init__(self, q): self.q = q
+
+    def collect_nowait(self):
+        ORDER.append(("submit", self.q))
+        return AsyncJob(self)
+
     def collect(self):
         CALLS.append(self.q)
+        if "SP_PREVIEW_ADJUSTMENT" in self.q:
+            return _preview_reply(self.q)
         if "SP_SUBMIT_ADJUSTMENT" in self.q:
             # Realistic shape: SP_SUBMIT_ADJUSTMENT's ordinary single-scope
             # message is "Created with status '<status>'." — it also starts
@@ -32,6 +88,7 @@ def fake(monkeypatch):
     monkeypatch.setattr(sc, "get_session", lambda: Sess())
     monkeypatch.chdir(APP)
     CALLS.clear()
+    ORDER.clear()
 
 def _load():
     at = AppTest.from_file("pages/1_New_Adjustment.py", default_timeout=120).run()
@@ -261,3 +318,106 @@ def test_reset_wizard_drops_the_recon_cache():
     at.button(key="new_adj").click().run()      # → reset_wizard()
     assert not at.exception, at.exception
     assert "_eroll_recon_cache" not in at.session_state
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Impact preview — concurrent per-scope calls + the per-scope split
+# ══════════════════════════════════════════════════════════════════════════
+
+def _preview_scaling(at, scopes):
+    """Fill a COMPLETE two-scope Scaling draft (so the preview button
+    renders — it is gated on an empty checklist) and press it."""
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": "Scaling Adjustment",
+                               "adjustment_type": "Scale",
+                               "process_types": list(scopes),
+                               "process_type": scopes[0],
+                               "cobid": 20260101, "scale_factor": 1.5,
+                               "entity_code": "E1", "department_code": "D1",
+                               "adjustment_category": "Cat", "reason": "why",
+                               "result": None, "step": 1}
+    at.run(); assert not at.exception, at.exception
+    CALLS.clear(); ORDER.clear()
+    at.button(key=f"run_preview_{at.session_state['_wiz_v']}").click().run()
+    assert not at.exception, at.exception
+    return at.session_state["wiz"]
+
+
+def test_two_scope_preview_keeps_every_scope_row_and_sums_them():
+    """The ticket shows ONE impact figure; with several scopes that sum says
+    nothing about where the money lands, so the full per-scope summary rows
+    are kept as well — and the aggregate must still be their sum."""
+    at = _load()
+    w = _preview_scaling(at, ["VaR", "Stress"])
+
+    assert set(w["_preview_scopes"]) == {"VaR", "Stress"}
+    assert w["_preview_scopes"]["VaR"]["ROWS_AFFECTED"] == 10
+    assert w["_preview_scopes"]["Stress"]["ROWS_AFFECTED"] == 5
+    assert w["_preview_by_scope"] == {"VaR": 10, "Stress": 5}
+
+    s = w["_preview_sum"]
+    assert s["ROWS_AFFECTED"] == 15
+    assert s["TOTAL_CURRENT_VALUE"] == 1500.0
+    assert s["TOTAL_ADJUSTMENT_DELTA"] == 150.0
+    assert s["TOTAL_PROJECTED_VALUE"] == 1650.0
+    # The per-scope rows must not alias the aggregate that was built from them.
+    assert w["_preview_scopes"]["VaR"]["ROWS_AFFECTED"] == 10
+    # Both scopes' preview SQL, each under its own header.
+    assert "-- VaR" in w["_preview_sql"] and "-- Stress" in w["_preview_sql"]
+
+
+def test_two_scope_preview_renders_the_impact_split_with_a_total():
+    at = _load()
+    _preview_scaling(at, ["VaR", "Stress"])
+
+    grids = [d.value for d in at.dataframe]
+    grid = next((g for g in grids
+                 if "Scope" in list(g.columns) and "Adjustment" in list(g.columns)),
+                None)
+    assert grid is not None, [list(g.columns) for g in grids]
+    assert list(grid["Scope"]) == ["VaR", "Stress", "Total"]
+    assert list(grid["Rows"]) == ["10", "5", "15"]
+    assert list(grid["Adjustment"]) == ["100.00", "50.00", "150.00"]
+    assert any("Impact by scope" in c.value for c in at.caption), \
+        [c.value for c in at.caption]
+    # The old one-line caption is replaced, not shown alongside.
+    assert not any("Rows by scope" in c.value for c in at.caption)
+
+
+def test_single_scope_preview_renders_no_split_table():
+    at = _load()
+    _preview_scaling(at, ["VaR"])
+    assert not any("Impact by scope" in c.value for c in at.caption)
+    assert not any("Scope" in list(d.value.columns) for d in at.dataframe)
+
+
+def test_every_preview_job_is_submitted_before_any_result_is_read():
+    """The point of the async jobs: two scopes × (summary, sql) go to
+    Snowflake together and run concurrently — the gather only starts once
+    every statement is in flight."""
+    at = _load()
+    _preview_scaling(at, ["VaR", "Stress"])
+
+    kinds = [k for k, _ in ORDER]
+    assert kinds == ["submit"] * 4 + ["result"] * 4, ORDER
+    assert all("SP_PREVIEW_ADJUSTMENT" in q for _, q in ORDER)
+
+
+def test_call_sp_df_async_falls_back_when_the_runtime_has_no_async_jobs(monkeypatch):
+    """Snowpark without collect_nowait (or a session that refuses it) must
+    still hand the caller a job whose .result_df() holds the rows — run
+    synchronously at submit time."""
+    class NoAsyncSQL(SQL):
+        def collect_nowait(self):
+            raise AttributeError("'DataFrame' object has no attribute 'collect_nowait'")
+
+    class NoAsyncSess:
+        def sql(self, q, *a, **k): return NoAsyncSQL(q)
+
+    monkeypatch.setattr(sc, "get_session", lambda: NoAsyncSess())
+    job = sc.call_sp_df_async("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                              json.dumps({"process_type": "VaR", "mode": "summary"}))
+    assert job.is_async is False
+    df = job.result_df()
+    assert int(df.iloc[0]["ROWS_AFFECTED"]) == 10
+    assert sc.gather_dfs([job])[0] is df

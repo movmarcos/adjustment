@@ -114,31 +114,93 @@ def call_procedure(proc_name: str, *args):
     return get_session().sql(f"CALL {proc_name}({args_str})").collect()
 
 
+def _sp_call_sql(proc_name: str, *args) -> str:
+    """The `CALL proc(arg, …)` text for a stored procedure.
+
+    Double backslashes FIRST (Snowflake literals interpret \\n, \\t, ...),
+    then double single quotes — otherwise JSON args with newlines or quotes
+    break the literal and the SP's json.loads."""
+    def _lit(a):
+        if isinstance(a, str):
+            return "'" + a.replace("\\", "\\\\").replace("'", "''") + "'"
+        return str(a)
+    return f"CALL {proc_name}({', '.join(_lit(a) for a in args)})"
+
+
+def _rows_to_df(rows):
+    """Row objects → pandas DataFrame, column names off the first row."""
+    import pandas as pd
+    if not rows:
+        return pd.DataFrame()
+    first = rows[0]
+    if hasattr(first, "_fields"):
+        fields = list(first._fields)
+    else:
+        fields = list(first.as_dict().keys())
+    return pd.DataFrame([list(r) for r in rows], columns=fields)
+
+
 def call_sp_df(proc_name: str, *args):
     """Call a tabular stored procedure using session.call() and return a pandas DataFrame.
 
     Uses session.call() (not session.sql("CALL ...")) which correctly handles
     RETURNS TABLE() procedures in all Snowpark runtime versions.
     """
-    import pandas as pd
     try:
         return get_session().call(proc_name, *args).to_pandas()
     except Exception:
         # Fallback: SQL CALL with manual Row→dict conversion.
-        # Double backslashes first (Snowflake literals interpret \n, \t, ...),
-        # then double single quotes — otherwise JSON args with newlines or
-        # quotes break the literal and the SP's json.loads.
-        def _lit(a):
-            if isinstance(a, str):
-                return "'" + a.replace("\\", "\\\\").replace("'", "''") + "'"
-            return str(a)
-        args_str = ", ".join(_lit(a) for a in args)
-        rows = get_session().sql(f"CALL {proc_name}({args_str})").collect()
-        if not rows:
-            return pd.DataFrame()
-        # Build DataFrame from field names on the first row
-        fields = list(rows[0]._fields) if hasattr(rows[0], "_fields") else list(rows[0].as_dict().keys())
-        return pd.DataFrame([list(r) for r in rows], columns=fields)
+        return _rows_to_df(get_session().sql(_sp_call_sql(proc_name, *args)).collect())
+
+
+class _EagerSPJob:
+    """Already-finished job: holds a DataFrame the caller gathers later.
+
+    The sequential fallback for runtimes without async jobs — the caller's
+    submit-then-gather loop is identical either way."""
+
+    def __init__(self, df):
+        self._df = df
+        self.is_async = False
+
+    def result_df(self):
+        return self._df
+
+
+class _AsyncSPJob:
+    """A running Snowpark AsyncJob; .result_df() blocks until it finishes."""
+
+    def __init__(self, job):
+        self._job = job
+        self._df = None
+        self.is_async = True
+
+    def result_df(self):
+        if self._df is None:
+            self._df = _rows_to_df(self._job.result())
+        return self._df
+
+
+def call_sp_df_async(proc_name: str, *args):
+    """Start a tabular SP call without waiting; returns an object with .result_df().
+
+    Uses Snowpark's async jobs (DataFrame.collect_nowait → AsyncJob) so several
+    per-scope procedure calls run CONCURRENTLY in Snowflake — no Python threads,
+    no extra sessions. Falls back to a synchronous call when the runtime does
+    not support async jobs, so the caller's gather loop never changes."""
+    try:
+        job = get_session().sql(_sp_call_sql(proc_name, *args)).collect_nowait()
+        if not hasattr(job, "result"):
+            # Some runtimes return the rows themselves — nothing async about it.
+            raise TypeError("collect_nowait did not return an AsyncJob")
+        return _AsyncSPJob(job)
+    except Exception:
+        return _EagerSPJob(call_sp_df(proc_name, *args))
+
+
+def gather_dfs(jobs):
+    """Collect every submitted job, in submission order."""
+    return [j.result_df() for j in jobs]
 
 
 def friendly_error(exc) -> str:
