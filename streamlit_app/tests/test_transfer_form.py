@@ -494,12 +494,14 @@ def grp_options(at, suffix=""):
     return list(grp.options)
 
 
-def test_transfer_offers_only_var_stress_sensitivity_and_drops_frtb():
-    """v1 restriction (spec §5.3 / controller ruling): Transfer Book runs on
-    VaR, Stress and Sensitivity only — the engine's leg ②T re-keys position
-    by position, which the single-column-PK FRTB tables cannot net, and
-    SP_SUBMIT rejects them. An FRTB scope already in the draft is dropped
-    when the type becomes Transfer, and is NAMED (never silently)."""
+def test_transfer_offers_all_six_scopes():
+    """The v1 FRTB restriction is lifted: Transfer Book offers every scope,
+    same as any other adjustment type. FRTB scopes get a new FRTBSA_*_KEY
+    per transferred row (source key + target book + resolved trade), so
+    leg ②T no longer collides — see _transfer_col in
+    new_adjustment_db_objects/05_sp_process_adjustment.sql. No scope is
+    dropped and no warning is shown, so the pill group renders under its
+    plain (non "_ltd") widget key, same as every other adjustment type."""
     at = _load()
     _seed_ref_data(at)
     at.session_state["wiz"] = {**at.session_state["wiz"],
@@ -511,19 +513,18 @@ def test_transfer_offers_only_var_stress_sensitivity_and_drops_frtb():
     assert not at.exception, at.exception
 
     # ButtonGroup options come back as rendered labels, not bare codes.
-    opts = " ".join(str(o) for o in grp_options(at, "_ltd"))
+    opts = " ".join(str(o) for o in grp_options(at))
     assert "VaR" in opts and "Stress" in opts and "Sensitivity" in opts
-    assert "FRTB" not in opts
-    assert len(grp_options(at, "_ltd")) == 3
-    assert at.session_state["wiz"]["process_types"] == ["VaR"]
-    assert any("FRTB scopes are not available for Transfer Book yet" in w.value
-               and "FRTBSBM" in w.value for w in at.warning), \
-        [w.value for w in at.warning]
+    assert "FRTB" in opts
+    assert len(grp_options(at)) == 6
+    assert at.session_state["wiz"]["process_types"] == ["VaR", "FRTB"]
+    assert not any("not available for Transfer Book" in w.value for w in at.warning)
 
 
 def test_non_transfer_types_still_offer_every_scope():
-    """The restriction is Transfer-only — Scale keeps the full pill group
-    under its original widget key."""
+    """Every adjustment type — Transfer included — offers the full pill
+    group under its original (non "_ltd") widget key; there is currently no
+    scope restriction anywhere in the form."""
     at = _load()
     at.session_state["wiz"] = {**at.session_state["wiz"],
                                "category": "Scaling Adjustment",

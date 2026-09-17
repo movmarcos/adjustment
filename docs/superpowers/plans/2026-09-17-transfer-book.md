@@ -898,12 +898,10 @@ not, so a 05 deployed against the old table breaks Scale, Flatten and Roll
 too. `deploy_all.ps1` does this automatically (files run in name order);
 never hand-deploy 05 alone.
 
-**v1 scope.** Transfer Book is limited to **VaR, Stress and Sensitivity**.
-`SP_SUBMIT_ADJUSTMENT` rejects an FRTB scope ("not yet available for FRTB
-scopes") and the New Adjustment page offers only those three in the scope
-pills. Reason: leg ②T re-keys the source rows position by position so leg
-③'s flatten cancels them; the FRTB tables' single opaque-column PK cannot
-net that way.
+**FRTB scopes:** transferred rows get a NEW `FRTBSA_*_KEY` (MD5 of source
+key + target book + resolved trade), like Direct FRTB rows; DVLP check: no
+duplicate (COBID, `FRTBSA_*_KEY`) in the FRTB `_ADJUSTMENT` table after a
+transfer.
 
 1. Push; on the Windows box `.\deploy_all.ps1` (auto picks DB + Streamlit).
 2. Run `pytest tests/test_transfer_book.py -q` with `TEST_TRF_SRC_BOOK` / `TEST_TRF_TGT_BOOK` set to two real current books.

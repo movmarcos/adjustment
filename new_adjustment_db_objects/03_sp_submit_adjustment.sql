@@ -352,14 +352,6 @@ def main(session, p_adjustment):
             if src_book.upper() == tgt_book.upper():
                 return {"adj_id": None, "status": "Error",
                         "message": "Source and target book must differ."}
-            # v1 release scope: the engine's leg ②T re-keys position by
-            # position, which the single-column-PK FRTB tables cannot net.
-            # Keep them out until that is designed and tested.
-            if process_type.upper().startswith("FRTB"):
-                return {"adj_id": None, "status": "Error",
-                        "message": "Transfer Book is not yet available for FRTB scopes "
-                                   "(FRTBSBM, FRTBDRC, FRTBRRAO) — it is limited to VaR, "
-                                   "Stress and Sensitivity in this release."}
             # A transfer COPIES the source book as it stands; a factor other
             # than 1 would silently scale the copy (the page never sends one,
             # but another caller could).

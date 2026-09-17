@@ -142,8 +142,6 @@ Adjustment categories:
   trade codes limit it, one adjustment per trade and per scope. The ticket's
   entity is the target book's entity. Trades with no version under the
   target book land on the target's '<BOOK>/Adjustment' trade.
-  Transfer Book is limited to VaR, Stress and Sensitivity in this release —
-  the FRTB scopes are not available for it yet.
 - Direct: exact values. For VaR/Stress/Sensitivity it is PER ROW — paste or
   upload a CSV and each row becomes its own independent adjustment. For
   FRTB/FRTBDRC/FRTBRRAO it is PER FILE — one uploaded file = one Direct

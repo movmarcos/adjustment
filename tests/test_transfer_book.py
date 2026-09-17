@@ -70,12 +70,12 @@ def test_trf02_guards(session, ev):
     ev.check("scale factor other than 1 refused",
              isinstance(r5, dict) and r5.get("status") == "Error"
              and "must be 1" in str(r5.get("message", "")))
-    # v1 release scope: VaR / Stress / Sensitivity only (leg ②T re-keys
-    # position by position, which the single-column-PK FRTB tables cannot net).
+    # FRTB scopes are accepted: the engine mints a new FRTBSA_*_KEY per
+    # transferred row (source key + target book + resolved trade), like
+    # Direct FRTB rows, so leg ②T no longer collides in the ranked CTE.
     r6 = _submit(session, process_type="FRTB")
-    ev.check("FRTB scope refused in this release",
-             isinstance(r6, dict) and r6.get("status") == "Error"
-             and "not yet available" in str(r6.get("message", "")))
+    ev.check("FRTB transfer accepted",
+             isinstance(r6, dict) and r6.get("status") in ("Pending", "Pending Approval"))
 
 
 @pytest.mark.uat("TRF-04", title="A pending Flatten on the target book blocks a Transfer", priority="P2")

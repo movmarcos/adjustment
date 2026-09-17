@@ -1097,11 +1097,14 @@ def _missing_fields() -> list:
 # LEFT COLUMN — FORM SECTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Transfer Book, v1 release scope. The engine's leg ②T re-keys the source
-# rows position by position so leg ③'s flatten cancels them; the FRTB tables'
-# single opaque-column PK cannot net that way, so SP_SUBMIT rejects them too
-# ("not yet available for FRTB scopes").
-TRANSFER_SCOPES = ["VaR", "Stress", "Sensitivity"]
+# Transfer Book offers every scope, same as the other adjustment types. FRTB
+# scopes (single opaque-column PK) get a NEW FRTBSA_*_KEY per transferred row
+# (source key + target book + resolved trade) so leg ②T never collides with
+# leg ③ or the untouched source row — see _transfer_col in
+# new_adjustment_db_objects/05_sp_process_adjustment.sql. Kept as its own
+# constant (rather than inlining ALL_SCOPES at the call site) so a future
+# restriction is a one-line change here.
+TRANSFER_SCOPES = list(ALL_SCOPES)
 
 
 def _selected_scopes() -> list:
@@ -1142,10 +1145,12 @@ def _render_scope_pills(options: list = None) -> None:
     """Multi-select scope pills. Sets wiz['process_types'] (list of codes);
     one adjustment is created per selected scope.
 
-    `options` narrows what may be picked (Transfer Book v1 offers VaR /
-    Stress / Sensitivity only — see TRANSFER_SCOPES). Scopes already in the
-    draft that the narrowed list no longer offers are dropped and named, the
-    same way _purge_filters_for names a dropped filter."""
+    `options` narrows what may be picked (currently unused in practice — every
+    adjustment type, Transfer Book included, offers every scope; the
+    parameter and TRANSFER_SCOPES stay in place so a future restriction is a
+    one-line change). Scopes already in the draft that a narrowed list no
+    longer offers are dropped and named, the same way _purge_filters_for
+    names a dropped filter."""
     opts = [s for s in ALL_SCOPES if s in (options or ALL_SCOPES)]
     stored = [s for s in (wiz.get("process_types") or []) if s in ALL_SCOPES]
     current = [s for s in stored if s in opts]

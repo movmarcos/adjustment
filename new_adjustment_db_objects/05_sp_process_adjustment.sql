@@ -1795,9 +1795,18 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 # '<BOOK>/Adjustment' trade (ta), else the source key.
                 #
                 # Single-column-PK scopes (FRTB*, whose key IS one opaque fact
-                # column): legs ②T and ③ do NOT net position-by-position — the
-                # source key is emitted unchanged, exactly as for a cross-COB
-                # Roll. Both legs are still inserted, and the combined total is
+                # column): the transferred row gets a NEW key, minted per
+                # (source row, target book, resolved trade) — MD5(source key
+                # || target BOOK_CODE || resolved TRADE_KEY), exactly as the
+                # Direct FRTB path mints its own keys per row (see
+                # frtb/views/vw_adjustments_direct_sbm.sql). That means leg ②T's
+                # rows do NOT share a key with leg ③'s flattened target rows, so
+                # `ranked`'s DENSE_RANK PARTITION BY {key_name} never collides
+                # two same-batch transfers (or a same-batch Scale) out of the
+                # source book, and the transferred row never carries the same
+                # (COBID, key) as the untouched source row. Legs ②T/③ still do
+                # NOT net position-by-position for these scopes — same as a
+                # cross-COB Roll — so the combined total is still
                 # adjusted(source) − original(target) + original(target) =
                 # adjusted(source). Supersede is by filter, not by key, so the
                 # earlier rows in the target scope still go.
@@ -1817,6 +1826,13 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                     if cu == "ENTITY_CODE_SABRE": return "tb.ENTITY_CODE AS ENTITY_CODE_SABRE"
                     if cu == "TRADE_KEY":
                         return "COALESCE(tt.TRADE_KEY, ta.TRADE_KEY, fact.TRADE_KEY) AS TRADE_KEY"
+                    if len(pk_parts) == 1 and cu == key_name.upper():
+                        return (
+                            f"MD5(COALESCE(fact.{key_name}::VARCHAR, '_') || '-' || "
+                            f"UPPER(adjust.BOOK_CODE) || '-' || "
+                            f"COALESCE(tt.TRADE_KEY, ta.TRADE_KEY, fact.TRADE_KEY)::VARCHAR) "
+                            f"AS {key_name}"
+                        )
                     return f"fact.{c}" if c in _view_cols else f"{_adj_default(c)} AS {c}"
                 select_non_metric_trf = ', '.join(_transfer_col(c) for c in fact_non_metric_matched)
                 # Submit forces SOURCE_COBID = COBID for a transfer, so this is
