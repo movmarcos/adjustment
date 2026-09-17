@@ -678,8 +678,9 @@ with tab_create:
     section_title("The New Adjustment Page", "info")
     _html(_card(
         "One dense screen: pick the <strong>Category</strong> (Scaling / Direct "
-        "/ VaR Upload / Entity Roll), pick the <strong>Scope</strong>, fill the fields, and "
-        "the live <strong>Ticket</strong> panel on the right tracks completeness "
+        "/ VaR Upload / Entity Roll), then — for Scaling — the <strong>Adjustment "
+        "Type</strong>, then one or more <strong>Data Scopes</strong>, fill the "
+        "fields, and the live <strong>Ticket</strong> panel on the right tracks completeness "
         "and unlocks Submit when everything required is present. Every "
         "adjustment needs an <strong>Adjustment Category</strong> (the managed "
         "business-reason list) and a <strong>Reason</strong>."))
@@ -693,19 +694,59 @@ with tab_create:
         ["<strong>Roll</strong>", "Carries the source COB's <em>adjusted</em> "
          "values (original + its adjustments) forward to the target COB, "
          "flattening what was there.", "full factor on the source leg"],
+        ["<strong>Transfer Book</strong>", "At one COB, replaces the "
+         "<em>target</em> book's positions with the <em>source</em> book's "
+         "adjusted values (the source book is untouched). Optional trade codes "
+         "limit it to those trades. See the Transfer Book section below.",
+         "1 (copy as-is)"],
     ]))
+    _html(_card(
+        f'{icon("layers", size=13, color="#7E22CE")} <strong>Several data scopes at once:</strong> '
+        f'the scope pills are multi-select — click a scope to add it, click again to '
+        f'remove it. Submit creates <strong>one adjustment per selected scope</strong> '
+        f'(the ticket says how many). With several scopes the filter form offers the '
+        f'eight main fields (Entity, Source System, Department, Book, Instrument, '
+        f'Strategy, Trade Typology, Trade Code) plus, under <em>More filters</em>, only '
+        f'the fields <em>every</em> selected scope supports; a filter that a newly '
+        f'added scope cannot use is cleared and you are told which. The preview '
+        f'shows the impact per scope and a total; a scope that matches 0 rows blocks '
+        f'Submit until you deselect it or fix the filters.', "#7E22CE"))
     _html(_card(
         f'{icon("eye", size=13, color=P["info"])} <strong>Impact preview:</strong> '
         f'for narrow scopes (book/department level) run the preview before '
         f'submitting — it shows rows affected and the value delta. A preview '
         f'matching <strong>0 rows</strong> blocks Submit: one of your filter '
         f'codes probably does not exist at that COB.', P["info"]))
+
+    section_title("Transfer Book", "shuffle")
     _html(_card(
-        f'{icon("layers", size=13, color="#7E22CE")} <strong>Multi-scope FRTB:</strong> '
-        f'selecting all three FRTB scopes submits three sibling adjustments - one each for '
-        f'FRTBSBM, FRTBDRC and FRTBRRAO. They overlap by design, so the pipeline '
-        f'runs them in sequence; the preview shown is the sum across the three.',
-        "#7E22CE"))
+        "A Scaling type for moving a book's risk to another book at one COB. "
+        "Choose the <strong>Source</strong> book (values come from here) and the "
+        "<strong>Target</strong> book (the book that receives them) — both from "
+        "the current book list, shown with their department and entity — and, "
+        "optionally, the <strong>trade codes</strong> to transfer (blank = the "
+        "whole book). It works like a Roll with the book swapped for the COB: "
+        "the target book's positions in scope are flattened and replaced by the "
+        "source book's <em>adjusted</em> values; the source book keeps its rows. "
+        "No scale factor, no recurring schedule."))
+    _html(_table(["Rule", "Detail"], [
+        ["One adjustment per scope × trade",
+         "Two scopes and three trades create six adjustments; the ticket and the "
+         "progress bar say how many. Above 20 you tick a confirmation first."],
+        ["Entity", "Taken from the target book automatically; it drives the "
+         "sign-off check and where the rows are reported."],
+        ["Trades in the target book", "A transferred trade uses its own version "
+         "under the target book at that COB. If the trade does not exist there "
+         "yet, the rows land on the target's <code>&lt;BOOK&gt;/Adjustment</code> "
+         "trade — the preview breakdown flags these as <em>fallback</em>."],
+        ["Several fallback trades", "If two or more selected trades both fall "
+         "back and share every other key, only one survives — the page warns; "
+         "ask for the trades to be set up in the target book first."],
+        ["FRTB scopes", "Transferred FRTB rows get a new row key (source key + "
+         "target book + trade), like Direct FRTB uploads."],
+        ["Approval", "Optional, like any other Scaling adjustment (tick "
+         "‘Requires Approval’)."],
+    ]))
 
     section_title("Direct Adjustment (paste or upload CSV)", "list")
     _html(_card(
@@ -755,7 +796,9 @@ with tab_create:
         f'reconciliation count of what will be removed and requires a ticked '
         f'confirmation; the whole wipe + roll is applied atomically (all or '
         f'nothing). Large entities (e.g. MUSI on VaR) move hundreds of '
-        f'millions of rows and can take ~20 minutes to process.', P["danger"]))
+        f'millions of rows and can take ~20 minutes to process. Several data '
+        f'scopes can be selected: one roll is created per scope, and the removal '
+        f'count is shown per scope.', P["danger"]))
 
     section_title("What happens at Submit", "send")
     _html(_table(["Check", "Outcome"], [
@@ -836,12 +879,15 @@ with tab_approval:
 
     section_title("Who can do what", "user")
     _html(_table(["Action", "Who"], [
-        ["Submit adjustments, request COB re-open, re-sign-off a re-opened COB",
-         "Any app user"],
+        ["Submit adjustments", "Any app user"],
+        ["Sign off a COB, request a COB re-open, re-sign-off a re-opened COB",
+         "Users on the <strong>Authorized Sign-Off Users</strong> list (Admin "
+         "page, optionally per scope). While that list is empty, any app user."],
         ["Approve/reject adjustments and re-open requests",
          "Registered approvers (per scope), never for their own requests"],
         ["View COB sign-off status", "Any app user (Sign-Off page)"],
-        ["Manage approvers, scope config, page admins",
+        ["Manage approvers, sign-off users, scope config, page admins, "
+         "the AI assistant models",
          "Page administrators (Admin page; access controlled by the "
          "administrators list, with a warning-flagged open ‘bootstrap’ mode "
          "until the first admin is registered)"],
@@ -915,6 +961,13 @@ with tab_processing:
          "Two legs: flatten the target COB's current values, then carry the "
          "source COB's <em>adjusted</em> values forward (× factor). Combined "
          "result at the target = the source COB's adjusted numbers."],
+        ["<strong>Transfer Book</strong>",
+         "Same engine as Roll, with the book swapped for the COB: the target "
+         "book's rows in scope are flattened, and the source book's adjusted "
+         "rows are brought in re-keyed to the target book (book, entity, and "
+         "the trade's version under the target book). Netting per position "
+         "gives combined(target) = adjusted(source). Earlier adjustments in "
+         "the target scope are superseded by filter, as for Scale."],
         ["<strong>Direct</strong> (per row: VaR / Stress / Sensitivity)",
          "One header row = one fact row: the codes on the adjustment resolve "
          "directly to dimension keys (case-insensitive, −1 when blank or "
