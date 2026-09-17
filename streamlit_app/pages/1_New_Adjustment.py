@@ -20,7 +20,7 @@ st.set_page_config(
 
 from utils.styles import (scope_label, scope_meta, wide_kwargs,
     inject_css, render_sidebar,
-    P, SCOPE_CONFIG, TYPE_CONFIG, CATEGORY_CONFIG, render_df_table,
+    P, TYPE_CONFIG, CATEGORY_CONFIG, render_df_table,
     render_data_grid, fmt_adj_id, icon, bordered_container,
     ALL_SCOPES, _st_version,
 )
@@ -2919,7 +2919,8 @@ def _ticket_html(missing: list) -> str:
                      "var_component_name": "VaR Comp",
                      "var_sub_component_name": "VaR Sub",
                      "day_type": "Day Type"}
-        label_map.update({k: v[0].rstrip(" *†") for k, v in FIELD_LABELS.items()})
+        label_map.update({k: v[0].rstrip(" *†") for k, v in FIELD_LABELS.items()
+                          if k not in label_map})
         chips = "".join(
             f'<span class="filter-chip">{label_map.get(k, k)}: {v}</span>'
             for k, v in applied)
