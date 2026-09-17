@@ -30,6 +30,9 @@ def test_all_scopes_succeed_calls_once_per_scope_and_names_them():
     assert out["status"] == "Pending"
     assert "2 adjustments" in out["message"]
     assert "VaR" in out["message"] and "Stress" in out["message"]
+    # Explicit marker the success screen keys off — never text-matched.
+    assert out["fanout"] is True
+    assert out["created"] == 2
 
 
 def test_payload_fields_preserved_per_call_with_scope_swapped():
@@ -58,6 +61,8 @@ def test_partial_failure_names_created_and_failed_no_rollback():
     assert "Stress: blocked" in out["message"]
     assert "Already created: VaR" in out["message"]
     assert "delete them from the Adjustments page" in out["message"]
+    assert out["fanout"] is True
+    assert out["created"] == 1
 
 
 def test_all_scopes_fail_no_partial_note():
@@ -81,3 +86,41 @@ def test_single_scope_still_works():
     assert out["status"] == "Pending Approval"
     assert "1 adjustments" in out["message"]
     assert "FRTBSBM" in out["message"]
+    assert out["fanout"] is True
+    assert out["created"] == 1
+
+
+def test_mixed_statuses_surface_the_stricter_one_and_are_listed():
+    def submit_one(payload):
+        if payload["process_type"] == "VaR":
+            return {"status": "Pending"}
+        return {"status": "Pending Approval"}
+
+    out = submit_fanout({}, ["VaR", "Stress"], submit_one, _is_success, _scope_label)
+
+    # A "Pending Approval" scope still needs an approver — surface that,
+    # not whichever scope happened to run first.
+    assert out["status"] == "Pending Approval"
+    assert out["fanout"] is True
+    assert out["created"] == 2
+    assert "Statuses: VaR Pending, Stress Pending Approval." in out["message"]
+
+
+def test_uniform_statuses_do_not_add_a_statuses_note():
+    def submit_one(payload):
+        return {"status": "Pending"}
+
+    out = submit_fanout({}, ["VaR", "Stress"], submit_one, _is_success, _scope_label)
+
+    assert out["status"] == "Pending"
+    assert "Statuses:" not in out["message"]
+
+
+def test_empty_scope_list_is_guarded():
+    def submit_one(payload):
+        raise AssertionError("submit_one must not be called with no scopes")
+
+    out = submit_fanout({}, [], submit_one, _is_success, _scope_label)
+
+    assert out == {"status": "Error", "message": "No scope selected.",
+                    "fanout": True, "created": 0}

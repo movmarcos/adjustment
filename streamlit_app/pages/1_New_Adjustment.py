@@ -3373,20 +3373,24 @@ if wiz["step"] == 3:
     # processing until an approver actions it — saying "processed
     # automatically" there sent users looking for a report that never came.
     status    = result.get("status")
-    n_created = result.get("created")          # Direct batches only
+    n_created = result.get("created")          # Direct batches / fan-out
     n_rej     = int(result.get("rejected") or 0)
-    plural    = n_created is not None and n_created != 1
+    # Multi-scope fan-out (_submit_fanout) carries an explicit "fanout"
+    # marker rather than being detected by matching message text: the
+    # backend's ordinary single-scope success message is "Created with
+    # status '<status>'." (SP_SUBMIT_ADJUSTMENT), which also starts with
+    # "Created " and was wrongly caught by an earlier text-matching version
+    # of this check — see task-4 fix round 1 (2026-09-17).
+    is_fanout = bool(result.get("fanout"))
+    plural    = is_fanout or (n_created is not None and n_created != 1)
     noun      = "adjustments" if plural else "adjustment"
     title     = (f"{n_created} Adjustments Submitted Successfully" if plural
                  else "Adjustment Submitted Successfully")
-    if (wiz.get("category") in ("Scaling Adjustment", "Entity Roll")
-            and (result.get("message") or "").startswith("Created ")):
-        # Multi-scope fan-out (_submit_fanout): the message already names the
-        # count and the scopes — show it verbatim as the headline. Scoped to
-        # these two categories so the Direct Adjustment batch screen (whose
-        # own "Created N Direct adjustments." message also starts with
-        # "Created ") is unaffected and keeps its original headline.
-        title = result.get("message")
+    if is_fanout:
+        # The fan-out's own message (in `msg`, shown as the body below) names
+        # the scopes; the headline stays the generic count so title and body
+        # are not identical.
+        title = f"{result.get('created')} Adjustments Submitted Successfully"
     if status == "Pending Approval":
         next_html = (f'<strong>Waiting for approval</strong> — an approver must '
                      f'action {"them" if plural else "it"} on the Approval Queue '

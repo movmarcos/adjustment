@@ -14,7 +14,13 @@ class SQL:
     def collect(self):
         CALLS.append(self.q)
         if "SP_SUBMIT_ADJUSTMENT" in self.q:
-            return [Row([json.dumps({"status": "Pending", "adj_id": "x"})])]
+            # Realistic shape: SP_SUBMIT_ADJUSTMENT's ordinary single-scope
+            # message is "Created with status '<status>'." — it also starts
+            # with "Created ", which is exactly why the success screen must
+            # key off an explicit "fanout" marker rather than message text
+            # (see 03_sp_submit_adjustment.sql:685 and task-4 fix round 1).
+            return [Row([json.dumps({"status": "Pending", "adj_id": "x",
+                                     "message": "Created with status 'Pending'."})])]
         if "CURRENT_USER" in self.q.upper(): return [Row(["TESTER"])]
         return []
     def to_pandas(self): CALLS.append(self.q); return pd.DataFrame()
@@ -47,3 +53,34 @@ def test_scaling_shows_type_before_scope():
     at.run(); assert not at.exception, at.exception
     texts = " ".join(m.value for m in at.markdown)
     assert texts.index("Adjustment Type") < texts.index("Data Scope")
+
+def test_single_scope_success_screen_shows_original_headline_once():
+    """A single-scope result (never touches _submit_fanout) must render
+    exactly as before this task: the generic "Adjustment Submitted
+    Successfully" headline, and the backend's own "Created with status …"
+    message shown once, as the body — not duplicated as the headline too."""
+    at = _load()
+    at.session_state["wiz"] = {
+        **at.session_state["wiz"], "step": 3, "category": "Scaling Adjustment",
+        "process_types": ["VaR"],
+        "result": {"status": "Pending", "adj_id": "x",
+                   "message": "Created with status 'Pending'."},
+    }
+    at.run(); assert not at.exception, at.exception
+    texts = " ".join(m.value for m in at.markdown)
+    assert "Adjustment Submitted Successfully" in texts
+    assert texts.count("Created with status") == 1
+
+def test_multi_scope_fanout_success_screen_shows_count_headline():
+    at = _load()
+    at.session_state["wiz"] = {
+        **at.session_state["wiz"], "step": 3, "category": "Scaling Adjustment",
+        "process_types": ["VaR", "Stress"],
+        "result": {"status": "Pending", "fanout": True, "created": 2,
+                   "message": "Created 2 adjustments — one per scope (VaR, Stress). "
+                              "They are queued and will be processed by their "
+                              "scope pipelines."},
+    }
+    at.run(); assert not at.exception, at.exception
+    texts = " ".join(m.value for m in at.markdown)
+    assert "2 Adjustments Submitted Successfully" in texts
