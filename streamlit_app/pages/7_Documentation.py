@@ -596,8 +596,8 @@ with tab_overview:
     _html(_card(
         f'{icon("info", size=13, color=P["info"])} The three FRTB sub-types '
         f'(FRTBSBM, FRTBDRC, FRTBRRAO) are processed by one shared FRTB pipeline. '
-        f'Choosing <strong>“All FRTB”</strong> on the New Adjustment page simply '
-        f'creates one adjustment per sub-type — three sibling tickets that '
+        f'Selecting several data scopes on the New Adjustment page (Scaling or Entity Roll) simply '
+        f'creates one adjustment per selected scope - three sibling tickets that '
         f'process one after another.', P["info"]))
 
     section_title("Adjustment Categories", "zap")
@@ -696,8 +696,8 @@ with tab_create:
         f'matching <strong>0 rows</strong> blocks Submit: one of your filter '
         f'codes probably does not exist at that COB.', P["info"]))
     _html(_card(
-        f'{icon("layers", size=13, color="#7E22CE")} <strong>All FRTB:</strong> '
-        f'selecting “All FRTB” submits three sibling adjustments — one each for '
+        f'{icon("layers", size=13, color="#7E22CE")} <strong>Multi-scope FRTB:</strong> '
+        f'selecting all three FRTB scopes submits three sibling adjustments - one each for '
         f'FRTBSBM, FRTBDRC and FRTBRRAO. They overlap by design, so the pipeline '
         f'runs them in sequence; the preview shown is the sum across the three.',
         "#7E22CE"))
