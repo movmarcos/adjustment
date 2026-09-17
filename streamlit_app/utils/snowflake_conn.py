@@ -133,11 +133,9 @@ def _rows_to_df(rows):
     if not rows:
         return pd.DataFrame()
     first = rows[0]
-    if hasattr(first, "_fields"):
-        fields = list(first._fields)
-    else:
-        fields = list(first.as_dict().keys())
-    return pd.DataFrame([list(r) for r in rows], columns=fields)
+    # `or` (not hasattr): some Row shapes carry _fields = None.
+    fields = getattr(first, "_fields", None) or list(first.as_dict().keys())
+    return pd.DataFrame([list(r) for r in rows], columns=list(fields))
 
 
 def call_sp_df(proc_name: str, *args):
@@ -156,8 +154,9 @@ def call_sp_df(proc_name: str, *args):
 class _EagerSPJob:
     """Already-finished job: holds a DataFrame the caller gathers later.
 
-    The sequential fallback for runtimes without async jobs — the caller's
-    submit-then-gather loop is identical either way."""
+    The sequential fallback for runtimes without async jobs. The caller's
+    submit-then-gather loop reads the same, but the work happened at SUBMIT
+    time — so a submit loop here raises where the async one would not."""
 
     def __init__(self, df):
         self._df = df
@@ -186,8 +185,13 @@ def call_sp_df_async(proc_name: str, *args):
 
     Uses Snowpark's async jobs (DataFrame.collect_nowait → AsyncJob) so several
     per-scope procedure calls run CONCURRENTLY in Snowflake — no Python threads,
-    no extra sessions. Falls back to a synchronous call when the runtime does
-    not support async jobs, so the caller's gather loop never changes."""
+    no extra sessions. When the runtime does not support async jobs the call is
+    executed EAGERLY here instead, at submit time, and the caller's gather loop
+    then just reads the stored DataFrame.
+
+    READ-ONLY procedures only: a submit that fails part-way is retried on the
+    synchronous path, so a writing procedure (SP_SUBMIT_ADJUSTMENT and friends)
+    could run twice. Those must keep using call_sp_df / call_procedure."""
     try:
         job = get_session().sql(_sp_call_sql(proc_name, *args)).collect_nowait()
         if not hasattr(job, "result"):

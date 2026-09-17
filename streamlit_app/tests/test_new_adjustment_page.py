@@ -45,7 +45,13 @@ def _preview_reply(q):
                          "TOTAL_PROJECTED_VALUE": n * 110.0})]
     if '"mode": "sql"' in q:
         return [DictRow({"PREVIEW_SQL": f"SELECT /* {scope} */ 1"})]
-    return []                                   # breakdown: no fallback trades
+    # breakdown (Transfer only): VaR has two trades with no version in the
+    # target book, Stress has none.
+    if scope == "VaR":
+        return [DictRow({"TARGET_TRADE": "fallback: B2/Adjustment"}),
+                DictRow({"TARGET_TRADE": "Fallback: B2/Adjustment"}),
+                DictRow({"TARGET_TRADE": "T1"})]
+    return [DictRow({"TARGET_TRADE": "T1"})]
 
 
 class AsyncJob:
@@ -421,3 +427,82 @@ def test_call_sp_df_async_falls_back_when_the_runtime_has_no_async_jobs(monkeypa
     df = job.result_df()
     assert int(df.iloc[0]["ROWS_AFFECTED"]) == 10
     assert sc.gather_dfs([job])[0] is df
+
+
+def _seed_ref_data(at):
+    """Reference caches the Transfer dropdowns read (the fake session returns
+    no rows), so the book/trade widgets render with real options instead of
+    writing None back over the draft."""
+    _books = [["B1", "D1", "E1"], ["B2", "D2", "E2"]]
+    at.session_state["_ref_books_current"] = list(_books)
+    at.session_state["_ref_books_v2"] = list(_books)
+    at.session_state["_ref_trades_B1"] = [["T1"], ["T2"]]
+
+
+def test_transfer_preview_counts_fallback_trades_per_scope():
+    """The breakdown call rides along with the other preview jobs; its
+    per-scope fallback counts must survive the submit-then-gather rewrite,
+    and the impact split must render beside them."""
+    at = _load()
+    _seed_ref_data(at)
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": "Scaling Adjustment",
+                               "adjustment_type": "Transfer",
+                               "process_types": ["VaR", "Stress"],
+                               "process_type": "VaR",
+                               "cobid": 20260101,
+                               "source_book_code": "B1", "target_book_code": "B2",
+                               "transfer_trade_codes": ["T1", "T2"],
+                               "adjustment_category": "Cat", "reason": "why",
+                               "result": None, "step": 1}
+    at.run(); assert not at.exception, at.exception
+    CALLS.clear(); ORDER.clear()
+    at.button(key=f"run_preview_{at.session_state['_wiz_v']}").click().run()
+    assert not at.exception, at.exception
+
+    w = at.session_state["wiz"]
+    assert w["_transfer_fallbacks"] == {"VaR": 2, "Stress": 0}
+    assert w["_preview_sum"]["ROWS_AFFECTED"] == 15
+    assert set(w["_preview_scopes"]) == {"VaR", "Stress"}
+    # Six jobs (summary + sql + breakdown, twice), all in flight before the
+    # first result is read.
+    kinds = [k for k, _ in ORDER]
+    assert kinds == ["submit"] * 6 + ["result"] * 6, ORDER
+    # The ≥ 2 fallback warning fires for VaR only.
+    warns = [x.value for x in at.warning]
+    assert any("2 of the selected trades have no version" in x for x in warns), warns
+    grid = next((d.value for d in at.dataframe if "Scope" in list(d.value.columns)), None)
+    assert grid is not None and list(grid["Scope"]) == ["VaR", "Stress", "Total"]
+
+
+def test_a_failing_sql_text_call_does_not_lose_the_preview():
+    """The preview SQL is advisory. In fallback mode call_sp_df_async runs the
+    call at submit time and re-raises, so the submission — not just the gather
+    — has to tolerate it: the numbers must still render, with no SQL to show."""
+    class NoSqlModeSQL(SQL):
+        def collect_nowait(self):
+            if '"mode": "sql"' in self.q:
+                raise RuntimeError("async submit refused")
+            return SQL.collect_nowait(self)
+
+        def collect(self):
+            if '"mode": "sql"' in self.q:
+                CALLS.append(self.q)
+                raise RuntimeError("SQL-text mode is not deployed")
+            return SQL.collect(self)
+
+    class NoSqlModeSess:
+        def sql(self, q, *a, **k): return NoSqlModeSQL(q)
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(sc, "get_session", lambda: NoSqlModeSess())
+    try:
+        at = _load()
+        w = _preview_scaling(at, ["VaR", "Stress"])
+    finally:
+        monkey.undo()
+
+    assert w["_preview_err"] is None
+    assert w["_preview_sql"] is None
+    assert w["_preview_sum"]["ROWS_AFFECTED"] == 15
+    assert set(w["_preview_scopes"]) == {"VaR", "Stress"}

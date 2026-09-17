@@ -3340,9 +3340,13 @@ def _run_preview() -> None:
     Every per-scope call (summary, sql and — for a Transfer — breakdown) is
     SUBMITTED FIRST and gathered afterwards, so Snowflake runs them
     concurrently as async jobs instead of one after another: a three-scope
-    preview used to cost the sum of nine round trips. call_sp_df_async falls
-    back to a synchronous call on runtimes without async jobs, so the loop
-    below behaves identically either way."""
+    preview used to cost the sum of nine round trips. On a runtime without
+    async jobs call_sp_df_async degrades to the old behaviour — each call
+    executes eagerly, in submission order, at submit time — which is also why
+    the ADVISORY submissions (sql text, breakdown) each sit in their own
+    try/except: in that mode a failing advisory call raises where the gather
+    used to swallow it, and a preview whose numbers are fine must still
+    render."""
     payload = _preview_payload()
     subtypes = _selected_scopes() or [payload.get("process_type")]
     is_transfer = wiz.get("adjustment_type") == "Transfer"
@@ -3359,18 +3363,28 @@ def _run_preview() -> None:
                                 json.dumps({**payload, "process_type": sub,
                                             "mode": mode}))
 
+    def _submit_advisory(mode):
+        """Submit an advisory call per scope, skipping any scope that refuses
+        to start (fallback mode runs it there and then, so it can raise)."""
+        jobs = []
+        for sub in subtypes:
+            try:
+                jobs.append((sub, _submit(sub, mode)))
+            except Exception:
+                pass
+        return jobs
+
     try:
         # ── Submit everything, then gather ───────────────────────────────
         sum_jobs = [(sub, _submit(sub, "summary")) for sub in subtypes]
-        sql_jobs = [(sub, _submit(sub, "sql")) for sub in subtypes]
+        sql_jobs = _submit_advisory("sql")
         # Transfer Book: how many of the selected trades have NO version in
         # the target book. Each of those lands on the target's
         # '<BOOK>/Adjustment' trade, so two that also share every other key
         # column collapse onto ONE surrogate key and only the newest header's
         # row survives (engine leg ②T comment; UAT TRF-05). Counted here so
         # the ticket can warn BEFORE the adjustments are created.
-        brk_jobs = [(sub, _submit(sub, "breakdown"))
-                    for sub in subtypes] if is_transfer else []
+        brk_jobs = _submit_advisory("breakdown") if is_transfer else []
 
         agg = None
         by_scope = {}
