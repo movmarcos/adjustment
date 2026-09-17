@@ -253,6 +253,7 @@ def main(session, p_adjustment):
       source_system_code             str
       department_code                str
       book_code                      str
+      source_book_code               str     Transfer only — source book (target is book_code)
       currency_code                  str
       trade_typology                 str
       trade_code                     str
@@ -356,18 +357,25 @@ def main(session, p_adjustment):
                         "message": "Transfer Book applies within one COB: source_cobid must equal cobid."}
             def _book_entity(code):
                 r = session.sql(f"""
-                    SELECT MAX(ENTITY_CODE) AS E, COUNT(*) AS N FROM DIMENSION.BOOK
+                    SELECT MAX(ENTITY_CODE) AS E, COUNT(*) AS N, COUNT(DISTINCT ENTITY_CODE) AS D
+                    FROM DIMENSION.BOOK
                     WHERE UPPER(BOOK_CODE) = UPPER('{_esc(code)}') AND IS_CURRENT_ROW = TRUE
                 """).collect()
-                return (r[0]["E"], int(r[0]["N"])) if r else (None, 0)
-            src_ent, src_n = _book_entity(src_book)
-            tgt_ent, tgt_n = _book_entity(tgt_book)
+                return (r[0]["E"], int(r[0]["N"]), int(r[0]["D"])) if r else (None, 0, 0)
+            src_ent, src_n, src_d = _book_entity(src_book)
+            tgt_ent, tgt_n, tgt_d = _book_entity(tgt_book)
             if src_n == 0:
                 return {"adj_id": None, "status": "Error",
                         "message": f"Source book '{src_book}' is not a current book in DIMENSION.BOOK."}
             if tgt_n == 0:
                 return {"adj_id": None, "status": "Error",
                         "message": f"Target book '{tgt_book}' is not a current book in DIMENSION.BOOK."}
+            if src_d > 1:
+                return {"adj_id": None, "status": "Error",
+                        "message": f"Book '{src_book}' maps to more than one entity in DIMENSION.BOOK — ask the data team to fix the book before transferring."}
+            if tgt_d > 1:
+                return {"adj_id": None, "status": "Error",
+                        "message": f"Book '{tgt_book}' maps to more than one entity in DIMENSION.BOOK — ask the data team to fix the book before transferring."}
             adj["entity_code"] = tgt_ent
             adj["book_code"] = tgt_book
             adj["source_book_code"] = src_book
@@ -376,7 +384,9 @@ def main(session, p_adjustment):
                        "measure_type_code", "trader_code", "guaranteed_entity", "region_key",
                        "scenario_date_id", "tenor_code", "underlying_tenor_code", "curve_code",
                        "product_category_attributes", "var_component_name",
-                       "var_sub_component_name", "day_type"):
+                       "var_sub_component_name", "day_type",
+                       "var_component_id", "var_sub_component_id", "batch_region_area",
+                       "murex_family", "murex_group"):
                 adj.pop(_k, None)          # a transfer carries no other filters
             source_cobid = cobid
 

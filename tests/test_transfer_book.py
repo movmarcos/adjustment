@@ -43,18 +43,27 @@ def test_trf01_submit(session, ev):
              h and h[0]["BOOK_CODE"].upper() == TGT.upper() and h[0]["SOURCE_BOOK_CODE"].upper() == SRC.upper())
     ev.check("entity derived from the target book",
              h and ent and (h[0]["ENTITY_CODE"] or "").upper() == (ent[0]["E"] or "").upper())
+    ev.check("trade code kept", h and (h[0]["TRADE_CODE"] or "").upper() == "UAT-TRADE-1")
 
 
 @pytest.mark.uat("TRF-02", title="Transfer guards: same book, unknown book, missing source, cross-COB", priority="P1")
 def test_trf02_guards(session, ev):
     r1 = _submit(session, source_book_code=TGT)
-    ev.check("same book refused", isinstance(r1, dict) and r1.get("status") == "Error")
+    ev.check("same book refused",
+             isinstance(r1, dict) and r1.get("status") == "Error"
+             and "must differ" in str(r1.get("message", "")))
     r2 = _submit(session, book_code="ZZ_NO_SUCH_BOOK")
-    ev.check("unknown target refused", isinstance(r2, dict) and r2.get("status") == "Error")
+    ev.check("unknown target refused",
+             isinstance(r2, dict) and r2.get("status") == "Error"
+             and "not a current book" in str(r2.get("message", "")))
     r3 = _submit(session, source_book_code="")
-    ev.check("missing source refused", isinstance(r3, dict) and r3.get("status") == "Error")
+    ev.check("missing source refused",
+             isinstance(r3, dict) and r3.get("status") == "Error"
+             and "both a source book and a target book" in str(r3.get("message", "")))
     r4 = _submit(session, source_cobid=FAKE_COB - 1)
-    ev.check("cross-COB refused", isinstance(r4, dict) and r4.get("status") == "Error")
+    ev.check("cross-COB refused",
+             isinstance(r4, dict) and r4.get("status") == "Error"
+             and "within one COB" in str(r4.get("message", "")))
 
 
 @pytest.mark.uat("TRF-04", title="A pending Flatten on the target book blocks a Transfer", priority="P2")
@@ -65,8 +74,12 @@ def test_trf04_overlap_blocks(session, ev):
         "cobid": FAKE_COB, "process_type": "Stress", "adjustment_type": "Flatten",
         "username": U_SUBMIT, "entity_code": ent, "book_code": TGT,
         "reason": "UAT automation — blocker", "adjustment_category": "Booking Error"}))
+    ev.check("setup Flatten accepted",
+             isinstance(flat, dict) and flat.get("status") in ("Pending", "Pending Approval")
+             and bool(flat.get("adj_id")))
     res = _submit(session, process_type="Stress")
     h = ev.sql("Transfer header", f"""SELECT BLOCKED_BY_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
                                       WHERE ADJ_ID = '{res.get("adj_id")}'""")
     ev.check("transfer is blocked by the earlier Flatten",
-             h and h[0]["BLOCKED_BY_ADJ_ID"] == flat.get("adj_id"))
+             h and h[0]["BLOCKED_BY_ADJ_ID"] is not None
+             and h[0]["BLOCKED_BY_ADJ_ID"] == flat.get("adj_id"))
