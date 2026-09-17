@@ -784,6 +784,8 @@ SCOPE_BTN_ICONS = {
     "VaR":         ":material/bar_chart:",
     "Stress":      ":material/show_chart:",
     "FRTB":        ":material/account_balance:",
+    "FRTBDRC":     ":material/account_balance:",
+    "FRTBRRAO":    ":material/account_balance:",
     "Sensitivity": ":material/adjust:",
 }
 TYPE_BTN_ICONS = {
@@ -1143,11 +1145,17 @@ def _purge_filters_for(scopes: list) -> None:
 
 
 def _render_scope_pills(options: list = None) -> None:
-    """Multi-select scope pills. Sets wiz['process_types'] (list of codes);
+    """Multi-select scope pills, built from buttons like the category / type
+    pickers (icon + label; selected = primary red, white text). A click
+    toggles the scope in or out. Sets wiz['process_types'] (list of codes);
     one adjustment is created per selected scope.
 
-    `options` narrows what may be picked (currently unused in practice — every
-    adjustment type, Transfer Book included, offers every scope; the
+    Buttons rather than st.pills: the selection is driven purely by wiz
+    state, so there is no widget default-vs-state fight, nothing to purge
+    when `options` is narrowed, and the look matches the other pickers.
+
+    `options` narrows what may be picked (currently unused in practice —
+    every adjustment type, Transfer Book included, offers every scope; the
     parameter and TRANSFER_SCOPES stay in place so a future restriction is a
     one-line change). Scopes already in the draft that a narrowed list no
     longer offers are dropped and named, the same way _purge_filters_for
@@ -1165,23 +1173,21 @@ def _render_scope_pills(options: list = None) -> None:
         wiz["_scope_drop_note"] = (
             "FRTB scopes are not available for Transfer Book yet — removed: "
             + ", ".join(scope_label(s) for s in stored if s not in opts) + ".")
-        # The unrestricted widget still holds the dropped scopes; left in
-        # place it would write them straight back when the user switches the
-        # type away from Transfer.
-        st.session_state.pop(_k(f"scopes_{wiz.get('category')}"), None)
-    # A restricted list gets its own widget key: reusing the unrestricted
-    # one would hand Streamlit a stored selection that is not in `options`.
-    key = _k(f"scopes_{wiz.get('category')}"
-             + ("" if len(opts) == len(ALL_SCOPES) else "_ltd"))
-    if _st_version() >= (1, 40):
-        picked = st.pills("Data scopes", opts, selection_mode="multi",
-                          default=current, format_func=scope_label, key=key,
-                          label_visibility="collapsed")
-    else:
-        picked = st.multiselect("Data scopes", opts, default=current,
-                                format_func=scope_label, key=key,
-                                label_visibility="collapsed")
-    picked = [s for s in opts if s in (picked or [])]   # stable order
+
+    cols = st.columns(len(opts))
+    clicked = None
+    for i, sc in enumerate(opts):
+        with cols[i]:
+            if _btn(scope_label(sc),
+                    icon_name=SCOPE_BTN_ICONS.get(sc, SCOPE_BTN_ICONS["FRTB"]),
+                    key=_k(f"scope_{wiz.get('category')}_{sc}"),
+                    **wide_kwargs(),
+                    type="primary" if sc in current else "secondary"):
+                clicked = sc
+    picked = current
+    if clicked:
+        picked = ([s for s in current if s != clicked] if clicked in current
+                  else [s for s in opts if s in current or s == clicked])
     if picked != current:
         wiz["process_types"] = picked
         wiz["process_type"]  = picked[0] if picked else None   # legacy readers

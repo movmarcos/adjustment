@@ -176,8 +176,10 @@ def test_scope_change_that_drops_a_filter_says_so():
                                "tenor_code": "5Y"}
     at.run(); assert not at.exception, at.exception
 
-    at.button_group(key=f"scopes_Scaling Adjustment_"
-                        f"{at.session_state['_wiz_v']}").set_value(["VaR"]).run()
+    # Scope pills are buttons: clicking VaR adds it to the selection
+    # (Sensitivity + VaR); Tenor Code is not offered for that pair.
+    at.button(key=f"scope_Scaling Adjustment_VaR_"
+                  f"{at.session_state['_wiz_v']}").click().run()
     assert not at.exception, at.exception
 
     assert at.session_state["wiz"]["tenor_code"] is None

@@ -1231,6 +1231,18 @@ def inject_css():
         color: #FFFFFF !important;
     }}
     .stButton button[kind="primary"] p {{ color: #FFFFFF !important; }}
+    /* Selected pill buttons carry a Material icon: it must go white with
+       the label, otherwise it stays dark on the brand-red background. */
+    .stButton button[kind="primary"] span,
+    .stButton button[kind="primary"] svg {{
+        color: #FFFFFF !important; fill: #FFFFFF !important;
+    }}
+    [data-testid="stPills"] button[data-testid="stBaseButton-pillsActive"] p,
+    [data-testid="stPills"] button[data-testid="stBaseButton-pillsActive"] span,
+    [data-testid="stButtonGroup"] button[data-testid="stBaseButton-pillsActive"] p,
+    [data-testid="stButtonGroup"] button[data-testid="stBaseButton-pillsActive"] span {{
+        color: #FFFFFF !important; fill: #FFFFFF !important;
+    }}
     .stButton button:disabled, .stDownloadButton button:disabled,
     .stFormSubmitButton button:disabled {{
         background-color: {P["grey_100"]} !important;

@@ -486,12 +486,12 @@ def test_transfer_ticket_shows_the_books_and_trade_count():
 
 
 def grp_options(at, suffix=""):
-    """Options of the scope pill group (a ButtonGroup). The restricted
-    Transfer list renders under its own key — "..._ltd" — so Streamlit is
-    never handed a stored selection that is no longer in `options`."""
-    grp = at.button_group(key=f"scopes_Scaling Adjustment{suffix}_"
-                              f"{at.session_state['_wiz_v']}")
-    return list(grp.options)
+    """Scope codes offered by the scope pill buttons (one st.button per
+    scope, keyed scope_<category>_<code>_<v>)."""
+    prefix = f"scope_Scaling Adjustment_"
+    suffix_v = f"_{at.session_state['_wiz_v']}"
+    return [b.key[len(prefix):-len(suffix_v)] for b in at.button
+            if b.key and b.key.startswith(prefix) and b.key.endswith(suffix_v)]
 
 
 def test_transfer_offers_all_six_scopes():
@@ -512,8 +512,7 @@ def test_transfer_offers_all_six_scopes():
     at.run()
     assert not at.exception, at.exception
 
-    # ButtonGroup options come back as rendered labels, not bare codes.
-    opts = " ".join(str(o) for o in grp_options(at))
+    opts = " ".join(grp_options(at))
     assert "VaR" in opts and "Stress" in opts and "Sensitivity" in opts
     assert "FRTB" in opts
     assert len(grp_options(at)) == 6
