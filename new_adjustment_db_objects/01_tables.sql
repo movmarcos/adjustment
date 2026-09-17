@@ -125,6 +125,9 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_HEADER (
     -- NOTE: new columns must stay at the END (CREATE OR ALTER append-only).
     VAR_COMPONENT_NAME          VARCHAR(200) COLLATE 'en-ci',
     VAR_SUB_COMPONENT_NAME      VARCHAR(200) COLLATE 'en-ci',
+    -- Transfer Book (2026-09-17): the SOURCE book whose adjusted rows replace
+    -- BOOK_CODE (the TARGET book) at COBID. NULL = not a transfer.
+    SOURCE_BOOK_CODE            VARCHAR(20)  COLLATE 'en-ci',
 
     CONSTRAINT PK_ADJ_HEADER PRIMARY KEY (ADJ_ID)
 )
