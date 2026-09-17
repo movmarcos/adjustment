@@ -27,9 +27,10 @@ from utils.styles import (scope_label, scope_meta, wide_kwargs,
 from utils.snowflake_conn import (run_query, call_sp_df, current_user_name,
                                   signoff_access, can_sign_off,
                                   safe_rerun, friendly_error)
-from utils.scope_filters import (FIELD_LABELS, MAIN_FIELDS_SINGLE, VAR_ONLY_FIELDS,
+from utils.scope_filters import (FIELD_LABELS, MAIN_FIELDS_SINGLE,
                                  filter_layout, allowed_filter_keys)
-from utils.submit_fanout import submit_fanout as _submit_fanout_pure
+from utils.submit_fanout import (submit_fanout as _submit_fanout_pure,
+                                 first_scope as _first_scope)
 
 inject_css()
 render_sidebar()
@@ -103,9 +104,15 @@ def _k(name: str) -> str:
 
 
 def reset_wizard() -> None:
-    """Reset all wizard fields and bump key version to clear widget state."""
+    """Reset all wizard fields and bump key version to clear widget state.
+
+    Lists are copied, not shared: dict(_WIZ_DEFAULTS) is shallow, so a reset
+    wizard would otherwise hand out the SAME "process_types" list object the
+    defaults hold — one `.append` anywhere and every later reset starts with
+    scopes already selected."""
     st.session_state["_wiz_v"] = st.session_state.get("_wiz_v", 0) + 1
-    st.session_state["wiz"] = dict(_WIZ_DEFAULTS)
+    st.session_state["wiz"] = {k: (list(v) if isinstance(v, list) else v)
+                               for k, v in _WIZ_DEFAULTS.items()}
 
 
 if "wiz" not in st.session_state:
@@ -154,7 +161,10 @@ def _build_payload() -> dict:
     if cat == "Entity Roll":
         return {
             "cobid":                 wiz["cobid"],
-            "process_type":          wiz["process_type"],
+            # Multi-scope categories read the scope list, never the legacy
+            # single wiz["process_type"] — the fan-out swaps this per call
+            # and a single selection must not depend on the shim.
+            "process_type":          _first_scope(_selected_scopes()),
             "adjustment_type":       "EROL",
             "username":              current_user_name(),
             "source_cobid":          wiz.get("source_cobid") or wiz["cobid"],
@@ -169,7 +179,7 @@ def _build_payload() -> dict:
     # Scaling Adjustment
     payload = {
         "cobid":                 wiz["cobid"],
-        "process_type":          wiz["process_type"],
+        "process_type":          _first_scope(_selected_scopes()),   # see above
         "adjustment_type":       wiz["adjustment_type"],
         "username":              current_user_name(),
         "source_cobid":          _scaling_source_cobid(),
@@ -806,7 +816,9 @@ def _scaling_source_cobid():
 def _preview_payload() -> dict:
     pj = {
         "cobid":           wiz["cobid"],
-        "process_type":    wiz["process_type"],
+        # Scaling only: the scope list is the source of truth (_run_preview
+        # swaps process_type per scope), not the legacy single value.
+        "process_type":    _first_scope(_selected_scopes()),
         "adjustment_type": wiz["adjustment_type"],
         "source_cobid":    _scaling_source_cobid(),
         "scale_factor":    wiz.get("scale_factor", 1.0),
@@ -922,10 +934,10 @@ def _completion_checks() -> list:
         if wiz.get("cobid") and wiz.get("source_cobid") \
                 and wiz["cobid"] == wiz["source_cobid"]:
             checks.append(("Source COB differs from target", False))
-    else:  # Scaling
+    else:  # Scaling — listed in form order (type card renders above scope)
         checks += [
-            ("Data scope",      bool(_selected_scopes())),
             ("Adjustment type", bool(wiz.get("adjustment_type"))),
+            ("Data scope",      bool(_selected_scopes())),
             ("COB date",        bool(wiz.get("cobid"))),
         ]
         if wiz.get("adjustment_type") == "Roll":
@@ -972,21 +984,34 @@ def _missing_fields() -> list:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _selected_scopes() -> list:
-    """Scope codes this draft submits to — one adjustment per code."""
+    """Scope codes this draft submits to — one adjustment per code.
+
+    Filtered against ALL_SCOPES: stale session state (a retired code, or a
+    list left by an older app version) must never reach a submit payload."""
     if wiz.get("category") in ("Scaling Adjustment", "Entity Roll"):
-        return list(wiz.get("process_types") or [])
+        return [s for s in (wiz.get("process_types") or []) if s in ALL_SCOPES]
     return [wiz["process_type"]] if wiz.get("process_type") else []
 
 
 def _purge_filters_for(scopes: list) -> None:
     """Drop filter values the new selection no longer offers (a VaR Component
-    picked under VaR must not ride into a Stress submission invisibly)."""
+    picked under VaR must not ride into a Stress submission invisibly).
+
+    Clearing a filter the user typed is not allowed to be silent: the names
+    of the dropped ones are stashed in wiz['_purged_filters_note'] and shown
+    once under the scope pills (_render_scope_pills)."""
     allowed = allowed_filter_keys(scopes)
+    cleared = []
     for _fk in FILTER_KEYS:
         if _fk in MAIN_FIELDS_SINGLE:
             continue
         if _fk not in allowed:
+            if wiz.get(_fk) and str(wiz[_fk]).strip():
+                cleared.append(FIELD_LABELS[_fk][0].rstrip(" *†"))
             wiz[_fk] = None
+    wiz["_purged_filters_note"] = (
+        ("Cleared filters not supported by the new scope selection: "
+         + ", ".join(cleared) + ".") if cleared else None)
     if "VaR" not in scopes or len(scopes) > 1:
         for _wk in ("var_comp_dd", "var_sub_dd"):
             st.session_state.pop(_k(_wk), None)
@@ -1011,11 +1036,16 @@ def _render_scope_pills() -> None:
         wiz["process_type"]  = picked[0] if picked else None   # legacy readers
         wiz["_preview_sum"] = None
         wiz["_preview_sql"] = None
+        wiz["_preview_by_scope"] = None
         _purge_filters_for(picked)
         safe_rerun()
     n = len(picked)
     st.caption("Pick one or more scopes — one adjustment is created per scope."
                + (f" **{n} adjustments** will be created." if n > 1 else ""))
+    # Shown once, on the rerun that follows the purge (see _purge_filters_for).
+    if wiz.get("_purged_filters_note"):
+        st.warning(wiz["_purged_filters_note"])
+        wiz["_purged_filters_note"] = None
 
 
 # ── Reference-data dropdowns (entity / department / book) ───────────────────
@@ -1322,9 +1352,10 @@ _DAY_TYPE_LABELS = {"": "— both —", "1": "1 — 1-day VaR", "10": "10 — 10
 
 
 def _render_day_type(slot: str) -> None:
-    """Day Type dropdown (VaR only) — shown in BOTH the main filter row and
-    More filters. Each slot has its own widget key; both are driven from and
-    write back wiz['day_type'], so they always mirror each other."""
+    """Day Type dropdown (VaR only) — rendered in the main filter row (a
+    single VaR scope puts it there; several scopes drop it entirely, see
+    filter_layout). The slot keeps the widget key per render slot; the value
+    is driven from and written back to wiz['day_type']."""
     k = _k(f"day_type_{slot}")
     opts = list(_DAY_TYPE_LABELS.keys())
     cur = str(wiz.get("day_type") or "")
@@ -1438,6 +1469,7 @@ def render_scaling_form() -> None:
             wiz["adjustment_type"] = tsel
             wiz["_preview_sum"] = None
             wiz["_preview_sql"] = None
+            wiz["_preview_by_scope"] = None
             # The Source COB field only renders for Roll; a value typed for a
             # Roll must not survive a switch to Scale/Flatten, or the preview
             # and submit send it and the engine treats the same-COB Scale as
@@ -2698,14 +2730,25 @@ def render_entity_roll_form() -> None:
     # bypass ADJ_HEADER, so DIMENSION.ADJUSTMENT and the fact table can hold
     # more than ADJ_HEADER. Show all three counts and whether they match; the
     # roll removes every one of them.
+    # Three queries per scope, on EVERY rerun (each keystroke in Reason) —
+    # memoised per (scope, COB, entity) for the life of the session. The
+    # counts only change when another session writes adjustments for the same
+    # entity/COB; the roll itself re-checks server-side before deleting.
     wiz["_eroll_remove_count"] = 0
     _recon_rows = []
+    _recon_cache = st.session_state.setdefault("_eroll_recon_cache", {})
     for _pt_code in _selected_scopes():
         if not (wiz.get("cobid") and (wiz.get("entity_code") or "").strip()):
             break
         _cob = int(wiz["cobid"])
         _ent = wiz["entity_code"].strip().replace("\\", "\\\\").replace("'", "''")
         _pt  = _pt_code.replace("\\", "\\\\").replace("'", "''")
+        _ck  = (_pt_code, _cob, wiz["entity_code"].strip().upper())
+        if _ck in _recon_cache:
+            h_cnt, d_cnt, f_cnt = _recon_cache[_ck]
+            _recon_rows.append((scope_label(_pt_code), h_cnt, d_cnt, f_cnt))
+            wiz["_eroll_remove_count"] += max(d_cnt or 0, f_cnt or 0)
+            continue
         h_cnt = d_cnt = f_cnt = None
         try:
             _hd = run_query(f"""
@@ -2733,6 +2776,7 @@ def render_entity_roll_form() -> None:
                 f_cnt = int(_fc[0][0]) if _fc else None
         except Exception:
             f_cnt = None
+        _recon_cache[_ck] = (h_cnt, d_cnt, f_cnt)
         _recon_rows.append((scope_label(_pt_code), h_cnt, d_cnt, f_cnt))
         wiz["_eroll_remove_count"] += max(d_cnt or 0, f_cnt or 0)
     if wiz["_eroll_remove_count"] > 0:
@@ -2961,11 +3005,15 @@ def _ticket_html(missing: list) -> str:
 def _run_preview() -> None:
     """Run the summary-mode preview SP and stash the single aggregate row.
 
-    Several scopes: previews each and sums the numeric totals."""
+    Several scopes: previews each and sums the numeric totals. The summed
+    row hides a scope that matched nothing (VaR 1,234 + Stress 0 reads as
+    1,234 rows affected), so the per-scope row counts are stashed too —
+    wiz['_preview_by_scope'] — and drive the zero-row block."""
     payload = _preview_payload()
     subtypes = _selected_scopes() or [payload.get("process_type")]
     try:
         agg = None
+        by_scope = {}
         for sub in subtypes:
             df_sum = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
                                 json.dumps({**payload, "process_type": sub,
@@ -2975,8 +3023,10 @@ def _run_preview() -> None:
                 wiz["_preview_err"] = (str(df_sum.iloc[0][msg_col]) if msg_col and not df_sum.empty
                                        else "Couldn't calculate a preview for these filters.")
                 wiz["_preview_sum"] = None
+                wiz["_preview_by_scope"] = None
                 return
             row = df_sum.iloc[0].to_dict()
+            by_scope[sub] = _safe_int(row.get("ROWS_AFFECTED"))
             if agg is None:
                 agg = row
             else:
@@ -2986,6 +3036,7 @@ def _run_preview() -> None:
                     except TypeError:
                         pass    # non-numeric column — keep the first value
         wiz["_preview_sum"] = agg
+        wiz["_preview_by_scope"] = by_scope
         wiz["_preview_err"] = None
         wiz["_preview_for"] = json.dumps(payload, sort_keys=True, default=str)
         # The statement(s) behind the numbers — shown under "Show preview SQL"
@@ -3005,6 +3056,7 @@ def _run_preview() -> None:
     except Exception as exc:
         wiz["_preview_err"] = str(exc)
         wiz["_preview_sum"] = None
+        wiz["_preview_by_scope"] = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3384,13 +3436,12 @@ if wiz["step"] == 3:
     is_fanout = bool(result.get("fanout"))
     plural    = is_fanout or (n_created is not None and n_created != 1)
     noun      = "adjustments" if plural else "adjustment"
+    # A fan-out is always `plural`, so the count headline above already
+    # covers it: the fan-out's own message (in `msg`, shown as the body
+    # below) names the scopes and the headline stays the generic count, so
+    # title and body are not identical.
     title     = (f"{n_created} Adjustments Submitted Successfully" if plural
                  else "Adjustment Submitted Successfully")
-    if is_fanout:
-        # The fan-out's own message (in `msg`, shown as the body below) names
-        # the scopes; the headline stays the generic count so title and body
-        # are not identical.
-        title = f"{result.get('created')} Adjustments Submitted Successfully"
     if status == "Pending Approval":
         next_html = (f'<strong>Waiting for approval</strong> — an approver must '
                      f'action {"them" if plural else "it"} on the Approval Queue '
@@ -3468,10 +3519,16 @@ with left:
                     _delete_direct_batch(wiz["direct_batch_id"])
                 except Exception:
                     pass
-            wiz.update({"category": cat, "process_type": None, "adjustment_type": None,
+            # process_typeS must be cleared with process_type: a Scaling draft
+            # scoped to VaR+Stress that hops to Direct Adjustment and back
+            # otherwise comes back still carrying both scopes (and would fan
+            # out to them) while the form reads as a fresh start.
+            wiz.update({"category": cat, "process_type": None, "process_types": [],
+                        "adjustment_type": None,
                         "source_cobid": None,
                         "uploaded_df": None, "uploaded_file_name": None,
                         "_preview_sum": None, "_preview_err": None,
+                        "_preview_by_scope": None,
                         "direct_batch_id": None, "direct_ndf": None,
                         "direct_verdicts": None, "_direct_sig": None,
                         "direct_rows": None,
@@ -3527,12 +3584,22 @@ with right:
                            == json.dumps(_preview_payload(), sort_keys=True, default=str))
         if s is not None and not preview_current:
             st.info("Filters changed since the last preview — run it again.")
+        # Per-scope row counts: the summed total hides a scope that matched
+        # nothing, and submitting that scope would create an adjustment that
+        # changes nothing. Show the split and block on ANY zero scope.
+        _by_scope = (wiz.get("_preview_by_scope") or {}) if preview_current else {}
+        _zero_scopes = [sc for sc, cnt in _by_scope.items() if cnt == 0]
+        if preview_current and len(_by_scope) > 1:
+            st.caption("Rows by scope: "
+                       + " · ".join(f"{scope_label(sc)} {cnt:,}"
+                                    for sc, cnt in _by_scope.items()))
         # STICKY zero-rows block: once a preview showed 0 rows, submission
         # stays blocked until a NEW preview runs — merely editing a filter
         # (which invalidates the preview) must not unlock Submit, or the
         # "blocked until the preview finds matching rows" promise is a lie.
         if preview_current:
-            wiz["_zero_preview"] = _safe_int(s.get("ROWS_AFFECTED")) == 0
+            wiz["_zero_preview"] = (_safe_int(s.get("ROWS_AFFECTED")) == 0
+                                    or bool(_zero_scopes))
         if wiz.get("_zero_preview"):
             zero_rows = True
         if not preview_current and wiz.get("_zero_preview"):
@@ -3545,6 +3612,12 @@ with right:
                 "nothing. One of the filter values probably doesn't exist for this "
                 "COB — double-check entity, book, and measure-type codes. "
                 "Submission is blocked until the preview finds matching rows.")
+        elif preview_current and _zero_scopes:
+            _names = ", ".join(scope_label(sc) for sc in _zero_scopes)
+            st.warning(
+                f"**{_names}** matches 0 rows at this COB — deselect it or fix "
+                f"the filters. Submission is blocked until every selected scope "
+                f"finds matching rows.")
 
     # ── VaR Upload: replacement confirmation ──────────────────────────────
     dup_ok = True
@@ -3562,9 +3635,14 @@ with right:
         _n_sup = wiz.get("_eroll_remove_count") or 0
         _sup_txt = (f"{_n_sup} existing adjustment(s) " if _n_sup
                     else "all existing adjustments ")
+        # The signature covers everything the confirmation is about — the
+        # SCOPE SET and how many adjustments the roll removes included, so
+        # adding a scope (or the count moving) re-keys the checkbox and the
+        # user has to tick it again for what they are now agreeing to.
         _er_sig = abs(hash((wiz.get("cobid"), wiz.get("source_cobid"),
                             (wiz.get("entity_code") or "").upper(),
-                            wiz.get("process_type")))) % 10**8
+                            tuple(_selected_scopes()),
+                            wiz.get("_eroll_remove_count")))) % 10**8
         eroll_ok = st.checkbox(
             f"I understand this Entity Roll will permanently remove {_sup_txt}"
             f"for this entity at the target COB (including data from other systems).",
@@ -3592,8 +3670,10 @@ with right:
     if missing:
         st.caption("Submit unlocks when the ticket is complete.")
     elif signoff_blocked:
-        st.caption("Submit is blocked: this COB is signed off for the "
-                   "selected scope (see the sign-off panel above).")
+        st.caption("Submit is blocked: this COB is signed off for "
+                   + ("one of the selected scopes"
+                      if len(_selected_scopes()) > 1 else "the selected scope")
+                   + " (see the sign-off panel above).")
     elif zero_rows:
         st.caption("Submit is blocked: the current filters match no data.")
     elif not dup_ok:

@@ -71,6 +71,98 @@ def test_single_scope_success_screen_shows_original_headline_once():
     assert "Adjustment Submitted Successfully" in texts
     assert texts.count("Created with status") == 1
 
+def _click_cat(at, category):
+    """Click a Category pill (keys are versioned: cat_<Category>_<wiz_v>)."""
+    btn = next(b for b in at.button
+               if (b.key or "").startswith(f"cat_{category}_"))
+    btn.click().run()
+    assert not at.exception, at.exception
+
+
+def test_category_round_trip_clears_the_scope_selection():
+    """process_types must be reset with process_type when the category
+    changes — otherwise a Scaling draft scoped to VaR that visits Direct
+    Adjustment and comes back still fans out to VaR while the form reads
+    as a fresh start."""
+    at = _load()
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": "Scaling Adjustment",
+                               "adjustment_type": "Scale",
+                               "process_types": ["VaR"], "process_type": "VaR"}
+    at.run(); assert not at.exception, at.exception
+    assert at.session_state["wiz"]["process_types"] == ["VaR"]
+
+    _click_cat(at, "Direct Adjustment")
+    assert at.session_state["wiz"]["process_types"] == []
+    assert at.session_state["wiz"]["process_type"] is None
+
+    _click_cat(at, "Scaling Adjustment")
+    assert at.session_state["wiz"]["process_types"] == []
+
+
+def test_scope_change_that_drops_a_filter_says_so():
+    """Silently dropping a filter the user typed is not allowed: Tenor Code
+    is a Sensitivity filter the engine cannot apply for VaR, so switching
+    scope clears it — and must name it."""
+    at = _load()
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": "Scaling Adjustment",
+                               "adjustment_type": "Scale",
+                               "process_types": ["Sensitivity"],
+                               "process_type": "Sensitivity",
+                               "tenor_code": "5Y"}
+    at.run(); assert not at.exception, at.exception
+
+    at.button_group(key=f"scopes_Scaling Adjustment_"
+                        f"{at.session_state['_wiz_v']}").set_value(["VaR"]).run()
+    assert not at.exception, at.exception
+
+    assert at.session_state["wiz"]["tenor_code"] is None
+    assert any("Cleared filters not supported by the new scope selection"
+               in w.value and "Tenor Code" in w.value for w in at.warning), \
+        [w.value for w in at.warning]
+    # Shown once only — the note is cleared after rendering.
+    assert at.session_state["wiz"].get("_purged_filters_note") is None
+    at.run()
+    assert not any("Cleared filters" in w.value for w in at.warning)
+
+
+def _submit_scaling(at, scopes):
+    """Fill a Scaling draft for `scopes` and press Submit.
+
+    AppTest ignores a button's `disabled` flag, so this exercises the submit
+    ROUTING (one SP call per scope) without having to drive every widget in
+    the ticket to completion."""
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": "Scaling Adjustment",
+                               "adjustment_type": "Scale",
+                               "process_types": list(scopes),
+                               "process_type": scopes[0],
+                               "cobid": 20260101, "scale_factor": 1.5,
+                               "entity_code": "E1", "department_code": "D1",
+                               "adjustment_category": "Cat", "reason": "why",
+                               "result": None, "step": 1}
+    at.run(); assert not at.exception, at.exception
+    assert at.session_state["wiz"]["process_types"] == list(scopes)
+    CALLS.clear()
+    at.button(key=f"submit_{at.session_state['_wiz_v']}").click().run()
+    assert not at.exception, at.exception
+    return sum(1 for c in CALLS if "SP_SUBMIT_ADJUSTMENT" in c)
+
+
+def test_one_scope_submits_once_and_does_not_fan_out():
+    at = _load()
+    assert _submit_scaling(at, ["VaR"]) == 1
+    assert not (at.session_state["wiz"]["result"] or {}).get("fanout")
+
+
+def test_two_scopes_submit_once_per_scope():
+    at = _load()
+    assert _submit_scaling(at, ["VaR", "Stress"]) == 2
+    res = at.session_state["wiz"]["result"]
+    assert res["fanout"] is True and res["created"] == 2
+
+
 def test_multi_scope_fanout_success_screen_shows_count_headline():
     at = _load()
     at.session_state["wiz"] = {

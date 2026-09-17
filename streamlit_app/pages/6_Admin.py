@@ -1369,7 +1369,8 @@ CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT('VaR', 'Scale', 20260328);"""),
     - **`TASK_PROCESS_VAR`** — every minute; polls and runs the **VaR** pipeline.
     - **`TASK_PROCESS_STRESS`** — every minute; polls and runs the **Stress** pipeline.
     - **`TASK_PROCESS_FRTB`** — every minute; polls and runs the **FRTB** pipeline
-      (sub-types FRTB, FRTBDRC, FRTBRRAO — "All FRTB" in the app submits one adjustment per sub-type).
+      (sub-types FRTB, FRTBDRC, FRTBRRAO — selecting several data scopes on the New Adjustment
+      page submits one adjustment per scope).
     - **`TASK_PROCESS_SENSITIVITY`** — every minute; polls and runs the **Sensitivity** pipeline.
 
     Each task fires every **1 minute** unconditionally and calls `SP_RUN_PIPELINE` for its

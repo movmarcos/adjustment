@@ -597,8 +597,8 @@ with tab_overview:
         f'{icon("info", size=13, color=P["info"])} The three FRTB sub-types '
         f'(FRTBSBM, FRTBDRC, FRTBRRAO) are processed by one shared FRTB pipeline. '
         f'Selecting several data scopes on the New Adjustment page (Scaling or Entity Roll) simply '
-        f'creates one adjustment per selected scope - three sibling tickets that '
-        f'process one after another.', P["info"]))
+        f'creates one adjustment per selected scope — one sibling ticket per scope, '
+        f'processed one after another.', P["info"]))
 
     section_title("Adjustment Categories", "zap")
     cat_rows = [

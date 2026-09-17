@@ -3,7 +3,7 @@
 No Streamlit, no Snowflake: submit_one / is_success / scope_label are fakes
 passed in directly, so this exercises the exact branch logic used by the
 page's `_submit_fanout(payload, scopes)` wrapper."""
-from utils.submit_fanout import submit_fanout
+from utils.submit_fanout import submit_fanout, first_scope
 
 SUCCESS_STATUSES = {"Pending", "Pending Approval"}
 
@@ -29,6 +29,8 @@ def test_all_scopes_succeed_calls_once_per_scope_and_names_them():
     assert calls == ["VaR", "Stress"]
     assert out["status"] == "Pending"
     assert "2 adjustments" in out["message"]
+    # Auto-queued (not "Pending Approval") — the queued sentence applies.
+    assert "queued and will be processed" in out["message"]
     assert "VaR" in out["message"] and "Stress" in out["message"]
     # Explicit marker the success screen keys off — never text-matched.
     assert out["fanout"] is True
@@ -84,10 +86,30 @@ def test_single_scope_still_works():
     out = submit_fanout({}, ["FRTB"], submit_one, _is_success, _scope_label)
 
     assert out["status"] == "Pending Approval"
-    assert "1 adjustments" in out["message"]
+    assert "Created 1 adjustment —" in out["message"]     # singular
+    assert "1 adjustments" not in out["message"]
     assert "FRTBSBM" in out["message"]
     assert out["fanout"] is True
     assert out["created"] == 1
+
+
+def test_pending_approval_message_points_at_the_approval_queue():
+    """An approval-gated fan-out is NOT queued for processing — telling the
+    user it is sends them looking for a report that never comes."""
+    def submit_one(payload):
+        return {"status": "Pending Approval"}
+
+    out = submit_fanout({}, ["VaR", "Stress"], submit_one, _is_success, _scope_label)
+
+    assert "waiting for approval on the Approval Queue page" in out["message"]
+    assert "queued" not in out["message"]
+
+
+def test_first_scope_is_the_first_selection_and_survives_an_empty_list():
+    assert first_scope(["VaR", "Stress"]) == "VaR"
+    assert first_scope(["Stress"]) == "Stress"
+    assert first_scope([]) is None
+    assert first_scope(None) is None
 
 
 def test_mixed_statuses_surface_the_stricter_one_and_are_listed():

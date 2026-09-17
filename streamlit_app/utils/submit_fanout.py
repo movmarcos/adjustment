@@ -6,6 +6,16 @@ page wraps this with its own `_submit_one` / `_is_submit_success` /
 """
 
 
+def first_scope(scopes):
+    """The scope a fan-out payload is built against — the first selected one.
+
+    The payload is built once and the scope is swapped per call (see
+    `submit_fanout`), so which code it carries only matters for the scopes
+    that are NOT fanned out (a single selection). Kept here, pure, so the
+    page never falls back to the legacy single `wiz["process_type"]`."""
+    return (list(scopes or []) or [None])[0]
+
+
 def submit_fanout(payload: dict, scopes: list, submit_one, is_success, scope_label) -> dict:
     """One submit call per scope (same payload, scope swapped).
     Scopes sharing a pipeline are serialised by the engine. No rollback on a
@@ -36,9 +46,16 @@ def submit_fanout(payload: dict, scopes: list, submit_one, is_success, scope_lab
         # sibling scope was auto-queued as "Pending" — surface the stricter
         # status rather than picking the first one arbitrarily.
         status = "Pending Approval" if "Pending Approval" in statuses else statuses[0]
-        message = (f"Created {len(created)} adjustments — one per scope "
-                   f"({', '.join(created)}). They are queued and will be "
-                   f"processed by their scope pipelines.")
+        # What happens next depends on the status: a "Pending Approval"
+        # adjustment is NOT queued for processing until an approver actions
+        # it — saying "queued" there sends users looking for a report that
+        # never comes (same rule as the success screen's next-steps copy).
+        nxt = ("They are waiting for approval on the Approval Queue page."
+               if status == "Pending Approval"
+               else "They are queued and will be processed by their scope pipelines.")
+        noun = "adjustment" if len(created) == 1 else "adjustments"
+        message = (f"Created {len(created)} {noun} — one per scope "
+                   f"({', '.join(created)}). {nxt}")
         if len(set(statuses)) > 1:
             per_scope = ", ".join(f"{lbl} {st}" for lbl, st in zip(created, statuses))
             message += f" Statuses: {per_scope}."
