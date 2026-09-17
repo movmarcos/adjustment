@@ -104,6 +104,7 @@ _ICON_PATHS = {
     "help-circle":    '<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>',
     "unlock":         '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>',
     "filter":         '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>',
+    "shuffle":        '<path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22"/><path d="m18 2 4 4-4 4"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8"/><path d="m18 14 4 4-4 4"/>',
 }
 
 
@@ -289,10 +290,21 @@ def scope_meta(value):
 
 
 TYPE_CONFIG = {
-    "Flatten": {"icon": "minus-circle", "desc": "Zero out matching positions", "formula": "new = original × 0"},
-    "Scale":   {"icon": "bar-chart",    "desc": "Multiply by a scale factor", "formula": "new = original × sf"},
-    "Roll":    {"icon": "refresh-cw",   "desc": "Roll prior COB's adjusted state forward", "formula": "new = (prior + prior_adj) × sf"},
+    "Flatten":  {"icon": "minus-circle", "desc": "Zero out matching positions", "formula": "new = original × 0"},
+    "Scale":    {"icon": "bar-chart",    "desc": "Multiply by a scale factor", "formula": "new = original × sf"},
+    "Roll":     {"icon": "refresh-cw",   "desc": "Roll prior COB's adjusted state forward", "formula": "new = (prior + prior_adj) × sf"},
+    "Transfer": {"icon": "shuffle",      "desc": "Replace a target book with a source book's values",
+                 "formula": "target book = adjusted(source book) at the COB"},
 }
+
+# Display names for ADJUSTMENT_TYPE codes. Presentation only — the stored code
+# stays "Transfer" (same convention as SCOPE_DISPLAY for PROCESS_TYPE).
+TYPE_LABELS = {"Transfer": "Transfer Book"}
+
+
+def type_label(code):
+    """Display name for an ADJUSTMENT_TYPE code (identity when not renamed)."""
+    return TYPE_LABELS.get(str(code or ""), str(code or ""))
 
 # ── Lifecycle stage colours (used by tracker board and lifecycle bar) ───────
 

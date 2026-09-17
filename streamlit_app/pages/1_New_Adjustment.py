@@ -22,7 +22,7 @@ from utils.styles import (scope_label, scope_meta, wide_kwargs,
     inject_css, render_sidebar,
     P, TYPE_CONFIG, CATEGORY_CONFIG, render_df_table,
     render_data_grid, fmt_adj_id, icon, bordered_container,
-    ALL_SCOPES, _st_version,
+    ALL_SCOPES, _st_version, type_label,
 )
 from utils.snowflake_conn import (run_query, call_sp_df, current_user_name,
                                   signoff_access, can_sign_off,
@@ -31,6 +31,8 @@ from utils.scope_filters import (FIELD_LABELS, MAIN_FIELDS_SINGLE,
                                  filter_layout, allowed_filter_keys)
 from utils.submit_fanout import (submit_fanout as _submit_fanout_pure,
                                  first_scope as _first_scope)
+from utils.transfer_book import (transfer_jobs, book_entity,
+                                 submit_jobs as _submit_jobs_pure)
 
 inject_css()
 render_sidebar()
@@ -52,6 +54,12 @@ _WIZ_DEFAULTS: dict = {
     "recurring_start_cobid":  None,
     "recurring_end_cobid":    None,
     "scale_factor":           1.0,
+    # Transfer Book (adjustment_type "Transfer"): the target book's positions
+    # at the COB are replaced by the source book's adjusted values. One
+    # adjustment per selected trade code (blank = the whole book).
+    "source_book_code":       None,
+    "target_book_code":       None,
+    "transfer_trade_codes":   [],
     # Shared
     "cobid":                  None,
     "entity_code":            None,
@@ -188,6 +196,25 @@ def _build_payload() -> dict:
         "adjustment_occurrence": wiz.get("occurrence", "ADHOC"),
         "requires_approval":     wiz.get("requires_approval", False),
     }
+    # ── Transfer Book ────────────────────────────────────────────────────
+    # BOOK_CODE is the TARGET (the scope being replaced); SOURCE_BOOK_CODE is
+    # where the values come from, and the entity is derived from the target
+    # book server-side. NOTHING else is sent: any other filter left over from
+    # a Scale/Roll draft would silently narrow the transfer
+    # (03_sp_submit_adjustment.sql rejects stray filter keys for this reason).
+    if wiz.get("adjustment_type") == "Transfer":
+        payload.update({
+            "source_cobid":          wiz["cobid"],     # one COB, never a roll
+            "scale_factor":          1,
+            "book_code":             wiz.get("target_book_code"),
+            "source_book_code":      wiz.get("source_book_code"),
+            "adjustment_occurrence": "ADHOC",
+        })
+        payload["adjustment_category"] = wiz.get("adjustment_category")
+        if wiz.get("global_reference"):
+            payload["global_reference"] = wiz.get("global_reference")
+        return payload
+
     payload["adjustment_category"] = wiz.get("adjustment_category")
     if wiz.get("global_reference"):
         payload["global_reference"] = wiz.get("global_reference")
@@ -495,6 +522,15 @@ def _submit_fanout(payload: dict, scopes: list) -> dict:
     return _submit_fanout_pure(payload, scopes, _submit_one, _is_submit_success, scope_label)
 
 
+def _submit_jobs(payload: dict, jobs: list) -> dict:
+    """Transfer Book: one SP_SUBMIT_ADJUSTMENT call per (scope, trade).
+    Thin wrapper around the pure `submit_jobs` helper (utils/transfer_book.py)
+    — the result carries the same "fanout"/"created" markers the success
+    screen reads."""
+    return _submit_jobs_pure(jobs, payload, _submit_one, _is_submit_success,
+                             scope_label)
+
+
 def _do_submit() -> dict:
     """Call SP_SUBMIT_ADJUSTMENT. Returns result dict (never raises)."""
     import uuid as _uuid
@@ -574,7 +610,15 @@ def _do_submit() -> dict:
         payload = _build_payload()
 
         scopes = _selected_scopes()
-        if wiz.get("category") in ("Scaling Adjustment", "Entity Roll") and len(scopes) > 1:
+        # Transfer Book fans out over scope × trade code (one adjustment per
+        # trade), so it is routed before the plain per-scope fan-out.
+        if wiz.get("adjustment_type") == "Transfer":
+            jobs = transfer_jobs(scopes, wiz.get("transfer_trade_codes"))
+            if len(jobs) > 1:
+                return _submit_jobs(payload, jobs)
+            if jobs and jobs[0][1]:
+                payload["trade_code"] = jobs[0][1]
+        elif wiz.get("category") in ("Scaling Adjustment", "Entity Roll") and len(scopes) > 1:
             return _submit_fanout(payload, scopes)
 
         # For VaR Upload: write line items BEFORE the SP call so that
@@ -706,9 +750,10 @@ SCOPE_BTN_ICONS = {
     "Sensitivity": ":material/adjust:",
 }
 TYPE_BTN_ICONS = {
-    "Scale":   ":material/bar_chart:",
-    "Flatten": ":material/remove_circle:",
-    "Roll":    ":material/autorenew:",
+    "Scale":    ":material/bar_chart:",
+    "Flatten":  ":material/remove_circle:",
+    "Roll":     ":material/autorenew:",
+    "Transfer": ":material/swap_horiz:",
 }
 OCC_BTN_ICONS = {
     "ADHOC":     ":material/event:",
@@ -823,6 +868,17 @@ def _preview_payload() -> dict:
         "source_cobid":    _scaling_source_cobid(),
         "scale_factor":    wiz.get("scale_factor", 1.0),
     }
+    # Transfer Book: the source book (+ optional trade codes) replaces every
+    # dimension filter — the preview counts the SOURCE rows that will be
+    # carried over, across all selected trades in one call (`trade_codes`).
+    if wiz.get("adjustment_type") == "Transfer":
+        return {"cobid": wiz["cobid"],
+                "process_type": _first_scope(_selected_scopes()),
+                "adjustment_type": "Transfer",
+                "source_cobid": wiz["cobid"], "scale_factor": 1,
+                "book_code": wiz.get("target_book_code"),
+                "source_book_code": wiz.get("source_book_code"),
+                "trade_codes": list(wiz.get("transfer_trade_codes") or [])}
     for key in FILTER_KEYS:
         val = wiz.get(key)
         if val and str(val).strip():
@@ -957,18 +1013,31 @@ def _completion_checks() -> list:
                        ("End COB",   bool(_re))]
             if _rs and _re:
                 checks.append(("Start before End", _rs <= _re))
-        _has_var_comp = _selected_scopes() == ["VaR"] and (
-            bool((wiz.get("var_component_name") or "").strip())
-            or bool((wiz.get("var_sub_component_name") or "").strip()))
-        _narrow_label = ("Department, Book or VaR Component"
-                         if _selected_scopes() == ["VaR"]
-                         else "Department or Book code")
+        if wiz.get("adjustment_type") == "Transfer":
+            # No entity / department check: a Transfer is scoped by the two
+            # books alone and the entity is derived from the target book.
+            _src, _tgt = wiz.get("source_book_code"), wiz.get("target_book_code")
+            checks += [
+                ("Source book", bool(_src)),
+                ("Target book", bool(_tgt)),
+                ("Target differs from source",
+                 (_src or "") != (_tgt or "") if _src and _tgt else True),
+            ]
+        else:
+            _has_var_comp = _selected_scopes() == ["VaR"] and (
+                bool((wiz.get("var_component_name") or "").strip())
+                or bool((wiz.get("var_sub_component_name") or "").strip()))
+            _narrow_label = ("Department, Book or VaR Component"
+                             if _selected_scopes() == ["VaR"]
+                             else "Department or Book code")
+            checks += [
+                ("Entity code", bool((wiz.get("entity_code") or "").strip())),
+                (_narrow_label,
+                 bool((wiz.get("department_code") or "").strip())
+                 or bool((wiz.get("book_code") or "").strip())
+                 or _has_var_comp),
+            ]
         checks += [
-            ("Entity code", bool((wiz.get("entity_code") or "").strip())),
-            (_narrow_label,
-             bool((wiz.get("department_code") or "").strip())
-             or bool((wiz.get("book_code") or "").strip())
-             or _has_var_comp),
             ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
             ("Reason", bool((wiz.get("reason") or "").strip())),
         ]
@@ -1458,14 +1527,88 @@ def _render_extra_filters() -> None:
                 _render_filter_widget(fk)
 
 
+def _book_trade_options(book_code):
+    """Current trade codes in a book (the Transfer trade picker).
+
+    '<book>/Adjustment' rows are the engine's own adjustment carriers, not
+    real trades — they are never a transfer source."""
+    code = (book_code or "").strip().replace("\\", "\\\\").replace("'", "''")
+    if not code:
+        return []
+    rows = _ref_rows(
+        f"SELECT DISTINCT TRADE_CODE FROM DIMENSION.TRADE "
+        f"WHERE UPPER(BOOK_CODE) = UPPER('{code}') AND IS_CURRENT_ROW = TRUE "
+        f"AND TRADE_CODE IS NOT NULL AND TRADE_CODE NOT ILIKE '%/Adjustment' "
+        f"ORDER BY TRADE_CODE", f"_ref_trades_{code.upper()}")
+    return [str(r[0]) for r in rows if r[0] is not None]
+
+
+def _render_transfer_fields() -> None:
+    """Transfer Book: source book → target book, with optional trade codes.
+
+    The generic filter keys (book_code / entity_code) are kept in step with
+    the TARGET book, because the ticket, the completion checklist and the
+    sign-off gate all read them."""
+    books = _book_options(None, None)                    # every current book
+    rows_ = _book_dept_rows()
+    s_col, t_col = st.columns(2)
+    with s_col:
+        st.markdown("**Source** — values come from")
+        wiz["source_book_code"] = _code_select(
+            "Source Book Code *", _k("trf_src_book"), wiz.get("source_book_code"),
+            books, placeholder="— select book —") or None
+        src_ent = book_entity(rows_, wiz.get("source_book_code"))
+        if wiz.get("source_book_code"):
+            st.caption(f"Entity: {src_ent or '—'}")
+        opts = _book_trade_options(wiz.get("source_book_code"))
+        # The widget key carries the source book: changing the book changes
+        # the option list, and a multiselect that keeps its old key would
+        # otherwise hold trade codes that belong to the previous book.
+        picked = st.multiselect(
+            "Trade Codes (optional — blank = whole book)", opts,
+            default=[t for t in (wiz.get("transfer_trade_codes") or []) if t in opts],
+            key=_k(f"trf_trades_{(wiz.get('source_book_code') or '').upper()}"),
+            help="One adjustment is created per selected trade.")
+        wiz["transfer_trade_codes"] = list(picked)
+        if wiz.get("source_book_code"):
+            st.caption(f"{len(opts):,} trades in this book")
+            if not opts:
+                # Without options the multiselect can only be empty, which
+                # means "whole book" — say so rather than let a per-trade
+                # transfer silently widen to everything in the book.
+                st.warning("No current trades found for this book — the "
+                           "transfer will cover the whole book.")
+    with t_col:
+        st.markdown("**Target** — book that receives the values")
+        tgt_opts = [b for b in books if b != (wiz.get("source_book_code") or "")]
+        wiz["target_book_code"] = _code_select(
+            "Target Book Code *", _k("trf_tgt_book"), wiz.get("target_book_code"),
+            tgt_opts, placeholder="— select book —") or None
+        tgt_ent = book_entity(rows_, wiz.get("target_book_code"))
+        if wiz.get("target_book_code"):
+            st.caption(f"Entity: {tgt_ent or '—'}")
+            if src_ent and tgt_ent and src_ent != tgt_ent:
+                st.info(f"Rows will be reported under entity {tgt_ent}.")
+    # Keep the generic filter keys consistent with the ticket / sign-off gate.
+    wiz["book_code"]   = wiz.get("target_book_code")
+    wiz["entity_code"] = tgt_ent
+    _scs   = _selected_scopes()
+    _n_trd = len(wiz.get("transfer_trade_codes") or [])
+    n_jobs = len(transfer_jobs(_scs, wiz.get("transfer_trade_codes")))
+    if n_jobs > 1:
+        st.caption(f"**{n_jobs} adjustments** will be created "
+                   f"({len(_scs)} scope(s) × {max(1, _n_trd)} trade(s)).")
+
+
 def render_scaling_form() -> None:
     # ── Type ─────────────────────────────────────────────────────────────
     with _card():
         _sec(2, "Adjustment Type", "How should the figures change?")
         tsel = _pill_row(list(TYPE_CONFIG.keys()), wiz.get("adjustment_type"),
-                         "type", icons=TYPE_BTN_ICONS,
+                         "type", icons=TYPE_BTN_ICONS, fmt=type_label,
                          descs={k: v["desc"] for k, v in TYPE_CONFIG.items()})
         if tsel and tsel != wiz.get("adjustment_type"):
+            _was_transfer = wiz.get("adjustment_type") == "Transfer"
             wiz["adjustment_type"] = tsel
             wiz["_preview_sum"] = None
             wiz["_preview_sql"] = None
@@ -1476,6 +1619,23 @@ def render_scaling_form() -> None:
             # a cross-COB roll (delta = factor × source, projected doubles).
             if tsel != "Roll":
                 wiz["source_cobid"] = None
+            # Same rule for the Transfer fields: a source/target book left by
+            # a Transfer must not ride into a Scale/Flatten/Roll (the Transfer
+            # form writes the target book into the generic book/entity filter
+            # keys, so those are dropped too — widget state included, or the
+            # dropdowns would simply write them back on the next rerun).
+            if tsel != "Transfer":
+                wiz["source_book_code"]     = None
+                wiz["target_book_code"]     = None
+                wiz["transfer_trade_codes"] = []
+                if _was_transfer:
+                    wiz["book_code"] = None
+                    wiz["entity_code"] = None
+                    for _wk in ("book_dd", "entity_dd"):
+                        st.session_state.pop(_k(_wk), None)
+            else:
+                # A Transfer is a single-COB operation — never recurring.
+                wiz["occurrence"] = "ADHOC"
             safe_rerun()
         if wiz.get("adjustment_type"):
             st.caption(f"Formula: {TYPE_CONFIG[wiz['adjustment_type']]['formula']}")
@@ -1491,29 +1651,49 @@ def render_scaling_form() -> None:
         st.info("Select at least one data scope to continue.")
         return
 
+    _is_transfer = wiz.get("adjustment_type") == "Transfer"
+    if _is_transfer and wiz.get("occurrence") != "ADHOC":
+        # The ad-hoc/recurring pills are hidden for a Transfer and the payload
+        # forces ADHOC — keep wiz in step so the ticket can't advertise a
+        # "Recurring (daily)" schedule that is never submitted.
+        wiz["occurrence"] = "ADHOC"
+
     # ── Dates & factor ───────────────────────────────────────────────────
     with _card():
-        _sec(4, "Date & Schedule", "When should this adjustment be applied?")
-        occ = _pill_row(["ADHOC", "RECURRING"], wiz.get("occurrence", "ADHOC"),
-                        "freq", icons=OCC_BTN_ICONS,
-                        fmt=lambda k: "Ad hoc" if k == "ADHOC" else "Recurring (daily)",
-                        descs={"ADHOC": "Apply once to a single COB",
-                               "RECURRING": "Apply daily between start and end COB"})
-        if occ and occ != wiz.get("occurrence"):
-            wiz["occurrence"] = occ
-            safe_rerun()
+        _sec(4, "Date & Schedule",
+             "Which COB is transferred?" if _is_transfer
+             else "When should this adjustment be applied?")
+        # A Transfer applies within ONE COB — no ad-hoc/recurring choice.
+        if not _is_transfer:
+            occ = _pill_row(["ADHOC", "RECURRING"], wiz.get("occurrence", "ADHOC"),
+                            "freq", icons=OCC_BTN_ICONS,
+                            fmt=lambda k: "Ad hoc" if k == "ADHOC" else "Recurring (daily)",
+                            descs={"ADHOC": "Apply once to a single COB",
+                                   "RECURRING": "Apply daily between start and end COB"})
+            if occ and occ != wiz.get("occurrence"):
+                wiz["occurrence"] = occ
+                safe_rerun()
 
         _render_schedule_fields()
 
-    # ── Filters ──────────────────────────────────────────────────────────
-    with _card():
-        _sec(5, "Dimension Filters",
-             "Entity is required, plus at least one of Department / Book"
-             + (" (VaR: or VaR Component)" if _selected_scopes() == ["VaR"] else "")
-             + ". Everything else is optional — blank = all values. "
-               "Entity-wide adjustments (entity with no other filter) are not allowed.")
-        _render_main_filters()
-        _render_extra_filters()
+    # ── Filters (Transfer: the two books ARE the scope) ──────────────────
+    if _is_transfer:
+        with _card():
+            _sec(5, "Transfer Details",
+                 "The target book's positions at this COB are replaced by the "
+                 "source book's values. Choose trade codes to transfer only "
+                 "those trades — one adjustment is created per trade (and per "
+                 "scope).")
+            _render_transfer_fields()
+    else:
+        with _card():
+            _sec(5, "Dimension Filters",
+                 "Entity is required, plus at least one of Department / Book"
+                 + (" (VaR: or VaR Component)" if _selected_scopes() == ["VaR"] else "")
+                 + ". Everything else is optional — blank = all values. "
+                   "Entity-wide adjustments (entity with no other filter) are not allowed.")
+            _render_main_filters()
+            _render_extra_filters()
 
     # ── Reason ───────────────────────────────────────────────────────────
     with _card():
@@ -2836,13 +3016,19 @@ def _is_roll_preview(s: dict) -> bool:
 
 
 def _roll_source_rows(s: dict) -> str:
-    """Roll only: show what the projected value is made of — the source
-    COB's original data plus the adjustments already sitting on it, which
-    a Roll carries forward. Without this a source COB that holds earlier
-    adjustments previews as an unexplained projected total."""
+    """Roll / Transfer: show what the projected value is made of — the
+    source's original data plus the adjustments already sitting on it, which
+    both types carry forward. Without this a source that holds earlier
+    adjustments previews as an unexplained projected total.
+
+    A Transfer's source is a BOOK at the same COB, not a COB — labelling it
+    with wiz["source_cobid"] (always None for a Transfer) read "Source None".
+    """
     if not _is_roll_preview(s):
         return ""
-    src = wiz.get("source_cobid")
+    src = (f'book {wiz.get("source_book_code")}'
+           if wiz.get("adjustment_type") == "Transfer"
+           else wiz.get("source_cobid"))
     return (f'<div class="kv"><span class="k">Source {src} original</span>'
             f'<span class="v">{_fmt_money(s.get("SOURCE_ORIGINAL_VALUE"))}</span></div>'
             f'<div class="kv"><span class="k">Source {src} adjustments (carried)</span>'
@@ -2916,7 +3102,7 @@ def _ticket_html(missing: list) -> str:
         _scs = _selected_scopes()
         kv += _ticket_row("Scope" if len(_scs) <= 1 else f"Scopes ({len(_scs)} adjustments)",
                           ", ".join(scope_label(s) for s in _scs) if _scs else None, bool(_scs))
-        kv += _ticket_row("Type",  type_txt)
+        kv += _ticket_row("Type",  type_label(type_txt) if type_txt else type_txt)
         kv += _ticket_row("Schedule",
                           "Ad hoc" if wiz.get("occurrence", "ADHOC") == "ADHOC"
                           else "Recurring (daily)", True)
@@ -2927,10 +3113,20 @@ def _ticket_html(missing: list) -> str:
                               f'{wiz.get("recurring_start_cobid")} → '
                               f'{wiz.get("recurring_end_cobid")}' if rec_set else None,
                               rec_set)
-        applied = [(k, str(wiz.get(k)).strip()) for k in FILTER_KEYS
-                   if (wiz.get(k) or "") and str(wiz.get(k)).strip()]
-        kv += _ticket_row("Filters",
-                          f"{len(applied)} applied" if applied else "All records", True)
+        if wiz.get("adjustment_type") == "Transfer":
+            # The two books ARE the scope — `applied` stays empty so the
+            # filter chips below are skipped for a Transfer.
+            _src, _tgt = wiz.get("source_book_code"), wiz.get("target_book_code")
+            kv += _ticket_row("Transfer",
+                              f'{_src} → {_tgt}' if _src and _tgt else None)
+            _tc = wiz.get("transfer_trade_codes") or []
+            kv += _ticket_row("Trades",
+                              f"{len(_tc)} selected" if _tc else "Whole book", True)
+        else:
+            applied = [(k, str(wiz.get(k)).strip()) for k in FILTER_KEYS
+                       if (wiz.get(k) or "") and str(wiz.get(k)).strip()]
+            kv += _ticket_row("Filters",
+                              f"{len(applied)} applied" if applied else "All records", True)
 
     if cat:
         kv += _ticket_row("Approval",
@@ -3709,11 +3905,33 @@ if wiz.get("category") == "Scaling Adjustment" and wiz.get("_preview_sum") \
     _is_roll = (wiz.get("adjustment_type") == "Roll"
                 and wiz.get("source_cobid")
                 and int(wiz.get("source_cobid")) != int(wiz["cobid"]))
+    _is_transfer = wiz.get("adjustment_type") == "Transfer"
     if _is_roll:
         st.caption(
             "Roll preview shows the net impact: **current** = the target COB's "
             "original total (flattened), **projected** = the source COB's adjusted "
             "total rolled forward. Per-row breakdown is not shown for cross-COB rolls.")
+    elif _is_transfer:
+        st.caption(
+            "Transfer preview: **current** = the target book's total in scope "
+            "(flattened), **projected** = the source book's adjusted total.")
+        if total_rows > 0:
+            # Per-TRADE breakdown (the transfer's own breakdown mode). No
+            # "Sample rows" expander: SP_PREVIEW_ADJUSTMENT has no sample mode
+            # for a transfer — it would silently return the summary again.
+            with st.expander("Breakdown by trade", expanded=False):
+                try:
+                    df_trd = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                                        json.dumps({**_preview_payload(),
+                                                    "mode": "breakdown"}))
+                    if not df_trd.empty:
+                        df_trd = df_trd.rename(columns={
+                            "TRADE_CODE": "Trade",
+                            "TARGET_TRADE": "Target trade",
+                            "PROJECTED_VALUE": "Projected"})
+                        render_data_grid(df_trd, height=300)
+                except Exception as exc:
+                    st.warning(f"Breakdown not available: {exc}")
     elif total_rows > 0:
         with st.expander("Breakdown by book / department / entity", expanded=False):
             try:
