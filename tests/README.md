@@ -16,7 +16,7 @@ pip install pytest              # plus the mufg_snowflakeconn wheel (repo root)
 pytest tests -v
 ```
 
-Connection matches `test_process.py`/`deploy.py`: `mufg_snowflakeconn` with
+Connection matches `deploy.py`: `mufg_snowflakeconn` with
 env `dvlp` and the deployment user. Override with:
 
 | Env var | Default | Purpose |

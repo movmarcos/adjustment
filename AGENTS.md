@@ -16,7 +16,7 @@ scheduled processing, and PowerBI refresh. Two halves:
   `utils/styles.py`, connection helpers in `utils/snowflake_conn.py`.
 - `new_adjustment_db_objects/` — Snowflake DDL + stored procedures, numbered
   in deploy order (`01_tables.sql` … `08_views.sql`). `deploy.py` deploys.
-  `_OLD/` is dead code — never edit it.
+  Old prototypes were removed from the tree (2026-09-17); they remain in git history only.
 
 **End users are non-technical.** Error prevention and clear messages beat
 features. Anything ambiguous in the UI is a bug.

@@ -82,7 +82,7 @@ def call_sp(session, name, *args):
     return raw
 
 
-# ── Session fixture (same connection pattern as test_process.py/deploy.py) ──
+# ── Session fixture (same connection pattern as deploy.py) ──
 @pytest.fixture(scope="session")
 def session():
     from mufg_snowflakeconn import sfconnection as m_sf
