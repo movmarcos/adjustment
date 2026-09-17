@@ -4,7 +4,7 @@ Documentation — Full Process Guide
 Rewritten to describe the system AS BUILT:
   • polling pipeline (1-minute scope tasks, claim tokens — no streams)
   • sign-off lifecycle (external feed → block → re-open approval → re-sign-off)
-  • "All FRTB" fan-out (one adjustment per real sub-type; FRTBALL retired)
+  • multi-scope submission (one adjustment per selected scope; FRTBALL retired)
   • delete/retry semantics, the stale-run reaper, force-process
   • PowerBI refresh hand-off and statuses
 
@@ -134,6 +134,9 @@ reports combine them.
 Adjustment categories:
 - Scaling: Flatten (zero the scope), Scale (multiply by a factor), Roll (carry
   another COB's adjusted values forward).
+  Scaling and Entity Roll accept SEVERAL data scopes at once — the app
+  creates one adjustment per selected scope. With several scopes the filter
+  form offers only the fields every selected scope supports.
 - Direct: exact values. For VaR/Stress/Sensitivity it is PER ROW — paste or
   upload a CSV and each row becomes its own independent adjustment. For
   FRTB/FRTBDRC/FRTBRRAO it is PER FILE — one uploaded file = one Direct
