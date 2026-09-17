@@ -1793,17 +1793,35 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 # TRADE_KEY: the same trade code's version under the target
                 # book at the COB (tt), else the target book's
                 # '<BOOK>/Adjustment' trade (ta), else the source key.
+                #
+                # Single-column-PK scopes (FRTB*, whose key IS one opaque fact
+                # column): legs ②T and ③ do NOT net position-by-position — the
+                # source key is emitted unchanged, exactly as for a cross-COB
+                # Roll. Both legs are still inserted, and the combined total is
+                # adjusted(source) − original(target) + original(target) =
+                # adjusted(source). Supersede is by filter, not by key, so the
+                # earlier rows in the target scope still go.
+                #
+                # Known limitation (UAT TRF-05): two transferred trades that BOTH
+                # fall back to the '<BOOK>/Adjustment' trade (ta) and share every
+                # other key column collapse onto one surrogate key; `ranked` then
+                # keeps the newest header's row only.
                 def _transfer_col(c):
                     cu = c.upper()
-                    if cu == "BOOK_KEY":        return "tb.BOOK_KEY AS BOOK_KEY"
-                    if cu == "BOOK_CODE":       return "adjust.BOOK_CODE AS BOOK_CODE"
-                    if cu == "DEPARTMENT_CODE": return "tb.DEPARTMENT_CODE AS DEPARTMENT_CODE"
-                    if cu == "ENTITY_KEY":      return "te.ENTITY_KEY AS ENTITY_KEY"
-                    if cu == "ENTITY_CODE":     return "tb.ENTITY_CODE AS ENTITY_CODE"
+                    if cu == "BOOK_KEY":          return "tb.BOOK_KEY AS BOOK_KEY"
+                    if cu == "BOOK_CODE":         return "adjust.BOOK_CODE AS BOOK_CODE"
+                    if cu == "BOOK_CODE_SABRE":   return "adjust.BOOK_CODE AS BOOK_CODE_SABRE"
+                    if cu == "DEPARTMENT_CODE":   return "tb.DEPARTMENT_CODE AS DEPARTMENT_CODE"
+                    if cu == "ENTITY_KEY":        return "te.ENTITY_KEY AS ENTITY_KEY"
+                    if cu == "ENTITY_CODE":       return "tb.ENTITY_CODE AS ENTITY_CODE"
+                    if cu == "ENTITY_CODE_SABRE": return "tb.ENTITY_CODE AS ENTITY_CODE_SABRE"
                     if cu == "TRADE_KEY":
                         return "COALESCE(tt.TRADE_KEY, ta.TRADE_KEY, fact.TRADE_KEY) AS TRADE_KEY"
                     return f"fact.{c}" if c in _view_cols else f"{_adj_default(c)} AS {c}"
                 select_non_metric_trf = ', '.join(_transfer_col(c) for c in fact_non_metric_matched)
+                # Submit forces SOURCE_COBID = COBID for a transfer, so this is
+                # both the target and the source COB date — one date resolves
+                # every SCD2 lookup below.
                 _cob_date = f"TO_DATE('{int(cobid)}', 'YYYYMMDD')"
                 transfer_leg = f"""
                 UNION ALL
@@ -1819,21 +1837,47 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                     AND adjust.RUN_STATUS = 'Running'
                     AND adjust.SOURCE_BOOK_CODE IS NOT NULL
                     AND fact.COBID = adjust.SOURCE_COBID
-                LEFT JOIN DIMENSION.BOOK tb
+                -- Every target-side lookup is DEDUPLICATED: DIMENSION.BOOK and
+                -- DIMENSION.ENTITY carry several rows per code in this warehouse,
+                -- and a plain join would fan the source rows out (× the duplicate
+                -- count) straight into the transferred amount.
+                -- tb is an INNER join: no current target book → the leg yields no
+                -- rows (spec §6.2), rather than NULL keys.
+                INNER JOIN (
+                    SELECT BOOK_KEY, BOOK_CODE, ENTITY_CODE, DEPARTMENT_CODE
+                    FROM DIMENSION.BOOK
+                    WHERE IS_CURRENT_ROW = TRUE
+                    QUALIFY ROW_NUMBER() OVER (
+                        PARTITION BY UPPER(BOOK_CODE) ORDER BY BOOK_KEY DESC) = 1
+                ) tb
                     ON  UPPER(tb.BOOK_CODE) = UPPER(adjust.BOOK_CODE)
-                    AND tb.IS_CURRENT_ROW = TRUE
-                LEFT JOIN DIMENSION.ENTITY te
-                    ON  UPPER(te.ENTITY_CODE) = UPPER(tb.ENTITY_CODE)
+                LEFT JOIN (
+                    SELECT UPPER(ENTITY_CODE) AS EC, MAX(ENTITY_KEY) AS ENTITY_KEY
+                    FROM DIMENSION.ENTITY GROUP BY 1
+                ) te
+                    ON  te.EC = UPPER(tb.ENTITY_CODE)
                 LEFT JOIN DIMENSION.TRADE st
                     ON  st.TRADE_KEY = COALESCE(fact.TRADE_KEY, -1)
-                LEFT JOIN DIMENSION.TRADE tt
+                LEFT JOIN (
+                    SELECT TRADE_KEY, TRADE_CODE, BOOK_CODE
+                    FROM DIMENSION.TRADE
+                    WHERE {_cob_date} BETWEEN EFFECTIVE_START_DATE AND EFFECTIVE_END_DATE
+                    QUALIFY ROW_NUMBER() OVER (
+                        PARTITION BY UPPER(TRADE_CODE), UPPER(BOOK_CODE)
+                        ORDER BY EFFECTIVE_START_DATE DESC, TRADE_KEY DESC) = 1
+                ) tt
                     ON  UPPER(tt.TRADE_CODE) = UPPER(st.TRADE_CODE)
                     AND UPPER(tt.BOOK_CODE)  = UPPER(adjust.BOOK_CODE)
-                    AND {_cob_date} BETWEEN tt.EFFECTIVE_START_DATE AND tt.EFFECTIVE_END_DATE
-                LEFT JOIN DIMENSION.TRADE ta
+                LEFT JOIN (
+                    SELECT TRADE_KEY, TRADE_CODE, BOOK_CODE
+                    FROM DIMENSION.TRADE
+                    WHERE {_cob_date} BETWEEN EFFECTIVE_START_DATE AND EFFECTIVE_END_DATE
+                    QUALIFY ROW_NUMBER() OVER (
+                        PARTITION BY UPPER(TRADE_CODE), UPPER(BOOK_CODE)
+                        ORDER BY EFFECTIVE_START_DATE DESC, TRADE_KEY DESC) = 1
+                ) ta
                     ON  UPPER(ta.TRADE_CODE) = UPPER(adjust.BOOK_CODE || '/Adjustment')
                     AND UPPER(ta.BOOK_CODE)  = UPPER(adjust.BOOK_CODE)
-                    AND {_cob_date} BETWEEN ta.EFFECTIVE_START_DATE AND ta.EFFECTIVE_END_DATE
                 WHERE fact.{metric_usd_name} IS NOT NULL
                   AND EXISTS (SELECT 1 FROM DIMENSION.BOOK sb
                               WHERE sb.BOOK_KEY = COALESCE(fact.BOOK_KEY, -1)
@@ -1920,6 +1964,10 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             """
 
             _erlog(session, _sqlog, "stage_build (netted temp)", insert_sql)
+            if has_transfer:
+                _erlog(session, _sqlog, "transfer_leg (note)",
+                       "SELECT 'batch contains Transfer Book rows - leg 2T "
+                       "re-keys source-book rows to the target book' AS NOTE")
 
             # (Prior-run rows were removed before the temp build, keyed by the
             #  previous DIMENSION_ADJ_ID — the fresh IDs have no rows yet.)
@@ -1988,6 +2036,7 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
               AND tgt.COMMON_INSTRUMENT_KEY = src.COMMON_INSTRUMENT_KEY
               AND tgt.COMMON_INSTRUMENT_FCD_KEY = src.COMMON_INSTRUMENT_FCD_KEY
               AND tgt.COBID = src.COBID
+              AND tgt.ADJUSTMENT_ID = src.ADJUSTMENT_ID
               AND tgt.ADJUSTMENT_ID IN ({dim_ids_str})
             """
             # ^ Scoped to THIS batch's rows: without the ADJUSTMENT_ID filter
