@@ -923,7 +923,7 @@ def _completion_checks() -> list:
         ]
     elif cat == "Entity Roll":
         checks += [
-            ("Data scope",          bool(wiz.get("process_type"))),
+            ("Data scope",          bool(_selected_scopes())),
             ("Target COB",          bool(wiz.get("cobid"))),
             ("Source COB",          bool(wiz.get("source_cobid"))),
             ("Entity code",         bool((wiz.get("entity_code") or "").strip())),
@@ -935,7 +935,7 @@ def _completion_checks() -> list:
             checks.append(("Source COB differs from target", False))
     else:  # Scaling
         checks += [
-            ("Data scope",      bool(wiz.get("process_type"))),
+            ("Data scope",      bool(_selected_scopes())),
             ("Adjustment type", bool(wiz.get("adjustment_type"))),
             ("COB date",        bool(wiz.get("cobid"))),
         ]
@@ -956,11 +956,11 @@ def _completion_checks() -> list:
                        ("End COB",   bool(_re))]
             if _rs and _re:
                 checks.append(("Start before End", _rs <= _re))
-        _has_var_comp = wiz.get("process_type") == "VaR" and (
+        _has_var_comp = _selected_scopes() == ["VaR"] and (
             bool((wiz.get("var_component_name") or "").strip())
             or bool((wiz.get("var_sub_component_name") or "").strip()))
         _narrow_label = ("Department, Book or VaR Component"
-                         if wiz.get("process_type") == "VaR"
+                         if _selected_scopes() == ["VaR"]
                          else "Department or Book code")
         checks += [
             ("Entity code", bool((wiz.get("entity_code") or "").strip())),
@@ -1351,53 +1351,64 @@ def _render_day_type(slot: str) -> None:
                       "Blank applies the adjustment to both horizons.")
 
 
-def _render_main_filters() -> None:
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        wiz["entity_code"] = _code_select(
-            "Entity Code *", _k("entity_dd"), wiz.get("entity_code"),
-            _entity_options(), placeholder="— select entity —")
-    with c2:
-        wiz["source_system_code"] = st.text_input("Source System", key=_k("src_sys"),
-                                                  value=wiz.get("source_system_code") or "",
-                                                  placeholder="e.g. MS")
-    with c3:
-        wiz["department_code"] = _code_select(
-            "Department Code †", _k("dept_dd"), wiz.get("department_code"),
-            _dept_options(wiz.get("entity_code")), placeholder="— any —",
-            help="Filtered by the selected Entity")
-    with c4:
-        wiz["book_code"] = _code_select(
-            "Book Code †", _k("book_dd"), wiz.get("book_code"),
-            _book_options(wiz.get("department_code"), wiz.get("entity_code")),
-            placeholder="— any —",
-            help="Filtered by the selected Entity and Department")
-    if wiz.get("process_type") == "VaR":
-        c5, c6, c7, _ = st.columns(4)
-        with c5:
-            wiz["var_component_name"] = _code_select(
-                "VaR Component †", _k("var_comp_dd"),
-                wiz.get("var_component_name"),
-                _var_comp_options(), placeholder="— any —")
-        with c6:
-            wiz["var_sub_component_name"] = _code_select(
-                "VaR Sub-Component", _k("var_sub_dd"),
-                wiz.get("var_sub_component_name"),
-                _var_sub_options(wiz.get("var_component_name")),
-                placeholder="— any —",
-                help="Filtered by the selected VaR Component")
-        with c7:
-            _render_day_type("main")
-        st.caption("Blank = all values for that dimension · "
-                   "† at least one of Department, Book or VaR Component")
+def _render_filter_widget(fk: str) -> None:
+    """Render the widget for one filter key into wiz[fk]. Reference-backed
+    keys get dropdowns (same sources as before); the rest are text inputs."""
+    fl, ph = FIELD_LABELS[fk]
+    scopes = _selected_scopes()
+    if fk == "entity_code":
+        wiz[fk] = _code_select(fl, _k("entity_dd"), wiz.get(fk),
+                               _entity_options(), placeholder="— select entity —")
+    elif fk == "department_code":
+        wiz[fk] = _code_select(fl, _k("dept_dd"), wiz.get(fk),
+                               _dept_options(wiz.get("entity_code")), placeholder="— any —",
+                               help="Filtered by the selected Entity")
+    elif fk == "book_code":
+        wiz[fk] = _code_select(fl, _k("book_dd"), wiz.get(fk),
+                               _book_options(wiz.get("department_code"), wiz.get("entity_code")),
+                               placeholder="— any —",
+                               help="Filtered by the selected Entity and Department")
+    elif fk == "var_component_name":
+        wiz[fk] = _code_select(fl, _k("var_comp_dd"), wiz.get(fk),
+                               _var_comp_options(), placeholder="— any —")
+    elif fk == "var_sub_component_name":
+        wiz[fk] = _code_select(fl, _k("var_sub_dd"), wiz.get(fk),
+                               _var_sub_options(wiz.get("var_component_name")),
+                               placeholder="— any —",
+                               help="Filtered by the selected VaR Component")
+    elif fk == "day_type":
+        _render_day_type("main")
+    elif fk == "simulation_source":
+        wiz[fk] = _code_select(fl, _k(fk), wiz.get(fk),
+                               _sim_source_options(), placeholder="— any —")
+    elif fk == "simulation_name":
+        wiz[fk] = _code_select(fl, _k(fk), wiz.get(fk),
+                               _sim_name_options(wiz.get("simulation_source")),
+                               placeholder="— any —",
+                               help="Narrowed by Simulation Source when one is selected")
+    elif fk == "measure_type_code":
+        wiz[fk] = _code_select(fl, _k(fk), wiz.get(fk),
+                               _measure_type_options(scopes[0] if len(scopes) == 1 else None),
+                               placeholder="— any —")
     else:
-        st.caption("Blank = all values for that dimension · "
-                   "† at least one of Department or Book")
+        wiz[fk] = st.text_input(fl, key=_k(fk), value=wiz.get(fk) or "", placeholder=ph)
 
-    # Inline nudge the moment the entity is picked without a narrowing
-    # filter — the checklist on the right says the same, but users look at
-    # the row they are editing, not the ticket.
-    _is_var = wiz.get("process_type") == "VaR"
+
+def _render_main_filters() -> None:
+    scopes = _selected_scopes()
+    lay = filter_layout(scopes)
+    main = lay["main"]
+    for row_start in range(0, len(main), 4):
+        cols = st.columns(4)
+        for col, fk in zip(cols, main[row_start:row_start + 4]):
+            with col:
+                _render_filter_widget(fk)
+    _is_var = scopes == ["VaR"]
+    st.caption("Blank = all values for that dimension · "
+               + ("† at least one of Department, Book or VaR Component"
+                  if _is_var else "† at least one of Department or Book")
+               + (" · fields shown are the ones every selected scope supports"
+                  if len(scopes) > 1 else ""))
     _narrowed = (bool((wiz.get("department_code") or "").strip())
                  or bool((wiz.get("book_code") or "").strip())
                  or (_is_var and (bool((wiz.get("var_component_name") or "").strip())
@@ -1409,69 +1420,28 @@ def _render_main_filters() -> None:
 
 
 def _render_extra_filters() -> None:
-    """Scope-specific (tier 2) + rarely-used (tier 3) filters, collapsed."""
-    pt = wiz.get("process_type", "")
-    custom_fields = SCOPE_FIELDS.get(pt, [])
-    applied = sum(1 for k in FILTER_KEYS
-                  if k not in ("entity_code", "source_system_code",
-                               "department_code", "book_code",
-                               "var_component_name", "var_sub_component_name")
-                  and (wiz.get(k) or "").strip())
+    """Collapsed 'More filters': only fields the engine applies to EVERY
+    selected scope (single scope: that scope's own fields first)."""
+    scopes = _selected_scopes()
+    more = filter_layout(scopes)["more"]
+    if not more:
+        return
+    applied = sum(1 for k in more if (wiz.get(k) or "").strip())
     label = f"More filters ({applied} applied)" if applied else "More filters"
-
-    def _filter_widget(fk, fl, ph):
-        """Text input by default; reference-backed fields get a dropdown."""
-        if fk == "simulation_source":
-            wiz[fk] = _code_select(fl, _k(fk), wiz.get(fk),
-                                   _sim_source_options(), placeholder="— any —")
-        elif fk == "simulation_name":
-            wiz[fk] = _code_select(fl, _k(fk), wiz.get(fk),
-                                   _sim_name_options(wiz.get("simulation_source")),
-                                   placeholder="— any —",
-                                   help="Narrowed by Simulation Source when one is selected")
-        elif fk == "measure_type_code":
-            wiz[fk] = _code_select(fl, _k(fk), wiz.get(fk),
-                                   _measure_type_options(wiz.get("process_type")),
-                                   placeholder="— any —")
-        else:
-            wiz[fk] = st.text_input(fl, key=_k(fk),
-                                    value=wiz.get(fk) or "", placeholder=ph)
-
     with st.expander(label, expanded=False):
-        if custom_fields or pt == "VaR":
-            st.markdown(
-                f'<div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;'
-                f'letter-spacing:0.05em;color:{P["info"]};margin-bottom:0.2rem">'
-                f'{pt} filters</div>', unsafe_allow_html=True)
-            _n_scope = len(custom_fields) + (1 if pt == "VaR" else 0)
-            ccols = st.columns(min(max(_n_scope, 1), 4))
-            for i, (fk, fl, ph) in enumerate(custom_fields):
-                with ccols[i % len(ccols)]:
-                    _filter_widget(fk, fl, ph)
-            if pt == "VaR":
-                with ccols[len(custom_fields) % len(ccols)]:
-                    _render_day_type("more")
-        shown = {"entity_code", "source_system_code", "department_code", "book_code",
-                 "var_component_name", "var_sub_component_name", "day_type"}
-        shown.update(fk for fk, _, _ in custom_fields)
-        extra = [(k, l, p) for k, l, p in ALL_EXTRA_FIELDS if k not in shown]
+        if len(scopes) > 1:
+            st.caption("Showing only filters that apply to all of: "
+                       + ", ".join(scope_label(s) for s in scopes))
         ecols = st.columns(3)
-        for i, (fk, fl, ph) in enumerate(extra):
+        for i, fk in enumerate(more):
             with ecols[i % 3]:
-                _filter_widget(fk, fl, ph)
+                _render_filter_widget(fk)
 
 
 def render_scaling_form() -> None:
-    with _card():
-        _sec(2, "Data Scope", "Select the data scope for this adjustment.")
-        _render_scope_pills()
-    if not wiz.get("process_type"):
-        st.info("Select a data scope to continue.")
-        return
-
     # ── Type ─────────────────────────────────────────────────────────────
     with _card():
-        _sec(3, "Adjustment Type", "How should the figures change?")
+        _sec(2, "Adjustment Type", "How should the figures change?")
         tsel = _pill_row(list(TYPE_CONFIG.keys()), wiz.get("adjustment_type"),
                          "type", icons=TYPE_BTN_ICONS,
                          descs={k: v["desc"] for k, v in TYPE_CONFIG.items()})
@@ -1488,6 +1458,17 @@ def render_scaling_form() -> None:
             safe_rerun()
         if wiz.get("adjustment_type"):
             st.caption(f"Formula: {TYPE_CONFIG[wiz['adjustment_type']]['formula']}")
+    if not wiz.get("adjustment_type"):
+        st.info("Select an adjustment type to continue.")
+        return
+
+    # ── Scope(s) ─────────────────────────────────────────────────────────
+    with _card():
+        _sec(3, "Data Scope", "Select one or more data scopes — one adjustment per scope.")
+        _render_scope_pills()
+    if not _selected_scopes():
+        st.info("Select at least one data scope to continue.")
+        return
 
     # ── Dates & factor ───────────────────────────────────────────────────
     with _card():
@@ -1507,7 +1488,7 @@ def render_scaling_form() -> None:
     with _card():
         _sec(5, "Dimension Filters",
              "Entity is required, plus at least one of Department / Book"
-             + (" (VaR: or VaR Component)" if wiz.get("process_type") == "VaR" else "")
+             + (" (VaR: or VaR Component)" if _selected_scopes() == ["VaR"] else "")
              + ". Everything else is optional — blank = all values. "
                "Entity-wide adjustments (entity with no other filter) are not allowed.")
         _render_main_filters()
