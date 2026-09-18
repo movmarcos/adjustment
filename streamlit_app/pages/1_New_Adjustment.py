@@ -11,6 +11,7 @@ bumps the version so every control is recreated fresh after a submit.
 """
 import streamlit as st
 import json
+import numbers
 import pandas as pd
 
 st.set_page_config(
@@ -3625,6 +3626,16 @@ def _run_preview() -> None:
         # not a number; blank it instead once more than one scope is in play.
         _COUNT_COLS = {"ROWS_AFFECTED", "NONZERO_ROWS",
                        "EXISTING_ADJ_COUNT", "EXISTING_ADJ_ROWS"}
+
+        def _is_measure_value(x):
+            """True for a real numeric scalar (int/float/Decimal — what the
+            real SP returns for NUMBER columns — but not bool). A type test,
+            not the old `(a or 0) + (b or 0)` probe: Python string `+`
+            concatenates rather than raising, so that probe misclassified a
+            shared non-empty string column (EXISTING_ADJ_IDS) as a measure
+            and blanked it (review fix, 2026-09-18)."""
+            return isinstance(x, numbers.Number) and not isinstance(x, bool)
+
         agg = None
         by_scope = {}
         per_scope = {}
@@ -3647,12 +3658,10 @@ def _run_preview() -> None:
                             agg[k] = (agg.get(k) or 0) + (v or 0)
                         except TypeError:
                             pass    # non-numeric column — keep the first value
-                    else:
-                        try:
-                            (agg.get(k) or 0) + (v or 0)   # numeric column?
-                            agg[k] = None                  # MEASURE — blank it
-                        except TypeError:
-                            pass    # non-numeric column — keep the first value
+                    elif _is_measure_value(agg.get(k)) or _is_measure_value(v):
+                        agg[k] = None    # MEASURE — blank it, never sum it
+                    # else: non-numeric (ids, text, message, …) — keep the
+                    # first scope's value, same as before.
         wiz["_preview_sum"] = agg
         wiz["_preview_by_scope"] = by_scope
         wiz["_preview_scopes"] = per_scope

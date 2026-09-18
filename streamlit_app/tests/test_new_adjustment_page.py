@@ -32,6 +32,16 @@ class DictRow(list):
 # total can be told apart from either half.
 PREVIEW_ROWS = {"VaR": 10, "Stress": 5}
 
+# Existing-overlap columns per scope — deliberately different counts/ids so a
+# summed count and a kept-first-scope id string can be told apart from what
+# the OLD (unsound) classifier did to EXISTING_ADJ_IDS (blanked it to None).
+PREVIEW_OVERLAP = {
+    "VaR":    {"EXISTING_ADJ_COUNT": 1, "EXISTING_ADJ_ROWS": 2,
+              "EXISTING_ADJ_VALUE": 50.0, "EXISTING_ADJ_IDS": "ADJ-1"},
+    "Stress": {"EXISTING_ADJ_COUNT": 2, "EXISTING_ADJ_ROWS": 3,
+              "EXISTING_ADJ_VALUE": 75.0, "EXISTING_ADJ_IDS": "ADJ-2,ADJ-3"},
+}
+
 
 def _preview_reply(q):
     """SP_PREVIEW_ADJUSTMENT's answer for this CALL text — per mode, and per
@@ -42,7 +52,8 @@ def _preview_reply(q):
         return [DictRow({"ROWS_AFFECTED": n, "NONZERO_ROWS": n,
                          "TOTAL_CURRENT_VALUE": n * 100.0,
                          "TOTAL_ADJUSTMENT_DELTA": n * 10.0,
-                         "TOTAL_PROJECTED_VALUE": n * 110.0})]
+                         "TOTAL_PROJECTED_VALUE": n * 110.0,
+                         **PREVIEW_OVERLAP.get(scope, {})})]
     if '"mode": "sql"' in q:
         return [DictRow({"PREVIEW_SQL": f"SELECT /* {scope} */ 1"})]
     # breakdown (Transfer only): VaR has two trades with no version in the
@@ -375,6 +386,16 @@ def test_two_scope_preview_sums_counts_and_blanks_measures():
     assert s["TOTAL_CURRENT_VALUE"] is None       # measure — blanked
     assert s["TOTAL_ADJUSTMENT_DELTA"] is None    # measure — blanked
     assert s["TOTAL_PROJECTED_VALUE"] is None     # measure — blanked
+    # Existing-overlap counts (VaR 1/2, Stress 2/3) are still summed …
+    assert s["EXISTING_ADJ_COUNT"] == 3
+    assert s["EXISTING_ADJ_ROWS"] == 5
+    # … EXISTING_ADJ_VALUE is a measure and is blanked …
+    assert s["EXISTING_ADJ_VALUE"] is None
+    # … and EXISTING_ADJ_IDS (a string) is neither blanked nor concatenated:
+    # the OLD `(a or 0) + (b or 0)` probe didn't raise on two strings (Python
+    # string `+` concatenates), so it misclassified this column as numeric
+    # and blanked it. It must keep the first scope's id list untouched.
+    assert s["EXISTING_ADJ_IDS"] == "ADJ-1"
     # The per-scope rows must not alias the aggregate that was built from them.
     assert w["_preview_scopes"]["VaR"]["ROWS_AFFECTED"] == 10
     # Both scopes' preview SQL, each under its own header.
@@ -683,6 +704,104 @@ def test_transfer_preview_summary_shape_is_unchanged_by_append():
         assert set(TRANSFER_SUMMARY) <= set(w["_preview_sum"])
         assert w["_preview_sum"]["TOTAL_PROJECTED_VALUE"] == 1350.0
         assert w["_preview_sum"]["TOTAL_ADJUSTMENT_DELTA"] == 1000.0
+    finally:
+        monkey.undo()
+
+
+# A second scope's Transfer summary row — deliberately different from
+# TRANSFER_SUMMARY so the per-scope split and the summed counts can be told
+# apart, the same way PREVIEW_ROWS/PREVIEW_OVERLAP do for Scale.
+TRANSFER_SUMMARY_STRESS = {
+    "ROWS_AFFECTED": 6,
+    "NONZERO_ROWS": 6,
+    "SOURCE_ORIGINAL_VALUE": 400.0,
+    "SOURCE_ADJUSTMENTS_VALUE": 100.0,
+    "SOURCE_ADJUSTED_VALUE": 500.0,
+    "TOTAL_CURRENT_VALUE": 175.0,
+    "TOTAL_ADJUSTMENT_DELTA": 500.0,
+    "TOTAL_PROJECTED_VALUE": 675.0,
+    "EXISTING_ADJ_COUNT": 2,
+    "EXISTING_ADJ_ROWS": 3,
+    "EXISTING_ADJ_VALUE": 75.0,
+    "EXISTING_ADJ_IDS": "ADJ-2,ADJ-3",
+}
+TRANSFER_SUMMARY_BY_SCOPE = {"VaR": TRANSFER_SUMMARY, "Stress": TRANSFER_SUMMARY_STRESS}
+
+
+class MultiScopeTransferSQL(SQL):
+    """Two-scope Transfer preview — same shape as TransferSQL, but the
+    summary row differs per scope so the count/measure split is exercised
+    under the "Added" delta label (Transfer's own, not "Adjustment")."""
+    def collect(self):
+        if "SP_PREVIEW_ADJUSTMENT" in self.q:
+            CALLS.append(self.q)
+            scope = next((s for s in TRANSFER_SUMMARY_BY_SCOPE
+                          if f'"process_type": "{s}"' in self.q), None)
+            if '"mode": "summary"' in self.q:
+                return [DictRow(dict(TRANSFER_SUMMARY_BY_SCOPE.get(scope, TRANSFER_SUMMARY)))]
+            if '"mode": "sql"' in self.q:
+                return [DictRow({"PREVIEW_SQL": f"SELECT /* {scope} */ 1"})]
+            return [DictRow({"TRADE_CODE": "T1", "TARGET_TRADE": "T1",
+                             "ROWS_AFFECTED": 4, "PROJECTED_VALUE": 1000.0})]
+        return SQL.collect(self)
+
+
+class MultiScopeTransferSess:
+    def sql(self, q, *a, **k): return MultiScopeTransferSQL(q)
+
+
+def test_two_scope_transfer_preview_sums_counts_and_shows_added_label():
+    """Transfer Book with two scopes goes through the "Added" label path
+    (the delta column header differs from Scale/Roll's "Adjustment"), and
+    must go through the same count/measure split: rows and the existing-
+    overlap counts summed, the money columns (incl. EXISTING_ADJ_VALUE)
+    blanked, and EXISTING_ADJ_IDS kept from the first scope rather than
+    blanked or concatenated."""
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(sc, "get_session", lambda: MultiScopeTransferSess())
+    try:
+        at = _load()
+        _seed_ref_data(at)
+        at.session_state["wiz"] = {**at.session_state["wiz"],
+                                   "category": "Scaling Adjustment",
+                                   "adjustment_type": "Transfer",
+                                   "process_types": ["VaR", "Stress"],
+                                   "process_type": "VaR",
+                                   "cobid": 20260101,
+                                   "source_book_code": "B1", "target_book_code": "B2",
+                                   "transfer_trade_codes": ["T1"],
+                                   "transfer_pick_trades": True,
+                                   "adjustment_category": "Cat", "reason": "why",
+                                   "result": None, "step": 1}
+        at.run(); assert not at.exception, at.exception
+        at.button(key=f"run_preview_{at.session_state['_wiz_v']}").click().run()
+        assert not at.exception, at.exception
+
+        w = at.session_state["wiz"]
+        s = w["_preview_sum"]
+        assert s["ROWS_AFFECTED"] == 10             # 4 + 6 — count, summed
+        assert s["EXISTING_ADJ_COUNT"] == 3         # 1 + 2 — count, summed
+        assert s["EXISTING_ADJ_ROWS"] == 5          # 2 + 3 — count, summed
+        assert s["TOTAL_ADJUSTMENT_DELTA"] is None  # measure — blanked
+        assert s["TOTAL_PROJECTED_VALUE"] is None   # measure — blanked
+        assert s["EXISTING_ADJ_VALUE"] is None      # measure — blanked
+        assert s["EXISTING_ADJ_IDS"] == "ADJ-1"     # kept, first scope's
+
+        texts = " ".join(m.value for m in at.markdown)
+        assert "per scope — see the table below" in texts
+
+        # The "Added" delta label (Transfer's own, not "Adjustment") lives in
+        # the per-scope table's column header now — the ticket's money rows
+        # are dropped for >1 scope (change 2), so this is the one place it
+        # still appears.
+        grids = [d.value for d in at.dataframe]
+        grid = next((g for g in grids
+                     if "Scope" in list(g.columns) and "Added" in list(g.columns)),
+                    None)
+        assert grid is not None, [list(g.columns) for g in grids]
+        total = grid[grid["Scope"] == "Total"].iloc[0]
+        assert total["Added"] == "—"
+        assert total["Rows"] == "10"
     finally:
         monkey.undo()
 
