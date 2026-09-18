@@ -969,9 +969,10 @@ with tab_processing:
          "Same engine as Roll, with the book swapped for the COB: the target "
          "book's rows in scope are flattened, and the source book's adjusted "
          "rows are brought in re-keyed to the target book (book, entity, and "
-         "the trade's version under the target book). Netting per position "
-         "gives combined(target) = adjusted(source). Earlier adjustments in "
-         "the target scope are superseded by filter, as for Scale."],
+         "the trade's version under the target book) &times; the scale factor. "
+         "Netting per position gives combined(target) = factor &times; "
+         "adjusted(source). Earlier adjustments in the target scope are "
+         "superseded by filter, as for Scale."],
         ["<strong>Direct</strong> (per row: VaR / Stress / Sensitivity)",
          "One header row = one fact row: the codes on the adjustment resolve "
          "directly to dimension keys (case-insensitive, −1 when blank or "
