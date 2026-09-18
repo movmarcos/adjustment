@@ -62,6 +62,10 @@ _WIZ_DEFAULTS: dict = {
     "source_book_code":       None,
     "target_book_code":       None,
     "transfer_trade_codes":   [],
+    # Opt-in for the trade picker. Default OFF so choosing a source book
+    # never queries the (large) DIMENSION.TRADE — see the rule block above
+    # _book_trade_options.
+    "transfer_pick_trades":   False,
     # Shared
     "cobid":                  None,
     "entity_code":            None,
@@ -1641,20 +1645,115 @@ def _render_extra_filters() -> None:
                 _render_filter_widget(fk)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# DIMENSION.TRADE helpers — READ THIS BEFORE ADDING ANOTHER ONE
+#
+# DIMENSION.TRADE is LARGE (SCD2: several rows per trade, every book, all
+# history). The rule, from Marcos, 2026-09-18, after a two-small-book
+# Transfer took over five minutes:
+#
+#   1. Do NOT query it speculatively. Nothing may hit this table just
+#      because a user picked a value in a dropdown — it is queried only when
+#      the user has explicitly asked for something that needs it.
+#   2. When you must query it, ALWAYS pin BOOK_CODE and/or TRADE_CODE as
+#      literals so the scan prunes, and put those literals BEFORE any window
+#      function / DISTINCT / ORDER BY, never after.
+#   3. Never wrap the filtered column in UPPER()/ILIKE when the value you are
+#      comparing already came out of a dimension (it is canonical already) —
+#      wrapping the column defeats micro-partition pruning and any clustering.
+#   4. Cap what comes back (LIMIT) so a mis-picked book cannot drag a
+#      six-figure list into a widget.
+# ══════════════════════════════════════════════════════════════════════════
+_TRADE_PICKER_LIMIT = 5000
+
+
 def _book_trade_options(book_code):
     """Current trade codes in a book (the Transfer trade picker).
 
+    ONLY called when the user has ticked "Transfer only specific trades" —
+    see rule 1 above. Choosing a source book alone must never reach this.
+
     '<book>/Adjustment' rows are the engine's own adjustment carriers, not
-    real trades — they are never a transfer source."""
+    real trades — they are never a transfer source.
+
+    PERF (2026-09-18) — what the old shape did wrong:
+      * `UPPER(BOOK_CODE) = UPPER('x')` wrapped the FILTERED column, so
+        Snowflake could neither prune micro-partitions on BOOK_CODE nor use
+        any clustering on it: every version of every trade in the warehouse
+        was read. The column is compared bare now — book_code always arrives
+        from _current_book_rows(), i.e. straight out of DIMENSION.BOOK, so it
+        is already the canonical spelling (rule 3).
+      * `NOT ILIKE '%/Adjustment'` is an unanchored case-insensitive pattern
+        match run over every surviving row. The engine writes that suffix
+        with exactly this casing (05, `adjust.BOOK_CODE || '/Adjustment'`)
+        but READS it case-insensitively, and the codes themselves come from
+        upstream — so rather than assume the casing, the suffix test is kept
+        case-insensitive and made bounded: a fixed 11-character comparison
+        instead of a scan of the whole string. Same rows, cheaper per row.
+      * nothing capped the result (rule 4).
+    The per-book session cache key is unchanged."""
     code = (book_code or "").strip().replace("\\", "\\\\").replace("'", "''")
     if not code:
         return []
     rows = _ref_rows(
         f"SELECT DISTINCT TRADE_CODE FROM DIMENSION.TRADE "
-        f"WHERE UPPER(BOOK_CODE) = UPPER('{code}') AND IS_CURRENT_ROW = TRUE "
-        f"AND TRADE_CODE IS NOT NULL AND TRADE_CODE NOT ILIKE '%/Adjustment' "
-        f"ORDER BY TRADE_CODE", f"_ref_trades_{code.upper()}")
+        f"WHERE BOOK_CODE = '{code}' AND IS_CURRENT_ROW = TRUE "
+        f"AND TRADE_CODE IS NOT NULL "
+        f"AND UPPER(RIGHT(TRADE_CODE, 11)) <> '/ADJUSTMENT' "
+        f"ORDER BY TRADE_CODE LIMIT {_TRADE_PICKER_LIMIT}",
+        f"_ref_trades_{code.upper()}")
     return [str(r[0]) for r in rows if r[0] is not None]
+
+
+def _transfer_fallback_count(tgt_book, cobid, trade_codes):
+    """How many of the SELECTED trades have no version under the TARGET book at
+    this COB. Those rows land on the target's '<BOOK>/Adjustment' trade
+    (engine leg ②T) instead of their own trade code, so the ticket warns.
+
+    Whole-book transfers (no trade codes) return 0 and get NO warning: the
+    question would mean listing every trade in the source book, which is
+    exactly the speculative scan rule 1 forbids. For that case the per-trade
+    breakdown — loaded on request, under the preview — is where the
+    information lives, and its copy says so.
+
+    PERF (2026-09-18): this used to be counted by running SP_PREVIEW_ADJUSTMENT
+    in `breakdown` mode for every scope of the draft — a full extra scan of the
+    expensive combined view, plus both SCD2 trade windows, on EVERY preview,
+    purely to count trade codes. It is a pure DIMENSION.TRADE question and is
+    now answered by ONE query pinned on both axes (rule 2): the target book
+    AND the selected trade codes, so it can return at most one row per
+    selected trade. The missing ones are derived here, in Python.
+
+    The effective-date window is the engine's own (`tt` in 05 / 04), so the
+    answer matches what the engine will actually do.
+
+    Scope-independent by construction (the trade dimension has no scope),
+    which is why the count no longer varies per process type."""
+    tgt = (tgt_book or "").strip().replace("\\", "\\\\").replace("'", "''")
+    picked = [str(t).strip() for t in (trade_codes or []) if str(t).strip()]
+    if not tgt or not picked:
+        return 0
+    try:
+        cob = int(cobid)
+    except (TypeError, ValueError):
+        return 0
+    # Both literals bare: the trade codes came from _book_trade_options (i.e.
+    # out of DIMENSION.TRADE) and the book out of DIMENSION.BOOK, so both are
+    # canonical already — no UPPER() on either filtered column (rule 3).
+    _lits = ", ".join(
+        "'" + t.replace("\\", "\\\\").replace("'", "''") + "'" for t in picked)
+    cob_date = f"TO_DATE('{cob}', 'YYYYMMDD')"
+    key = ("_ref_trf_fb_" + tgt.upper() + "|" + str(cob) + "|"
+           + ",".join(sorted(t.upper() for t in picked)))
+    rows = _ref_rows(
+        f"SELECT TRADE_CODE FROM DIMENSION.TRADE "
+        f"WHERE BOOK_CODE = '{tgt}' AND TRADE_CODE IN ({_lits}) "
+        f"AND {cob_date} BETWEEN EFFECTIVE_START_DATE AND EFFECTIVE_END_DATE",
+        key)
+    # Compared case-insensitively here (free in Python) so the count matches
+    # the engine's own case-insensitive trade join.
+    found = {str(r[0]).strip().upper() for r in rows if r and r[0] is not None}
+    return sum(1 for t in {t.upper() for t in picked} if t not in found)
 
 
 def _render_transfer_fields() -> None:
@@ -1683,24 +1782,56 @@ def _render_transfer_fields() -> None:
         src_ent = book_entity(rows_, wiz.get("source_book_code"))
         if wiz.get("source_book_code"):
             st.caption(f"Entity: {src_ent or '—'}")
-        opts = _book_trade_options(wiz.get("source_book_code"))
-        # The widget key carries the source book: changing the book changes
-        # the option list, and a multiselect that keeps its old key would
-        # otherwise hold trade codes that belong to the previous book.
-        picked = st.multiselect(
-            "Trade Codes (optional — blank = whole book)", opts,
-            default=[t for t in (wiz.get("transfer_trade_codes") or []) if t in opts],
-            key=_k(f"trf_trades_{(wiz.get('source_book_code') or '').upper()}"),
-            help="One adjustment is created per selected trade.")
-        wiz["transfer_trade_codes"] = list(picked)
-        if wiz.get("source_book_code"):
-            st.caption(f"{len(opts):,} trades in this book")
-            if not opts:
-                # Without options the multiselect can only be empty, which
-                # means "whole book" — say so rather than let a per-trade
-                # transfer silently widen to everything in the book.
-                st.warning("No current trades found for this book — the "
-                           "transfer will cover the whole book.")
+        # ── Trade picker: OPT-IN (Marcos, 2026-09-18) ────────────────────
+        # Loading the book's trade list used to happen the instant a source
+        # book was chosen — a full DIMENSION.TRADE scan the user never asked
+        # for, and the five-minute wait Marcos hit with two SMALL books. The
+        # common case (transfer the whole book) needs no trade list at all,
+        # so with this box clear NO query against DIMENSION.TRADE runs.
+        _pick_trades = st.checkbox(
+            "Transfer only specific trades",
+            value=bool(wiz.get("transfer_pick_trades")),
+            key=_k("trf_pick_trades"),
+            help="Off: the whole source book is transferred. On: loads this "
+                 "book's trade codes so you can pick some — one adjustment is "
+                 "created per selected trade.")
+        if not _pick_trades:
+            # Clearing the box must also clear the selection AND its widget
+            # state: a draft must never keep trade codes the user can no
+            # longer see (they would still ride into the submit).
+            if wiz.get("transfer_trade_codes"):
+                wiz["transfer_trade_codes"] = []
+            for _sk in [k for k in list(st.session_state)
+                        if "trf_trades_" in str(k)]:
+                st.session_state.pop(_sk, None)
+            wiz["transfer_pick_trades"] = False
+            st.caption("The whole source book will be transferred.")
+        else:
+            wiz["transfer_pick_trades"] = True
+            opts = _book_trade_options(wiz.get("source_book_code"))
+            # The widget key carries the source book: changing the book changes
+            # the option list, and a multiselect that keeps its old key would
+            # otherwise hold trade codes that belong to the previous book.
+            picked = st.multiselect(
+                "Trade Codes (optional — blank = whole book)", opts,
+                default=[t for t in (wiz.get("transfer_trade_codes") or []) if t in opts],
+                key=_k(f"trf_trades_{(wiz.get('source_book_code') or '').upper()}"),
+                help="One adjustment is created per selected trade.")
+            wiz["transfer_trade_codes"] = list(picked)
+            if wiz.get("source_book_code"):
+                st.caption(f"{len(opts):,} trades in this book")
+                if len(opts) >= _TRADE_PICKER_LIMIT:
+                    # The list is capped (see _book_trade_options) — say so, or
+                    # a user whose trade is past the cap would think it is gone.
+                    st.caption(f"Only the first {_TRADE_PICKER_LIMIT:,} trade "
+                               f"codes are listed. Leaving this blank transfers "
+                               f"the whole book, including the trades not shown.")
+                if not opts:
+                    # Without options the multiselect can only be empty, which
+                    # means "whole book" — say so rather than let a per-trade
+                    # transfer silently widen to everything in the book.
+                    st.warning("No current trades found for this book — the "
+                               "transfer will cover the whole book.")
     with t_col:
         st.markdown("**Target** — book that receives the values")
         tgt_opts = [b for b in books if b != (wiz.get("source_book_code") or "")]
@@ -1752,6 +1883,8 @@ def render_scaling_form() -> None:
                 wiz["source_book_code"]     = None
                 wiz["target_book_code"]     = None
                 wiz["transfer_trade_codes"] = []
+                wiz["transfer_pick_trades"] = False
+                st.session_state.pop(_k("trf_pick_trades"), None)
                 if _was_transfer:
                     wiz["book_code"] = None
                     wiz["entity_code"] = None
@@ -3416,12 +3549,13 @@ def _run_preview() -> None:
         # ── Submit everything, then gather ───────────────────────────────
         sum_jobs = [(sub, _submit(sub, "summary")) for sub in subtypes]
         sql_jobs = _submit_advisory("sql")
-        # Transfer Book: how many of the selected trades have NO version in
-        # the target book. Each of those lands on the target's
-        # '<BOOK>/Adjustment' trade rather than under its own trade code
-        # (engine leg ②T). Counted here so the ticket can say so BEFORE the
-        # adjustments are created.
-        brk_jobs = _submit_advisory("breakdown") if is_transfer else []
+        # PERF (2026-09-18): a `breakdown` call per scope used to ride along
+        # here, purely to count the trades that fall back to the target's
+        # '<BOOK>/Adjustment' trade — a whole extra scan of the combined view
+        # plus both SCD2 trade windows, on every preview, for a number that
+        # only DIMENSION.TRADE decides. It is now one pinned dimension query
+        # (_transfer_fallback_count), and the breakdown itself is loaded only
+        # when the user opens it and asks.
 
         agg = None
         by_scope = {}
@@ -3449,17 +3583,17 @@ def _run_preview() -> None:
         wiz["_preview_scopes"] = per_scope
         wiz["_preview_err"] = None
         if is_transfer:
-            _fallbacks = {}
-            for sub, job in brk_jobs:
-                try:
-                    df_b = job.result_df()
-                    if not df_b.empty and "TARGET_TRADE" in df_b.columns:
-                        _fallbacks[sub] = int(
-                            df_b["TARGET_TRADE"].astype(str)
-                            .str.strip().str.lower().str.startswith("fallback").sum())
-                except Exception:
-                    pass        # breakdown is advisory — never fail a preview on it
-            wiz["_transfer_fallbacks"] = _fallbacks
+            # Scope-independent (the trade dimension has no scope), but kept
+            # as the same per-scope dict the ticket already reads. Whole-book
+            # transfers get 0 — no speculative scan of the source book's
+            # trades; the per-trade breakdown covers that case on request.
+            try:
+                _n_fb = _transfer_fallback_count(
+                    wiz.get("target_book_code"), wiz.get("cobid"),
+                    wiz.get("transfer_trade_codes"))
+            except Exception:
+                _n_fb = 0       # advisory — never fail a preview on it
+            wiz["_transfer_fallbacks"] = {sub: _n_fb for sub in subtypes}
         else:
             wiz["_transfer_fallbacks"] = None
         wiz["_preview_for"] = json.dumps(payload, sort_keys=True, default=str)
@@ -3952,11 +4086,15 @@ with left:
                 for _wk in ("book_dd", "entity_dd"):
                     st.session_state.pop(_k(_wk), None)
                     st.session_state.pop(_k(_wk) + "_txt", None)
+            # The trade picker is opt-in and its checkbox holds its own widget
+            # state: drop it, or a new draft would re-tick itself and query
+            # DIMENSION.TRADE unasked.
+            st.session_state.pop(_k("trf_pick_trades"), None)
             wiz.update({"category": cat, "process_type": None, "process_types": [],
                         "adjustment_type": None,
                         "source_cobid": None,
                         "source_book_code": None, "target_book_code": None,
-                        "transfer_trade_codes": [],
+                        "transfer_trade_codes": [], "transfer_pick_trades": False,
                         "uploaded_df": None, "uploaded_file_name": None,
                         "_preview_sum": None, "_preview_err": None,
                         "_preview_by_scope": None, "_preview_scopes": None,
@@ -4073,15 +4211,19 @@ with right:
         # the engine ranks each transfer's rows in its own partition, so every
         # one of them is kept and they sum — but the user should still know
         # the rows will not sit under their own trade. Warn, never block.
-        for _fb_sc, _fb_n in ((wiz.get("_transfer_fallbacks") or {})
-                              if preview_current else {}).items():
-            if (_fb_n or 0) >= 2:
-                st.warning(
-                    f"{_fb_n} of the selected trades have no version in the "
-                    f"target book for {scope_label(_fb_sc)}; their rows land on "
-                    f"the target's '/Adjustment' trade instead of their own. "
-                    f"Ask for the trades to be set up in the target book if you "
-                    f"need them reported under their own trade code.")
+        # The count now comes from DIMENSION.TRADE alone, so it no longer
+        # varies by scope — one warning, not one per scope. (It is 0, and so
+        # silent, for a whole-book transfer: see _transfer_fallback_count.)
+        _fb_n = max([(v or 0) for v in
+                     ((wiz.get("_transfer_fallbacks") or {})
+                      if preview_current else {}).values()] or [0])
+        if _fb_n >= 2:
+            st.warning(
+                f"{_fb_n} of the selected trades have no version in the "
+                f"target book; their rows land on the target's '/Adjustment' "
+                f"trade instead of their own. Ask for the trades to be set up "
+                f"in the target book if you need them reported under their own "
+                f"trade code.")
 
     # ── VaR Upload: replacement confirmation ──────────────────────────────
     dup_ok = True
@@ -4216,21 +4358,44 @@ if wiz.get("category") == "Scaling Adjustment" and wiz.get("_preview_sum") \
             # Per-TRADE breakdown (the transfer's own breakdown mode). No
             # "Sample rows" expander: SP_PREVIEW_ADJUSTMENT has no sample mode
             # for a transfer — it would silently return the summary again.
+            #
+            # PERF (2026-09-18): this is the expensive one — a scan of the
+            # combined view plus both SCD2 trade lookups — so it is LAZY.
+            # Opening the expander costs nothing; the user asks for it.
             with st.expander("Breakdown by trade", expanded=False):
-                try:
-                    df_trd = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
-                                        json.dumps({**_preview_payload(),
-                                                    "mode": "breakdown"}))
-                    if not df_trd.empty:
-                        # Append semantics: the column is what this trade
-                        # ADDS to the target book, not a projected total.
-                        df_trd = df_trd.rename(columns={
-                            "TRADE_CODE": "Trade",
-                            "TARGET_TRADE": "Target trade",
-                            "PROJECTED_VALUE": "Value added"})
-                        render_data_grid(df_trd, height=300)
-                except Exception as exc:
-                    st.warning(f"Breakdown not available: {exc}")
+                _brk_key = "_trf_breakdown_df"
+                _brk_sig = json.dumps(_preview_payload(), sort_keys=True,
+                                      default=str)
+                if st.session_state.get("_trf_breakdown_for") != _brk_sig:
+                    st.session_state.pop(_brk_key, None)
+                st.caption(
+                    "Which trades the transfer lands on, and which fall back "
+                    "to the target's '/Adjustment' trade because they have no "
+                    "version in the target book. This is where that shows for "
+                    "a whole-book transfer. It reads the full measures view, "
+                    "so it is loaded only when you ask for it.")
+                if _btn("Load per-trade breakdown", key=_k("trf_brk_load"),
+                        icon_name=":material/table_rows:"):
+                    try:
+                        df_trd = call_sp_df(
+                            "ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                            json.dumps({**_preview_payload(),
+                                        "mode": "breakdown"}))
+                        if not df_trd.empty:
+                            # Append semantics: the column is what this trade
+                            # ADDS to the target book, not a projected total.
+                            df_trd = df_trd.rename(columns={
+                                "TRADE_CODE": "Trade",
+                                "TARGET_TRADE": "Target trade",
+                                "PROJECTED_VALUE": "Value added"})
+                        st.session_state[_brk_key] = df_trd
+                        st.session_state["_trf_breakdown_for"] = _brk_sig
+                    except Exception as exc:
+                        st.session_state.pop(_brk_key, None)
+                        st.warning(f"Breakdown not available: {exc}")
+                _df_brk = st.session_state.get(_brk_key)
+                if _df_brk is not None and not _df_brk.empty:
+                    render_data_grid(_df_brk, height=300)
     elif total_rows > 0:
         with st.expander("Breakdown by book / department / entity", expanded=False):
             try:

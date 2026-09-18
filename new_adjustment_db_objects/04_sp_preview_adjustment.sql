@@ -430,15 +430,22 @@ def main(session, p_adjustment):
     #   added     = factor × SUM(adjusted) at the SOURCE book   (the delta)
     #   projected = current + added
     #
-    # BOTH sides read FACT_ADJUSTED_TABLE, and the target side is the one place
-    # where this preview differs from Roll's. A transfer adds on top of
-    # whatever the target book already carries, so "current" has to be what
-    # the book actually shows today — its originals AND its own adjustments.
-    # Reading the base fact here would understate the book by exactly those
-    # adjustments (they are not superseded any more), making "projected" wrong
-    # by the same amount. Roll keeps reading the base fact for its target side
-    # because a Roll DOES flatten the target's originals and supersede its
-    # adjustments, so there the original total is the right "current".
+    # The target side is the one place where this preview differs from Roll's.
+    # A transfer adds on top of whatever the target book already carries, so
+    # "current" has to be what the book actually shows today — its originals
+    # AND its own adjustments. Taking the base fact ALONE would understate the
+    # book by exactly those adjustments (they are not superseded any more),
+    # making "projected" wrong by the same amount. Roll keeps reading the base
+    # fact for its target side because a Roll DOES flatten the target's
+    # originals and supersede its adjustments, so there the original total is
+    # the right "current".
+    #
+    # PERF (2026-09-18): that does NOT mean the target side has to read the
+    # combined view, and it no longer does. "Originals AND its own
+    # adjustments" is computed as base fact + the overlap query's
+    # EXISTING_ADJ_VALUE — the same adjustment rows, already summed from the
+    # small COB-pruned ADJUSTMENTS_TABLE over the same filters. Same number,
+    # one scan of the expensive view instead of two. Details at the tgt CTE.
     # ═════════════════════════════════════════════════════════════════════
     if is_transfer and not (fact_adj_tbl and fact_adj_tbl != fact_tbl):
         return session.sql(
@@ -466,6 +473,59 @@ def main(session, p_adjustment):
         tgt_where = f"WHERE fact.COBID = {int(cobid)}{tgt_dim_sql}\n      AND fact.{primary_metric} IS NOT NULL"
         _cob_date = f"TO_DATE('{int(cobid)}', 'YYYYMMDD')"
 
+        # ── PERF (2026-09-18): the target side no longer reads the view ──
+        # This branch used to scan the expensive combined/adjusted view TWICE
+        # per preview — once for the source (which genuinely needs adjusted
+        # values) and once for the target, only to obtain
+        #     adjusted(target) = original(target) + adjustments(target).
+        # The preview ALREADY knows the second term: the overlap query above
+        # summed exactly those adjustment rows, over exactly these dimension
+        # filters at this COB (_ov_filters IS dim_filters), from the small
+        # COB-pruned ADJUSTMENTS_TABLE. So the same number is now reached as
+        #     base fact (cheap, COB-pruned) + the EXISTING_ADJ_VALUE literal
+        # and the second view scan is gone. The DISPLAYED number is unchanged.
+        #
+        # The overlap query is best-effort (it yields the literal NULL when it
+        # fails, or in mode='sql' where it is not run at all). Falling back to
+        # base-only would silently understate "current", so when there is no
+        # real number to add, the old view-reading shape is used instead —
+        # correctness first, speed when it is free.
+        _have_ov = ov["EXISTING_ADJ_VALUE"] != "NULL"
+        if adj_rows_tbl and (_have_ov or mode == "sql"):
+            tgt_cte = f"""tgt AS (
+            -- The BASE fact, plus the adjustments the overlap query already
+            -- counted (substituted below as a literal) — together exactly the
+            -- adjusted total this preview used to read from the view.
+            SELECT COALESCE(SUM(fact.{primary_metric}), 0)  AS TOTAL_BASE_VALUE
+            FROM {fact_tbl} fact
+            {tgt_where}
+        )"""
+            tgt_current = (f"(tgt.TOTAL_BASE_VALUE + "
+                           f"COALESCE({ov['EXISTING_ADJ_VALUE']}, 0))")
+        else:
+            tgt_cte = f"""tgt AS (
+            -- The ADJUSTED view, not the base fact: append semantics mean the
+            -- target book keeps its own adjustments, so "current" is what it
+            -- shows today (see the branch comment above). Used only when the
+            -- overlap number is unavailable — see the PERF note.
+            SELECT COALESCE(SUM(fact.{primary_metric}), 0)  AS TOTAL_CURRENT_VALUE
+            FROM {fact_adj_tbl} fact
+            {tgt_where}
+        )"""
+            tgt_current = "tgt.TOTAL_CURRENT_VALUE"
+
+        # The breakdown's own target-trade lookup: pinned to the trade codes
+        # the user picked, when they picked any (a whole-book breakdown has to
+        # see them all). UPPER() on the column — see the join comment below.
+        # Gated on the SAME condition as src_where's trade predicate: if the
+        # source rows are not restricted to these codes, neither may tt be, or
+        # a trade outside the list would be mislabelled "fallback".
+        _brk_tt_trade = ""
+        if trade_codes and has_trade_key:
+            _brk_tt_trade = ("\n              AND UPPER(TRADE_CODE) IN ("
+                             + ", ".join(f"'{_esc(t).upper()}'" for t in trade_codes)
+                             + ")")
+
         transfer_summary = f"""
         WITH src_adj AS (
             SELECT COUNT(*)                                 AS ROWS_AFFECTED,
@@ -479,26 +539,19 @@ def main(session, p_adjustment):
             FROM {fact_tbl} fact
             {src_where}
         ),
-        tgt AS (
-            -- The ADJUSTED view, not the base fact: append semantics mean the
-            -- target book keeps its own adjustments, so "current" is what it
-            -- shows today (see the branch comment above).
-            SELECT COALESCE(SUM(fact.{primary_metric}), 0)  AS TOTAL_CURRENT_VALUE
-            FROM {fact_adj_tbl} fact
-            {tgt_where}
-        )
+        {tgt_cte}
         SELECT
             src_adj.ROWS_AFFECTED,
             src_adj.NONZERO_ROWS,
             src_orig.SOURCE_ORIGINAL_VALUE,
             src_adj.SOURCE_ADJUSTED_VALUE - src_orig.SOURCE_ORIGINAL_VALUE      AS SOURCE_ADJUSTMENTS_VALUE,
             src_adj.SOURCE_ADJUSTED_VALUE,
-            tgt.TOTAL_CURRENT_VALUE,
+            {tgt_current} AS TOTAL_CURRENT_VALUE,
             -- Append: the delta IS the factored source total (nothing on the
             -- target is flattened), and the projection adds it to the target
             -- book's adjusted total.
             {scale_factor} * src_adj.SOURCE_ADJUSTED_VALUE                           AS TOTAL_ADJUSTMENT_DELTA,
-            tgt.TOTAL_CURRENT_VALUE + {scale_factor} * src_adj.SOURCE_ADJUSTED_VALUE AS TOTAL_PROJECTED_VALUE,
+            {tgt_current} + {scale_factor} * src_adj.SOURCE_ADJUSTED_VALUE           AS TOTAL_PROJECTED_VALUE,
             {overlap_cols}
         FROM src_adj, src_orig, tgt
         """
@@ -515,10 +568,21 @@ def main(session, p_adjustment):
         -- (trade, book), and a plain join fans each source row out by that
         -- count — inflating ROWS_AFFECTED and PROJECTED_VALUE here while the
         -- engine (which dedups) writes the un-inflated figure.
+        -- PERF (2026-09-18): DIMENSION.TRADE is large, and this window used to
+        -- de-duplicate the whole COB-effective dimension before the ON clause
+        -- narrowed it to one book. The target book (and, when the user picked
+        -- trades, the trade codes) are pinned INSIDE, ahead of the window.
+        -- BOOK_CODE is compared bare — tgt_book comes from the app's book
+        -- dropdown, i.e. out of DIMENSION.BOOK, so it is canonical and
+        -- wrapping the column would only cost the pruning. TRADE_CODE keeps
+        -- UPPER(), matching the case-insensitive join below (it is compared
+        -- against the SOURCE row's spelling); it is free once the book
+        -- predicate has cut the scan down.
         LEFT JOIN (
             SELECT TRADE_KEY, TRADE_CODE, BOOK_CODE
             FROM DIMENSION.TRADE
             WHERE {_cob_date} BETWEEN EFFECTIVE_START_DATE AND EFFECTIVE_END_DATE
+              AND BOOK_CODE = '{_esc(tgt_book)}'{_brk_tt_trade}
             QUALIFY ROW_NUMBER() OVER (
                 PARTITION BY UPPER(TRADE_CODE), UPPER(BOOK_CODE)
                 ORDER BY EFFECTIVE_START_DATE DESC, TRADE_KEY DESC) = 1

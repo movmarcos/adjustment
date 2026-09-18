@@ -177,6 +177,14 @@ def _load():
     return at
 
 
+def _seed_books_only(at):
+    """Books, but NO trade cache — so a DIMENSION.TRADE query would have to go
+    to the (fake) session and show up in CALLS."""
+    _books = [["B1", "D1", "E1"], ["B2", "D2", "E2"]]
+    at.session_state["_ref_books_current"] = list(_books)
+    at.session_state["_ref_books_v2"] = list(_books)
+
+
 def _seed_ref_data(at):
     """Pre-fill the reference caches _ref_rows() reads (the fake session
     returns no rows), so the book dropdowns and the trade multiselect render
@@ -229,7 +237,8 @@ def test_switching_away_from_transfer_clears_its_fields():
                                "adjustment_type": "Transfer",
                                "process_types": ["VaR"], "process_type": "VaR",
                                "source_book_code": "B1", "target_book_code": "B2",
-                               "transfer_trade_codes": ["T1"]}
+                               "transfer_trade_codes": ["T1"],
+                               "transfer_pick_trades": True}
     at.run()
     assert not at.exception, at.exception
     # The form keeps the generic filter keys in step with the TARGET book —
@@ -271,6 +280,7 @@ def test_transfer_with_two_trades_submits_once_per_trade():
                                "cobid": 20260101,
                                "source_book_code": "B1", "target_book_code": "B2",
                                "transfer_trade_codes": ["T1", "T2"],
+                               "transfer_pick_trades": True,
                                "adjustment_category": "Cat", "reason": "why",
                                "result": None, "step": 1}
     at.run()
@@ -333,6 +343,7 @@ def _transfer_wiz(at, **over):
             "cobid": 20260101,
             "source_book_code": "B1", "target_book_code": "B2",
             "transfer_trade_codes": ["T1", "T2"],
+            "transfer_pick_trades": True,
             "adjustment_category": "Cat", "reason": "why",
             "result": None, "step": 1}
     at.session_state["wiz"] = {**base, **over}
@@ -503,7 +514,8 @@ def test_transfer_ticket_shows_the_books_and_trade_count():
                                "process_types": ["VaR"], "process_type": "VaR",
                                "cobid": 20260101,
                                "source_book_code": "B1", "target_book_code": "B2",
-                               "transfer_trade_codes": ["T1"]}
+                               "transfer_trade_codes": ["T1"],
+                               "transfer_pick_trades": True}
     at.run()
     assert not at.exception, at.exception
     texts = " ".join(m.value for m in at.markdown)
@@ -591,3 +603,73 @@ def test_transfer_type_card_formula_reads_as_an_append():
     caps = " ".join(c.value for c in at.caption)
     assert "Formula: target book += adjusted(source book) \u00d7 sf" in caps
     assert "target book = adjusted(source book)" not in caps
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Opt-in trade picker (perf: DIMENSION.TRADE is large — never read it
+# speculatively). Marcos, 2026-09-18.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _dim_trade_calls():
+    return [c for c in CALLS if "DIMENSION.TRADE" in c]
+
+
+def test_choosing_a_source_book_issues_no_trade_query():
+    """THE performance bug: picking a source book used to load every trade in
+    it straight away — a full DIMENSION.TRADE scan, and a five-minute wait for
+    two small books. With the picker unticked (the default) nothing may touch
+    that table at all."""
+    at = _load()
+    _seed_books_only(at)
+    _transfer_wiz(at, transfer_trade_codes=[], transfer_pick_trades=False)
+    CALLS.clear()
+    at.run()
+    assert not at.exception, at.exception
+    assert _dim_trade_calls() == []
+    assert at.session_state["wiz"]["transfer_trade_codes"] == []
+    caps = " ".join(c.value for c in at.caption)
+    assert "whole source book will be transferred" in caps
+
+
+def test_ticking_the_picker_loads_the_pruned_trade_list():
+    """Ticked, the list loads — and the query pins BOOK_CODE bare (prunable)
+    with a bounded suffix test and a LIMIT."""
+    at = _load()
+    _seed_books_only(at)
+    _transfer_wiz(at, transfer_trade_codes=[], transfer_pick_trades=False)
+    at.run()
+    assert not at.exception, at.exception
+    CALLS.clear()
+    at.checkbox(key=f"trf_pick_trades_{at.session_state['_wiz_v']}").check().run()
+    assert not at.exception, at.exception
+    dim = _dim_trade_calls()
+    assert len(dim) == 1, dim
+    q = dim[0]
+    assert "BOOK_CODE = 'B1'" in q                 # bare column → prunable
+    assert "UPPER(BOOK_CODE)" not in q
+    assert "NOT ILIKE" not in q                    # unanchored scan is gone
+    assert "LIMIT 5000" in q
+    assert at.session_state["wiz"]["transfer_pick_trades"] is True
+
+
+def test_unticking_the_picker_clears_the_selected_trades():
+    """A draft must never keep trade codes the user can no longer see — they
+    would still ride into the submit."""
+    at = _load()
+    _seed_ref_data(at)
+    _transfer_wiz(at, transfer_trade_codes=["T1", "T2"],
+                  transfer_pick_trades=True)
+    at.run()
+    assert not at.exception, at.exception
+    assert at.session_state["wiz"]["transfer_trade_codes"] == ["T1", "T2"]
+
+    at.checkbox(key=f"trf_pick_trades_{at.session_state['_wiz_v']}").uncheck().run()
+    assert not at.exception, at.exception
+    w = at.session_state["wiz"]
+    assert w["transfer_trade_codes"] == []
+    assert w["transfer_pick_trades"] is False
+    # The multiselect's own widget state is gone too: re-ticking starts clean
+    # rather than resurrecting the trades that were just cleared.
+    at.checkbox(key=f"trf_pick_trades_{at.session_state['_wiz_v']}").check().run()
+    assert not at.exception, at.exception
+    assert at.session_state["wiz"]["transfer_trade_codes"] == []

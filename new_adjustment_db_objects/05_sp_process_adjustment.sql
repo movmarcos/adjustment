@@ -1360,6 +1360,46 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             ]
             has_transfer = len(transfer_adj_ids) > 0
 
+            # ── Transfer batch literals (PERF, 2026-09-18) ───────────────
+            # DIMENSION.TRADE is LARGE (SCD2: every version of every trade in
+            # every book). Leg ②T's `tt` / `ta` lookups below de-duplicate it
+            # with a ROW_NUMBER window, and the window used to run over the
+            # WHOLE COB-effective dimension before the outer join narrowed it
+            # to one book. These literal lists let each window run over a
+            # handful of rows instead: the batch's target books, the target
+            # books' '<BOOK>/Adjustment' carrier codes, and — only when EVERY
+            # transfer header names a trade — the batch's trade codes.
+            #
+            # BOOK_CODE is compared BARE: the header's book came from the
+            # app's book dropdown, i.e. straight out of DIMENSION.BOOK, so it
+            # is the canonical spelling and wrapping the column in UPPER()
+            # would only cost the pruning. The TRADE_CODE lists keep UPPER()
+            # on the column, because those values are NOT canonical — `ta`'s
+            # are SYNTHESISED ('<book>' || '/Adjustment') and `tt`'s are
+            # matched against the SOURCE row's spelling, which is exactly why
+            # the joins below read them case-insensitively. That UPPER() costs
+            # nothing here: the bare BOOK_CODE predicate has already cut the
+            # scan down to one book.
+            transfer_books_str = transfer_adj_codes_str = transfer_trades_str = ""
+            if has_transfer:
+                _trf_hdr = (df_adj_scale
+                            .filter(col('SOURCE_BOOK_CODE').isNotNull())
+                            .select("BOOK_CODE", "TRADE_CODE").collect())
+                _tbooks = sorted({str(r["BOOK_CODE"]).strip() for r in _trf_hdr
+                                  if r["BOOK_CODE"] not in (None, "")})
+                transfer_books_str = ", ".join(_erl_s(b) for b in _tbooks)
+                transfer_adj_codes_str = ", ".join(
+                    _erl_s((b + "/Adjustment").upper()) for b in _tbooks)
+                _tcodes = [r["TRADE_CODE"] for r in _trf_hdr]
+                # A whole-book transfer has TRADE_CODE NULL and must still see
+                # every trade, so the trade list is usable only when no header
+                # in the batch is whole-book. Empty list → no predicate (never
+                # `IN ()`), i.e. the old unfiltered subquery.
+                if _tcodes and all(c not in (None, "") for c in _tcodes):
+                    transfer_trades_str = ", ".join(
+                        _erl_s(c) for c in sorted(
+                            {str(c).strip().upper() for c in _tcodes}))
+
             # Store RUN_LOG_ID in ADJ_HEADER for traceability
             session.sql(f"""
                 UPDATE ADJUSTMENT_APP.ADJ_HEADER
@@ -1854,6 +1894,19 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 # both the target and the source COB date — one date resolves
                 # every SCD2 lookup below.
                 _cob_date = f"TO_DATE('{int(cobid)}', 'YYYYMMDD')"
+                # PERF (2026-09-18): the selective predicates go INSIDE the tt
+                # / ta subqueries, ahead of their ROW_NUMBER windows. Without
+                # them the window de-duplicated the entire COB-effective trade
+                # dimension and only then did the outer join throw almost all
+                # of it away. See the literal-list block above for why
+                # BOOK_CODE is bare and TRADE_CODE is not.
+                _tt_book = (f"\n                      AND BOOK_CODE IN ({transfer_books_str})"
+                            if transfer_books_str else "")
+                _tt_trade = (f"\n                      AND UPPER(TRADE_CODE) IN ({transfer_trades_str})"
+                             if transfer_trades_str else "")
+                _ta_book = _tt_book
+                _ta_trade = (f"\n                      AND UPPER(TRADE_CODE) IN ({transfer_adj_codes_str})"
+                             if transfer_adj_codes_str else "")
                 transfer_leg = f"""
                 UNION ALL
                 -- ②T Transfer Book: source book's ADJUSTED rows at the COB, re-keyed to
@@ -1891,9 +1944,12 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 LEFT JOIN DIMENSION.TRADE st
                     ON  st.TRADE_KEY = COALESCE(fact.TRADE_KEY, -1)
                 LEFT JOIN (
+                    -- Pinned to this batch's target book(s) (and, when every
+                    -- header names a trade, its trade codes) BEFORE the
+                    -- window — DIMENSION.TRADE is large.
                     SELECT TRADE_KEY, TRADE_CODE, BOOK_CODE
                     FROM DIMENSION.TRADE
-                    WHERE {_cob_date} BETWEEN EFFECTIVE_START_DATE AND EFFECTIVE_END_DATE
+                    WHERE {_cob_date} BETWEEN EFFECTIVE_START_DATE AND EFFECTIVE_END_DATE{_tt_book}{_tt_trade}
                     QUALIFY ROW_NUMBER() OVER (
                         PARTITION BY UPPER(TRADE_CODE), UPPER(BOOK_CODE)
                         ORDER BY EFFECTIVE_START_DATE DESC, TRADE_KEY DESC) = 1
@@ -1901,9 +1957,12 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                     ON  UPPER(tt.TRADE_CODE) = UPPER(st.TRADE_CODE)
                     AND UPPER(tt.BOOK_CODE)  = UPPER(adjust.BOOK_CODE)
                 LEFT JOIN (
+                    -- ta only ever resolves '<BOOK>/Adjustment' carrier codes,
+                    -- so it is pinned to exactly those (plus the target books)
+                    -- before the window.
                     SELECT TRADE_KEY, TRADE_CODE, BOOK_CODE
                     FROM DIMENSION.TRADE
-                    WHERE {_cob_date} BETWEEN EFFECTIVE_START_DATE AND EFFECTIVE_END_DATE
+                    WHERE {_cob_date} BETWEEN EFFECTIVE_START_DATE AND EFFECTIVE_END_DATE{_ta_book}{_ta_trade}
                     QUALIFY ROW_NUMBER() OVER (
                         PARTITION BY UPPER(TRADE_CODE), UPPER(BOOK_CODE)
                         ORDER BY EFFECTIVE_START_DATE DESC, TRADE_KEY DESC) = 1

@@ -441,10 +441,12 @@ def _seed_ref_data(at):
     at.session_state["_ref_trades_B1"] = [["T1"], ["T2"]]
 
 
-def test_transfer_preview_counts_fallback_trades_per_scope():
-    """The breakdown call rides along with the other preview jobs; its
-    per-scope fallback counts must survive the submit-then-gather rewrite,
-    and the impact split must render beside them."""
+def test_transfer_preview_counts_fallback_trades_from_the_trade_dimension():
+    """Fallback trades (no version under the target book) are counted from
+    DIMENSION.TRADE, pinned on BOTH the target book and the selected trade
+    codes — NOT by running the preview SP in `breakdown` mode, which scanned
+    the combined view once per scope just to produce this number. The count no
+    longer varies by scope, so the warning fires once."""
     at = _load()
     _seed_ref_data(at)
     at.session_state["wiz"] = {**at.session_state["wiz"],
@@ -455,6 +457,7 @@ def test_transfer_preview_counts_fallback_trades_per_scope():
                                "cobid": 20260101,
                                "source_book_code": "B1", "target_book_code": "B2",
                                "transfer_trade_codes": ["T1", "T2"],
+                               "transfer_pick_trades": True,
                                "adjustment_category": "Cat", "reason": "why",
                                "result": None, "step": 1}
     at.run(); assert not at.exception, at.exception
@@ -463,15 +466,24 @@ def test_transfer_preview_counts_fallback_trades_per_scope():
     assert not at.exception, at.exception
 
     w = at.session_state["wiz"]
-    assert w["_transfer_fallbacks"] == {"VaR": 2, "Stress": 0}
+    # The fake session returns no rows for the dimension query, so NEITHER
+    # selected trade exists under B2 — both fall back, for every scope.
+    assert w["_transfer_fallbacks"] == {"VaR": 2, "Stress": 2}
     assert w["_preview_sum"]["ROWS_AFFECTED"] == 15
     assert set(w["_preview_scopes"]) == {"VaR", "Stress"}
-    # Six jobs (summary + sql + breakdown, twice), all in flight before the
-    # first result is read.
+    # FOUR jobs (summary + sql, twice) — the two breakdown calls are gone.
     kinds = [k for k, _ in ORDER]
-    assert kinds == ["submit"] * 6 + ["result"] * 6, ORDER
-    # The ≥ 2 fallback warning fires for VaR only.
+    assert kinds == ["submit"] * 4 + ["result"] * 4, ORDER
+    assert not any('"mode": "breakdown"' in c for c in CALLS), CALLS
+    # One pinned DIMENSION.TRADE query: the target book AND the trade codes
+    # are literals, so it can return at most one row per selected trade.
+    dim = [c for c in CALLS if "DIMENSION.TRADE" in c]
+    assert len(dim) == 1, dim
+    assert "BOOK_CODE = 'B2'" in dim[0] and "TRADE_CODE IN ('T1', 'T2')" in dim[0]
+    # The ≥ 2 fallback warning fires ONCE — the count is scope-independent.
     warns = [x.value for x in at.warning]
+    assert len([x for x in warns
+                if "of the selected trades have no version" in x]) == 1, warns
     assert any("2 of the selected trades have no version" in x for x in warns), warns
     grid = next((d.value for d in at.dataframe if "Scope" in list(d.value.columns)), None)
     assert grid is not None and list(grid["Scope"]) == ["VaR", "Stress", "Total"]
@@ -565,6 +577,7 @@ def _transfer_preview(at):
                                "cobid": 20260101,
                                "source_book_code": "B1", "target_book_code": "B2",
                                "transfer_trade_codes": ["T1"],
+                               "transfer_pick_trades": True,
                                "adjustment_category": "Cat", "reason": "why",
                                "result": None, "step": 1}
     at.run(); assert not at.exception, at.exception
@@ -596,10 +609,14 @@ def test_transfer_preview_summary_shape_is_unchanged_by_append():
                            "mode"}
         assert pj["adjustment_type"] == "Transfer"
         assert pj["source_cobid"] == pj["cobid"] == 20260101
-        # All three modes still ride along.
+        # Only the two CHEAP modes ride along now. `breakdown` used to be
+        # submitted here too, purely to count fallback trades — a whole extra
+        # scan of the combined view on every preview. It is lazy (a button
+        # inside its expander) and the fallback count comes from
+        # DIMENSION.TRADE instead.
         assert {json.loads(c[c.index("('") + 2:c.rindex("')")]
                            .replace("''", "'").replace("\\\\", "\\"))["mode"]
-                for c in prev} == {"summary", "sql", "breakdown"}
+                for c in prev} == {"summary", "sql"}
 
         w = at.session_state["wiz"]
         assert w["_preview_err"] is None
@@ -666,3 +683,31 @@ def test_transfer_impact_block_labels_current_as_including_adjustments():
     assert "Target original" not in texts
     # The delta row reads "Added", not "Adjustment".
     assert ">Added<" in texts
+
+
+def test_the_per_trade_breakdown_is_loaded_only_on_request():
+    """PERF (2026-09-18): the per-trade breakdown scans the combined view plus
+    both SCD2 trade lookups. Opening the preview — and opening the expander —
+    must cost nothing; the SP runs only when the user presses the button."""
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(sc, "get_session", lambda: TransferSess())
+    try:
+        at = _load()
+        _seed_ref_data(at)
+        at = _transfer_preview(at)
+        CALLS.clear()
+        at.run()
+        assert not at.exception, at.exception
+        assert not [c for c in CALLS if '"mode": "breakdown"' in c], CALLS
+
+        btn = at.button(key=f"trf_brk_load_{at.session_state['_wiz_v']}")
+        assert btn is not None
+        CALLS.clear()
+        btn.click().run()
+        assert not at.exception, at.exception
+        assert [c for c in CALLS if '"mode": "breakdown"' in c], CALLS
+        grid = next((d.value for d in at.dataframe
+                     if "Target trade" in list(d.value.columns)), None)
+        assert grid is not None and list(grid["Trade"]) == ["T1"]
+    finally:
+        monkey.undo()
