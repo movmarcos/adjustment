@@ -44,8 +44,9 @@ multi-scope for Direct Adjustment / VaR Upload; server-side batch submit.
   fan-out `_signoff_scopes` l.3087. `SCOPE_FIELDS` l.625 / `ALL_EXTRA_FIELDS`
   l.641 hard-code the filter lists.
 - `03_sp_submit_adjustment.sql` — `ACTION_MAP` l.40 validates
-  `ADJUSTMENT_TYPE`; `compute_scale_factor_adjusted` l.123; factor-1 and
-  same-COB guards l.315–335; `col_map` l.567 writes flat filter columns.
+  `ADJUSTMENT_TYPE`; `compute_scale_factor_adjusted` l.123; factor-1 (Scale
+  only) and same-COB guards l.315–335; `col_map` l.567 writes flat filter
+  columns.
 - `05_sp_process_adjustment.sql` Scale path l.1329–1990: legs ①②③ (l.1786),
   `_dim_filters` l.1540, roll leg l.1723, SCD2 remap l.1869, supersede by
   filter after it.
@@ -169,7 +170,9 @@ Two cards side by side.
 
 Ticket checklist for Transfer: scope(s) selected, COB, source book, target
 book ≠ source, reason. Recurring occurrence is not offered for Transfer
-(`occurrence` forced to ADHOC). Scale factor not shown (fixed 1).
+(`occurrence` forced to ADHOC). A **Scale Factor** applies exactly as for
+Roll — 1 copies the source book as-is, 1.10 adds 10% (amended 2026-09-18,
+Marcos; the original design fixed it at 1).
 
 Wizard state: `wiz["source_book_code"]`, `wiz["target_book_code"]`,
 `wiz["transfer_trade_codes"]: list[str]`. Reset on type change.
@@ -276,7 +279,7 @@ st ON st.TRADE_KEY = fact.TRADE_KEY`). If `tb` resolves to NULL the leg
 yields no rows; the submit guard makes this unreachable, and the run log
 records the row count.
 
-Metrics: `× adjust.SCALE_FACTOR_ADJUSTED` (= 1) as in leg ②.
+Metrics: `× adjust.SCALE_FACTOR_ADJUSTED` (the full factor, as in leg ②).
 
 ### 6.3 Why re-key inside the leg
 
@@ -327,7 +330,8 @@ Source predicate = §6.2's two EXISTS with the payload's `source_book_code` /
 Automated (tests/, fake COB 20991231, bots `UAT_BOT_*`):
 
 - TRF-01 submit: Transfer accepted; header has `ADJUSTMENT_TYPE='Transfer'`,
-  `ADJUSTMENT_ACTION='Scale'`, `SCALE_FACTOR_ADJUSTED=1`, `BOOK_CODE`=target,
+  `ADJUSTMENT_ACTION='Scale'`, `SCALE_FACTOR_ADJUSTED`= the submitted factor,
+  `BOOK_CODE`=target,
   `SOURCE_BOOK_CODE`=source, `ENTITY_CODE` = target book's entity from
   `DIMENSION.BOOK`.
 - TRF-02 guards: same book, unknown book, missing source book → `Error`.

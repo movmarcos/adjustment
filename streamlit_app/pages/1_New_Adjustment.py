@@ -1811,7 +1811,8 @@ def render_scaling_form() -> None:
         with _card():
             _sec(5, "Transfer Details",
                  "The target book's positions at this COB are replaced by the "
-                 "source book's values. Choose trade codes to transfer only "
+                 "source book's adjusted values × the Scale Factor above "
+                 "(1 = copy as-is). Choose trade codes to transfer only "
                  "those trades — one adjustment is created per trade (and per "
                  "scope).")
             _render_transfer_fields()
@@ -4176,7 +4177,8 @@ if wiz.get("category") == "Scaling Adjustment" and wiz.get("_preview_sum") \
     elif _is_transfer:
         st.caption(
             "Transfer preview: **current** = the target book's total in scope "
-            "(flattened), **projected** = the source book's adjusted total.")
+            "(flattened), **projected** = the source book's adjusted total "
+            "× the scale factor.")
         if total_rows > 0:
             # Per-TRADE breakdown (the transfer's own breakdown mode). No
             # "Sample rows" expander: SP_PREVIEW_ADJUSTMENT has no sample mode

@@ -1786,7 +1786,8 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 # RE-KEYED to the target book INSIDE the select: the surrogate
                 # key (fact_key) is built from these columns, so leg ③'s
                 # flattened target rows and these rows share a key per position
-                # and `netted` cancels them → combined(target) = adjusted(source).
+                # and `netted` cancels them → combined(target) = factor ×
+                # adjusted(source) (factor 1 = copy the source book as-is).
                 # Only the source book + optional trade code filter the source
                 # (the header's ENTITY/BOOK/DEPT describe the TARGET), so this
                 # leg uses neither from_where nor join_cond.
@@ -1943,7 +1944,8 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             -- ── Net per position ─────────────────────────────────────────
             -- Sum the legs per (surrogate key, ADJUSTMENT_ID) into one delta row
             -- per position = Σsource − Σtarget, so
-            --   combined(target) = original(target) + Σ(net) = adjusted(source).
+            --   combined(target) = original(target) + Σ(net) = factor × adjusted(source)
+            --   (cross-COB Roll: the source COB's; Transfer Book: the source book's).
             -- Source-only positions net to Σsource and are kept; positions whose
             -- net change is exactly zero are dropped (HAVING). Grouping also
             -- includes ADJUSTMENT_ID so distinct adjustments stay separate for the
