@@ -481,7 +481,7 @@ def main(session, p_adjustment):
                MAX(CASE WHEN tt.TRADE_KEY IS NOT NULL THEN 'target trade found'
                         ELSE 'fallback: {_esc(tgt_book)}/Adjustment' END) AS TARGET_TRADE,
                COUNT(*)                                                 AS ROWS_AFFECTED,
-               COALESCE(SUM(fact.{primary_metric}), 0)                  AS PROJECTED_VALUE
+               {scale_factor} * COALESCE(SUM(fact.{primary_metric}), 0)  AS PROJECTED_VALUE
         FROM {fact_adj_tbl} fact
         LEFT JOIN DIMENSION.TRADE st ON st.TRADE_KEY = fact.TRADE_KEY
         -- Same DEDUPLICATED target-trade lookup the engine's leg ②T uses

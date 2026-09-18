@@ -294,7 +294,7 @@ TYPE_CONFIG = {
     "Scale":    {"icon": "bar-chart",    "desc": "Multiply by a scale factor", "formula": "new = original × sf"},
     "Roll":     {"icon": "refresh-cw",   "desc": "Roll prior COB's adjusted state forward", "formula": "new = (prior + prior_adj) × sf"},
     "Transfer": {"icon": "shuffle",      "desc": "Replace a target book with a source book's values",
-                 "formula": "target book = adjusted(source book) at the COB"},
+                 "formula": "target book = adjusted(source book) × sf"},
 }
 
 # Display names for ADJUSTMENT_TYPE codes. Presentation only — the stored code

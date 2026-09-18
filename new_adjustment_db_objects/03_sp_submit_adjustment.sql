@@ -127,7 +127,7 @@ def compute_scale_factor_adjusted(adj_type, scale_factor, cobid, source_cobid):
     if t == "flatten":
         return -1.0
     elif t == "transfer":
-        return float(scale_factor)               # book swap: full factor (1.0), never sf-1
+        return float(scale_factor)               # book swap: full factor, like a cross-COB Roll (never sf-1)
     elif t in ("scale", "roll"):
         if source_cobid and int(source_cobid) != int(cobid):
             return float(scale_factor)           # cross-COB → full factor
@@ -352,13 +352,6 @@ def main(session, p_adjustment):
             if src_book.upper() == tgt_book.upper():
                 return {"adj_id": None, "status": "Error",
                         "message": "Source and target book must differ."}
-            # A transfer COPIES the source book as it stands; a factor other
-            # than 1 would silently scale the copy (the page never sends one,
-            # but another caller could).
-            if float(scale_factor) != 1.0:
-                return {"adj_id": None, "status": "Error",
-                        "message": "Transfer Book always copies the source book at 100% "
-                                   "— scale_factor must be 1."}
             if source_cobid is not None and int(source_cobid) != int(cobid):
                 return {"adj_id": None, "status": "Error",
                         "message": "Transfer Book applies within one COB: source_cobid must equal cobid."}

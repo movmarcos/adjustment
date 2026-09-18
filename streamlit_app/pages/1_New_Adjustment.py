@@ -210,7 +210,7 @@ def _build_payload() -> dict:
     if wiz.get("adjustment_type") == "Transfer":
         payload.update({
             "source_cobid":          wiz["cobid"],     # one COB, never a roll
-            "scale_factor":          1,
+            "scale_factor":          wiz.get("scale_factor", 1.0),
             "book_code":             wiz.get("target_book_code"),
             "source_book_code":      wiz.get("source_book_code"),
             "adjustment_occurrence": "ADHOC",
@@ -914,7 +914,8 @@ def _preview_payload() -> dict:
         return {"cobid": wiz["cobid"],
                 "process_type": _first_scope(_selected_scopes()),
                 "adjustment_type": "Transfer",
-                "source_cobid": wiz["cobid"], "scale_factor": 1,
+                "source_cobid": wiz["cobid"],
+                "scale_factor": wiz.get("scale_factor", 1.0),
                 "book_code": wiz.get("target_book_code"),
                 # The TARGET entity (the Transfer form derives it from the
                 # target book, and SP_SUBMIT derives the same one). The
@@ -1042,7 +1043,7 @@ def _completion_checks() -> list:
         ]
         if wiz.get("adjustment_type") == "Roll":
             checks.append(("Source COB", bool(wiz.get("source_cobid"))))
-        if wiz.get("adjustment_type") in ("Scale", "Roll"):
+        if wiz.get("adjustment_type") in ("Scale", "Roll", "Transfer"):
             # None = empty / not a number / out of range (see _float_input)
             checks.append(("Scale Factor", wiz.get("scale_factor") is not None))
         # A Scale at factor 1 is a no-op (delta 0) — block it. Roll is
@@ -1851,11 +1852,12 @@ def _render_schedule_fields() -> None:
             wiz["source_cobid"] = _int_input("Source COB (roll from) *",
                                              "src_cobid", wiz.get("source_cobid"))
     with d3:
-        if wiz.get("adjustment_type") in ("Scale", "Roll"):
+        if wiz.get("adjustment_type") in ("Scale", "Roll", "Transfer"):
             wiz["scale_factor"] = _float_input(
                 "Scale Factor *", "sf", wiz.get("scale_factor", 1.0),
                 min_v=-10.0, max_v=100.0,
-                help="1.05 = +5%,  0.95 = −5%. Comma or dot decimals accepted.")
+                help="1 = copy as-is (Roll / Transfer Book), 1.05 = +5%, "
+                     "0.95 = −5%. Comma or dot decimals accepted.")
     if (wiz.get("adjustment_type") == "Scale"
             and wiz.get("scale_factor") is not None
             and float(wiz["scale_factor"]) == 1.0):
@@ -3228,16 +3230,17 @@ def _ticket_html(missing: list) -> str:
                           bool(d_verdicts) and n_valid > 0)
     elif cat == "Scaling Adjustment":
         type_txt = wiz.get("adjustment_type")
-        if type_txt and type_txt in ("Scale", "Roll"):
+        _type_disp = type_label(type_txt) if type_txt else type_txt
+        if type_txt and type_txt in ("Scale", "Roll", "Transfer"):
             _sf = wiz.get("scale_factor")     # None = not set / invalid
-            type_txt += f' ×{_sf:g}' if _sf is not None else " × ?"
+            _type_disp += f' ×{_sf:g}' if _sf is not None else " × ?"
         cob_txt = wiz.get("cobid")
         if wiz.get("adjustment_type") == "Roll" and wiz.get("source_cobid") and cob_txt:
             cob_txt = f'{wiz.get("source_cobid")} → {cob_txt}'
         _scs = _selected_scopes()
         kv += _ticket_row("Scope" if len(_scs) <= 1 else f"Scopes ({len(_scs)} adjustments)",
                           ", ".join(scope_label(s) for s in _scs) if _scs else None, bool(_scs))
-        kv += _ticket_row("Type",  type_label(type_txt) if type_txt else type_txt)
+        kv += _ticket_row("Type", _type_disp)
         kv += _ticket_row("Schedule",
                           "Ad hoc" if wiz.get("occurrence", "ADHOC") == "ADHOC"
                           else "Recurring (daily)", True)

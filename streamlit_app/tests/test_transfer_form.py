@@ -393,15 +393,43 @@ def test_transfer_preview_payload_carries_trade_codes_and_no_filters():
                            "mode"})
 
 
-def test_transfer_has_no_scale_factor_field_or_checklist_row():
+def test_transfer_has_a_scale_factor_field_and_checklist_row():
     at = _load()
     _seed_ref_data(at)
     _transfer_wiz(at)
     at.run()
     assert not at.exception, at.exception
-    assert not any((t.key or "").startswith("sf_") for t in at.text_input)
+    assert any((t.key or "").startswith("sf_") for t in at.text_input)
     texts = " ".join(m.value for m in at.markdown)
-    assert "Scale Factor" not in texts
+    assert "Scale Factor" in texts
+
+
+def test_transfer_scale_factor_flows_through_submit_and_preview_payloads():
+    at = _load()
+    _seed_ref_data(at)
+    _transfer_wiz(at)
+    at.session_state["wiz"]["scale_factor"] = 1.5
+    at.run()
+    assert not at.exception, at.exception
+
+    CALLS.clear()
+    at.button(key=f"submit_{at.session_state['_wiz_v']}").click().run()
+    assert not at.exception, at.exception
+    payloads = _submit_payloads(at)
+    assert payloads and all(p["scale_factor"] == 1.5 for p in payloads)
+
+    _transfer_wiz(at)
+    at.session_state["wiz"]["scale_factor"] = 1.5
+    at.run()
+    assert not at.exception, at.exception
+    CALLS.clear()
+    at.button(key=f"run_preview_{at.session_state['_wiz_v']}").click().run()
+    assert not at.exception, at.exception
+    prev = [c for c in CALLS if "SP_PREVIEW_ADJUSTMENT" in c]
+    assert prev, CALLS
+    raw = prev[0][prev[0].index("('") + 2:prev[0].rindex("')")]
+    pj = json.loads(raw.replace("''", "'").replace("\\\\", "\\"))
+    assert pj["scale_factor"] == 1.5
 
 
 def test_target_equal_to_source_fails_the_checklist_case_insensitively():

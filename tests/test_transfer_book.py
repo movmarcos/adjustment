@@ -64,12 +64,15 @@ def test_trf02_guards(session, ev):
     ev.check("cross-COB refused",
              isinstance(r4, dict) and r4.get("status") == "Error"
              and "within one COB" in str(r4.get("message", "")))
-    # A transfer copies the source book as it stands — a factor other than 1
-    # would silently scale the copy.
+    # A Transfer now takes a scale factor exactly like Roll — factor 2 is
+    # accepted (book swap × factor), not rejected.
     r5 = _submit(session, scale_factor=2)
-    ev.check("scale factor other than 1 refused",
-             isinstance(r5, dict) and r5.get("status") == "Error"
-             and "must be 1" in str(r5.get("message", "")))
+    ev.check("scale factor other than 1 accepted",
+             isinstance(r5, dict) and r5.get("status") in ("Pending", "Pending Approval"))
+    h5 = ev.sql("Header (factor 2)", f"""SELECT SCALE_FACTOR, SCALE_FACTOR_ADJUSTED
+                                          FROM ADJUSTMENT_APP.ADJ_HEADER WHERE ADJ_ID = '{r5.get("adj_id")}'""")
+    ev.check("SCALE_FACTOR = 2 and SCALE_FACTOR_ADJUSTED = 2",
+             h5 and float(h5[0]["SCALE_FACTOR"]) == 2.0 and float(h5[0]["SCALE_FACTOR_ADJUSTED"]) == 2.0)
     # FRTB scopes are accepted: the engine mints a new FRTBSA_*_KEY per
     # transferred row (source key + target book + resolved trade), like
     # Direct FRTB rows, so leg ②T no longer collides in the ranked CTE.

@@ -138,10 +138,12 @@ Adjustment categories:
   creates one adjustment per selected scope. With several scopes the filter
   form offers only the fields every selected scope supports.
   Transfer Book (Scaling type): at one COB the TARGET book's positions are
-  replaced by the SOURCE book's adjusted values (source untouched); optional
-  trade codes limit it, one adjustment per trade and per scope. The ticket's
-  entity is the target book's entity. Trades with no version under the
-  target book land on the target's '<BOOK>/Adjustment' trade.
+  replaced by the SOURCE book's adjusted values (source untouched), times a
+  scale factor exactly like Roll (1 copies the source book as-is, 1.10 adds
+  10%); optional trade codes limit it, one adjustment per trade and per
+  scope. The ticket's entity is the target book's entity. Trades with no
+  version under the target book land on the target's '<BOOK>/Adjustment'
+  trade.
 - Direct: exact values. For VaR/Stress/Sensitivity it is PER ROW — paste or
   upload a CSV and each row becomes its own independent adjustment. For
   FRTB/FRTBDRC/FRTBRRAO it is PER FILE — one uploaded file = one Direct
@@ -698,7 +700,7 @@ with tab_create:
          "<em>target</em> book's positions with the <em>source</em> book's "
          "adjusted values (the source book is untouched). Optional trade codes "
          "limit it to those trades. See the Transfer Book section below.",
-         "1 (copy as-is)"],
+         "full factor (1 = copy as-is)"],
     ]))
     _html(_card(
         f'{icon("layers", size=13, color="#7E22CE")} <strong>Several data scopes at once:</strong> '
@@ -728,7 +730,9 @@ with tab_create:
         "whole book). It works like a Roll with the book swapped for the COB: "
         "the target book's positions in scope are flattened and replaced by the "
         "source book's <em>adjusted</em> values; the source book keeps its rows. "
-        "No scale factor, no recurring schedule."))
+        "A <strong>Scale Factor</strong> applies exactly as for Roll — 1 copies "
+        "the source book as-is, 1.10 adds 10% — and there is no recurring "
+        "schedule."))
     _html(_table(["Rule", "Detail"], [
         ["One adjustment per scope × trade",
          "Two scopes and three trades create six adjustments; the ticket and the "
