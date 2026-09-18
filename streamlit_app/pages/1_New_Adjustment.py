@@ -3387,9 +3387,13 @@ def _overlap_rows(s: dict) -> str:
         note = (f'Already adjusted here: {ids_txt}. Submitting replaces every one '
                 f'of those rows inside this filter at this COB (newest '
                 f'adjustment wins).')
+    # Several scopes: EXISTING_ADJ_VALUE is a blended measure the same way
+    # the other totals are — drop it and keep only the summed counts.
+    value_txt = ("" if len(_selected_scopes()) > 1 else
+                 f' · {_fmt_money(s.get("EXISTING_ADJ_VALUE"))}')
     return (f'<div class="kv"><span class="k">Existing adjustments in scope</span>'
-            f'<span class="v">{n:,} · {_safe_int(s.get("EXISTING_ADJ_ROWS")):,} rows · '
-            f'{_fmt_money(s.get("EXISTING_ADJ_VALUE"))}</span></div>'
+            f'<span class="v">{n:,} · {_safe_int(s.get("EXISTING_ADJ_ROWS")):,} rows'
+            f'{value_txt}</span></div>'
             f'<div style="font-size:0.78rem;color:{P["warning"]};margin-top:3px">'
             f'{note}'
             f'</div>')
@@ -3500,6 +3504,25 @@ def _ticket_html(missing: list) -> str:
                 if cat == "Scaling Adjustment" else False
         note = (f'<div style="font-size:0.78rem;color:{P["warning"]};margin-top:3px">'
                 'Filters changed — re-run the preview.</div>') if stale else ""
+        # Several scopes: each one prices a different measure (VaR P&L,
+        # Stress sim P&L, FRTBDRC JTD loss, FRTBRRAO notional, …), so no
+        # blended money figure is shown here — the per-scope table below is
+        # the only place a measure appears. Rows/non-zero rows stay summed
+        # counts. _fmt_money(None) also renders "—", which reads as a real
+        # zero, so the money rows are dropped outright rather than rendered.
+        money_rows = ("" if len(_selected_scopes()) > 1 else
+                      f'{_roll_source_rows(s)}'
+                      f'<div class="kv"><span class="k">{_current_label(s)}</span>'
+                      f'<span class="v">{_fmt_money(s.get("TOTAL_CURRENT_VALUE"))}</span></div>'
+                      f'<div class="kv"><span class="k">'
+                      f'{"Added" if wiz.get("adjustment_type") == "Transfer" else "Adjustment"}'
+                      f'</span>'
+                      f'<span class="v">{_fmt_money(s.get("TOTAL_ADJUSTMENT_DELTA"))}</span></div>'
+                      f'<div class="kv"><span class="k">Projected</span>'
+                      f'<span class="v">{_fmt_money(s.get("TOTAL_PROJECTED_VALUE"))}</span></div>')
+        if len(_selected_scopes()) > 1:
+            money_rows += ('<div class="kv"><span class="k">Impact</span>'
+                           '<span class="v">per scope — see the table below</span></div>')
         imp = (f'<div class="t-imp">'
                f'<div style="font-size:0.78rem;font-weight:700;text-transform:uppercase;'
                f'letter-spacing:.07em;color:{P["grey_700"]};margin-bottom:3px">Impact preview</div>'
@@ -3507,15 +3530,7 @@ def _ticket_html(missing: list) -> str:
                f'<span class="v">{_safe_int(s.get("ROWS_AFFECTED")):,}</span></div>'
                f'<div class="kv"><span class="k">Non-zero rows</span>'
                f'<span class="v">{_safe_int(s.get("NONZERO_ROWS")):,}</span></div>'
-               f'{_roll_source_rows(s)}'
-               f'<div class="kv"><span class="k">{_current_label(s)}</span>'
-               f'<span class="v">{_fmt_money(s.get("TOTAL_CURRENT_VALUE"))}</span></div>'
-               f'<div class="kv"><span class="k">'
-               f'{"Added" if wiz.get("adjustment_type") == "Transfer" else "Adjustment"}'
-               f'</span>'
-               f'<span class="v">{_fmt_money(s.get("TOTAL_ADJUSTMENT_DELTA"))}</span></div>'
-               f'<div class="kv"><span class="k">Projected</span>'
-               f'<span class="v">{_fmt_money(s.get("TOTAL_PROJECTED_VALUE"))}</span></div>'
+               f'{money_rows}'
                f'{_overlap_rows(s)}'
                f'{note}</div>')
 
@@ -3543,9 +3558,13 @@ def _ticket_html(missing: list) -> str:
 def _run_preview() -> None:
     """Run the summary-mode preview SP and stash the single aggregate row.
 
-    Several scopes: previews each and sums the numeric totals. The summed
-    row hides a scope that matched nothing (VaR 1,234 + Stress 0 reads as
-    1,234 rows affected), so the per-scope row counts are stashed too —
+    Several scopes: previews each and sums only the COUNT columns (rows
+    affected, existing adjustments, …) into wiz['_preview_sum'] — the MEASURE
+    columns (current/adjustment/projected value, …) are blanked to None there
+    because each scope prices a different quantity and summing them is not a
+    number. The summed counts hide a scope that matched nothing (VaR 1,234 +
+    Stress 0 reads as 1,234 rows affected), so the per-scope row counts are
+    stashed too —
     wiz['_preview_by_scope'] — and drive the zero-row block. The full
     per-scope summary rows go to wiz['_preview_scopes'], which feeds the
     impact-by-scope table.
@@ -3599,6 +3618,13 @@ def _run_preview() -> None:
         # (_transfer_fallback_count), and the breakdown itself is loaded only
         # when the user opens it and asks.
 
+        # Only COUNTS may be added across scopes. Every other numeric column
+        # is a MEASURE — VaR P&L, Stress sim P&L, sensitivity measure, FRTB
+        # sensitivity amount, FRTBDRC JTD loss, FRTBRRAO notional — each
+        # scope prices a different quantity, so a cross-scope sum of those is
+        # not a number; blank it instead once more than one scope is in play.
+        _COUNT_COLS = {"ROWS_AFFECTED", "NONZERO_ROWS",
+                       "EXISTING_ADJ_COUNT", "EXISTING_ADJ_ROWS"}
         agg = None
         by_scope = {}
         per_scope = {}
@@ -3616,10 +3642,17 @@ def _run_preview() -> None:
                 agg = dict(row)     # copied: per_scope must not alias the total
             else:
                 for k, v in row.items():
-                    try:
-                        agg[k] = (agg.get(k) or 0) + (v or 0)
-                    except TypeError:
-                        pass    # non-numeric column — keep the first value
+                    if k in _COUNT_COLS:
+                        try:
+                            agg[k] = (agg.get(k) or 0) + (v or 0)
+                        except TypeError:
+                            pass    # non-numeric column — keep the first value
+                    else:
+                        try:
+                            (agg.get(k) or 0) + (v or 0)   # numeric column?
+                            agg[k] = None                  # MEASURE — blank it
+                        except TypeError:
+                            pass    # non-numeric column — keep the first value
         wiz["_preview_sum"] = agg
         wiz["_preview_by_scope"] = by_scope
         wiz["_preview_scopes"] = per_scope
@@ -4221,7 +4254,13 @@ with right:
             st.caption("Impact by scope")
             render_data_grid(pd.DataFrame(
                 [_imp_row(scope_label(sc), r) for sc, r in _scope_rows.items()]
+                # Total row: Rows is a real sum (_preview_sum keeps counts
+                # summed); the money columns are None there by design, so
+                # _fmt_money renders them as "—" rather than a blended total.
                 + [_imp_row("Total", s or {})]), height=260)
+            st.caption("Measures differ per scope — a VaR P&L, a jump-to-default "
+                       "loss and a notional are not comparable — so only the row "
+                       "count is totalled above.")
         elif preview_current and len(_by_scope) > 1:
             st.caption("Rows by scope: "
                        + " · ".join(f"{scope_label(sc)} {cnt:,}"

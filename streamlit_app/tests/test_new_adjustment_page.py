@@ -351,10 +351,13 @@ def _preview_scaling(at, scopes):
     return at.session_state["wiz"]
 
 
-def test_two_scope_preview_keeps_every_scope_row_and_sums_them():
-    """The ticket shows ONE impact figure; with several scopes that sum says
-    nothing about where the money lands, so the full per-scope summary rows
-    are kept as well — and the aggregate must still be their sum."""
+def test_two_scope_preview_sums_counts_and_blanks_measures():
+    """Each scope prices a different measure (VaR P&L, Stress sim P&L, a JTD
+    loss, a notional, ...), so a cross-scope sum of those is not a number.
+    Only COUNT columns (rows affected, non-zero rows, ...) are summed into
+    _preview_sum; the MEASURE columns are None there once more than one
+    scope is previewed. The full per-scope summary rows are kept as well —
+    they are now the only place a measure appears."""
     at = _load()
     w = _preview_scaling(at, ["VaR", "Stress"])
 
@@ -362,16 +365,33 @@ def test_two_scope_preview_keeps_every_scope_row_and_sums_them():
     assert w["_preview_scopes"]["VaR"]["ROWS_AFFECTED"] == 10
     assert w["_preview_scopes"]["Stress"]["ROWS_AFFECTED"] == 5
     assert w["_preview_by_scope"] == {"VaR": 10, "Stress": 5}
+    # Each scope's own measures are untouched by the other scope's preview.
+    assert w["_preview_scopes"]["VaR"]["TOTAL_CURRENT_VALUE"] == 1000.0
+    assert w["_preview_scopes"]["Stress"]["TOTAL_CURRENT_VALUE"] == 500.0
 
     s = w["_preview_sum"]
-    assert s["ROWS_AFFECTED"] == 15
-    assert s["TOTAL_CURRENT_VALUE"] == 1500.0
-    assert s["TOTAL_ADJUSTMENT_DELTA"] == 150.0
-    assert s["TOTAL_PROJECTED_VALUE"] == 1650.0
+    assert s["ROWS_AFFECTED"] == 15        # count — summed
+    assert s["NONZERO_ROWS"] == 15         # count — summed
+    assert s["TOTAL_CURRENT_VALUE"] is None       # measure — blanked
+    assert s["TOTAL_ADJUSTMENT_DELTA"] is None    # measure — blanked
+    assert s["TOTAL_PROJECTED_VALUE"] is None     # measure — blanked
     # The per-scope rows must not alias the aggregate that was built from them.
     assert w["_preview_scopes"]["VaR"]["ROWS_AFFECTED"] == 10
     # Both scopes' preview SQL, each under its own header.
     assert "-- VaR" in w["_preview_sql"] and "-- Stress" in w["_preview_sql"]
+
+
+def test_single_scope_preview_still_carries_its_measures():
+    """Exactly one scope previewed: _preview_sum behaves as before — the
+    measure columns are the scope's own values, not blanked."""
+    at = _load()
+    w = _preview_scaling(at, ["VaR"])
+
+    s = w["_preview_sum"]
+    assert s["ROWS_AFFECTED"] == 10
+    assert s["TOTAL_CURRENT_VALUE"] == 1000.0
+    assert s["TOTAL_ADJUSTMENT_DELTA"] == 100.0
+    assert s["TOTAL_PROJECTED_VALUE"] == 1100.0
 
 
 def test_two_scope_preview_renders_the_impact_split_with_a_total():
@@ -385,11 +405,47 @@ def test_two_scope_preview_renders_the_impact_split_with_a_total():
     assert grid is not None, [list(g.columns) for g in grids]
     assert list(grid["Scope"]) == ["VaR", "Stress", "Total"]
     assert list(grid["Rows"]) == ["10", "5", "15"]
-    assert list(grid["Adjustment"]) == ["100.00", "50.00", "150.00"]
+    # Each scope keeps its own measure; the Total row's measure is a dash —
+    # VaR's P&L and Stress's sim P&L are not a number to add together.
+    assert list(grid["Adjustment"]) == ["100.00", "50.00", "—"]
     assert any("Impact by scope" in c.value for c in at.caption), \
         [c.value for c in at.caption]
     # The old one-line caption is replaced, not shown alongside.
     assert not any("Rows by scope" in c.value for c in at.caption)
+    # The caption explaining why the Total row's measure is a dash.
+    assert any("Measures differ per scope" in c.value for c in at.caption), \
+        [c.value for c in at.caption]
+
+
+def test_two_scope_ticket_shows_no_blended_money_figure():
+    """The ticket's Impact preview block must not render a summed money
+    figure across scopes — it points at the per-scope table instead."""
+    at = _load()
+    w = _preview_scaling(at, ["VaR", "Stress"])
+    texts = " ".join(m.value for m in at.markdown)
+
+    assert "per scope — see the table below" in texts
+    # The blended total that used to appear here (VaR 100 + Stress 50).
+    assert "150.00" not in texts
+    # Sanity: the summed-money string really would have appeared under the
+    # old behaviour — prove the aggregate itself carries no such figure.
+    assert w["_preview_sum"]["TOTAL_ADJUSTMENT_DELTA"] is None
+
+
+def test_two_scope_impact_table_total_row_shows_dash_for_money():
+    at = _load()
+    _preview_scaling(at, ["VaR", "Stress"])
+
+    grids = [d.value for d in at.dataframe]
+    grid = next((g for g in grids
+                 if "Scope" in list(g.columns) and "Adjustment" in list(g.columns)),
+                None)
+    assert grid is not None, [list(g.columns) for g in grids]
+    total = grid[grid["Scope"] == "Total"].iloc[0]
+    assert total["Current"] == "—"
+    assert total["Adjustment"] == "—"
+    assert total["Projected"] == "—"
+    assert total["Rows"] == "15"
 
 
 def test_single_scope_preview_renders_no_split_table():

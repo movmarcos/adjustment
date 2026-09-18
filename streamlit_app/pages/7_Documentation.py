@@ -136,7 +136,10 @@ Adjustment categories:
   another COB's adjusted values forward).
   Scaling and Entity Roll accept SEVERAL data scopes at once — the app
   creates one adjustment per selected scope. With several scopes the filter
-  form offers only the fields every selected scope supports.
+  form offers only the fields every selected scope supports. Each scope
+  measures a different quantity (VaR P&L vs Stress sim P&L vs a JTD loss vs
+  a notional, etc.), so the preview never sums those figures across scopes —
+  it shows them per scope only; row counts are the only thing totalled.
   Transfer Book (Scaling type): at one COB the SOURCE book's adjusted values
   are ADDED to the TARGET book (source untouched), times a scale factor
   exactly like Roll (1 adds a copy of the source book as-is, 1.10 adds 10%
@@ -716,9 +719,11 @@ with tab_create:
         f'eight main fields (Entity, Source System, Department, Book, Instrument, '
         f'Strategy, Trade Typology, Trade Code) plus, under <em>More filters</em>, only '
         f'the fields <em>every</em> selected scope supports; a filter that a newly '
-        f'added scope cannot use is cleared and you are told which. The preview '
-        f'shows the impact per scope and a total; a scope that matches 0 rows blocks '
-        f'Submit until you deselect it or fix the filters.', "#7E22CE"))
+        f'added scope cannot use is cleared and you are told which. Each scope '
+        f'measures a different quantity (a VaR P&amp;L, a jump-to-default loss, a '
+        f'notional, …), so the preview shows the figures per scope and never sums '
+        f'them into a blended total — only row counts are totalled; a scope that '
+        f'matches 0 rows blocks Submit until you deselect it or fix the filters.', "#7E22CE"))
     _html(_card(
         f'{icon("eye", size=13, color=P["info"])} <strong>Impact preview:</strong> '
         f'for narrow scopes (book/department level) run the preview before '

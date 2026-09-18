@@ -135,11 +135,21 @@ Rendering:
   for Transfer, §5). Result aggregation as today: all accepted → success
   screen listing the created ids per scope; any failure → `status: "Error"`
   naming accepted scopes and failures, no rollback.
-- `_run_preview`: loop over scopes, sum numeric summary columns (existing
-  code, generalised); per-row breakdown/sample shown only for a single scope
-  (existing rule). For Transfer with several trades the preview runs per
-  scope with all selected trades in one call (the preview accepts a list,
-  §6) and reports one row per trade in `breakdown` mode.
+- `_run_preview`: loop over scopes, ~~sum numeric summary columns (existing
+  code, generalised)~~. **Amended 2026-09-18 (Marcos)** — only the COUNT
+  columns (`ROWS_AFFECTED`, `NONZERO_ROWS`, `EXISTING_ADJ_COUNT`,
+  `EXISTING_ADJ_ROWS`) are summed across scopes; every MEASURE column
+  (`TOTAL_CURRENT_VALUE`, `TOTAL_ADJUSTMENT_DELTA`, `TOTAL_PROJECTED_VALUE`,
+  `SOURCE_*_VALUE`, `EXISTING_ADJ_VALUE`) is set to `None` in the aggregate
+  once more than one scope is previewed, and is shown per scope only. Each
+  scope's metric column (VaR P&L, Stress sim P&L, sensitivity measure, FRTB
+  sensitivity amount, FRTBDRC JTD loss, FRTBRRAO notional — see
+  `ADJUSTMENTS_SETTINGS`) is a different quantity in USD, so summing them
+  across scopes produced a number that looked plausible but meant nothing.
+  Single-scope preview is unaffected. Per-row breakdown/sample shown only
+  for a single scope (existing rule). For Transfer with several trades the
+  preview runs per scope with all selected trades in one call (the preview
+  accepts a list, §6) and reports one row per trade in `breakdown` mode.
 - `_signoff_scopes` returns the selected list; the sign-off panel already
   loops per scope.
 - Ticket summary: "Scopes: VaR, Stress — 2 adjustments will be created"
