@@ -485,13 +485,19 @@ def main(session, p_adjustment):
         #     base fact (cheap, COB-pruned) + the EXISTING_ADJ_VALUE literal
         # and the second view scan is gone. The DISPLAYED number is unchanged.
         #
-        # The overlap query is best-effort (it yields the literal NULL when it
-        # fails, or in mode='sql' where it is not run at all). Falling back to
-        # base-only would silently understate "current", so when there is no
-        # real number to add, the old view-reading shape is used instead —
+        # The overlap query is best-effort: it yields the literal NULL when it
+        # fails, AND it is deliberately not executed at all in mode='sql'.
+        # Falling back to base-only would silently understate "current", so
+        # the fast shape is taken ONLY when there is a real number to add —
         # correctness first, speed when it is free.
+        #
+        # mode='sql' therefore always gets the self-contained, view-reading
+        # shape. That panel is what users copy out to audit a number, so the
+        # statement it shows has to reproduce the preview on its own; the fast
+        # shape cannot, because its "current" depends on a literal substituted
+        # from a query that sql mode never ran.
         _have_ov = ov["EXISTING_ADJ_VALUE"] != "NULL"
-        if adj_rows_tbl and (_have_ov or mode == "sql"):
+        if adj_rows_tbl and _have_ov:
             tgt_cte = f"""tgt AS (
             -- The BASE fact, plus the adjustments the overlap query already
             -- counted (substituted below as a literal) — together exactly the
@@ -517,13 +523,23 @@ def main(session, p_adjustment):
         # The breakdown's own target-trade lookup: pinned to the trade codes
         # the user picked, when they picked any (a whole-book breakdown has to
         # see them all). UPPER() on the column — see the join comment below.
+        # Every spelling the caller's book could have been sent as (as given,
+        # trimmed, and both upper-cased) — see the comment at the join.
+        _brk_tt_books = ", ".join(
+            f"'{_esc(b)}'" for b in sorted(
+                {str(tgt_book), str(tgt_book).strip(),
+                 str(tgt_book).upper(), str(tgt_book).strip().upper()}))
         # Gated on the SAME condition as src_where's trade predicate: if the
         # source rows are not restricted to these codes, neither may tt be, or
         # a trade outside the list would be mislabelled "fallback".
+        # Both the padded and the trimmed spelling, upper-cased to match the
+        # UPPER() on the column.
         _brk_tt_trade = ""
         if trade_codes and has_trade_key:
             _brk_tt_trade = ("\n              AND UPPER(TRADE_CODE) IN ("
-                             + ", ".join(f"'{_esc(t).upper()}'" for t in trade_codes)
+                             + ", ".join(f"'{_esc(t)}'" for t in sorted(
+                                 {s for t in trade_codes
+                                  for s in (str(t).upper(), str(t).strip().upper())}))
                              + ")")
 
         transfer_summary = f"""
@@ -572,17 +588,22 @@ def main(session, p_adjustment):
         -- de-duplicate the whole COB-effective dimension before the ON clause
         -- narrowed it to one book. The target book (and, when the user picked
         -- trades, the trade codes) are pinned INSIDE, ahead of the window.
-        -- BOOK_CODE is compared bare — tgt_book comes from the app's book
-        -- dropdown, i.e. out of DIMENSION.BOOK, so it is canonical and
-        -- wrapping the column would only cost the pruning. TRADE_CODE keeps
-        -- UPPER(), matching the case-insensitive join below (it is compared
-        -- against the SOURCE row's spelling); it is free once the book
-        -- predicate has cut the scan down.
+        -- BOOK_CODE is compared BARE (wrapping the filtered column is what
+        -- defeats pruning) but against EVERY SPELLING the caller could have
+        -- sent: the payload's book is not guaranteed canonical — SP_SUBMIT
+        -- validates books case-insensitively and stores the caller's own
+        -- spelling, and ADJ_HEADER is COLLATE 'en-ci'. A single equality
+        -- could match nothing here while the join below (UPPER) still
+        -- matched, mislabelling every trade as "fallback". Stored values are
+        -- compared un-stripped by the join, so the un-stripped spelling is
+        -- emitted too. TRADE_CODE keeps UPPER(), matching the
+        -- case-insensitive join (it is compared against the SOURCE row's
+        -- spelling); it is free once the book predicate has cut the scan down.
         LEFT JOIN (
             SELECT TRADE_KEY, TRADE_CODE, BOOK_CODE
             FROM DIMENSION.TRADE
             WHERE {_cob_date} BETWEEN EFFECTIVE_START_DATE AND EFFECTIVE_END_DATE
-              AND BOOK_CODE = '{_esc(tgt_book)}'{_brk_tt_trade}
+              AND BOOK_CODE IN ({_brk_tt_books}){_brk_tt_trade}
             QUALIFY ROW_NUMBER() OVER (
                 PARTITION BY UPPER(TRADE_CODE), UPPER(BOOK_CODE)
                 ORDER BY EFFECTIVE_START_DATE DESC, TRADE_KEY DESC) = 1

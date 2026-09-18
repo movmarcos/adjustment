@@ -316,3 +316,129 @@ def test_trf07_source_book_is_stripped_from_non_transfers(session, ev):
     ev.check("stored as a Scale", h and h[0]["ADJUSTMENT_TYPE"] == "Scale")
     ev.check("SOURCE_BOOK_CODE was stripped — the Scale is not a pseudo-transfer",
              h and h[0]["SOURCE_BOOK_CODE"] is None)
+
+
+@pytest.mark.uat("TRF-08", title="The preview's target 'current' equals the adjusted view's own total for the same filter", priority="P1")
+def test_trf08_current_value_equals_the_adjusted_view(session, ev):
+    """THE check the cheap target-side rewrite relies on (perf pass,
+    2026-09-18).
+
+    04_sp_preview_adjustment.sql used to obtain a transfer's
+    TOTAL_CURRENT_VALUE by scanning the scope's FACT_ADJUSTED_TABLE (the
+    combined view) for the target book — the second of two scans of an
+    expensive object per preview. It now computes the same number as
+
+        SUM(base fact for the target filter)
+      + EXISTING_ADJ_VALUE                      -- the overlap query's sum of
+                                                -- ADJUSTMENTS_TABLE in scope
+
+    That rewrite is sound ONLY IF
+
+        adjusted(target) == base(target) + SUM(ADJUSTMENTS_TABLE in scope)
+
+    which holds because supersede is a physical DELETE from the adjustment
+    table (so nothing stale is counted) and the combined/adjusted objects are
+    plain views over fact + adjustments. But those views live UPSTREAM and are
+    not in this repo — nothing here can prove the premise by reading. This case
+    pins it against the real objects: it takes the preview's own
+    TOTAL_CURRENT_VALUE and compares it with an INDEPENDENT sum of the
+    FACT_ADJUSTED_TABLE over the same target predicates.
+
+    If this case ever fails, the preview's "current" (and therefore
+    "projected") is wrong by exactly the amount the two sides disagree — revert
+    04's `tgt` CTE to reading FACT_ADJUSTED_TABLE directly.
+
+    The target predicates mirror 04's `tgt_where` for a whole-book transfer:
+    COBID, the DIMENSION.BOOK semi-join on the target book, and the metric
+    NOT NULL. The metric is the scope's USD column when the view has one,
+    exactly as 04 chooses it (`primary_metric`).
+    """
+    scope = "VaR"
+    cfg = ev.sql("Scope settings", f"""
+        SELECT FACT_ADJUSTED_TABLE, METRIC_NAME, METRIC_USD_NAME
+        FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
+        WHERE UPPER(PROCESS_TYPE) = UPPER('{scope}') AND IS_ACTIVE = TRUE""")
+    if not cfg or not cfg[0]["FACT_ADJUSTED_TABLE"]:
+        ev.note("Skipped", f"{scope} has no FACT_ADJUSTED_TABLE configured — a "
+                           f"transfer preview refuses outright in that case, so "
+                           f"there is no 'current' to compare.")
+        return
+    view = str(cfg[0]["FACT_ADJUSTED_TABLE"])
+    m_name, m_usd = str(cfg[0]["METRIC_NAME"]), str(cfg[0]["METRIC_USD_NAME"] or "")
+
+    # Which columns the view actually has — 04 prefers the USD metric and
+    # needs BOOK_KEY for the book semi-join.
+    _parts = view.upper().split(".")
+    _schema, _tbl = (_parts[-2], _parts[-1]) if len(_parts) > 1 else ("", _parts[-1])
+    cols = ev.sql("Adjusted-view columns", f"""
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = '{_schema}' AND TABLE_NAME = '{_tbl}'""", max_rows=0)
+    colset = {str(c["COLUMN_NAME"]).upper() for c in cols}
+    if not colset:
+        ev.note("Skipped", f"Could not read the columns of {view} from "
+                           f"INFORMATION_SCHEMA — cannot build the independent "
+                           f"sum without knowing which metric column it carries.")
+        return
+    if "BOOK_KEY" not in colset:
+        ev.note("Skipped", f"{view} has no BOOK_KEY, so 04 builds no book "
+                           f"semi-join for this scope and the target filter this "
+                           f"case reproduces does not exist.")
+        return
+    metric = m_usd if (m_usd and m_usd.upper() in colset) else m_name
+    ev.note("Comparison basis", f"view={view} metric={metric} book={TGT} cob={FAKE_COB}")
+
+    # ── 1. The preview's own number ──────────────────────────────────────
+    payload = json.dumps({"cobid": FAKE_COB, "process_type": scope,
+                          "adjustment_type": "Transfer", "source_cobid": FAKE_COB,
+                          "scale_factor": 1, "book_code": TGT,
+                          "source_book_code": SRC, "mode": "summary"})
+    out = rows(session, f"CALL {SP_PREVIEW}('{payload}')")
+    ev.note("Preview summary", str(out)[:600])
+    r = out[0] if out else None
+    if not r or "TOTAL_CURRENT_VALUE" not in r:
+        ev.note("Skipped", "SP_PREVIEW_ADJUSTMENT returned no summary row (an "
+                           "error/MESSAGE row, or nothing) — the fake COB holds "
+                           f"no rows for {SRC} / {TGT}. Point "
+                           "TEST_TRF_SRC_BOOK / TEST_TRF_TGT_BOOK at books with "
+                           "data at a real COB to exercise the equivalence.")
+        return
+    preview_current = r["TOTAL_CURRENT_VALUE"]
+
+    # ── 2. The adjusted view's own total, same predicates ────────────────
+    indep = ev.sql("Adjusted view total for the target filter", f"""
+        SELECT COUNT(*) AS N, SUM(fact.{metric}) AS V
+        FROM {view} fact
+        WHERE fact.COBID = {FAKE_COB}
+          AND EXISTS (SELECT 1 FROM DIMENSION.BOOK bk
+                      WHERE bk.BOOK_KEY = fact.BOOK_KEY
+                        AND bk.BOOK_CODE = '{TGT}')
+          AND fact.{metric} IS NOT NULL""")
+
+    if not indep or int(indep[0]["N"] or 0) == 0:
+        ev.note("Skipped", f"{view} carries no rows for book {TGT} at COB "
+                           f"{FAKE_COB}, so both sides are empty and the "
+                           f"comparison cannot discriminate. Point the test at a "
+                           f"target book with data at a real COB.")
+        return
+
+    view_total = float(indep[0]["V"] or 0)
+    cur = float(preview_current or 0)
+
+    def _close(a, b):
+        # Relative tolerance — these are NUMBER(19,4)-ish sums of many rows.
+        return abs(a - b) <= 1e-6 * max(1.0, abs(a), abs(b))
+
+    ev.note("Figures", f"preview TOTAL_CURRENT_VALUE={cur} "
+                       f"adjusted-view SUM({metric})={view_total} "
+                       f"difference={cur - view_total}")
+    ev.note("Discriminating?",
+            "yes — the adjusted view's total for this book is non-zero, so "
+            "base-only and base+adjustments would differ"
+            if abs(view_total) > 0 else
+            "NO — the view's total is 0 for this book, so an understated "
+            "'current' would look identical. Point the test at a target book "
+            "that carries rows at this COB.")
+    ev.check("the preview's target 'current' equals the adjusted view's own "
+             "total for the same filter (base + existing adjustments == "
+             "adjusted) — the premise 04's cheap tgt CTE relies on",
+             _close(cur, view_total))

@@ -1370,35 +1370,61 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             # books' '<BOOK>/Adjustment' carrier codes, and — only when EVERY
             # transfer header names a trade — the batch's trade codes.
             #
-            # BOOK_CODE is compared BARE: the header's book came from the
-            # app's book dropdown, i.e. straight out of DIMENSION.BOOK, so it
-            # is the canonical spelling and wrapping the column in UPPER()
-            # would only cost the pruning. The TRADE_CODE lists keep UPPER()
-            # on the column, because those values are NOT canonical — `ta`'s
-            # are SYNTHESISED ('<book>' || '/Adjustment') and `tt`'s are
-            # matched against the SOURCE row's spelling, which is exactly why
-            # the joins below read them case-insensitively. That UPPER() costs
-            # nothing here: the bare BOOK_CODE predicate has already cut the
-            # scan down to one book.
+            # BOOK_CODE is compared BARE — wrapping the filtered column in
+            # UPPER() is what defeats pruning — but it is compared against
+            # EVERY SPELLING the header could carry, not one. The header's
+            # book is NOT guaranteed canonical: SP_SUBMIT validates the book
+            # case-insensitively and then stores the CALLER'S spelling, and
+            # ADJ_HEADER's columns are COLLATE 'en-ci', so a header can
+            # legitimately hold 'b2' where DIMENSION.TRADE holds 'B2'. A
+            # single equality would then match nothing in the pre-filter while
+            # the outer join (which uses UPPER) still matched — every
+            # transferred row would silently fall back to the SOURCE trade key
+            # under the target book: totals unchanged, trade attribution
+            # wrong, and diverging from what the preview breakdown reported.
+            # Emitting the variants keeps the predicate a prunable literal
+            # list. Stored values are compared un-stripped by the joins, so
+            # the un-stripped spelling is emitted too — a trailing space would
+            # otherwise miss the pre-filter while still matching the join.
+            #
+            # The TRADE_CODE lists keep UPPER() on the column, because those
+            # values are not canonical either — `ta`'s are SYNTHESISED
+            # ('<book>' || '/Adjustment') and `tt`'s are matched against the
+            # SOURCE row's spelling, which is exactly why the joins below read
+            # them case-insensitively. That UPPER() costs nothing here: the
+            # BOOK_CODE predicate has already cut the scan down to one book.
+            def _spellings(v):
+                """Every spelling of `v` a stored column might hold: as given,
+                trimmed, and both upper-cased (ADJ_HEADER is case-insensitive
+                and may keep the caller's own casing / padding)."""
+                s = str(v)
+                return {s, s.strip(), s.upper(), s.strip().upper()}
+
             transfer_books_str = transfer_adj_codes_str = transfer_trades_str = ""
             if has_transfer:
                 _trf_hdr = (df_adj_scale
                             .filter(col('SOURCE_BOOK_CODE').isNotNull())
                             .select("BOOK_CODE", "TRADE_CODE").collect())
-                _tbooks = sorted({str(r["BOOK_CODE"]).strip() for r in _trf_hdr
-                                  if r["BOOK_CODE"] not in (None, "")})
+                _braw = [r["BOOK_CODE"] for r in _trf_hdr
+                         if r["BOOK_CODE"] not in (None, "")]
+                _tbooks = sorted({s for b in _braw for s in _spellings(b)})
                 transfer_books_str = ", ".join(_erl_s(b) for b in _tbooks)
+                # Matched with UPPER() on the column, so one spelling each.
                 transfer_adj_codes_str = ", ".join(
-                    _erl_s((b + "/Adjustment").upper()) for b in _tbooks)
+                    _erl_s(c) for c in sorted(
+                        {(str(b).strip() + "/Adjustment").upper() for b in _braw}))
                 _tcodes = [r["TRADE_CODE"] for r in _trf_hdr]
                 # A whole-book transfer has TRADE_CODE NULL and must still see
                 # every trade, so the trade list is usable only when no header
                 # in the batch is whole-book. Empty list → no predicate (never
                 # `IN ()`), i.e. the old unfiltered subquery.
                 if _tcodes and all(c not in (None, "") for c in _tcodes):
+                    # UPPER() on the column handles the casing; the stripped
+                    # and un-stripped spellings are both emitted for padding.
                     transfer_trades_str = ", ".join(
                         _erl_s(c) for c in sorted(
-                            {str(c).strip().upper() for c in _tcodes}))
+                            {s for t in _tcodes
+                             for s in (str(t).upper(), str(t).strip().upper())}))
 
             # Store RUN_LOG_ID in ADJ_HEADER for traceability
             session.sql(f"""

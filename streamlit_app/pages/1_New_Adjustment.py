@@ -1705,6 +1705,22 @@ def _book_trade_options(book_code):
     return [str(r[0]) for r in rows if r[0] is not None]
 
 
+def _ref_rows_checked(sql: str, cache_key: str):
+    """Like _ref_rows, but tells the caller whether the query actually RAN.
+
+    Returns (rows, ok). _ref_rows caches `[]` for a failed query, which is
+    indistinguishable from "no rows" — fine for a dropdown (an empty list of
+    options), wrong for a NOT-FOUND count, where it would turn a broken query
+    into "none of these trades exist" and raise a false warning for the rest of
+    the session."""
+    if cache_key not in st.session_state:
+        try:
+            st.session_state[cache_key] = (run_query(sql), True)
+        except Exception:
+            st.session_state[cache_key] = ([], False)
+    return st.session_state[cache_key]
+
+
 def _transfer_fallback_count(tgt_book, cobid, trade_codes):
     """How many of the SELECTED trades have no version under the TARGET book at
     this COB. Those rows land on the target's '<BOOK>/Adjustment' trade
@@ -1728,32 +1744,52 @@ def _transfer_fallback_count(tgt_book, cobid, trade_codes):
     answer matches what the engine will actually do.
 
     Scope-independent by construction (the trade dimension has no scope),
-    which is why the count no longer varies per process type."""
-    tgt = (tgt_book or "").strip().replace("\\", "\\\\").replace("'", "''")
-    picked = [str(t).strip() for t in (trade_codes or []) if str(t).strip()]
-    if not tgt or not picked:
+    which is why the count no longer varies per process type.
+
+    Returns None when the query could not be run — "not found" and "could not
+    ask" must not be confused, or a broken query would read as "every trade is
+    missing" and raise a false warning. Callers skip the warning on None, the
+    way the old breakdown-based count did when its SP call failed."""
+    def _esc(v):
+        return str(v).replace("\\", "\\\\").replace("'", "''")
+
+    tgt_raw = str(tgt_book or "")
+    picked = [str(t) for t in (trade_codes or []) if str(t).strip()]
+    if not tgt_raw.strip() or not picked:
         return 0
     try:
         cob = int(cobid)
     except (TypeError, ValueError):
         return 0
-    # Both literals bare: the trade codes came from _book_trade_options (i.e.
-    # out of DIMENSION.TRADE) and the book out of DIMENSION.BOOK, so both are
-    # canonical already — no UPPER() on either filtered column (rule 3).
-    _lits = ", ".join(
-        "'" + t.replace("\\", "\\\\").replace("'", "''") + "'" for t in picked)
+    # Both columns stay BARE so the scan prunes, and each is compared against
+    # every spelling the value could be stored as — as given, trimmed, and
+    # upper-cased. The picker feeds these codes straight from DIMENSION.TRADE
+    # and the book from DIMENSION.BOOK, but a draft can also be restored from
+    # a header, where ADJ_HEADER's 'en-ci' collation means the stored spelling
+    # is the CALLER's, not the dimension's.
+    def _variants(vals):
+        out = set()
+        for v in vals:
+            s = str(v)
+            out.update({s, s.strip(), s.upper(), s.strip().upper()})
+        return sorted(out)
+
+    _books = ", ".join(f"'{_esc(b)}'" for b in _variants([tgt_raw]))
+    _lits = ", ".join(f"'{_esc(t)}'" for t in _variants(picked))
     cob_date = f"TO_DATE('{cob}', 'YYYYMMDD')"
-    key = ("_ref_trf_fb_" + tgt.upper() + "|" + str(cob) + "|"
-           + ",".join(sorted(t.upper() for t in picked)))
-    rows = _ref_rows(
+    key = ("_ref_trf_fb_" + tgt_raw.strip().upper() + "|" + str(cob) + "|"
+           + ",".join(sorted(t.strip().upper() for t in picked)))
+    rows, ok = _ref_rows_checked(
         f"SELECT TRADE_CODE FROM DIMENSION.TRADE "
-        f"WHERE BOOK_CODE = '{tgt}' AND TRADE_CODE IN ({_lits}) "
+        f"WHERE BOOK_CODE IN ({_books}) AND TRADE_CODE IN ({_lits}) "
         f"AND {cob_date} BETWEEN EFFECTIVE_START_DATE AND EFFECTIVE_END_DATE",
         key)
+    if not ok:
+        return None
     # Compared case-insensitively here (free in Python) so the count matches
     # the engine's own case-insensitive trade join.
     found = {str(r[0]).strip().upper() for r in rows if r and r[0] is not None}
-    return sum(1 for t in {t.upper() for t in picked} if t not in found)
+    return sum(1 for t in {t.strip().upper() for t in picked} if t not in found)
 
 
 def _render_transfer_fields() -> None:
@@ -3294,8 +3330,14 @@ def _current_label(s: dict) -> str:
     Roll: the target COB's ORIGINAL total — the engine flattens it, so that is
     what the projection replaces. Transfer Book: the target book's ADJUSTED
     total (originals + the adjustments already on it), because a transfer adds
-    on top of all of it and supersedes none of it — 04 reads
-    FACT_ADJUSTED_TABLE for the target side of a transfer only.
+    on top of all of it and supersedes none of it.
+
+    HOW 04 gets that adjusted total changed on 2026-09-18 (perf): it normally
+    sums the BASE fact and adds the overlap query's EXISTING_ADJ_VALUE — the
+    same adjustment rows, from the small COB-pruned ADJUSTMENTS_TABLE. It falls
+    back to reading FACT_ADJUSTED_TABLE only when that overlap value is
+    unavailable (and in mode='sql', where the shown statement must stand on its
+    own). Either way the NUMBER this labels is the same.
     """
     if wiz.get("adjustment_type") == "Transfer":
         return "Target current (incl. its adjustments)"
@@ -3592,8 +3634,12 @@ def _run_preview() -> None:
                     wiz.get("target_book_code"), wiz.get("cobid"),
                     wiz.get("transfer_trade_codes"))
             except Exception:
-                _n_fb = 0       # advisory — never fail a preview on it
-            wiz["_transfer_fallbacks"] = {sub: _n_fb for sub in subtypes}
+                _n_fb = None    # advisory — never fail a preview on it
+            # None = the dimension could not be asked. Left EMPTY rather than
+            # zero-filled, so the warning stays silent instead of claiming
+            # every selected trade is missing from the target book.
+            wiz["_transfer_fallbacks"] = ({} if _n_fb is None
+                                          else {sub: _n_fb for sub in subtypes})
         else:
             wiz["_transfer_fallbacks"] = None
         wiz["_preview_for"] = json.dumps(payload, sort_keys=True, default=str)
@@ -4396,6 +4442,12 @@ if wiz.get("category") == "Scaling Adjustment" and wiz.get("_preview_sum") \
                 _df_brk = st.session_state.get(_brk_key)
                 if _df_brk is not None and not _df_brk.empty:
                     render_data_grid(_df_brk, height=300)
+                elif _df_brk is not None:
+                    # Loaded, but the SP returned nothing — say so, or the
+                    # button looks dead.
+                    st.info("No per-trade rows came back for these filters. "
+                            "The summary above still stands; a breakdown needs "
+                            "source rows carrying a trade key.")
     elif total_rows > 0:
         with st.expander("Breakdown by book / department / entity", expanded=False):
             try:

@@ -479,7 +479,10 @@ def test_transfer_preview_counts_fallback_trades_from_the_trade_dimension():
     # are literals, so it can return at most one row per selected trade.
     dim = [c for c in CALLS if "DIMENSION.TRADE" in c]
     assert len(dim) == 1, dim
-    assert "BOOK_CODE = 'B2'" in dim[0] and "TRADE_CODE IN ('T1', 'T2')" in dim[0]
+    assert "BOOK_CODE IN ('B2')" in dim[0], dim[0]
+    assert "TRADE_CODE IN ('T1', 'T2')" in dim[0], dim[0]
+    # Bare columns: wrapping the filtered column is what defeats pruning.
+    assert "UPPER(BOOK_CODE)" not in dim[0] and "UPPER(TRADE_CODE)" not in dim[0]
     # The ≥ 2 fallback warning fires ONCE — the count is scope-independent.
     warns = [x.value for x in at.warning]
     assert len([x for x in warns
@@ -709,5 +712,83 @@ def test_the_per_trade_breakdown_is_loaded_only_on_request():
         grid = next((d.value for d in at.dataframe
                      if "Target trade" in list(d.value.columns)), None)
         assert grid is not None and list(grid["Trade"]) == ["T1"]
+    finally:
+        monkey.undo()
+
+
+def test_fallback_count_query_tolerates_the_stored_casing():
+    """ADJ_HEADER is COLLATE 'en-ci' and SP_SUBMIT stores the CALLER'S
+    spelling, so a draft can carry 't1' where DIMENSION.TRADE has 'T1'. The
+    pre-filter stays a bare, prunable literal list — it just carries every
+    spelling instead of one, or the count would read as "all missing" and fire
+    a false warning. The book goes through the same variant expansion, which is
+    why its predicate is an IN-list rather than an equality.
+    """
+    at = _load()
+    _seed_ref_data(at)
+    at.session_state["_ref_trades_B1"] = [["t1"]]
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": "Scaling Adjustment",
+                               "adjustment_type": "Transfer",
+                               "process_types": ["VaR"], "process_type": "VaR",
+                               "cobid": 20260101,
+                               "source_book_code": "B1", "target_book_code": "B2",
+                               "transfer_trade_codes": ["t1"],
+                               "transfer_pick_trades": True,
+                               "adjustment_category": "Cat", "reason": "why",
+                               "result": None, "step": 1}
+    at.run(); assert not at.exception, at.exception
+    CALLS.clear()
+    at.button(key=f"run_preview_{at.session_state['_wiz_v']}").click().run()
+    assert not at.exception, at.exception
+    dim = [c for c in CALLS if "DIMENSION.TRADE" in c]
+    assert len(dim) == 1, dim
+    # Both spellings of the trade code, as bare literals.
+    assert "'t1'" in dim[0] and "'T1'" in dim[0], dim[0]
+    # The book predicate is a literal LIST, so it can carry its variants too.
+    assert "BOOK_CODE IN (" in dim[0], dim[0]
+    assert "UPPER(BOOK_CODE)" not in dim[0] and "UPPER(TRADE_CODE)" not in dim[0]
+
+
+def test_a_failed_fallback_query_raises_no_warning():
+    """_ref_rows caches [] for a FAILED query, which reads identically to "no
+    rows" — i.e. "none of these trades exist in the target book". That would
+    fire a false warning for the rest of the session, so the count must
+    distinguish "could not ask" from "not found" and stay silent."""
+    class NoDimSQL(SQL):
+        def collect(self):
+            if "DIMENSION.TRADE" in self.q:
+                CALLS.append(self.q)
+                raise RuntimeError("dimension unavailable")
+            return SQL.collect(self)
+
+    class NoDimSess:
+        def sql(self, q, *a, **k): return NoDimSQL(q)
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(sc, "get_session", lambda: NoDimSess())
+    try:
+        at = _load()
+        _seed_ref_data(at)
+        at.session_state["wiz"] = {**at.session_state["wiz"],
+                                   "category": "Scaling Adjustment",
+                                   "adjustment_type": "Transfer",
+                                   "process_types": ["VaR"], "process_type": "VaR",
+                                   "cobid": 20260101,
+                                   "source_book_code": "B1", "target_book_code": "B2",
+                                   "transfer_trade_codes": ["T1", "T2"],
+                                   "transfer_pick_trades": True,
+                                   "adjustment_category": "Cat", "reason": "why",
+                                   "result": None, "step": 1}
+        at.run(); assert not at.exception, at.exception
+        at.button(key=f"run_preview_{at.session_state['_wiz_v']}").click().run()
+        assert not at.exception, at.exception
+        # No count at all — not a zero-filled one that reads as "all missing".
+        assert at.session_state["wiz"]["_transfer_fallbacks"] == {}
+        warns = [x.value for x in at.warning]
+        assert not [x for x in warns
+                    if "of the selected trades have no version" in x], warns
+        # The numbers themselves are unaffected.
+        assert at.session_state["wiz"]["_preview_sum"]["ROWS_AFFECTED"] == 10
     finally:
         monkey.undo()
