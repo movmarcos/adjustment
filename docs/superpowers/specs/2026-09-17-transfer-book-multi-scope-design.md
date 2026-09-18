@@ -15,16 +15,18 @@ Status: approved in conversation; awaiting spec review.
    (Entity Code, Source System, Department Code, Book Code, Instrument Code,
    Strategy, Trade Typology, Trade Code) and **More filters** shows only the
    fields the engine can apply to *every* selected scope.
-4. New Scaling adjustment type **Transfer Book**: at one COB, the target book
-   is replaced by the source book's adjusted values (Roll semantics with the
-   book swapped for the COB). Source book untouched. Optional trade codes
+4. New Scaling adjustment type **Transfer Book**: at one COB, the source
+   book's adjusted values (× a scale factor) are **added** to the target book
+   — *amended 2026-09-18 by Marcos; this originally read "the target book is
+   replaced by the source book's adjusted values"*. Source book untouched, and
+   the target book keeps everything it already has. Optional trade codes
    restrict the transfer; **one adjustment per trade code** (and per scope).
 
 Decisions taken by Marcos during design:
 
 | Question | Decision |
 |---|---|
-| Transfer semantics | **Copy, like Roll**: target book's rows in scope are flattened and replaced by the source book's adjusted values; source untouched. |
+| Transfer semantics | ~~**Copy, like Roll**: target book's rows in scope are flattened and replaced by the source book's adjusted values; source untouched.~~ **Amended 2026-09-18 (Marcos) — APPEND, not replace**: the source book's adjusted values × the scale factor are *added* to the target book. Nothing already on the target (its originals or its own adjustments) is flattened or superseded; source untouched. `combined(target) = whatever the target already had + factor × adjusted(source)`. |
 | Trade with no version under the target book at the COB | Copied rows use the target book's `'<BOOK_CODE>/Adjustment'` trade (same fallback as the Direct path). |
 | Engine placement | Extend the Scale path (netted UNION) rather than a new action or Direct line items. |
 | Multi-scope | Client-side fan-out (generalised FRTBALL loop), no new server contract. |
@@ -238,9 +240,13 @@ NULL`; `is_cross_cob := adjust.COBID <> adjust.SOURCE_COBID`.
                            AND SOURCE_BOOK_CODE IS NULL                 (changed)
 ② roll (cross-COB):        unchanged
 ②T transfer (new):         see below
-③ flatten target:          fact.COBID = COBID AND (COBID <> SOURCE_COBID
-                           OR SOURCE_BOOK_CODE IS NOT NULL)            (changed)
+③ flatten target:          fact.COBID = COBID AND COBID <> SOURCE_COBID
 ```
+
+> **Amended 2026-09-18 by Marcos — append semantics.** Leg ③ is reverted to
+> the cross-COB Roll condition only (`COBID <> SOURCE_COBID`). A Transfer Book
+> gets **leg ②T and nothing else**: no leg ①, no flatten leg ③. It only ADDS
+> rows, so the target book keeps its originals and its own adjustments.
 
 Batch flags: `has_cross_cob` (existing) and new `has_transfer` (any claimed
 row with `SOURCE_BOOK_CODE`). Leg ②T is emitted only when `has_transfer`.
@@ -284,20 +290,42 @@ Metrics: `× adjust.SCALE_FACTOR_ADJUSTED` (the full factor, as in leg ②).
 ### 6.3 Why re-key inside the leg
 
 `fact_key` computes the surrogate key from the emitted columns (BOOK_KEY,
-TRADE_KEY, ENTITY…). Leg ③'s flatten rows carry the target book's keys; leg
+TRADE_KEY, ENTITY…). ~~Leg ③'s flatten rows carry the target book's keys; leg
 ②T must carry the **same** keys for the same position so `netted` cancels
-them (`combined(target) = adjusted(source)`). Re-keying after netting (as the
+them (`combined(target) = adjusted(source)`).~~ Re-keying after netting (as the
 SCD2 UPDATE does for Roll) would leave source-keyed and target-keyed rows
 un-netted.
+
+> **Amended 2026-09-18 by Marcos — append semantics.** There is no leg ③ for a
+> transfer, so nothing has to cancel. The rows are still re-keyed inside the
+> leg so the ADDED rows sit on the **target book's** positions (book, entity,
+> the trade's version under the target book) and are reported there. Two
+> consequences of append:
+>
+> - **Supersede**: `supersede_sql`'s inner `EXISTS` gains
+>   `AND adjust.SOURCE_BOOK_CODE IS NULL` — a transfer deletes no earlier
+>   adjustment row in the target scope. Non-transfer headers in the same batch
+>   supersede exactly as before.
+> - **`ranked`**: when the batch carries transfers, the DENSE_RANK partition
+>   becomes `PARTITION BY {key_name}, CASE WHEN ADJUSTMENT_ID IN
+>   (<transfer dim ids>) THEN ADJUSTMENT_ID ELSE -1 END`, so no other row in
+>   the batch can displace a transfer's row (two transfers into one target
+>   book, a Scale on the target, two fallback-trade transfers). They all
+>   survive and SUM. The old v1 fallback-collapse limitation (UAT TRF-05) is
+>   gone. With no transfer in the batch the original clause is emitted
+>   verbatim. Single-column-PK (FRTB) keys also carry
+>   `|| '-' || adjust.DIMENSION_ADJ_ID` so two transfers never write one key.
 
 ### 6.4 Steps after the UNION
 
 - Rounding residual, staging, `perm_insert`: unchanged.
 - SCD2 remap (l.1869): its `adj_cte` filter `ad.COBID <> ad.SOURCE_COBID`
   already excludes transfers (same COB). No change; add a comment.
-- Supersede by filter: unchanged — the header's filters (target book, trade,
+- Supersede by filter: ~~unchanged — the header's filters (target book, trade,
   entity) describe the target scope, so earlier adjustments in the target
-  book (for that trade) are removed. Source-book adjustments are untouched.
+  book (for that trade) are removed.~~ **Amended 2026-09-18 by Marcos**: a
+  transfer supersedes **nothing** (see §6.3). Source-book adjustments are
+  untouched, and so are the target book's.
 - Summary rebuild, downstream hand-off: unchanged.
 - `_erlog` step labels: `stage_build` SQL contains the new leg; add a
   `transfer_leg` note in the batch log ctx for post-mortem.
@@ -306,10 +334,18 @@ un-netted.
 
 `is_transfer = adjustment_type == "transfer"`. Modes:
 
-- `summary`: `PROJECTED = Σ adjusted(source book, COB, trade)`, `EXISTING =
+- `summary`: ~~`PROJECTED = Σ adjusted(source book, COB, trade)`~~, `EXISTING =
   Σ original(target book, COB, trade)`, `EXISTING_ADJ = Σ adjustment rows in
   the target scope`, plus the source split lines (`SOURCE_ORIGINAL_VALUE`,
   `SOURCE_ADJUSTMENTS_VALUE`, `SOURCE_ADJUSTED_VALUE`) as Roll reports.
+
+  > **Amended 2026-09-18 by Marcos — append maths.**
+  > `TOTAL_ADJUSTMENT_DELTA = factor × SOURCE_ADJUSTED_VALUE` (what is added)
+  > and `TOTAL_PROJECTED_VALUE = TOTAL_CURRENT_VALUE + factor ×
+  > SOURCE_ADJUSTED_VALUE`. `ROWS_AFFECTED`, `NONZERO_ROWS`, the source split
+  > and `TOTAL_CURRENT_VALUE` are unchanged. The per-trade `breakdown` is
+  > unchanged — its `PROJECTED_VALUE` was always the factored amount added per
+  > trade, and the page now labels that column "Value added".
 - `breakdown`: one row per trade code (accepts `trade_codes: [..]` in the
   payload for the multi-trade preview; the header still stores one trade).
 - `sql`: the generated text, as today.

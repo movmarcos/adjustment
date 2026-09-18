@@ -508,3 +508,135 @@ def test_a_failing_sql_text_call_does_not_lose_the_preview():
     assert w["_preview_sql"] is None
     assert w["_preview_sum"]["ROWS_AFFECTED"] == 15
     assert set(w["_preview_scopes"]) == {"VaR", "Stress"}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Transfer Book — APPEND semantics (Marcos, 2026-09-18)
+# ══════════════════════════════════════════════════════════════════════════
+
+# The exact column set SP_PREVIEW_ADJUSTMENT's transfer `summary` mode returns
+# (04_sp_preview_adjustment.sql, is_transfer branch). The append change
+# rewrote only the last two VALUES — the SHAPE the page consumes is unchanged,
+# and this row is what proves it: every field the ticket reads is present and
+# the page renders the whole impact block from it without error.
+TRANSFER_SUMMARY = {
+    "ROWS_AFFECTED": 4,
+    "NONZERO_ROWS": 4,
+    "SOURCE_ORIGINAL_VALUE": 800.0,
+    "SOURCE_ADJUSTMENTS_VALUE": 200.0,
+    "SOURCE_ADJUSTED_VALUE": 1000.0,
+    "TOTAL_CURRENT_VALUE": 300.0,
+    # append: delta = factor × source adjusted, projected = current + delta
+    "TOTAL_ADJUSTMENT_DELTA": 1000.0,
+    "TOTAL_PROJECTED_VALUE": 1300.0,
+    "EXISTING_ADJ_COUNT": 1,
+    "EXISTING_ADJ_ROWS": 2,
+    "EXISTING_ADJ_VALUE": 50.0,
+    "EXISTING_ADJ_IDS": "ADJ-1",
+}
+
+
+class TransferSQL(SQL):
+    """Answers the transfer preview with the real 04 column set."""
+    def collect(self):
+        if "SP_PREVIEW_ADJUSTMENT" in self.q:
+            CALLS.append(self.q)
+            if '"mode": "summary"' in self.q:
+                return [DictRow(dict(TRANSFER_SUMMARY))]
+            if '"mode": "sql"' in self.q:
+                return [DictRow({"PREVIEW_SQL": "SELECT 1"})]
+            return [DictRow({"TRADE_CODE": "T1", "TARGET_TRADE": "T1",
+                             "ROWS_AFFECTED": 4, "PROJECTED_VALUE": 1000.0})]
+        return SQL.collect(self)
+
+
+class TransferSess:
+    def sql(self, q, *a, **k): return TransferSQL(q)
+
+
+def _transfer_preview(at):
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": "Scaling Adjustment",
+                               "adjustment_type": "Transfer",
+                               "process_types": ["VaR"], "process_type": "VaR",
+                               "cobid": 20260101,
+                               "source_book_code": "B1", "target_book_code": "B2",
+                               "transfer_trade_codes": ["T1"],
+                               "adjustment_category": "Cat", "reason": "why",
+                               "result": None, "step": 1}
+    at.run(); assert not at.exception, at.exception
+    at.button(key=f"run_preview_{at.session_state['_wiz_v']}").click().run()
+    assert not at.exception, at.exception
+    return at
+
+
+def test_transfer_preview_summary_shape_is_unchanged_by_append():
+    """The append change touched the preview's last two VALUES only. The
+    payload the page sends and the columns it reads back are the same as
+    before, and the whole impact block renders from that one row."""
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(sc, "get_session", lambda: TransferSess())
+    try:
+        at = _load()
+        _seed_ref_data(at)
+        at = _transfer_preview(at)
+
+        prev = [c for c in CALLS if "SP_PREVIEW_ADJUSTMENT" in c]
+        assert prev, CALLS
+        raw = prev[0][prev[0].index("('") + 2:prev[0].rindex("')")]
+        pj = json.loads(raw.replace("''", "'").replace("\\\\", "\\"))
+        # Unchanged payload contract (mode aside): the two books, the trades,
+        # one COB on both sides, and the factor.
+        assert set(pj) == {"cobid", "process_type", "adjustment_type",
+                           "source_cobid", "scale_factor", "book_code",
+                           "entity_code", "source_book_code", "trade_codes",
+                           "mode"}
+        assert pj["adjustment_type"] == "Transfer"
+        assert pj["source_cobid"] == pj["cobid"] == 20260101
+        # All three modes still ride along.
+        assert {json.loads(c[c.index("('") + 2:c.rindex("')")]
+                           .replace("''", "'").replace("\\\\", "\\"))["mode"]
+                for c in prev} == {"summary", "sql", "breakdown"}
+
+        w = at.session_state["wiz"]
+        assert w["_preview_err"] is None
+        # Every column 04 returns survives into the ticket's summary dict.
+        assert set(TRANSFER_SUMMARY) <= set(w["_preview_sum"])
+        assert w["_preview_sum"]["TOTAL_PROJECTED_VALUE"] == 1300.0
+        assert w["_preview_sum"]["TOTAL_ADJUSTMENT_DELTA"] == 1000.0
+    finally:
+        monkey.undo()
+
+
+def test_transfer_ticket_says_existing_adjustments_are_kept_not_replaced():
+    """Append: a transfer supersedes nothing (05, supersede_sql gained
+    `adjust.SOURCE_BOOK_CODE IS NULL`), so the overlap note must NOT tell the
+    user their earlier adjustments are replaced."""
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(sc, "get_session", lambda: TransferSess())
+    try:
+        at = _load()
+        _seed_ref_data(at)
+        at = _transfer_preview(at)
+        texts = " ".join(m.value for m in at.markdown)
+    finally:
+        monkey.undo()
+
+    assert "Already adjusted here" in texts
+    assert "added on top of them and replaces nothing" in texts
+    assert "Submitting replaces every one" not in texts
+
+
+def test_transfer_preview_caption_reads_current_plus_added():
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(sc, "get_session", lambda: TransferSess())
+    try:
+        at = _load()
+        _seed_ref_data(at)
+        at = _transfer_preview(at)
+        caps = " ".join(c.value for c in at.caption)
+    finally:
+        monkey.undo()
+
+    assert "**projected** = current + added" in caps
+    assert "nothing already there is replaced" in caps

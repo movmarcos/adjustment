@@ -1350,11 +1350,15 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             ).count() > 0
 
             # Transfer Book rows (SOURCE_BOOK_CODE set): same COB, book swapped.
-            # They use the adjusted view like a cross-COB Roll (leg ②T) and the
-            # flatten leg ③ on the TARGET book; never leg ①.
-            has_transfer = df_adj_scale.filter(
-                col('SOURCE_BOOK_CODE').isNotNull()
-            ).count() > 0
+            # They use the adjusted view like a cross-COB Roll (leg ②T) and get
+            # NEITHER leg ① nor the flatten leg ③ — a transfer APPENDS to the
+            # target book (Marcos, 2026-09-18).
+            transfer_adj_ids = [
+                row["ADJ_ID"] for row in df_adj_scale
+                .filter(col('SOURCE_BOOK_CODE').isNotNull())
+                .select("ADJ_ID").collect()
+            ]
+            has_transfer = len(transfer_adj_ids) > 0
 
             # Store RUN_LOG_ID in ADJ_HEADER for traceability
             session.sql(f"""
@@ -1395,6 +1399,11 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             if not dim_adj_map:
                 raise Exception("DIMENSION.ADJUSTMENT insert returned no ADJUSTMENT_IDs")
             dim_ids_str = ', '.join(str(v) for v in dim_adj_map.values())
+            # DIMENSION.ADJUSTMENT ids of THIS batch's transfer headers — used by
+            # `ranked` below to keep every transfer's rows (append semantics).
+            transfer_dim_ids = [dim_adj_map[a] for a in transfer_adj_ids
+                                if a in dim_adj_map]
+            transfer_dim_ids_str = ', '.join(str(v) for v in transfer_dim_ids)
 
             # ── Join columns (fact ∩ adj, minus exclusions) ──────────────
             exclude_join = ['COBID', 'IS_OFFICIAL_SOURCE', 'STRATEGY',
@@ -1737,8 +1746,9 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             transfer_leg = ""
             # Both the cross-COB Roll leg ② and the Transfer Book leg ②T read
             # the adjusted (combined) view. Without a distinct view neither leg
-            # can be built — processing would silently degrade to leg ③ alone
-            # and WIPE the target COB / target book instead of replacing it.
+            # can be built — a cross-COB Roll would degrade to leg ③ alone and
+            # WIPE the target COB instead of replacing it, and a Transfer (which
+            # has no other leg) would silently write nothing at all.
             # Fail loudly instead (mirrors the EntityRoll guard).
             needs_adjusted_view = has_cross_cob or has_transfer
             if needs_adjusted_view and (not fact_adjusted_tbl_name
@@ -1747,7 +1757,8 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                     f"Cross-COB Roll / Transfer Book for {process_type} requires "
                     f"FACT_ADJUSTED_TABLE to be configured in ADJUSTMENTS_SETTINGS "
                     f"(distinct from FACT_TABLE). Refusing to process — without the "
-                    f"adjusted view the target would be flattened instead of replaced.")
+                    f"adjusted view a Roll would flatten the target instead of "
+                    f"replacing it, and a Transfer would add nothing at all.")
 
             # The combined view may not expose every column the _ADJUSTMENT
             # table expects. Select the columns it HAS and default the rest to
@@ -1783,11 +1794,19 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
 
             if has_transfer:
                 # ②T Transfer Book — the SOURCE book's adjusted rows at the COB,
-                # RE-KEYED to the target book INSIDE the select: the surrogate
-                # key (fact_key) is built from these columns, so leg ③'s
-                # flattened target rows and these rows share a key per position
-                # and `netted` cancels them → combined(target) = factor ×
-                # adjusted(source) (factor 1 = copy the source book as-is).
+                # RE-KEYED to the target book INSIDE the select (the surrogate
+                # key in `fact_key` is built from these columns, so the added
+                # rows sit on the target book's positions).
+                #
+                # APPEND semantics (Marcos, 2026-09-18). This leg is the ONLY
+                # leg a transfer gets: there is no leg ① and no flatten leg ③,
+                # and `supersede_sql` skips transfer headers. So the transfer
+                # adds and removes nothing:
+                #   combined(target) = whatever the target already had
+                #                      (original + its own adjustments)
+                #                    + factor × adjusted(source book)
+                # (factor 1 = add a copy of the source book as it stands).
+                #
                 # Only the source book + optional trade code filter the source
                 # (the header's ENTITY/BOOK/DEPT describe the TARGET), so this
                 # leg uses neither from_where nor join_cond.
@@ -1797,25 +1816,19 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 #
                 # Single-column-PK scopes (FRTB*, whose key IS one opaque fact
                 # column): the transferred row gets a NEW key, minted per
-                # (source row, target book, resolved trade) — MD5(source key
-                # || target BOOK_CODE || resolved TRADE_KEY), exactly as the
-                # Direct FRTB path mints its own keys per row (see
-                # frtb/views/vw_adjustments_direct_sbm.sql). That means leg ②T's
-                # rows do NOT share a key with leg ③'s flattened target rows, so
-                # `ranked`'s DENSE_RANK PARTITION BY {key_name} never collides
-                # two same-batch transfers (or a same-batch Scale) out of the
-                # source book, and the transferred row never carries the same
-                # (COBID, key) as the untouched source row. Legs ②T/③ still do
-                # NOT net position-by-position for these scopes — same as a
-                # cross-COB Roll — so the combined total is still
-                # adjusted(source) − original(target) + original(target) =
-                # adjusted(source). Supersede is by filter, not by key, so the
-                # earlier rows in the target scope still go.
+                # (source row, target book, resolved trade, ADJUSTMENT) —
+                # MD5(source key || target BOOK_CODE || resolved TRADE_KEY ||
+                # DIMENSION_ADJ_ID), exactly as the Direct FRTB path mints its
+                # own keys per row (see frtb/views/vw_adjustments_direct_sbm.sql).
+                # The DIMENSION_ADJ_ID term means two transfers into the SAME
+                # target book never write the same key, and the transferred row
+                # never carries the same (COBID, key) as the untouched source row.
                 #
-                # Known limitation (UAT TRF-05): two transferred trades that BOTH
-                # fall back to the '<BOOK>/Adjustment' trade (ta) and share every
-                # other key column collapse onto one surrogate key; `ranked` then
-                # keeps the newest header's row only.
+                # Two transfers (including two trades that BOTH fall back to the
+                # '<BOOK>/Adjustment' trade) now both survive and SUM: `ranked`
+                # partitions transfer rows per ADJUSTMENT_ID, so nothing in the
+                # batch can displace them. The old v1 collapse limitation
+                # (UAT TRF-05) no longer applies.
                 def _transfer_col(c):
                     cu = c.upper()
                     if cu == "BOOK_KEY":          return "tb.BOOK_KEY AS BOOK_KEY"
@@ -1831,7 +1844,8 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                         return (
                             f"MD5(COALESCE(fact.{key_name}::VARCHAR, '_') || '-' || "
                             f"UPPER(adjust.BOOK_CODE) || '-' || "
-                            f"COALESCE(tt.TRADE_KEY, ta.TRADE_KEY, fact.TRADE_KEY)::VARCHAR) "
+                            f"COALESCE(tt.TRADE_KEY, ta.TRADE_KEY, fact.TRADE_KEY)::VARCHAR"
+                            f" || '-' || adjust.DIMENSION_ADJ_ID::VARCHAR) "
                             f"AS {key_name}"
                         )
                     return f"fact.{c}" if c in _view_cols else f"{_adj_default(c)} AS {c}"
@@ -1842,7 +1856,8 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 _cob_date = f"TO_DATE('{int(cobid)}', 'YYYYMMDD')"
                 transfer_leg = f"""
                 UNION ALL
-                -- ②T Transfer Book: source book's ADJUSTED rows at the COB, re-keyed to the target book
+                -- ②T Transfer Book: source book's ADJUSTED rows at the COB, re-keyed to
+                --    the target book and ADDED to it (no flatten leg — pure append)
                 SELECT adjust.COBID, adjust.DIMENSION_ADJ_ID AS ADJUSTMENT_ID,
                        adjust.CREATED_DATE AS ADJUSTMENT_CREATED_TIMESTAMP,
                        {select_non_metric_trf}, {select_measure}
@@ -1902,6 +1917,32 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                   AND (adjust.TRADE_CODE IS NULL
                        OR UPPER(st.TRADE_CODE) = UPPER(adjust.TRADE_CODE))"""
 
+            # ── `ranked` partition ───────────────────────────────────────
+            # Ordinary batches: newest-wins per position key — two adjustments
+            # that resolve to the same position must not double-count, so only
+            # the newest one's netted row survives (ROW_NUM = 1 below).
+            #
+            # A Transfer Book is an APPEND (Marcos, 2026-09-18): its rows must
+            # NEVER be dropped because some other row in the same batch happens
+            # to share the position key — two transfers into one target book,
+            # a Scale on the target book alongside a transfer, or two
+            # fallback-trade transfers landing on '<BOOK>/Adjustment'. So when
+            # the batch carries transfers, every transfer's rows are ranked in
+            # their OWN partition (…, ADJUSTMENT_ID) and everything else keeps
+            # sharing the single newest-wins partition (…, -1). Each transfer
+            # therefore contributes its own delta row and they SUM in the
+            # combined view, which is exactly append semantics.
+            #
+            # With no transfer in the batch the ORIGINAL clause is emitted
+            # verbatim — Scale / Flatten / Roll SQL is byte-for-byte unchanged.
+            if has_transfer and transfer_dim_ids_str:
+                ranked_partition = (
+                    f"PARTITION BY {key_name}, "
+                    f"CASE WHEN ADJUSTMENT_ID IN ({transfer_dim_ids_str}) "
+                    f"THEN ADJUSTMENT_ID ELSE -1 END")
+            else:
+                ranked_partition = f"PARTITION BY {key_name}"
+
             # Build the key expression
             select_with_keys = "*" if key_name == pk_expr else f"{pk_expr}, *"
             exclude_keys = "*" if key_name == pk_expr else f"* EXCLUDE ({key_name})"
@@ -1931,10 +1972,14 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 AND adjust.SOURCE_BOOK_CODE IS NULL
                 {join_cond}{roll_leg}{transfer_leg}
                 UNION ALL
-                -- ③ Flatten current COB (offsets existing values at target COB for cross-COB roll, or in the TARGET book for a transfer)
+                -- ③ Flatten current COB — offsets the existing values at the
+                --   target COB so a cross-COB Roll REPLACES them. A Transfer
+                --   Book does NOT get this leg: it APPENDS the source book's
+                --   adjusted values to whatever the target book already has
+                --   (Marcos, 2026-09-18), so nothing on the target is flattened.
                 {select_flatten} {from_where}
                 AND fact.COBID = adjust.COBID
-                AND (adjust.COBID <> adjust.SOURCE_COBID OR adjust.SOURCE_BOOK_CODE IS NOT NULL)
+                AND adjust.COBID <> adjust.SOURCE_COBID
                 {join_cond}
             ),
             fact_key AS (
@@ -1943,13 +1988,18 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             ),
             -- ── Net per position ─────────────────────────────────────────
             -- Sum the legs per (surrogate key, ADJUSTMENT_ID) into one delta row
-            -- per position = Σsource − Σtarget, so
-            --   combined(target) = original(target) + Σ(net) = factor × adjusted(source)
-            --   (cross-COB Roll: the source COB's; Transfer Book: the source book's).
-            -- Source-only positions net to Σsource and are kept; positions whose
-            -- net change is exactly zero are dropped (HAVING). Grouping also
-            -- includes ADJUSTMENT_ID so distinct adjustments stay separate for the
-            -- DENSE_RANK overlap resolution below.
+            -- per position.
+            --   Cross-COB Roll (legs ② + ③): Σsource − Σtarget, so
+            --     combined(target) = original(target) + Σ(net)
+            --                      = factor × adjusted(source COB).
+            --     Source-only positions net to Σsource and are kept.
+            --   Transfer Book (leg ②T ONLY — no flatten leg): Σsource, so
+            --     combined(target) = whatever the target already had
+            --                      + factor × adjusted(source book).
+            --     Nothing on the target is cancelled; the transfer only ADDS.
+            -- Positions whose net change is exactly zero are dropped (HAVING).
+            -- Grouping also includes ADJUSTMENT_ID so distinct adjustments stay
+            -- separate for the DENSE_RANK resolution below.
             netted AS (
                 SELECT
                     {key_name},
@@ -1966,7 +2016,7 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 SELECT
                     {exclude_keys},
                     DENSE_RANK() OVER (
-                        PARTITION BY {key_name}
+                        {ranked_partition}
                         ORDER BY ADJUSTMENT_CREATED_TIMESTAMP DESC, ADJUSTMENT_ID DESC
                     ) AS ROW_NUM
                 FROM netted
@@ -1985,7 +2035,8 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             if has_transfer:
                 _erlog(session, _sqlog, "transfer_leg (note)",
                        "SELECT 'batch contains Transfer Book rows - the transfer leg "
-                       "re-keys source-book rows to the target book' AS NOTE")
+                       "re-keys source-book rows to the target book and ADDS them "
+                       "(no flatten leg, no supersede)' AS NOTE")
 
             # (Prior-run rows were removed before the temp build, keyed by the
             #  previous DIMENSION_ADJ_ID — the fresh IDs have no rows yet.)
@@ -2084,6 +2135,14 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             # view and, once deleted, stranded a meaningless residue.
             # The predicates are the legs' own dimension filters + direct
             # column matches, applied to the ADJUSTMENTS_TABLE (alias fa).
+            #
+            # A Transfer Book supersedes NOTHING (Marcos, 2026-09-18): append
+            # semantics mean it only ADDS the source book's adjusted values on
+            # top of the target book — everything the target already carries
+            # stays. Hence `adjust.SOURCE_BOOK_CODE IS NULL` inside the EXISTS:
+            # a transfer header never contributes a delete predicate, while any
+            # non-transfer adjustment in the same batch supersedes exactly as
+            # before. (To undo a transfer, delete it — do not re-submit it.)
             _fa_join_cond = '\n'.join([
                 f"AND (adjust.{c} = fa.{c} OR adjust.{c} IS NULL)"
                 for c in join_cols
@@ -2100,6 +2159,7 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                         AND adjust.ADJ_ID IN ({adj_ids_str})
                         AND adjust.IS_DELETED = FALSE
                         AND adjust.RUN_STATUS = 'Running'
+                        AND adjust.SOURCE_BOOK_CODE IS NULL
                         {_fa_dim_preds}
                         {_fa_join_cond}
                   )

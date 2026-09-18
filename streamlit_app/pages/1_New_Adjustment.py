@@ -1810,11 +1810,12 @@ def render_scaling_form() -> None:
     if _is_transfer:
         with _card():
             _sec(5, "Transfer Details",
-                 "The target book's positions at this COB are replaced by the "
-                 "source book's adjusted values × the Scale Factor above "
-                 "(1 = copy as-is). Choose trade codes to transfer only "
-                 "those trades — one adjustment is created per trade (and per "
-                 "scope).")
+                 "The source book's adjusted values × the Scale Factor above "
+                 "are added to the target book at this COB (1 = add a copy "
+                 "as-is); the target book keeps everything it already has and "
+                 "the source book is untouched. Choose trade codes to transfer "
+                 "only those trades — one adjustment is created per trade (and "
+                 "per scope).")
             _render_transfer_fields()
     else:
         with _card():
@@ -3177,19 +3178,30 @@ def _roll_source_rows(s: dict) -> str:
 
 def _overlap_rows(s: dict) -> str:
     """Scope-level overlap: adjustments already sitting on the target COB
-    inside this filter (from the preview's EXISTING_ADJ_* columns). The engine
-    supersedes by filter scope, so every one of those rows is replaced."""
+    inside this filter (from the preview's EXISTING_ADJ_* columns).
+
+    For every type except Transfer Book the engine supersedes by filter scope,
+    so those rows are replaced. A Transfer Book is a pure APPEND — it
+    supersedes nothing and is added on top of what the target book already
+    carries (05, supersede_sql)."""
     n = _safe_int(s.get("EXISTING_ADJ_COUNT"))
     if n <= 0:
         return ""
     ids = str(s.get("EXISTING_ADJ_IDS") or "")
     ids_txt = ", ".join(fmt_adj_id(i.strip()) for i in ids.split(",") if i.strip())
+    if wiz.get("adjustment_type") == "Transfer":
+        note = (f'Already adjusted here: {ids_txt}. The target book keeps every '
+                f'one of those adjustments — a Transfer Book adjustment is '
+                f'added on top of them and replaces nothing.')
+    else:
+        note = (f'Already adjusted here: {ids_txt}. Submitting replaces every one '
+                f'of those rows inside this filter at this COB (newest '
+                f'adjustment wins).')
     return (f'<div class="kv"><span class="k">Existing adjustments in scope</span>'
             f'<span class="v">{n:,} · {_safe_int(s.get("EXISTING_ADJ_ROWS")):,} rows · '
             f'{_fmt_money(s.get("EXISTING_ADJ_VALUE"))}</span></div>'
             f'<div style="font-size:0.78rem;color:{P["warning"]};margin-top:3px">'
-            f'Already adjusted here: {ids_txt}. Submitting replaces every one of '
-            f'those rows inside this filter at this COB (newest adjustment wins).'
+            f'{note}'
             f'</div>')
 
 
@@ -3390,10 +3402,9 @@ def _run_preview() -> None:
         sql_jobs = _submit_advisory("sql")
         # Transfer Book: how many of the selected trades have NO version in
         # the target book. Each of those lands on the target's
-        # '<BOOK>/Adjustment' trade, so two that also share every other key
-        # column collapse onto ONE surrogate key and only the newest header's
-        # row survives (engine leg ②T comment; UAT TRF-05). Counted here so
-        # the ticket can warn BEFORE the adjustments are created.
+        # '<BOOK>/Adjustment' trade rather than under its own trade code
+        # (engine leg ②T). Counted here so the ticket can say so BEFORE the
+        # adjustments are created.
         brk_jobs = _submit_advisory("breakdown") if is_transfer else []
 
         agg = None
@@ -4038,19 +4049,20 @@ with right:
                 f"the filters. Submission is blocked until every selected scope "
                 f"finds matching rows.")
 
-        # Transfer Book: ≥ 2 trades with no version in the target book all
-        # fall back to the same '<BOOK>/Adjustment' trade and can collapse
-        # onto one row. Warn (not block) — the user may know the trades are
-        # distinct on another key.
+        # Transfer Book: trades with no version in the target book land on
+        # the target's '<BOOK>/Adjustment' trade. They no longer collapse —
+        # the engine ranks each transfer's rows in its own partition, so every
+        # one of them is kept and they sum — but the user should still know
+        # the rows will not sit under their own trade. Warn, never block.
         for _fb_sc, _fb_n in ((wiz.get("_transfer_fallbacks") or {})
                               if preview_current else {}).items():
             if (_fb_n or 0) >= 2:
                 st.warning(
                     f"{_fb_n} of the selected trades have no version in the "
-                    f"target book for {scope_label(_fb_sc)}; they will all land "
-                    f"on the target's '/Adjustment' trade and, if their other "
-                    f"keys coincide, only one survives. Deselect them or ask "
-                    f"for the trades to be set up in the target book.")
+                    f"target book for {scope_label(_fb_sc)}; their rows land on "
+                    f"the target's '/Adjustment' trade instead of their own. "
+                    f"Ask for the trades to be set up in the target book if you "
+                    f"need them reported under their own trade code.")
 
     # ── VaR Upload: replacement confirmation ──────────────────────────────
     dup_ok = True
@@ -4177,8 +4189,9 @@ if wiz.get("category") == "Scaling Adjustment" and wiz.get("_preview_sum") \
     elif _is_transfer:
         st.caption(
             "Transfer preview: **current** = the target book's total in scope "
-            "(flattened), **projected** = the source book's adjusted total "
-            "× the scale factor.")
+            "now, **added** = the source book's adjusted total × the scale "
+            "factor, **projected** = current + added. A transfer is added on "
+            "top of the target book — nothing already there is replaced.")
         if total_rows > 0:
             # Per-TRADE breakdown (the transfer's own breakdown mode). No
             # "Sample rows" expander: SP_PREVIEW_ADJUSTMENT has no sample mode
@@ -4189,10 +4202,12 @@ if wiz.get("category") == "Scaling Adjustment" and wiz.get("_preview_sum") \
                                         json.dumps({**_preview_payload(),
                                                     "mode": "breakdown"}))
                     if not df_trd.empty:
+                        # Append semantics: the column is what this trade
+                        # ADDS to the target book, not a projected total.
                         df_trd = df_trd.rename(columns={
                             "TRADE_CODE": "Trade",
                             "TARGET_TRADE": "Target trade",
-                            "PROJECTED_VALUE": "Projected"})
+                            "PROJECTED_VALUE": "Value added"})
                         render_data_grid(df_trd, height=300)
                 except Exception as exc:
                     st.warning(f"Breakdown not available: {exc}")

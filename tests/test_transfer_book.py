@@ -117,18 +117,21 @@ def test_trf03_preview_sql(session, ev):
 
 @pytest.mark.uat("TRF-05", title="Trades with no version in the target book are flagged 'fallback' in the breakdown", priority="P2")
 def test_trf05_fallback_trades_are_flagged(session, ev):
-    """KNOWN LIMITATION this case documents (engine leg ②T comment in
+    """What this case documents (engine leg ②T comment in
     05_sp_process_adjustment.sql):
 
     A transferred trade that has no version under the TARGET book at the COB
-    is re-keyed onto that book's '<BOOK_CODE>/Adjustment' trade. Two such
-    trades that also share every other key column therefore land on the SAME
-    surrogate key — `ranked` keeps the newest header's row and the other
-    one's value is lost. There is no engine-side fix in v1: the preview's
-    `breakdown` mode flags every fallback trade ("fallback: <BOOK>/Adjustment")
-    and the New Adjustment page raises a warning when two or more of the
-    selected trades fall back, so the user deselects them or has the trades
-    set up in the target book first.
+    is re-keyed onto that book's '<BOOK_CODE>/Adjustment' trade. The preview's
+    `breakdown` mode FLAGS every such trade ("fallback: <BOOK>/Adjustment")
+    and the New Adjustment page warns when two or more of the selected trades
+    fall back, so the user can have the trades set up in the target book and
+    keep them reported under their own codes.
+
+    The v1 COLLAPSE limitation this case used to document is GONE (append
+    semantics, Marcos 2026-09-18): transfers are now ranked per ADJUSTMENT_ID
+    (`ranked`'s partition) and single-column-PK keys carry the
+    DIMENSION_ADJ_ID, so two fallback trades both survive and their values
+    SUM. Nothing is silently dropped; the flag is informational only.
 
     Here: two trade codes that certainly have no version in the target book
     (made-up ones by default; override with TEST_TRF_FALLBACK_TRADES to use
@@ -171,3 +174,62 @@ def test_trf05_fallback_trades_are_flagged(session, ev):
              "target-book trade)", len(flagged) == len(out))
     ev.check("the breakdown reports one row per trade under test, all flagged",
              len(out) == 0 or (len(out) == len(trades) and len(flagged) == len(trades)))
+
+
+@pytest.mark.uat("TRF-06", title="A Transfer appends: an adjustment already on the target book is left in place", priority="P1")
+def test_trf06_transfer_appends_and_supersedes_nothing(session, ev):
+    """Append semantics (Marcos, 2026-09-18).
+
+    A Transfer Book adds the source book's adjusted values to the target book
+    and supersedes NOTHING: `supersede_sql` in 05_sp_process_adjustment.sql
+    only builds a delete predicate from headers with
+    `SOURCE_BOOK_CODE IS NULL`, and a transfer gets no flatten leg ③.
+
+    This case proves the HEADER-level half on the fake COB: submit a Flatten
+    on the target book, then a Transfer into the same book, and check both
+    headers are still alive and neither has been marked Superseded.
+
+    The ROW-level proof — that the Flatten's rows are still in the scope's
+    _ADJUSTMENT table after the transfer has been processed, and that the
+    combined value is target + factor × adjusted(source) — needs a PROCESSED
+    run, which this suite does not trigger. Run the pair through the pipeline
+    on DVLP and compare the combined view before/after to close that half.
+    """
+    ent = rows(session, f"""SELECT MAX(ENTITY_CODE) AS E FROM DIMENSION.BOOK
+                            WHERE UPPER(BOOK_CODE) = UPPER('{TGT}') AND IS_CURRENT_ROW = TRUE""")[0]["E"]
+    # Scope deliberately different from TRF-04's Stress blocker so the two
+    # cases do not interfere. The Transfer below WILL be queued behind this
+    # Flatten (BLOCKED_BY_ADJ_ID — TRF-04 covers that), which is exactly the
+    # ordering append needs: the Flatten processes first, then the Transfer
+    # adds on top of it without superseding it.
+    flat = call_sp(session, SP_SUBMIT, json.dumps({
+        "cobid": FAKE_COB, "process_type": "Sensitivity", "adjustment_type": "Flatten",
+        "username": U_SUBMIT, "entity_code": ent, "book_code": TGT,
+        "reason": "UAT automation — pre-existing adjustment on the target book",
+        "adjustment_category": "Booking Error"}))
+    ev.note("Flatten on the target book", str(flat)[:300])
+    ev.check("setup Flatten accepted",
+             isinstance(flat, dict) and flat.get("status") in ("Pending", "Pending Approval")
+             and bool(flat.get("adj_id")))
+
+    trf = _submit(session, process_type="Sensitivity")
+    ev.note("Transfer into the same book", str(trf)[:300])
+    ev.check("transfer accepted",
+             isinstance(trf, dict) and trf.get("status") in ("Pending", "Pending Approval")
+             and bool(trf.get("adj_id")))
+
+    h = ev.sql("Both headers", f"""
+        SELECT ADJ_ID, ADJUSTMENT_TYPE, RUN_STATUS, IS_DELETED
+        FROM ADJUSTMENT_APP.ADJ_HEADER
+        WHERE ADJ_ID IN ('{flat.get("adj_id")}', '{trf.get("adj_id")}')
+        ORDER BY ADJUSTMENT_TYPE""")
+    ev.check("both headers still exist", h is not None and len(h) == 2)
+    ev.check("neither header is deleted by the other",
+             h is not None and all(not bool(r["IS_DELETED"]) for r in h))
+    ev.check("neither header is Superseded — a transfer replaces nothing",
+             h is not None and all(str(r["RUN_STATUS"] or "") != "Superseded" for r in h))
+    ev.check("the earlier Flatten on the target book is untouched",
+             h is not None and any(r["ADJUSTMENT_TYPE"] == "Flatten"
+                                   and not bool(r["IS_DELETED"])
+                                   and str(r["RUN_STATUS"] or "") != "Superseded"
+                                   for r in h))

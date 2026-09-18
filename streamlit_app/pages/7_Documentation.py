@@ -137,13 +137,15 @@ Adjustment categories:
   Scaling and Entity Roll accept SEVERAL data scopes at once — the app
   creates one adjustment per selected scope. With several scopes the filter
   form offers only the fields every selected scope supports.
-  Transfer Book (Scaling type): at one COB the TARGET book's positions are
-  replaced by the SOURCE book's adjusted values (source untouched), times a
-  scale factor exactly like Roll (1 copies the source book as-is, 1.10 adds
-  10%); optional trade codes limit it, one adjustment per trade and per
-  scope. The ticket's entity is the target book's entity. Trades with no
-  version under the target book land on the target's '<BOOK>/Adjustment'
-  trade.
+  Transfer Book (Scaling type): at one COB the SOURCE book's adjusted values
+  are ADDED to the TARGET book (source untouched), times a scale factor
+  exactly like Roll (1 adds a copy of the source book as-is, 1.10 adds 10%
+  more). It is a pure append: nothing already on the target book — its
+  original values or its own adjustments — is flattened or superseded, and
+  submitting the same transfer twice adds it twice (delete one to undo).
+  Optional trade codes limit it, one adjustment per trade and per scope. The
+  ticket's entity is the target book's entity. Trades with no version under
+  the target book land on the target's '<BOOK>/Adjustment' trade.
 - Direct: exact values. For VaR/Stress/Sensitivity it is PER ROW — paste or
   upload a CSV and each row becomes its own independent adjustment. For
   FRTB/FRTBDRC/FRTBRRAO it is PER FILE — one uploaded file = one Direct
@@ -696,11 +698,12 @@ with tab_create:
         ["<strong>Roll</strong>", "Carries the source COB's <em>adjusted</em> "
          "values (original + its adjustments) forward to the target COB, "
          "flattening what was there.", "full factor on the source leg"],
-        ["<strong>Transfer Book</strong>", "At one COB, replaces the "
-         "<em>target</em> book's positions with the <em>source</em> book's "
-         "adjusted values (the source book is untouched). Optional trade codes "
-         "limit it to those trades. See the Transfer Book section below.",
-         "full factor (1 = copy as-is)"],
+        ["<strong>Transfer Book</strong>", "At one COB, <em>adds</em> the "
+         "<em>source</em> book's adjusted values to the <em>target</em> book "
+         "(the source book is untouched, and the target keeps everything it "
+         "already has). Optional trade codes limit it to those trades. See the "
+         "Transfer Book section below.",
+         "full factor (1 = add a copy as-is)"],
     ]))
     _html(_card(
         f'{icon("layers", size=13, color="#7E22CE")} <strong>Several data scopes at once:</strong> '
@@ -727,12 +730,13 @@ with tab_create:
         "<strong>Target</strong> book (the book that receives them) — both from "
         "the current book list, shown with their department and entity — and, "
         "optionally, the <strong>trade codes</strong> to transfer (blank = the "
-        "whole book). It works like a Roll with the book swapped for the COB: "
-        "the target book's positions in scope are flattened and replaced by the "
-        "source book's <em>adjusted</em> values; the source book keeps its rows. "
-        "A <strong>Scale Factor</strong> applies exactly as for Roll — 1 copies "
-        "the source book as-is, 1.10 adds 10% — and there is no recurring "
-        "schedule."))
+        "whole book). It is a pure <strong>append</strong>: the source book's "
+        "<em>adjusted</em> values are added to the target book, and "
+        "<strong>nothing already on the target book is removed</strong> — "
+        "neither its original values nor the adjustments it already carries. "
+        "The source book keeps its rows too. A <strong>Scale Factor</strong> "
+        "applies exactly as for Roll — 1 adds a copy of the source book as-is, "
+        "1.10 adds 10% more — and there is no recurring schedule."))
     _html(_table(["Rule", "Detail"], [
         ["One adjustment per scope × trade",
          "Two scopes and three trades create six adjustments; the ticket and the "
@@ -743,9 +747,15 @@ with tab_create:
          "under the target book at that COB. If the trade does not exist there "
          "yet, the rows land on the target's <code>&lt;BOOK&gt;/Adjustment</code> "
          "trade — the preview breakdown flags these as <em>fallback</em>."],
-        ["Several fallback trades", "If two or more selected trades both fall "
-         "back and share every other key, only one survives — the page warns; "
-         "ask for the trades to be set up in the target book first."],
+        ["Nothing is replaced", "The target book keeps its original values and "
+         "every adjustment already on it; the transfer is added on top. "
+         "Submitting the same transfer twice therefore adds it "
+         "<strong>twice</strong> — use Delete to remove one."],
+        ["Several fallback trades", "Two or more selected trades that both fall "
+         "back land on the same <code>&lt;BOOK&gt;/Adjustment</code> trade. Both "
+         "are kept and their values add up; the page still warns, so you can "
+         "have the trades set up in the target book if you need them reported "
+         "under their own codes."],
         ["FRTB scopes", "Transferred FRTB rows get a new row key (source key + "
          "target book + trade), like Direct FRTB uploads."],
         ["Approval", "Optional, like any other Scaling adjustment (tick "
@@ -966,13 +976,15 @@ with tab_processing:
          "source COB's <em>adjusted</em> values forward (× factor). Combined "
          "result at the target = the source COB's adjusted numbers."],
         ["<strong>Transfer Book</strong>",
-         "Same engine as Roll, with the book swapped for the COB: the target "
-         "book's rows in scope are flattened, and the source book's adjusted "
+         "One leg only, and it purely <em>adds</em>: the source book's adjusted "
          "rows are brought in re-keyed to the target book (book, entity, and "
-         "the trade's version under the target book) &times; the scale factor. "
-         "Netting per position gives combined(target) = factor &times; "
-         "adjusted(source). Earlier adjustments in the target scope are "
-         "superseded by filter, as for Scale."],
+         "the trade\u2019s version under the target book) &times; the scale "
+         "factor. There is <strong>no flatten leg</strong> on the target and "
+         "<strong>no supersede</strong> \u2014 earlier adjustments in the "
+         "target scope stay exactly where they are. Result: "
+         "combined(target) = what the target already had + factor &times; "
+         "adjusted(source). Each transfer\u2019s rows are ranked in their own "
+         "partition, so two transfers into one book both survive and sum."],
         ["<strong>Direct</strong> (per row: VaR / Stress / Sensitivity)",
          "One header row = one fact row: the codes on the adjustment resolve "
          "directly to dimension keys (case-insensitive, −1 when blank or "

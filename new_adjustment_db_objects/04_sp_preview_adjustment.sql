@@ -419,13 +419,16 @@ def main(session, p_adjustment):
                            + overlap_sql if overlap_sql else "")
 
     # ═════════════════════════════════════════════════════════════════════
-    # TRANSFER BOOK — preview mirrors the cross-COB Roll shape above, but
-    # within one COB: source and target are different BOOKs, not different
-    # COBs. Source reads FACT_ADJUSTED_TABLE (the combined view — a transfer
-    # carries the source book's *adjusted* values, same as Roll leg ②).
-    #   current   = SUM(original) at the TARGET book
-    #   projected = factor × SUM(adjusted) at the SOURCE book
-    #   delta     = projected − current
+    # TRANSFER BOOK — source and target are different BOOKs within one COB.
+    # Source reads FACT_ADJUSTED_TABLE (the combined view — a transfer carries
+    # the source book's *adjusted* values, same as Roll leg ②).
+    #
+    # APPEND semantics (Marcos, 2026-09-18): a transfer ADDS to the target
+    # book, it does not replace it — the engine gives a transfer no flatten
+    # leg and supersedes nothing (05, leg ②T / supersede_sql).
+    #   current   = SUM(original) at the TARGET book, in scope
+    #   added     = factor × SUM(adjusted) at the SOURCE book   (the delta)
+    #   projected = current + added
     # ═════════════════════════════════════════════════════════════════════
     if is_transfer and not (fact_adj_tbl and fact_adj_tbl != fact_tbl):
         return session.sql(
@@ -471,8 +474,11 @@ def main(session, p_adjustment):
             src_adj.SOURCE_ADJUSTED_VALUE - src_orig.SOURCE_ORIGINAL_VALUE      AS SOURCE_ADJUSTMENTS_VALUE,
             src_adj.SOURCE_ADJUSTED_VALUE,
             tgt.TOTAL_CURRENT_VALUE,
-            {scale_factor} * src_adj.SOURCE_ADJUSTED_VALUE - tgt.TOTAL_CURRENT_VALUE AS TOTAL_ADJUSTMENT_DELTA,
-            {scale_factor} * src_adj.SOURCE_ADJUSTED_VALUE                           AS TOTAL_PROJECTED_VALUE,
+            -- Append: the delta IS the factored source total (nothing on the
+            -- target is flattened), and the projection adds it to what the
+            -- target book already shows.
+            {scale_factor} * src_adj.SOURCE_ADJUSTED_VALUE                           AS TOTAL_ADJUSTMENT_DELTA,
+            tgt.TOTAL_CURRENT_VALUE + {scale_factor} * src_adj.SOURCE_ADJUSTED_VALUE AS TOTAL_PROJECTED_VALUE,
             {overlap_cols}
         FROM src_adj, src_orig, tgt
         """

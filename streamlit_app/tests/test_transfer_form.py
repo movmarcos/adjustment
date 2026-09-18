@@ -381,8 +381,8 @@ def test_transfer_preview_payload_carries_trade_codes_and_no_filters():
     assert pj["source_cobid"] == pj["cobid"] == 20260101
     assert pj["scale_factor"] == 1
     # The TARGET entity rides along (derived from the target book, B2 → E9
-    # is overwritten with E2): the preview's "current" side must predicate on
-    # the entity exactly as the engine's leg ③ flatten does.
+    # is overwritten with E2): the preview's "current" side must scope the
+    # target book exactly as the ticket and the sign-off gate do.
     assert pj["entity_code"] == "E2"
     # Every OTHER stale filter from an earlier draft is still dropped — a
     # transfer is scoped by its two books, never by a leftover department.
@@ -561,3 +561,33 @@ def test_non_transfer_types_still_offer_every_scope():
     assert not at.exception, at.exception
     assert len(grp_options(at)) == 6
     assert at.session_state["wiz"]["process_types"] == ["FRTB"]
+
+
+def test_transfer_details_copy_says_the_values_are_added():
+    """Append semantics (Marcos, 2026-09-18): a Transfer Book adds the source
+    book's adjusted values to the target book — it no longer replaces the
+    target's positions, so the section 5 blurb must not say it does."""
+    at = _load()
+    _seed_ref_data(at)
+    _transfer_wiz(at)
+    at.run()
+    assert not at.exception, at.exception
+    texts = " ".join(m.value for m in at.markdown)
+    assert "are added to the target book at this COB" in texts
+    assert "the target book keeps everything it already has" in texts
+    assert "positions at this COB are replaced" not in texts
+
+
+def test_transfer_type_card_formula_reads_as_an_append():
+    """The type pill's one-line formula (utils/styles.TYPE_CONFIG) is the
+    shortest statement of the semantics on the page."""
+    at = _load()
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": "Scaling Adjustment",
+                               "adjustment_type": "Transfer",
+                               "process_types": ["VaR"], "process_type": "VaR"}
+    at.run()
+    assert not at.exception, at.exception
+    caps = " ".join(c.value for c in at.caption)
+    assert "Formula: target book += adjusted(source book) \u00d7 sf" in caps
+    assert "target book = adjusted(source book)" not in caps
