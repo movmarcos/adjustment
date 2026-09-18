@@ -3154,6 +3154,20 @@ def _is_roll_preview(s: dict) -> bool:
     return s.get("SOURCE_ORIGINAL_VALUE") is not None
 
 
+def _current_label(s: dict) -> str:
+    """What TOTAL_CURRENT_VALUE actually is, per type.
+
+    Roll: the target COB's ORIGINAL total — the engine flattens it, so that is
+    what the projection replaces. Transfer Book: the target book's ADJUSTED
+    total (originals + the adjustments already on it), because a transfer adds
+    on top of all of it and supersedes none of it — 04 reads
+    FACT_ADJUSTED_TABLE for the target side of a transfer only.
+    """
+    if wiz.get("adjustment_type") == "Transfer":
+        return "Target current (incl. its adjustments)"
+    return "Target original" if _is_roll_preview(s) else "Original"
+
+
 def _roll_source_rows(s: dict) -> str:
     """Roll / Transfer: show what the projected value is made of — the
     source's original data plus the adjustments already sitting on it, which
@@ -3318,10 +3332,11 @@ def _ticket_html(missing: list) -> str:
                f'<div class="kv"><span class="k">Non-zero rows</span>'
                f'<span class="v">{_safe_int(s.get("NONZERO_ROWS")):,}</span></div>'
                f'{_roll_source_rows(s)}'
-               f'<div class="kv"><span class="k">'
-               f'{"Target original" if _is_roll_preview(s) else "Original"}</span>'
+               f'<div class="kv"><span class="k">{_current_label(s)}</span>'
                f'<span class="v">{_fmt_money(s.get("TOTAL_CURRENT_VALUE"))}</span></div>'
-               f'<div class="kv"><span class="k">Adjustment</span>'
+               f'<div class="kv"><span class="k">'
+               f'{"Added" if wiz.get("adjustment_type") == "Transfer" else "Adjustment"}'
+               f'</span>'
                f'<span class="v">{_fmt_money(s.get("TOTAL_ADJUSTMENT_DELTA"))}</span></div>'
                f'<div class="kv"><span class="k">Projected</span>'
                f'<span class="v">{_fmt_money(s.get("TOTAL_PROJECTED_VALUE"))}</span></div>'
@@ -4013,7 +4028,10 @@ with right:
                 return {"Scope": name,
                         "Rows": f"{_safe_int(r.get('ROWS_AFFECTED')):,}",
                         "Current": _fmt_money(r.get("TOTAL_CURRENT_VALUE")),
-                        "Adjustment": _fmt_money(r.get("TOTAL_ADJUSTMENT_DELTA")),
+                        # Transfer: the delta is what gets ADDED, not a
+                        # replacement of the current column.
+                        ("Added" if wiz.get("adjustment_type") == "Transfer"
+                         else "Adjustment"): _fmt_money(r.get("TOTAL_ADJUSTMENT_DELTA")),
                         "Projected": _fmt_money(r.get("TOTAL_PROJECTED_VALUE"))}
             st.caption("Impact by scope")
             render_data_grid(pd.DataFrame(
@@ -4189,9 +4207,10 @@ if wiz.get("category") == "Scaling Adjustment" and wiz.get("_preview_sum") \
     elif _is_transfer:
         st.caption(
             "Transfer preview: **current** = the target book's total in scope "
-            "now, **added** = the source book's adjusted total × the scale "
-            "factor, **projected** = current + added. A transfer is added on "
-            "top of the target book — nothing already there is replaced.")
+            "today, **including the adjustments already on it**, **added** = "
+            "the source book's adjusted total × the scale factor, "
+            "**projected** = current + added. A transfer is added on top of "
+            "the target book — nothing already there is replaced.")
         if total_rows > 0:
             # Per-TRADE breakdown (the transfer's own breakdown mode). No
             # "Sample rows" expander: SP_PREVIEW_ADJUSTMENT has no sample mode

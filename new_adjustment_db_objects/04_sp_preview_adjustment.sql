@@ -426,9 +426,19 @@ def main(session, p_adjustment):
     # APPEND semantics (Marcos, 2026-09-18): a transfer ADDS to the target
     # book, it does not replace it — the engine gives a transfer no flatten
     # leg and supersedes nothing (05, leg ②T / supersede_sql).
-    #   current   = SUM(original) at the TARGET book, in scope
+    #   current   = SUM(adjusted) at the TARGET book, in scope
     #   added     = factor × SUM(adjusted) at the SOURCE book   (the delta)
     #   projected = current + added
+    #
+    # BOTH sides read FACT_ADJUSTED_TABLE, and the target side is the one place
+    # where this preview differs from Roll's. A transfer adds on top of
+    # whatever the target book already carries, so "current" has to be what
+    # the book actually shows today — its originals AND its own adjustments.
+    # Reading the base fact here would understate the book by exactly those
+    # adjustments (they are not superseded any more), making "projected" wrong
+    # by the same amount. Roll keeps reading the base fact for its target side
+    # because a Roll DOES flatten the target's originals and supersede its
+    # adjustments, so there the original total is the right "current".
     # ═════════════════════════════════════════════════════════════════════
     if is_transfer and not (fact_adj_tbl and fact_adj_tbl != fact_tbl):
         return session.sql(
@@ -463,8 +473,11 @@ def main(session, p_adjustment):
             {src_where}
         ),
         tgt AS (
+            -- The ADJUSTED view, not the base fact: append semantics mean the
+            -- target book keeps its own adjustments, so "current" is what it
+            -- shows today (see the branch comment above).
             SELECT COALESCE(SUM(fact.{primary_metric}), 0)  AS TOTAL_CURRENT_VALUE
-            FROM {fact_tbl} fact
+            FROM {fact_adj_tbl} fact
             {tgt_where}
         )
         SELECT
@@ -475,8 +488,8 @@ def main(session, p_adjustment):
             src_adj.SOURCE_ADJUSTED_VALUE,
             tgt.TOTAL_CURRENT_VALUE,
             -- Append: the delta IS the factored source total (nothing on the
-            -- target is flattened), and the projection adds it to what the
-            -- target book already shows.
+            -- target is flattened), and the projection adds it to the target
+            -- book's adjusted total.
             {scale_factor} * src_adj.SOURCE_ADJUSTED_VALUE                           AS TOTAL_ADJUSTMENT_DELTA,
             tgt.TOTAL_CURRENT_VALUE + {scale_factor} * src_adj.SOURCE_ADJUSTED_VALUE AS TOTAL_PROJECTED_VALUE,
             {overlap_cols}

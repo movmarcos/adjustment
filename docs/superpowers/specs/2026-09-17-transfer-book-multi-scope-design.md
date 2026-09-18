@@ -342,10 +342,22 @@ un-netted.
   > **Amended 2026-09-18 by Marcos — append maths.**
   > `TOTAL_ADJUSTMENT_DELTA = factor × SOURCE_ADJUSTED_VALUE` (what is added)
   > and `TOTAL_PROJECTED_VALUE = TOTAL_CURRENT_VALUE + factor ×
-  > SOURCE_ADJUSTED_VALUE`. `ROWS_AFFECTED`, `NONZERO_ROWS`, the source split
-  > and `TOTAL_CURRENT_VALUE` are unchanged. The per-trade `breakdown` is
-  > unchanged — its `PROJECTED_VALUE` was always the factored amount added per
-  > trade, and the page now labels that column "Value added".
+  > SOURCE_ADJUSTED_VALUE`. `ROWS_AFFECTED`, `NONZERO_ROWS` and the source
+  > split are unchanged.
+  >
+  > `TOTAL_CURRENT_VALUE` now reads **`FACT_ADJUSTED_TABLE`** for the target
+  > side (the `tgt` CTE; `tgt_where` itself is unchanged), so "current" is
+  > `adjusted(target)` — the book's originals **plus the adjustments already on
+  > it**. That is the one place the transfer preview differs from Roll's: a
+  > transfer supersedes none of those adjustments, so reading the base fact
+  > would understate the book by exactly their value and make "projected" wrong
+  > by the same amount. **Roll's branch is unchanged** and still reads the base
+  > fact for its target side, because a Roll *does* flatten the target's
+  > originals and supersede its adjustments.
+  >
+  > The per-trade `breakdown` is unchanged — its `PROJECTED_VALUE` was always
+  > the factored amount added per trade, and the page now labels that column
+  > "Value added".
 - `breakdown`: one row per trade code (accepts `trade_codes: [..]` in the
   payload for the multi-trade preview; the header still stores one trade).
 - `sql`: the generated text, as today.

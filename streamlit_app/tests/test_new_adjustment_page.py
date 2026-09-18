@@ -525,10 +525,13 @@ TRANSFER_SUMMARY = {
     "SOURCE_ORIGINAL_VALUE": 800.0,
     "SOURCE_ADJUSTMENTS_VALUE": 200.0,
     "SOURCE_ADJUSTED_VALUE": 1000.0,
-    "TOTAL_CURRENT_VALUE": 300.0,
+    # The target book's ADJUSTED total: 300 original + the 50 of adjustments
+    # already on it (04 reads FACT_ADJUSTED_TABLE for a transfer's target side,
+    # because a transfer supersedes none of them).
+    "TOTAL_CURRENT_VALUE": 350.0,
     # append: delta = factor × source adjusted, projected = current + delta
     "TOTAL_ADJUSTMENT_DELTA": 1000.0,
-    "TOTAL_PROJECTED_VALUE": 1300.0,
+    "TOTAL_PROJECTED_VALUE": 1350.0,
     "EXISTING_ADJ_COUNT": 1,
     "EXISTING_ADJ_ROWS": 2,
     "EXISTING_ADJ_VALUE": 50.0,
@@ -602,7 +605,7 @@ def test_transfer_preview_summary_shape_is_unchanged_by_append():
         assert w["_preview_err"] is None
         # Every column 04 returns survives into the ticket's summary dict.
         assert set(TRANSFER_SUMMARY) <= set(w["_preview_sum"])
-        assert w["_preview_sum"]["TOTAL_PROJECTED_VALUE"] == 1300.0
+        assert w["_preview_sum"]["TOTAL_PROJECTED_VALUE"] == 1350.0
         assert w["_preview_sum"]["TOTAL_ADJUSTMENT_DELTA"] == 1000.0
     finally:
         monkey.undo()
@@ -640,3 +643,26 @@ def test_transfer_preview_caption_reads_current_plus_added():
 
     assert "**projected** = current + added" in caps
     assert "nothing already there is replaced" in caps
+    # "current" is the target book's total INCLUDING its own adjustments —
+    # 04's tgt CTE reads the adjusted view for a transfer.
+    assert "including the adjustments already on it" in caps
+
+
+def test_transfer_impact_block_labels_current_as_including_adjustments():
+    """The ticket's Impact preview must not call a transfer's current figure
+    "Target original" — for a transfer it is the target book's ADJUSTED total,
+    and the delta is what gets added on top of it."""
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(sc, "get_session", lambda: TransferSess())
+    try:
+        at = _load()
+        _seed_ref_data(at)
+        at = _transfer_preview(at)
+        texts = " ".join(m.value for m in at.markdown)
+    finally:
+        monkey.undo()
+
+    assert "Target current (incl. its adjustments)" in texts
+    assert "Target original" not in texts
+    # The delta row reads "Added", not "Adjustment".
+    assert ">Added<" in texts
