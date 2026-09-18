@@ -143,6 +143,9 @@ Adjustment categories:
   more). It is a pure append: nothing already on the target book — its
   original values or its own adjustments — is flattened or superseded, and
   submitting the same transfer twice adds it twice (delete one to undo).
+  It works one way only: a transfer replaces nothing, but a later Scale,
+  Flatten or Roll on that book at the same COB replaces the transferred rows
+  along with everything else in its filter.
   Optional trade codes limit it, one adjustment per trade and per scope. The
   ticket's entity is the target book's entity. Trades with no version under
   the target book land on the target's '<BOOK>/Adjustment' trade.
@@ -750,7 +753,10 @@ with tab_create:
         ["Nothing is replaced", "The target book keeps its original values and "
          "every adjustment already on it; the transfer is added on top. "
          "Submitting the same transfer twice therefore adds it "
-         "<strong>twice</strong> — use Delete to remove one."],
+         "<strong>twice</strong> — use Delete to remove one. It works one way "
+         "only: a later Scale, Flatten or Roll on that book at the same COB "
+         "<em>replaces</em> the transferred rows along with everything else in "
+         "its filter."],
         ["Several fallback trades", "Two or more selected trades that both fall "
          "back land on the same <code>&lt;BOOK&gt;/Adjustment</code> trade. Both "
          "are kept and their values add up; the page still warns, so you can "

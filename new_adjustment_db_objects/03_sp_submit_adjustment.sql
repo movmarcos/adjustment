@@ -339,10 +339,20 @@ def main(session, p_adjustment):
                                 f"values forward.")}
 
         # ── Transfer Book: source book → target book at ONE COB ──────────
-        # BOOK_CODE is the TARGET (the scope being replaced — like Roll's
-        # filters describe the target COB); SOURCE_BOOK_CODE is where the
-        # values come from. The entity is DERIVED from the target book so the
-        # sign-off check, overlap check and every grid work unchanged.
+        # BOOK_CODE is the TARGET (the book the values are ADDED to — like
+        # Roll's filters describe the target COB); SOURCE_BOOK_CODE is where
+        # the values come from. The entity is DERIVED from the target book so
+        # the sign-off check, overlap check and every grid work unchanged.
+        #
+        # SOURCE_BOOK_CODE is what the engine keys every transfer behaviour
+        # off: a header carrying it skips leg ①, gets no flatten leg ③ and
+        # contributes no supersede predicate (05). So for ANY other type it is
+        # stripped here — a caller outside the app (a notebook, a direct SP
+        # call) must not be able to smuggle a source book onto a Scale and
+        # turn it into a pseudo-transfer that silently supersedes nothing.
+        if adjustment_type.lower() != "transfer":
+            adj.pop("source_book_code", None)
+
         if adjustment_type.lower() == "transfer":
             src_book = str(adj.get("source_book_code") or "").strip()
             tgt_book = str(adj.get("book_code") or "").strip()

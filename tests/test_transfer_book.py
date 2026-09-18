@@ -176,7 +176,7 @@ def test_trf05_fallback_trades_are_flagged(session, ev):
              len(out) == 0 or (len(out) == len(trades) and len(flagged) == len(trades)))
 
 
-@pytest.mark.uat("TRF-06", title="A Transfer appends: an adjustment already on the target book is left in place", priority="P1")
+@pytest.mark.uat("TRF-06", title="A Transfer appends: the preview shows it added on top, and an adjustment already on the target book is left in place", priority="P1")
 def test_trf06_transfer_appends_and_supersedes_nothing(session, ev):
     """Append semantics (Marcos, 2026-09-18).
 
@@ -185,16 +185,76 @@ def test_trf06_transfer_appends_and_supersedes_nothing(session, ev):
     only builds a delete predicate from headers with
     `SOURCE_BOOK_CODE IS NULL`, and a transfer gets no flatten leg ③.
 
-    This case proves the HEADER-level half on the fake COB: submit a Flatten
-    on the target book, then a Transfer into the same book, and check both
-    headers are still alive and neither has been marked Superseded.
+    WHAT THIS PROVES
+    1. The **preview identity**, which is the part that fails loudly against
+       the old replace engine: `TOTAL_ADJUSTMENT_DELTA = factor ×
+       SOURCE_ADJUSTED_VALUE` (the old preview returned
+       `factor × source − current`) and `TOTAL_PROJECTED_VALUE =
+       TOTAL_CURRENT_VALUE + TOTAL_ADJUSTMENT_DELTA` (the old one returned
+       `factor × source`). Unless the target book's current total is exactly
+       zero these two are numerically different, so a stale 04 fails here.
+    2. Secondary, header-level: a Flatten already on the target book and the
+       Transfer coexist — neither is deleted, neither is marked Superseded.
 
-    The ROW-level proof — that the Flatten's rows are still in the scope's
-    _ADJUSTMENT table after the transfer has been processed, and that the
-    combined value is target + factor × adjusted(source) — needs a PROCESSED
-    run, which this suite does not trigger. Run the pair through the pipeline
-    on DVLP and compare the combined view before/after to close that half.
+    WHAT IT DOES NOT PROVE (needs a PROCESSED run, which this suite does not
+    trigger): that the Flatten's ROWS are still in the scope's _ADJUSTMENT
+    table after the transfer has run, and that the combined value equals
+    target + factor × adjusted(source). Run the pair through the pipeline on
+    DVLP and compare the combined view before/after to close that half. Note
+    also that the header checks alone are weak — the Scale-path supersede
+    deletes fact ROWS, never headers, and 'Superseded' is only ever set by
+    Entity Roll — which is why check 1 carries this case.
     """
+    factor = 2
+
+    # ── 1. The preview identity ──────────────────────────────────────────
+    payload = json.dumps({"cobid": FAKE_COB, "process_type": "VaR",
+                          "adjustment_type": "Transfer", "source_cobid": FAKE_COB,
+                          "scale_factor": factor, "book_code": TGT,
+                          "source_book_code": SRC, "mode": "summary"})
+    out = rows(session, f"CALL {SP_PREVIEW}('{payload}')")
+    ev.note("Preview summary", str(out)[:600])
+    # conftest.rows() returns plain upper-cased dicts.
+    r = out[0] if out else None
+
+    if not r or "TOTAL_PROJECTED_VALUE" not in r:
+        # An error/MESSAGE row, or nothing at all: the fake COB carries no
+        # source rows for these books. Reported, never passed off as success.
+        ev.note("Preview skipped",
+                "SP_PREVIEW_ADJUSTMENT returned no summary row (MESSAGE row or "
+                "empty) — the fake COB holds no fact rows for "
+                f"{SRC} / {TGT}. Point TEST_TRF_SRC_BOOK / TEST_TRF_TGT_BOOK at "
+                "books with data at a real COB to exercise the append identity.")
+    else:
+        cur   = float(r["TOTAL_CURRENT_VALUE"]   or 0)
+        delta = float(r["TOTAL_ADJUSTMENT_DELTA"] or 0)
+        proj  = float(r["TOTAL_PROJECTED_VALUE"]  or 0)
+        src   = float(r["SOURCE_ADJUSTED_VALUE"]  or 0)
+
+        def _close(a, b):
+            # Relative tolerance — these are NUMBER(19,4)-ish sums of many rows.
+            return abs(a - b) <= 1e-6 * max(1.0, abs(a), abs(b))
+
+        ev.note("Preview figures",
+                f"current={cur} delta={delta} projected={proj} source_adjusted={src}")
+        ev.check("delta = factor x source adjusted (append; the old engine "
+                 "returned factor x source MINUS current)",
+                 _close(delta, factor * src))
+        ev.check("projected = current + delta (append; the old engine returned "
+                 "factor x source, ignoring what the target already had)",
+                 _close(proj, cur + delta))
+        # Only meaningful when the target book actually holds something — with
+        # cur = 0 the append and replace identities coincide.
+        ev.note("Discriminating?",
+                "yes — the target book's current total is non-zero, so append "
+                "and replace give different numbers"
+                if abs(cur) > 0 else
+                "NO — the target book's current total in scope is 0, so the "
+                "append and replace identities coincide and the two checks "
+                "above cannot tell the engines apart. Point the test at a "
+                "target book that carries rows at this COB.")
+
+    # ── 2. Header-level: the two adjustments coexist ─────────────────────
     ent = rows(session, f"""SELECT MAX(ENTITY_CODE) AS E FROM DIMENSION.BOOK
                             WHERE UPPER(BOOK_CODE) = UPPER('{TGT}') AND IS_CURRENT_ROW = TRUE""")[0]["E"]
     # Scope deliberately different from TRF-04's Stress blocker so the two
@@ -225,11 +285,34 @@ def test_trf06_transfer_appends_and_supersedes_nothing(session, ev):
         ORDER BY ADJUSTMENT_TYPE""")
     ev.check("both headers still exist", h is not None and len(h) == 2)
     ev.check("neither header is deleted by the other",
-             h is not None and all(not bool(r["IS_DELETED"]) for r in h))
+             h is not None and all(not bool(r2["IS_DELETED"]) for r2 in h))
     ev.check("neither header is Superseded — a transfer replaces nothing",
-             h is not None and all(str(r["RUN_STATUS"] or "") != "Superseded" for r in h))
-    ev.check("the earlier Flatten on the target book is untouched",
-             h is not None and any(r["ADJUSTMENT_TYPE"] == "Flatten"
-                                   and not bool(r["IS_DELETED"])
-                                   and str(r["RUN_STATUS"] or "") != "Superseded"
-                                   for r in h))
+             h is not None and all(str(r2["RUN_STATUS"] or "") != "Superseded" for r2 in h))
+
+
+@pytest.mark.uat("TRF-07", title="A non-transfer type cannot smuggle a source book onto its header", priority="P2")
+def test_trf07_source_book_is_stripped_from_non_transfers(session, ev):
+    """SOURCE_BOOK_CODE is what the engine keys every transfer behaviour off:
+    a header carrying it skips leg ①, gets no flatten leg ③ and contributes no
+    supersede predicate. SP_SUBMIT_ADJUSTMENT therefore pops it for any type
+    other than Transfer (03), so a caller outside the app cannot turn a Scale
+    into a pseudo-transfer that silently supersedes nothing.
+    """
+    ent = rows(session, f"""SELECT MAX(ENTITY_CODE) AS E FROM DIMENSION.BOOK
+                            WHERE UPPER(BOOK_CODE) = UPPER('{TGT}') AND IS_CURRENT_ROW = TRUE""")[0]["E"]
+    res = call_sp(session, SP_SUBMIT, json.dumps({
+        "cobid": FAKE_COB, "process_type": "VaR", "adjustment_type": "Scale",
+        "scale_factor": 1.05, "username": U_SUBMIT,
+        "entity_code": ent, "book_code": TGT,
+        "source_book_code": SRC,          # <- stray key, must be ignored
+        "reason": "UAT automation — stray source_book_code on a Scale",
+        "adjustment_category": "Booking Error"}))
+    ev.note("SP result", str(res)[:300])
+    ev.check("Scale still accepted",
+             isinstance(res, dict) and res.get("status") in ("Pending", "Pending Approval"))
+    h = ev.sql("Header", f"""SELECT ADJUSTMENT_TYPE, SOURCE_BOOK_CODE
+                             FROM ADJUSTMENT_APP.ADJ_HEADER
+                             WHERE ADJ_ID = '{res.get("adj_id")}'""")
+    ev.check("stored as a Scale", h and h[0]["ADJUSTMENT_TYPE"] == "Scale")
+    ev.check("SOURCE_BOOK_CODE was stripped — the Scale is not a pseudo-transfer",
+             h and h[0]["SOURCE_BOOK_CODE"] is None)

@@ -456,6 +456,13 @@ def main(session, p_adjustment):
                              f"AND UPPER(st.TRADE_CODE) IN ({_tl}))")
         src_where = (f"WHERE fact.COBID = {int(cobid)}\n      AND " + "\n      AND ".join(src_preds)
                      + f"\n      AND fact.{primary_metric} IS NOT NULL")
+        # tgt_where carries the TARGET book's predicates, and — when the user
+        # picked trade codes — the trade predicate too. Caveat worth knowing
+        # when reading a preview: rows a PREVIOUS transfer parked on the
+        # target's '<BOOK>/Adjustment' trade (because the transferred trade had
+        # no version under the target book) fall OUTSIDE a trade-scoped
+        # preview, so "current" does not count them even though they are on the
+        # book. A whole-book preview (no trade codes) sees them.
         tgt_where = f"WHERE fact.COBID = {int(cobid)}{tgt_dim_sql}\n      AND fact.{primary_metric} IS NOT NULL"
         _cob_date = f"TO_DATE('{int(cobid)}', 'YYYYMMDD')"
 

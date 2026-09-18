@@ -4,7 +4,9 @@
 
 **Goal:** A new Scaling adjustment type "Transfer Book": at one COB the target book's positions in scope are replaced by the source book's adjusted values (source untouched), one adjustment per selected scope per trade code.
 
-**Architecture:** Roll with the book swapped for the COB. `ADJ_HEADER` gains `SOURCE_BOOK_CODE`; the header's `BOOK_CODE` is the TARGET book and `ENTITY_CODE` is derived server-side from the target book, so sign-off, overlap checks, supersede-by-filter and every grid work unchanged. The Scale path of `SP_PROCESS_ADJUSTMENT` gets a fourth UNION leg (②T) that reads the source book's rows from the adjusted view and re-keys them to the target book inside the SELECT, so netting cancels the target's flattened rows position by position. `SP_PREVIEW_ADJUSTMENT` mirrors it. The page adds the type pill, a Source/Target form and per-trade fan-out on top of Part A's `_submit_fanout`.
+> **Amended 2026-09-18 by Marcos — APPEND, not replace.** The source book's adjusted values × the scale factor are *added* to the target book: nothing already on the target (its originals or its own adjustments) is flattened or superseded. `combined(target) = whatever the target already had + factor × adjusted(source)`. In the engine that means leg ②T and nothing else — no leg ①, no flatten leg ③, no supersede predicate — and `ranked` partitions transfer rows per `ADJUSTMENT_ID`. The replace wording below is kept for the record; see the spec §1/§6.1/§6.3/§6.4/§6.5 amendments for the authoritative description.
+
+**Architecture:** *(amended 2026-09-18 — see the goal note above: the leg ②T rows are ADDED, there is no flatten leg and no supersede for a transfer, so nothing "cancels position by position".)* Roll with the book swapped for the COB. `ADJ_HEADER` gains `SOURCE_BOOK_CODE`; the header's `BOOK_CODE` is the TARGET book and `ENTITY_CODE` is derived server-side from the target book, so sign-off, overlap checks, supersede-by-filter and every grid work unchanged. The Scale path of `SP_PROCESS_ADJUSTMENT` gets a fourth UNION leg (②T) that reads the source book's rows from the adjusted view and re-keys them to the target book inside the SELECT, so netting cancels the target's flattened rows position by position. `SP_PREVIEW_ADJUSTMENT` mirrors it. The page adds the type pill, a Source/Target form and per-trade fan-out on top of Part A's `_submit_fanout`.
 
 **Tech Stack:** Snowflake Python stored procedures (Snowpark), Streamlit 1.50, pytest (UAT suite in `tests/` needs Snowflake and is NOT runnable here; local unit tests use the scratchpad venv `VENV=/private/tmp/claude-501/-Users-marcosmagri-Documents-MUFG-adjustment/202b9189-fe88-405b-a79e-040561cbbd73/scratchpad/venv/bin/python`).
 
@@ -46,8 +48,10 @@
 
 In `01_tables.sql`, after `    VAR_SUB_COMPONENT_NAME      VARCHAR(200) COLLATE 'en-ci',` add:
 ```sql
-    -- Transfer Book (2026-09-17): the SOURCE book whose adjusted rows replace
-    -- BOOK_CODE (the TARGET book) at COBID. NULL = not a transfer.
+    -- Transfer Book (2026-09-17): the SOURCE book whose adjusted rows are
+    -- ADDED to BOOK_CODE (the TARGET book) at COBID — the target keeps
+    -- everything it already carries (append, 2026-09-18). NULL = not a
+    -- transfer, and the engine keys every transfer behaviour off this column.
     SOURCE_BOOK_CODE            VARCHAR(20)  COLLATE 'en-ci',
 ```
 

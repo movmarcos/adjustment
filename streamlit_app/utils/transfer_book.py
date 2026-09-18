@@ -1,7 +1,7 @@
 """Pure helpers for the Transfer Book form (no Streamlit, no Snowflake).
 
-A Transfer Book adjustment replaces a TARGET book's positions at one COB with
-a SOURCE book's adjusted values. Selecting trade codes narrows it: the engine
+A Transfer Book adjustment ADDS a SOURCE book's adjusted values to a TARGET
+book at one COB — the target keeps everything it already has. Selecting trade codes narrows it: the engine
 takes one adjustment per trade (and one per selected scope), so the page fans
 out over `transfer_jobs(...)` exactly the way multi-scope Scaling fans out
 over `submit_fanout(...)` (utils/submit_fanout.py).

@@ -287,6 +287,14 @@ records the row count.
 
 Metrics: `× adjust.SCALE_FACTOR_ADJUSTED` (the full factor, as in leg ②).
 
+> **Note (2026-09-18).** Leg ②T reads `FACT_ADJUSTED_TABLE` as it stands
+> *before* this batch's own inserts — the whole UNION is evaluated into the
+> staging table first, and only then does `perm_insert` write. So two transfers
+> chained within ONE batch (A → B and B → C) both see the **pre-batch** value
+> of their source book: B → C carries B as it was before A → B landed. Chaining
+> that is meant to compound has to be run as two separate batches (two
+> pipeline runs), and that is worth saying to a user who asks.
+
 ### 6.3 Why re-key inside the leg
 
 `fact_key` computes the surrogate key from the emitted columns (BOOK_KEY,

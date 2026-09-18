@@ -55,9 +55,10 @@ _WIZ_DEFAULTS: dict = {
     "recurring_start_cobid":  None,
     "recurring_end_cobid":    None,
     "scale_factor":           1.0,
-    # Transfer Book (adjustment_type "Transfer"): the target book's positions
-    # at the COB are replaced by the source book's adjusted values. One
-    # adjustment per selected trade code (blank = the whole book).
+    # Transfer Book (adjustment_type "Transfer"): the source book's adjusted
+    # values are ADDED to the target book at the COB — the target keeps
+    # everything it already has. One adjustment per selected trade code
+    # (blank = the whole book).
     "source_book_code":       None,
     "target_book_code":       None,
     "transfer_trade_codes":   [],
@@ -201,9 +202,9 @@ def _build_payload() -> dict:
         "requires_approval":     wiz.get("requires_approval", False),
     }
     # ── Transfer Book ────────────────────────────────────────────────────
-    # BOOK_CODE is the TARGET (the scope being replaced); SOURCE_BOOK_CODE is
-    # where the values come from, and the entity is derived from the target
-    # book server-side. NOTHING else is sent: any other filter left over from
+    # BOOK_CODE is the TARGET (the book the values are added to);
+    # SOURCE_BOOK_CODE is where they come from, and the entity is derived from
+    # the target book server-side. NOTHING else is sent: any other filter left over from
     # a Scale/Roll draft would silently narrow the transfer — the SP strips
     # (pops) stray filter keys rather than failing, so a key sent by mistake
     # is dropped without a word (03_sp_submit_adjustment.sql).
@@ -919,8 +920,9 @@ def _preview_payload() -> dict:
                 "book_code": wiz.get("target_book_code"),
                 # The TARGET entity (the Transfer form derives it from the
                 # target book, and SP_SUBMIT derives the same one). The
-                # preview's "current" side must predicate on it exactly as
-                # the engine's leg ③ does, or the two read different rows.
+                # preview's target side must be scoped exactly the way the
+                # engine scopes the rows it ADDS — leg ②T re-keys them to the
+                # target book's entity — or the two read different rows.
                 "entity_code": wiz.get("entity_code"),
                 "source_book_code": wiz.get("source_book_code"),
                 "trade_codes": list(wiz.get("transfer_trade_codes") or [])}
@@ -1773,9 +1775,7 @@ def render_scaling_form() -> None:
     _transfer = wiz.get("adjustment_type") == "Transfer"
     with _card():
         _sec(3, "Data Scope",
-             "Select one or more data scopes — one adjustment per scope."
-             + (" Transfer Book covers VaR, Stress and Sensitivity in this "
-                "release." if _transfer else ""))
+             "Select one or more data scopes — one adjustment per scope.")
         _render_scope_pills(TRANSFER_SCOPES if _transfer else ALL_SCOPES)
     if not _selected_scopes():
         st.info("Select at least one data scope to continue.")
@@ -1858,8 +1858,9 @@ def _render_schedule_fields() -> None:
             wiz["scale_factor"] = _float_input(
                 "Scale Factor *", "sf", wiz.get("scale_factor", 1.0),
                 min_v=-10.0, max_v=100.0,
-                help="1 = copy as-is (Roll / Transfer Book), 1.05 = +5%, "
-                     "0.95 = −5%. Comma or dot decimals accepted.")
+                help="1 = as-is (Roll carries the source COB forward, "
+                     "Transfer Book adds the source book unchanged), "
+                     "1.05 = +5%, 0.95 = −5%. Comma or dot decimals accepted.")
     if (wiz.get("adjustment_type") == "Scale"
             and wiz.get("scale_factor") is not None
             and float(wiz["scale_factor"]) == 1.0):
