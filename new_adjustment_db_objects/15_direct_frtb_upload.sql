@@ -41,7 +41,8 @@ USE SCHEMA ADJUSTMENT_APP;
 -- Insert-if-missing / update-in-place, never DELETE+INSERT: a redeploy must
 -- not reset IS_ACTIVE (silently re-enabling a scope an admin turned off), and
 -- must not blank a column a future INSERT list happens to omit. Same policy as
--- DIRECT_ACCEPTED_COLUMNS (01:503-505), ADJUSTMENTS_SETTINGS and ADJ_CATEGORY.
+-- the DIRECT_ACCEPTED_COLUMNS, ADJUSTMENTS_SETTINGS and ADJ_CATEGORY seeds in
+-- 01_tables.sql, each of which says "IS_ACTIVE deliberately NOT touched".
 MERGE INTO ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA t
 USING (
 SELECT
@@ -395,16 +396,41 @@ WITH base AS (
       AND UPPER(h.PROCESS_TYPE) = 'FRTB'
       AND h.ADJUSTMENT_ACTION IN ('Direct', 'Upload')   -- file flow is Direct; Upload = pre-retype rows
 ),
--- ── DIMENSION.TRADE pinning ────────────────────────────────────────────────
--- Standing rule: never scan DIMENSION.TRADE (the huge SCD2 table) without a
--- predicate that can prune it. The caller filters this view by ADJ_ID, which
--- prunes ADJ_LINE_ITEM_JSON only — left as a plain LEFT JOIN the dimension is
--- the build side and gets read whole. So collect the trade codes this view can
--- possibly need and pin the dimension on its BARE TRADE_CODE column (a bare
--- column keeps the predicate prunable; UPPER(TRADE_CODE) would not be).
--- Case is handled by emitting every spelling we could need, because the match
--- itself (below) must be case-insensitive — the validation views accept a
--- trade code in any case (13:345, 13:357).
+-- ── DIMENSION pinning: TRADE, BOOK, COMMON_INSTRUMENT(_FCD) ───────────────
+-- Standing rule: never scan a large SCD2 dimension without a predicate that
+-- can prune it. The caller filters this view by ADJ_ID, which prunes
+-- ADJ_LINE_ITEM_JSON only — left as a plain LEFT JOIN the dimension is the
+-- build side and gets read whole. So collect the codes this view can possibly
+-- need and pin each dimension on its BARE code column: a bare column keeps the
+-- predicate prunable, UPPER(<dimension column>) does not. That is exactly what
+-- finding I10 objects to, and why the validation file builds its pinned_book /
+-- ok_instr CTEs the same way (see the pinning CTEs in 13_direct_validation.sql).
+-- Case is handled by emitting every spelling we could need into the value set,
+-- because the match itself (below) must be case-insensitive — the FRTB
+-- validation block in 13_direct_validation.sql accepts a code in any case.
+-- NOTE: the pin set spans ALL FRTB Direct adjustments, not just the batch the
+-- caller asked for — the caller's ADJ_ID filter sits outside the view and
+-- cannot reach into a CTE. It is still orders of magnitude narrower than the
+-- whole dimension, which is the point.
+-- Residual (same for trades, books and instruments): a dimension row spelled
+-- neither like the file, nor all-upper, nor all-lower, still misses. Closing
+-- that needs a case-insensitive collation on the dimension column; folding the
+-- dimension side instead would trade a rare miss for a guaranteed full scan.
+-- Every spelling the pre-pin joins could match is in the set, so nothing that
+-- resolved before stops resolving here.
+--
+-- SCD2 convention (applies to trades / books / instruments below): a row
+-- resolves when it IS_CURRENT_ROW — parity with the gate that accepted the
+-- file, since the validation views and the row-level Direct writer both match
+-- on IS_CURRENT_ROW = TRUE — OR when the COB falls inside its effective-date
+-- window, which is what this file did before and is the historically correct
+-- reading for a backdated COB. The two are OR'd rather than swapped so that
+-- (a) a green file whose current SCD2 row starts after a backdated COB no
+-- longer silently writes -1, and (b) nothing that resolved under the old
+-- window-only rule stops resolving. Where both candidates exist, the QUALIFY
+-- at the end of the view prefers the one whose window covers the COB.
+-- DIMENSION.FRTB_INSTRUMENT (fi) stays window-only: it is not part of the
+-- validation gate and carries no IS_CURRENT_ROW column.
 wanted_trades AS (
     SELECT TC FROM (
         SELECT COALESCE(NULLIF(b.TRADE_CODE, ''),
@@ -430,12 +456,57 @@ trades AS (
     SELECT t.TRADE_KEY, t.TRADE_CODE, t.BOOK_CODE, t.ENTITY_CODE, t.INSTRUMENT_KEY,
            t.TRADE_TYPOLOGY, t.MUREX_INSTRUMENT, t.MUREX_VERSION,
            t.TRADE_SOURCE_SYSTEM_CODE, t.SABRE_TRADE_CODE,
-           t.PRODUCT_CATEGORY_ATTRIBUTES_KEY,
+           t.PRODUCT_CATEGORY_ATTRIBUTES_KEY, t.IS_CURRENT_ROW,
            t.EFFECTIVE_START_DATE, t.EFFECTIVE_END_DATE
     FROM DIMENSION.TRADE t
     WHERE t.TRADE_CODE IN (SELECT TC FROM wanted_trades)
-      AND t.EFFECTIVE_START_DATE <= (SELECT MAX(EVAL_DATE) FROM base)
-      AND t.EFFECTIVE_END_DATE   >= (SELECT MIN(EVAL_DATE) FROM base)
+      AND (t.IS_CURRENT_ROW = TRUE
+           OR (t.EFFECTIVE_START_DATE <= (SELECT MAX(EVAL_DATE) FROM base)
+               AND t.EFFECTIVE_END_DATE >= (SELECT MIN(EVAL_DATE) FROM base)))
+),
+-- The BOOK_CODE the view resolves is the payload's, falling back to the pinned
+-- trade's BOOK_CODE — so both sources feed the pin set.
+wanted_books AS (
+    SELECT BC FROM (
+        SELECT NULLIF(b.BOOK_CODE_IN, '') AS BC FROM base b
+        UNION SELECT UPPER(NULLIF(b.BOOK_CODE_IN, '')) FROM base b
+        UNION SELECT LOWER(NULLIF(b.BOOK_CODE_IN, '')) FROM base b
+        UNION SELECT t.BOOK_CODE        FROM trades t
+        UNION SELECT UPPER(t.BOOK_CODE) FROM trades t
+        UNION SELECT LOWER(t.BOOK_CODE) FROM trades t
+    ) WHERE BC IS NOT NULL
+),
+books AS (
+    SELECT bk.BOOK_KEY, bk.BOOK_CODE, bk.ENTITY_CODE, bk.IS_CURRENT_ROW,
+           bk.EFFECTIVE_START_DATE, bk.EFFECTIVE_END_DATE
+    FROM DIMENSION.BOOK bk
+    WHERE bk.BOOK_CODE IN (SELECT BC FROM wanted_books)
+      AND (bk.IS_CURRENT_ROW = TRUE
+           OR (bk.EFFECTIVE_START_DATE <= (SELECT MAX(EVAL_DATE) FROM base)
+               AND bk.EFFECTIVE_END_DATE >= (SELECT MIN(EVAL_DATE) FROM base)))
+),
+-- SBM resolves the instrument from SECURITY_CODE.
+wanted_instruments AS (
+    SELECT IC FROM (
+        SELECT NULLIF(b.SECURITY_CODE, '') AS IC FROM base b
+        UNION SELECT UPPER(NULLIF(b.SECURITY_CODE, '')) FROM base b
+        UNION SELECT LOWER(NULLIF(b.SECURITY_CODE, '')) FROM base b
+    ) WHERE IC IS NOT NULL
+),
+instruments AS (
+    SELECT c.COMMON_INSTRUMENT_KEY, c.INSTRUMENT_CODE, c.INSTRUMENT_KEY,
+           c.IS_CURRENT_ROW, c.EFFECTIVE_START_DATE, c.EFFECTIVE_END_DATE
+    FROM DIMENSION.COMMON_INSTRUMENT c
+    WHERE c.INSTRUMENT_CODE IN (SELECT IC FROM wanted_instruments)
+      AND (c.IS_CURRENT_ROW = TRUE
+           OR (c.EFFECTIVE_START_DATE <= (SELECT MAX(EVAL_DATE) FROM base)
+               AND c.EFFECTIVE_END_DATE >= (SELECT MIN(EVAL_DATE) FROM base)))
+),
+instruments_fcd AS (
+    SELECT f.COMMON_INSTRUMENT_FCD_KEY, f.INSTRUMENT_CODE, f.INSTRUMENT_KEY
+    FROM DIMENSION.COMMON_INSTRUMENT_FCD f
+    WHERE f.INSTRUMENT_CODE IN (SELECT IC FROM wanted_instruments)
+      AND f.IS_CURRENT_ROW = TRUE
 ),
 enriched AS (
     SELECT base.*,
@@ -514,11 +585,14 @@ SELECT
     enriched.FILE_NAME AS RAVEN_FILENAME,
     enriched.ROW_NUM   AS RAVEN_FILE_ROW_NUMBER
 FROM enriched
--- Every code join below is UPPER()-wrapped on BOTH sides and treats '' as
--- NULL, because that is exactly how VW_DIRECT_VALIDATE_FRTB accepts the file
--- (13:302-359) and how the row-level Direct writer resolves keys (05:1044-1102).
+-- Every code join below is case-insensitive and treats '' as NULL, because
+-- that is exactly how VW_DIRECT_VALIDATE_FRTB accepts the file (see the FRTB
+-- validation block in 13_direct_validation.sql) and how the row-level Direct
+-- writer resolves keys (the _RES_JOINS map in 05_sp_process_adjustment.sql).
 -- A file the app paints green must not then resolve to a -1 key here.
--- 'td' is the PINNED trades CTE above, not DIMENSION.TRADE itself.
+-- 'td' / 'b' / 'ci' / 'fci' are the PINNED CTEs above, not the dimensions
+-- themselves — the case folding happens against the small pinned set, never
+-- against the dimension column (which would defeat pruning).
 -- Direct-adjustment trade rule (all direct scopes): an empty TRADE_CODE
 -- resolves to the book's synthetic '<BOOK_CODE>/Adjustment' trade.
 LEFT JOIN trades td
@@ -526,14 +600,25 @@ LEFT JOIN trades td
                               CONCAT(NULLIF(enriched.BOOK_CODE_IN, ''), '/Adjustment')))
  AND UPPER(td.BOOK_CODE) = UPPER(COALESCE(NULLIF(enriched.BOOK_CODE_IN, ''), td.BOOK_CODE))
  AND UPPER(td.ENTITY_CODE) = UPPER(enriched.ENTITY_CODE)
- AND enriched.EVAL_DATE BETWEEN td.EFFECTIVE_START_DATE AND td.EFFECTIVE_END_DATE
-LEFT JOIN DIMENSION.BOOK b
+ AND (td.IS_CURRENT_ROW = TRUE
+      OR enriched.EVAL_DATE BETWEEN td.EFFECTIVE_START_DATE AND td.EFFECTIVE_END_DATE)
+-- The book must belong to the row's entity. A BOOK_CODE can repeat across
+-- entities, so an unqualified match resolves to *some* book — a wrong
+-- BOOK_KEY, which is worse than -1 because nothing downstream can detect it.
+-- Both the validation views and the row-level Direct writer qualify the book
+-- by entity (and by department, which the FRTB payloads do not carry) the
+-- same way, with the IS NULL guard so a row without an entity still resolves.
+LEFT JOIN books b
   ON UPPER(b.BOOK_CODE) = UPPER(COALESCE(NULLIF(enriched.BOOK_CODE_IN, ''), td.BOOK_CODE))
- AND enriched.EVAL_DATE BETWEEN b.EFFECTIVE_START_DATE AND b.EFFECTIVE_END_DATE
+ AND (NULLIF(enriched.ENTITY_CODE, '') IS NULL
+      OR UPPER(b.ENTITY_CODE) = UPPER(enriched.ENTITY_CODE))
+ AND (b.IS_CURRENT_ROW = TRUE
+      OR enriched.EVAL_DATE BETWEEN b.EFFECTIVE_START_DATE AND b.EFFECTIVE_END_DATE)
 LEFT JOIN DIMENSION.MEASURE_TYPE mt
   ON UPPER(mt.MEASURE_TYPE_CODE) = UPPER(NULLIF(enriched.MEASURE_TYPE_CODE, ''))
 -- The tenor dimension is keyed by CONCAT(tenor_code, '_', COALESCE(ccy,'USD'))
--- everywhere in the solution (04:267-269, 05:1111-1112, 05:1714-1717, 13:205-206).
+-- everywhere in the solution (the preview and process procs, and the
+-- validation file's ok_tenor CTE, all build the key that way).
 -- Matching a bare TENOR_CODE ('2Y') against TENOR_CURRENCY_CODE ('2Y_USD')
 -- never hit, so every SBM Direct row landed with TENOR_CURRENCY_KEY = -1.
 LEFT JOIN DIMENSION.TENOR_CURRENCY tc
@@ -548,15 +633,19 @@ LEFT JOIN DIMENSION.CURRENCY_PAIR cp
 LEFT JOIN DIMENSION.CURVE_CURRENCY cc
   ON UPPER(cc.CURVE_CODE) =
      UPPER(IFF(COALESCE(enriched.CURVE_TYPE, '') = '', 'N/A', enriched.CURVE_TYPE))
-LEFT JOIN DIMENSION.COMMON_INSTRUMENT ci
+LEFT JOIN instruments ci
   ON UPPER(ci.INSTRUMENT_CODE) = UPPER(NULLIF(enriched.SECURITY_CODE, ''))
- AND enriched.EVAL_DATE BETWEEN ci.EFFECTIVE_START_DATE AND ci.EFFECTIVE_END_DATE
+ AND (ci.IS_CURRENT_ROW = TRUE
+      OR enriched.EVAL_DATE BETWEEN ci.EFFECTIVE_START_DATE AND ci.EFFECTIVE_END_DATE)
+-- ci2 / fci2 resolve from the trade's INSTRUMENT_KEY, not from a code, so
+-- there is nothing to pin and no dimension column to fold: the join key is
+-- already a key.
 LEFT JOIN DIMENSION.COMMON_INSTRUMENT ci2
   ON td.INSTRUMENT_KEY = ci2.INSTRUMENT_KEY
- AND enriched.EVAL_DATE BETWEEN ci2.EFFECTIVE_START_DATE AND ci2.EFFECTIVE_END_DATE
-LEFT JOIN DIMENSION.COMMON_INSTRUMENT_FCD fci
+ AND (ci2.IS_CURRENT_ROW = TRUE
+      OR enriched.EVAL_DATE BETWEEN ci2.EFFECTIVE_START_DATE AND ci2.EFFECTIVE_END_DATE)
+LEFT JOIN instruments_fcd fci
   ON UPPER(fci.INSTRUMENT_CODE) = UPPER(NULLIF(enriched.SECURITY_CODE, ''))
- AND fci.IS_CURRENT_ROW = TRUE
 LEFT JOIN DIMENSION.COMMON_INSTRUMENT_FCD fci2
   ON td.INSTRUMENT_KEY = fci2.INSTRUMENT_KEY
  AND fci2.IS_CURRENT_ROW = TRUE
@@ -567,11 +656,37 @@ LEFT JOIN DIMENSION.FRTB_INSTRUMENT fi
      UPPER(COALESCE(NULLIF(enriched.ISSUER_CODE, ''), 'NA'))
  AND enriched.EVAL_DATE BETWEEN fi.EFFECTIVE_START_DATE AND fi.EFFECTIVE_END_DATE
 QUALIFY ROW_NUMBER() OVER (
-    -- One output row per line item: dimension joins (TRADE by code+entity,
-    -- instruments by code) can fan out when a code maps to multiple rows
-    -- in the effective window; keep the best-resolved candidate.
+    -- One output row per line item: every dimension join here can fan out
+    -- (a code maps to several SCD2 rows, or to several rows in the effective
+    -- window), so exactly one candidate must be chosen.
+    -- The choice has to be DETERMINISTIC: FRTBSA_SENSITIVITY_KEY is an MD5 of
+    -- (ADJ_ID, ROW_NUM) and a retry overwrites the same fact row, so an
+    -- arbitrary tie-break could land different dimension keys on the same row
+    -- each time the adjustment is reprocessed. Every joined alias that can
+    -- fan out therefore appears in the ORDER BY. ('tim' does not: it is
+    -- already GROUP BY TICKER, so it contributes at most one row.)
+    -- The leading IFF per SCD2 alias prefers the row whose effective window
+    -- covers the COB over a merely-current row — see the SCD2 note above.
     PARTITION BY ADJ_ID, ROW_NUM
-    ORDER BY td.TRADE_KEY DESC NULLS LAST, ci.COMMON_INSTRUMENT_KEY DESC NULLS LAST) = 1;
+    ORDER BY IFF(enriched.EVAL_DATE BETWEEN td.EFFECTIVE_START_DATE
+                                        AND td.EFFECTIVE_END_DATE, 0, 1) ASC NULLS LAST,
+             td.TRADE_KEY DESC NULLS LAST,
+             IFF(enriched.EVAL_DATE BETWEEN b.EFFECTIVE_START_DATE
+                                        AND b.EFFECTIVE_END_DATE, 0, 1) ASC NULLS LAST,
+             b.BOOK_KEY DESC NULLS LAST,
+             IFF(enriched.EVAL_DATE BETWEEN ci.EFFECTIVE_START_DATE
+                                        AND ci.EFFECTIVE_END_DATE, 0, 1) ASC NULLS LAST,
+             ci.COMMON_INSTRUMENT_KEY DESC NULLS LAST,
+             IFF(enriched.EVAL_DATE BETWEEN ci2.EFFECTIVE_START_DATE
+                                        AND ci2.EFFECTIVE_END_DATE, 0, 1) ASC NULLS LAST,
+             ci2.COMMON_INSTRUMENT_KEY DESC NULLS LAST,
+             fci.COMMON_INSTRUMENT_FCD_KEY DESC NULLS LAST,
+             fci2.COMMON_INSTRUMENT_FCD_KEY DESC NULLS LAST,
+             fi.FRTB_INSTRUMENT_KEY DESC NULLS LAST,
+             mt.MEASURE_TYPE_KEY DESC NULLS LAST,
+             tc.TENOR_CURRENCY_KEY DESC NULLS LAST,
+             cp.CURRENCY_PAIR_KEY DESC NULLS LAST,
+             cc.CURVE_CURRENCY_KEY DESC NULLS LAST) = 1;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 5. VW_DIRECT_FRTBDRC_ENRICHED — DRC line items → FRTBSA_DRC shape
@@ -648,7 +763,8 @@ WITH base AS (
       AND UPPER(h.PROCESS_TYPE) = 'FRTBDRC'
       AND h.ADJUSTMENT_ACTION IN ('Direct', 'Upload')   -- file flow is Direct; Upload = pre-retype rows
 ),
--- DIMENSION.TRADE pinning — see the SBM view above for the standing rule.
+-- DIMENSION pinning (TRADE / BOOK / COMMON_INSTRUMENT(_FCD)) and the SCD2
+-- convention — see the SBM view above for the standing rule and the rationale.
 wanted_trades AS (
     SELECT TC FROM (
         SELECT COALESCE(NULLIF(b.TRADE_CODE, ''),
@@ -672,12 +788,56 @@ trades AS (
     SELECT t.TRADE_KEY, t.TRADE_CODE, t.BOOK_CODE, t.ENTITY_CODE, t.INSTRUMENT_KEY,
            t.TRADE_TYPOLOGY, t.MUREX_INSTRUMENT, t.MUREX_VERSION,
            t.TRADE_SOURCE_SYSTEM_CODE, t.SABRE_TRADE_CODE,
-           t.PRODUCT_CATEGORY_ATTRIBUTES_KEY,
+           t.PRODUCT_CATEGORY_ATTRIBUTES_KEY, t.IS_CURRENT_ROW,
            t.EFFECTIVE_START_DATE, t.EFFECTIVE_END_DATE
     FROM DIMENSION.TRADE t
     WHERE t.TRADE_CODE IN (SELECT TC FROM wanted_trades)
-      AND t.EFFECTIVE_START_DATE <= (SELECT MAX(EVAL_DATE) FROM base)
-      AND t.EFFECTIVE_END_DATE   >= (SELECT MIN(EVAL_DATE) FROM base)
+      AND (t.IS_CURRENT_ROW = TRUE
+           OR (t.EFFECTIVE_START_DATE <= (SELECT MAX(EVAL_DATE) FROM base)
+               AND t.EFFECTIVE_END_DATE >= (SELECT MIN(EVAL_DATE) FROM base)))
+),
+wanted_books AS (
+    SELECT BC FROM (
+        SELECT NULLIF(b.BOOK_CODE, '') AS BC FROM base b
+        UNION SELECT UPPER(NULLIF(b.BOOK_CODE, '')) FROM base b
+        UNION SELECT LOWER(NULLIF(b.BOOK_CODE, '')) FROM base b
+    ) WHERE BC IS NOT NULL
+),
+books AS (
+    SELECT bk.BOOK_KEY, bk.BOOK_CODE, bk.ENTITY_CODE, bk.IS_CURRENT_ROW,
+           bk.EFFECTIVE_START_DATE, bk.EFFECTIVE_END_DATE
+    FROM DIMENSION.BOOK bk
+    WHERE bk.BOOK_CODE IN (SELECT BC FROM wanted_books)
+      AND (bk.IS_CURRENT_ROW = TRUE
+           OR (bk.EFFECTIVE_START_DATE <= (SELECT MAX(EVAL_DATE) FROM base)
+               AND bk.EFFECTIVE_END_DATE >= (SELECT MIN(EVAL_DATE) FROM base)))
+),
+-- DRC resolves the instrument from SECURITY_CODE, falling back to
+-- INSTRUMENT_NAME — both feed the pin set.
+wanted_instruments AS (
+    SELECT IC FROM (
+        SELECT COALESCE(NULLIF(b.SECURITY_CODE, ''),
+                        NULLIF(b.INSTRUMENT_NAME, '')) AS IC FROM base b
+        UNION SELECT UPPER(COALESCE(NULLIF(b.SECURITY_CODE, ''),
+                                    NULLIF(b.INSTRUMENT_NAME, ''))) FROM base b
+        UNION SELECT LOWER(COALESCE(NULLIF(b.SECURITY_CODE, ''),
+                                    NULLIF(b.INSTRUMENT_NAME, ''))) FROM base b
+    ) WHERE IC IS NOT NULL
+),
+instruments AS (
+    SELECT c.COMMON_INSTRUMENT_KEY, c.INSTRUMENT_CODE, c.INSTRUMENT_KEY,
+           c.IS_CURRENT_ROW, c.EFFECTIVE_START_DATE, c.EFFECTIVE_END_DATE
+    FROM DIMENSION.COMMON_INSTRUMENT c
+    WHERE c.INSTRUMENT_CODE IN (SELECT IC FROM wanted_instruments)
+      AND (c.IS_CURRENT_ROW = TRUE
+           OR (c.EFFECTIVE_START_DATE <= (SELECT MAX(EVAL_DATE) FROM base)
+               AND c.EFFECTIVE_END_DATE >= (SELECT MIN(EVAL_DATE) FROM base)))
+),
+instruments_fcd AS (
+    SELECT f.COMMON_INSTRUMENT_FCD_KEY, f.INSTRUMENT_CODE, f.INSTRUMENT_KEY
+    FROM DIMENSION.COMMON_INSTRUMENT_FCD f
+    WHERE f.INSTRUMENT_CODE IN (SELECT IC FROM wanted_instruments)
+      AND f.IS_CURRENT_ROW = TRUE
 ),
 enriched AS (
     SELECT base.*,
@@ -735,32 +895,42 @@ SELECT
     enriched.ROW_NUM   AS RAVEN_FILE_ROW_NUMBER
 FROM enriched
 -- Case-insensitive, '' treated as NULL — the rules VW_DIRECT_VALIDATE_FRTBDRC
--- accepts the file under (13:362-438). 'td' is the PINNED trades CTE above.
-LEFT JOIN DIMENSION.BOOK b
+-- accepts the file under (see the FRTBDRC validation block in
+-- 13_direct_validation.sql). 'td' / 'b' / 'ci' / 'fci' are the PINNED CTEs
+-- above, so the case folding never touches a dimension column. The book is
+-- entity-qualified for the same reason as in the SBM view.
+LEFT JOIN books b
   ON UPPER(b.BOOK_CODE) = UPPER(NULLIF(enriched.BOOK_CODE, ''))
- AND enriched.EVAL_DATE BETWEEN b.EFFECTIVE_START_DATE AND b.EFFECTIVE_END_DATE
+ AND (NULLIF(enriched.ENTITY_CODE, '') IS NULL
+      OR UPPER(b.ENTITY_CODE) = UPPER(enriched.ENTITY_CODE))
+ AND (b.IS_CURRENT_ROW = TRUE
+      OR enriched.EVAL_DATE BETWEEN b.EFFECTIVE_START_DATE AND b.EFFECTIVE_END_DATE)
 LEFT JOIN trades td
   ON UPPER(td.TRADE_CODE) = UPPER(COALESCE(NULLIF(enriched.TRADE_CODE, ''),
                               CONCAT(NULLIF(enriched.BOOK_CODE, ''), '/Adjustment')))
  AND UPPER(td.BOOK_CODE) = UPPER(COALESCE(NULLIF(enriched.BOOK_CODE, ''), td.BOOK_CODE))
  AND UPPER(td.ENTITY_CODE) = UPPER(enriched.ENTITY_CODE)
- AND enriched.EVAL_DATE BETWEEN td.EFFECTIVE_START_DATE AND td.EFFECTIVE_END_DATE
+ AND (td.IS_CURRENT_ROW = TRUE
+      OR enriched.EVAL_DATE BETWEEN td.EFFECTIVE_START_DATE AND td.EFFECTIVE_END_DATE)
 LEFT JOIN DIMENSION.MEASURE_TYPE mt
   ON UPPER(mt.MEASURE_TYPE_CODE) = UPPER(NULLIF(enriched.MEASURE_TYPE_CODE, ''))
 LEFT JOIN (SELECT TICKER, MAX(ISIN) AS ISIN
            FROM STATIC_STAGING.TICKER_ISIN_MAP GROUP BY TICKER) tim
   ON enriched.SECURITY_CODE = tim.TICKER
-LEFT JOIN DIMENSION.COMMON_INSTRUMENT ci
+LEFT JOIN instruments ci
   ON UPPER(ci.INSTRUMENT_CODE) = UPPER(COALESCE(NULLIF(enriched.SECURITY_CODE, ''),
                                                 NULLIF(enriched.INSTRUMENT_NAME, '')))
- AND enriched.EVAL_DATE BETWEEN ci.EFFECTIVE_START_DATE AND ci.EFFECTIVE_END_DATE
+ AND (ci.IS_CURRENT_ROW = TRUE
+      OR enriched.EVAL_DATE BETWEEN ci.EFFECTIVE_START_DATE AND ci.EFFECTIVE_END_DATE)
+-- ci2 / fci2 resolve from the trade's INSTRUMENT_KEY, not from a code: the
+-- join key is already a key, so there is nothing to pin or fold.
 LEFT JOIN DIMENSION.COMMON_INSTRUMENT ci2
   ON td.INSTRUMENT_KEY = ci2.INSTRUMENT_KEY
- AND enriched.EVAL_DATE BETWEEN ci2.EFFECTIVE_START_DATE AND ci2.EFFECTIVE_END_DATE
-LEFT JOIN DIMENSION.COMMON_INSTRUMENT_FCD fci
+ AND (ci2.IS_CURRENT_ROW = TRUE
+      OR enriched.EVAL_DATE BETWEEN ci2.EFFECTIVE_START_DATE AND ci2.EFFECTIVE_END_DATE)
+LEFT JOIN instruments_fcd fci
   ON UPPER(fci.INSTRUMENT_CODE) = UPPER(COALESCE(NULLIF(enriched.SECURITY_CODE, ''),
                                                  NULLIF(enriched.INSTRUMENT_NAME, '')))
- AND fci.IS_CURRENT_ROW = TRUE
 LEFT JOIN DIMENSION.COMMON_INSTRUMENT_FCD fci2
   ON td.INSTRUMENT_KEY = fci2.INSTRUMENT_KEY
  AND fci2.IS_CURRENT_ROW = TRUE
@@ -774,11 +944,29 @@ LEFT JOIN DIMENSION.FRTB_INSTRUMENT fi
      UPPER(COALESCE(NULLIF(enriched.ISSUER_CODE, ''), 'NA'))
  AND enriched.EVAL_DATE BETWEEN fi.EFFECTIVE_START_DATE AND fi.EFFECTIVE_END_DATE
 QUALIFY ROW_NUMBER() OVER (
-    -- One output row per line item: dimension joins (TRADE by code+entity,
-    -- instruments by code) can fan out when a code maps to multiple rows
-    -- in the effective window; keep the best-resolved candidate.
+    -- One output row per line item, chosen DETERMINISTICALLY: FRTBSA_DRC_KEY
+    -- is an MD5 of (ADJ_ID, ROW_NUM) and a retry overwrites the same fact
+    -- row, so every alias that can fan out must appear in the ORDER BY or the
+    -- same adjustment could land different dimension keys on reprocessing.
+    -- ('tim' is GROUP BY TICKER, so it contributes at most one row.)
     PARTITION BY ADJ_ID, ROW_NUM
-    ORDER BY td.TRADE_KEY DESC NULLS LAST, ci.COMMON_INSTRUMENT_KEY DESC NULLS LAST) = 1;
+    ORDER BY IFF(enriched.EVAL_DATE BETWEEN td.EFFECTIVE_START_DATE
+                                        AND td.EFFECTIVE_END_DATE, 0, 1) ASC NULLS LAST,
+             td.TRADE_KEY DESC NULLS LAST,
+             IFF(enriched.EVAL_DATE BETWEEN b.EFFECTIVE_START_DATE
+                                        AND b.EFFECTIVE_END_DATE, 0, 1) ASC NULLS LAST,
+             b.BOOK_KEY DESC NULLS LAST,
+             IFF(enriched.EVAL_DATE BETWEEN ci.EFFECTIVE_START_DATE
+                                        AND ci.EFFECTIVE_END_DATE, 0, 1) ASC NULLS LAST,
+             ci.COMMON_INSTRUMENT_KEY DESC NULLS LAST,
+             IFF(enriched.EVAL_DATE BETWEEN ci2.EFFECTIVE_START_DATE
+                                        AND ci2.EFFECTIVE_END_DATE, 0, 1) ASC NULLS LAST,
+             ci2.COMMON_INSTRUMENT_KEY DESC NULLS LAST,
+             fci.COMMON_INSTRUMENT_FCD_KEY DESC NULLS LAST,
+             fci2.COMMON_INSTRUMENT_FCD_KEY DESC NULLS LAST,
+             fi.FRTB_INSTRUMENT_KEY DESC NULLS LAST,
+             mt.MEASURE_TYPE_KEY DESC NULLS LAST,
+             cp.CURRENCY_PAIR_KEY DESC NULLS LAST) = 1;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 6. VW_DIRECT_FRTBRRAO_ENRICHED — RRAO line items → FRTBSA_RRAO shape
@@ -825,7 +1013,8 @@ WITH base AS (
       AND UPPER(h.PROCESS_TYPE) = 'FRTBRRAO'
       AND h.ADJUSTMENT_ACTION IN ('Direct', 'Upload')   -- file flow is Direct; Upload = pre-retype rows
 ),
--- DIMENSION.TRADE pinning — see the SBM view above for the standing rule.
+-- DIMENSION pinning (TRADE / BOOK / COMMON_INSTRUMENT(_FCD)) and the SCD2
+-- convention — see the SBM view above for the standing rule and the rationale.
 wanted_trades AS (
     SELECT TC FROM (
         SELECT COALESCE(NULLIF(b.TRADE_CODE, ''),
@@ -849,12 +1038,52 @@ trades AS (
     SELECT t.TRADE_KEY, t.TRADE_CODE, t.BOOK_CODE, t.ENTITY_CODE, t.INSTRUMENT_KEY,
            t.TRADE_TYPOLOGY, t.MUREX_INSTRUMENT, t.MUREX_VERSION,
            t.TRADE_SOURCE_SYSTEM_CODE, t.SABRE_TRADE_CODE,
-           t.PRODUCT_CATEGORY_ATTRIBUTES_KEY,
+           t.PRODUCT_CATEGORY_ATTRIBUTES_KEY, t.IS_CURRENT_ROW,
            t.EFFECTIVE_START_DATE, t.EFFECTIVE_END_DATE
     FROM DIMENSION.TRADE t
     WHERE t.TRADE_CODE IN (SELECT TC FROM wanted_trades)
-      AND t.EFFECTIVE_START_DATE <= (SELECT MAX(EVAL_DATE) FROM base)
-      AND t.EFFECTIVE_END_DATE   >= (SELECT MIN(EVAL_DATE) FROM base)
+      AND (t.IS_CURRENT_ROW = TRUE
+           OR (t.EFFECTIVE_START_DATE <= (SELECT MAX(EVAL_DATE) FROM base)
+               AND t.EFFECTIVE_END_DATE >= (SELECT MIN(EVAL_DATE) FROM base)))
+),
+wanted_books AS (
+    SELECT BC FROM (
+        SELECT NULLIF(b.BOOK_CODE, '') AS BC FROM base b
+        UNION SELECT UPPER(NULLIF(b.BOOK_CODE, '')) FROM base b
+        UNION SELECT LOWER(NULLIF(b.BOOK_CODE, '')) FROM base b
+    ) WHERE BC IS NOT NULL
+),
+books AS (
+    SELECT bk.BOOK_KEY, bk.BOOK_CODE, bk.ENTITY_CODE, bk.IS_CURRENT_ROW,
+           bk.EFFECTIVE_START_DATE, bk.EFFECTIVE_END_DATE
+    FROM DIMENSION.BOOK bk
+    WHERE bk.BOOK_CODE IN (SELECT BC FROM wanted_books)
+      AND (bk.IS_CURRENT_ROW = TRUE
+           OR (bk.EFFECTIVE_START_DATE <= (SELECT MAX(EVAL_DATE) FROM base)
+               AND bk.EFFECTIVE_END_DATE >= (SELECT MIN(EVAL_DATE) FROM base)))
+),
+-- RRAO resolves the instrument from INSTRUMENT_CODE.
+wanted_instruments AS (
+    SELECT IC FROM (
+        SELECT NULLIF(b.INSTRUMENT_CODE, '') AS IC FROM base b
+        UNION SELECT UPPER(NULLIF(b.INSTRUMENT_CODE, '')) FROM base b
+        UNION SELECT LOWER(NULLIF(b.INSTRUMENT_CODE, '')) FROM base b
+    ) WHERE IC IS NOT NULL
+),
+instruments AS (
+    SELECT c.COMMON_INSTRUMENT_KEY, c.INSTRUMENT_CODE, c.INSTRUMENT_KEY,
+           c.IS_CURRENT_ROW, c.EFFECTIVE_START_DATE, c.EFFECTIVE_END_DATE
+    FROM DIMENSION.COMMON_INSTRUMENT c
+    WHERE c.INSTRUMENT_CODE IN (SELECT IC FROM wanted_instruments)
+      AND (c.IS_CURRENT_ROW = TRUE
+           OR (c.EFFECTIVE_START_DATE <= (SELECT MAX(EVAL_DATE) FROM base)
+               AND c.EFFECTIVE_END_DATE >= (SELECT MIN(EVAL_DATE) FROM base)))
+),
+instruments_fcd AS (
+    SELECT f.COMMON_INSTRUMENT_FCD_KEY, f.INSTRUMENT_CODE, f.INSTRUMENT_KEY
+    FROM DIMENSION.COMMON_INSTRUMENT_FCD f
+    WHERE f.INSTRUMENT_CODE IN (SELECT IC FROM wanted_instruments)
+      AND f.IS_CURRENT_ROW = TRUE
 ),
 enriched AS (
     SELECT base.*,
@@ -892,36 +1121,57 @@ SELECT
     enriched.ROW_NUM   AS RAVEN_FILE_ROW_NUMBER
 FROM enriched
 -- Case-insensitive, '' treated as NULL — the rules VW_DIRECT_VALIDATE_FRTBRRAO
--- accepts the file under (13:440-516). 'td' is the PINNED trades CTE above.
-LEFT JOIN DIMENSION.BOOK b
+-- accepts the file under (see the FRTBRRAO validation block in
+-- 13_direct_validation.sql). 'td' / 'b' / 'ci' / 'fci' are the PINNED CTEs
+-- above, so the case folding never touches a dimension column. The book is
+-- entity-qualified for the same reason as in the SBM view.
+LEFT JOIN books b
   ON UPPER(b.BOOK_CODE) = UPPER(NULLIF(enriched.BOOK_CODE, ''))
- AND enriched.EVAL_DATE BETWEEN b.EFFECTIVE_START_DATE AND b.EFFECTIVE_END_DATE
+ AND (NULLIF(enriched.ENTITY_CODE, '') IS NULL
+      OR UPPER(b.ENTITY_CODE) = UPPER(enriched.ENTITY_CODE))
+ AND (b.IS_CURRENT_ROW = TRUE
+      OR enriched.EVAL_DATE BETWEEN b.EFFECTIVE_START_DATE AND b.EFFECTIVE_END_DATE)
 LEFT JOIN trades td
   ON UPPER(td.TRADE_CODE) = UPPER(COALESCE(NULLIF(enriched.TRADE_CODE, ''),
                               CONCAT(NULLIF(enriched.BOOK_CODE, ''), '/Adjustment')))
  AND UPPER(td.BOOK_CODE) = UPPER(COALESCE(NULLIF(enriched.BOOK_CODE, ''), td.BOOK_CODE))
  AND UPPER(td.ENTITY_CODE) = UPPER(enriched.ENTITY_CODE)
- AND enriched.EVAL_DATE BETWEEN td.EFFECTIVE_START_DATE AND td.EFFECTIVE_END_DATE
+ AND (td.IS_CURRENT_ROW = TRUE
+      OR enriched.EVAL_DATE BETWEEN td.EFFECTIVE_START_DATE AND td.EFFECTIVE_END_DATE)
 -- PCA: the dimension column stays BARE (prunable) and only the payload side is
--- normalised — same shape as 04:295 / 05:1743. Left as-is by this batch (M10).
+-- normalised — the same shape the preview and process procs use. Left as-is by
+-- this batch (M10 owns making all three call sites case-insensitive together).
 LEFT JOIN DIMENSION.PRODUCT_CATEGORY_ATTRIBUTES pca
   ON pca.PCA_CONCAT_KEY = REPLACE(enriched.PRODUCT_CATEGORY_ATTRIBUTES, ' ', '')
 LEFT JOIN DIMENSION.MEASURE_TYPE mt
   ON UPPER(mt.MEASURE_TYPE_CODE) = UPPER(NULLIF(enriched.MEASURE_TYPE_CODE, ''))
 LEFT JOIN DIMENSION.CURRENCY_PAIR cp
   ON UPPER(cp.CURRENCY_PAIR) = UPPER(enriched.CURRENCY_PAIR_CODE)
-LEFT JOIN DIMENSION.COMMON_INSTRUMENT ci
+LEFT JOIN instruments ci
   ON UPPER(ci.INSTRUMENT_CODE) = UPPER(NULLIF(enriched.INSTRUMENT_CODE, ''))
- AND enriched.EVAL_DATE BETWEEN ci.EFFECTIVE_START_DATE AND ci.EFFECTIVE_END_DATE
-LEFT JOIN DIMENSION.COMMON_INSTRUMENT_FCD fci
+ AND (ci.IS_CURRENT_ROW = TRUE
+      OR enriched.EVAL_DATE BETWEEN ci.EFFECTIVE_START_DATE AND ci.EFFECTIVE_END_DATE)
+LEFT JOIN instruments_fcd fci
   ON UPPER(fci.INSTRUMENT_CODE) = UPPER(NULLIF(enriched.INSTRUMENT_CODE, ''))
- AND fci.IS_CURRENT_ROW = TRUE
 QUALIFY ROW_NUMBER() OVER (
-    -- One output row per line item: dimension joins (TRADE by code+entity,
-    -- instruments by code) can fan out when a code maps to multiple rows
-    -- in the effective window; keep the best-resolved candidate.
+    -- One output row per line item, chosen DETERMINISTICALLY: FRTBSA_RRAO_KEY
+    -- is an MD5 of (ADJ_ID, ROW_NUM) and a retry overwrites the same fact
+    -- row, so every alias that can fan out must appear in the ORDER BY or the
+    -- same adjustment could land different dimension keys on reprocessing.
     PARTITION BY ADJ_ID, ROW_NUM
-    ORDER BY td.TRADE_KEY DESC NULLS LAST, ci.COMMON_INSTRUMENT_KEY DESC NULLS LAST) = 1;
+    ORDER BY IFF(enriched.EVAL_DATE BETWEEN td.EFFECTIVE_START_DATE
+                                        AND td.EFFECTIVE_END_DATE, 0, 1) ASC NULLS LAST,
+             td.TRADE_KEY DESC NULLS LAST,
+             IFF(enriched.EVAL_DATE BETWEEN b.EFFECTIVE_START_DATE
+                                        AND b.EFFECTIVE_END_DATE, 0, 1) ASC NULLS LAST,
+             b.BOOK_KEY DESC NULLS LAST,
+             IFF(enriched.EVAL_DATE BETWEEN ci.EFFECTIVE_START_DATE
+                                        AND ci.EFFECTIVE_END_DATE, 0, 1) ASC NULLS LAST,
+             ci.COMMON_INSTRUMENT_KEY DESC NULLS LAST,
+             fci.COMMON_INSTRUMENT_FCD_KEY DESC NULLS LAST,
+             pca.PRODUCT_CATEGORY_ATTRIBUTES_KEY DESC NULLS LAST,
+             mt.MEASURE_TYPE_KEY DESC NULLS LAST,
+             cp.CURRENCY_PAIR_KEY DESC NULLS LAST) = 1;
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- VERIFY
