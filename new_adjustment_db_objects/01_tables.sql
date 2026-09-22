@@ -983,7 +983,18 @@ COMMENT = 'Users (ADMIN_TYPE=USER) and Snowflake roles (ADMIN_TYPE=ROLE, direct 
 -- created through this table before ADMIN_TYPE existed was a named-user
 -- entry (ROLE support was added together with this column), so 'USER' is
 -- the correct backfill value. Idempotent: a no-op once no NULLs remain.
-UPDATE ADJUSTMENT_APP.ADJ_ADMINS SET ADMIN_TYPE = 'USER' WHERE ADMIN_TYPE IS NULL;
+--
+-- BI_DEVELOPER is excluded on purpose. It is the one seeded ROLE row, and a
+-- legacy copy of it could predate the column (NULL ADMIN_TYPE). Backfilling
+-- it to 'USER' here would make it stop matching the seed MERGE below (whose
+-- ON clause reads COALESCE(t.ADMIN_TYPE,'ROLE')='ROLE'), and that MERGE
+-- would then insert a SECOND BI_DEVELOPER row — the exact duplicate the
+-- COALESCE was added to prevent. It is left NULL for the MERGE to match and
+-- then set to its true type ('ROLE') by the UPDATE just after the MERGE.
+UPDATE ADJUSTMENT_APP.ADJ_ADMINS
+SET ADMIN_TYPE = 'USER'
+WHERE ADMIN_TYPE IS NULL
+  AND UPPER(USERNAME) <> 'BI_DEVELOPER';
 
 -- Standing admin role (Marcos, 2026-08): BI_DEVELOPER members are admins.
 -- COALESCE on the join is defense-in-depth alongside the backfill above:
@@ -995,6 +1006,17 @@ USING (SELECT 'BI_DEVELOPER' AS USERNAME, 'ROLE' AS ADMIN_TYPE) s
 ON UPPER(t.USERNAME) = s.USERNAME AND COALESCE(t.ADMIN_TYPE, 'ROLE') = s.ADMIN_TYPE
 WHEN NOT MATCHED THEN INSERT (USERNAME, ADMIN_TYPE, IS_ACTIVE, ADDED_BY)
 VALUES (s.USERNAME, s.ADMIN_TYPE, TRUE, 'SEED');
+
+-- Completes the backfill for the one row the UPDATE above had to skip: a
+-- legacy NULL-typed BI_DEVELOPER row is a ROLE, not a USER. Runs AFTER the
+-- MERGE so the MERGE could still match it on COALESCE(...,'ROLE'). Readers
+-- COALESCE a NULL to 'USER', so without this the role would stop expanding
+-- through SHOW GRANTS OF ROLE and its members would lose admin.
+-- Idempotent: a no-op once the row is typed (or when it never existed).
+UPDATE ADJUSTMENT_APP.ADJ_ADMINS
+SET ADMIN_TYPE = 'ROLE'
+WHERE UPPER(USERNAME) = 'BI_DEVELOPER'
+  AND ADMIN_TYPE IS NULL;
 
 -- Standing named admin (Marcos, 2026-09): Michelangelo Aliberti. Seeded as
 -- the email; the app matches identities on both the full string and the

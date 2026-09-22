@@ -12,15 +12,31 @@
 --                          integration (see docs/TICKET_email_notification_
 --                          integration.md).
 --
--- Events (p_event / p_payload JSON):
+-- Events (p_event / p_payload JSON). Every payload key listed here is the key
+-- this proc actually READS — an emitter that sends a different spelling gets a
+-- body full of '?' and, worse, an empty exclusion name (so the actor is mailed
+-- about their own request). Keep emitters and this list in lockstep.
 --   'adjustment_outcome'  {"adj_ids": ["..."], "status": "Processed"|"Failed"}
 --       → one email per SUBMITTER (prefs: NOTIFY_MY_OUTCOMES) listing their
 --         adjustments in the batch, with error text on failures.
+--       Emitted by: 03_sp_submit_adjustment.sql / 05_sp_process_adjustment.sql.
 --   'approval_pending'    {"process_type","cobid","adjustment_type","submitted_by"}
 --       → one email to the scope's APPROVERS (prefs: NOTIFY_APPROVALS),
 --         excluding the submitter (they cannot approve their own).
+--       This is the ADJUSTMENT approval event only — a COB sign-off request is
+--       not an adjustment and uses 'signoff_requested' below.
+--       Emitted by: 03_sp_submit_adjustment.sql SP_SUBMIT_ADJUSTMENT and
+--       14_sp_submit_direct_batch.sql SP_SUBMIT_DIRECT_BATCH.
+--   'signoff_requested'   {"process_type","cobid","entity_code","sub_type",
+--                          "requested_by","reason"}
+--       → one email to the scope's APPROVERS, excluding the requester.
+--         entity_code / sub_type are optional and only narrow the wording.
+--       Emitted by: 12_sp_workflow.sql SP_REQUEST_SIGNOFF_CHANGE (SIGNOFF).
 --   'reopen_requested'    {"process_type","cobid","requested_by","reason"}
 --       → one email to the scope's APPROVERS, excluding the requester.
+--       Emitted by: 12_sp_workflow.sql SP_REQUEST_SIGNOFF_CHANGE (REOPEN) —
+--       the single sender for every page's re-open, including the New
+--       Adjustment quick action, which no longer notifies for itself.
 --   'test'                {"email": "..."} → direct test send (Admin page).
 --
 -- Recipients resolve through ADJ_NOTIFICATION_PREFS (active, opted-in, with
@@ -198,6 +214,36 @@ def main(session, p_event, p_payload):
                     f"reject it.</p>")
                 emails.append((",".join(recips), subj, body))
 
+        elif event == "signoff_requested":
+            # A COB SIGN-OFF request — deliberately NOT 'approval_pending':
+            # that event's wording describes a submitted adjustment waiting in
+            # the Approval Queue, which is a different thing from asking an
+            # approver to sign a COB/scope off.
+            pt   = str(payload.get("process_type") or "")
+            ent  = str(payload.get("entity_code") or "").strip()
+            sub  = str(payload.get("sub_type") or "").strip()
+            subj = (SUBJECT_PREFIX +
+                    f"COB sign-off requested — {pt} COB {payload.get('cobid', '?')}")
+            recips = _approver_recipients(session, pt,
+                                          str(payload.get("requested_by") or ""))
+            if recips:
+                # '*' is the whole-scope row — say so rather than printing '*'.
+                where = ""
+                if ent:
+                    where = (" (whole scope)" if ent == "*"
+                             else f" for entity <b>{_h(ent)}</b>")
+                    if sub:
+                        where += f" / sub-type <b>{_h(sub)}</b>"
+                body = _wrap(
+                    f"<p><b>{_h(payload.get('requested_by') or '?')}</b> requested "
+                    f"<b>sign-off</b> of COB <b>{_h(payload.get('cobid') or '?')}</b> "
+                    f"for scope <b>{_h(pt)}</b>{where}.</p>"
+                    f"<p>Reason: {_h(payload.get('reason') or '—')}</p>"
+                    f"<p>Decide it in the Approval Queue's <b>COB Sign-Off / "
+                    f"Re-open Requests</b> section — you cannot approve your "
+                    f"own request.</p>")
+                emails.append((",".join(recips), subj, body))
+
         elif event == "reopen_requested":
             pt   = str(payload.get("process_type") or "")
             subj = (SUBJECT_PREFIX +
@@ -210,8 +256,8 @@ def main(session, p_event, p_payload):
                     f"re-open the signed-off COB <b>{_h(payload.get('cobid') or '?')}</b> "
                     f"for scope <b>{_h(pt)}</b>.</p>"
                     f"<p>Reason: {_h(payload.get('reason') or '—')}</p>"
-                    f"<p>Decide it in the Approval Queue's <b>COB Re-open "
-                    f"Requests</b> section.</p>")
+                    f"<p>Decide it in the Approval Queue's <b>COB Sign-Off / "
+                    f"Re-open Requests</b> section.</p>")
                 emails.append((",".join(recips), subj, body))
 
         elif event == "test":

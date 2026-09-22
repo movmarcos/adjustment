@@ -85,7 +85,10 @@ WITH active_adjustments AS (
         -- serialise against each other. Match that here or this view warns
         -- about overlaps the engine never actually blocks on, and stays
         -- silent on overlaps that will really serialise.
-        CASE WHEN PROCESS_TYPE IN ('FRTB', 'FRTBDRC', 'FRTBRRAO') THEN 'FRTB'
+        -- UPPER() on both arms: PROCESS_TYPE is a plain VARCHAR (no
+        -- case-insensitive collation), so a row stored as 'Frtb' would have
+        -- fallen through to the ELSE and become its own pipeline.
+        CASE WHEN UPPER(PROCESS_TYPE) IN ('FRTB', 'FRTBDRC', 'FRTBRRAO') THEN 'FRTB'
              ELSE UPPER(PROCESS_TYPE) END           AS PIPELINE_KEY,
         ADJUSTMENT_TYPE,
         ADJUSTMENT_ACTION,

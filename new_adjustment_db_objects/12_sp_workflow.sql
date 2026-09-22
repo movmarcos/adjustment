@@ -443,10 +443,14 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_sub_type,
     new_status = pending_status if requires_approval else direct_status
     from_in = ", ".join(f"'{s}'" for s in from_statuses)
     # Slice the RAW text first, escape after — slicing an escaped string can
-    # split a doubled quote/backslash pair and break the literal. Keep the
-    # raw, unescaped copy too (raw_reason) for building the history COMMENT
-    # below, which composes further text around it and must not re-slice
-    # anything already escaped.
+    # split a doubled quote/backslash pair and break the literal. Nothing
+    # below ever re-slices `reason`: escaping only expands the SQL *literal*
+    # (Snowflake stores the unescaped text), so the single raw [:490] slice
+    # is what has to fit REOPEN_REASON's VARCHAR(500) — and it does. Slicing
+    # the escaped form as well was both wrong and pointless.
+    # Keep the raw, unescaped copy too
+    # (raw_reason) for building the history COMMENT below, which composes
+    # further text around it and must not re-slice anything already escaped.
     raw_reason = str(p_reason or "")[:490]
     reason = _esc(raw_reason)
 
@@ -455,7 +459,7 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_sub_type,
                       f"PREV_STATUS = '{cur}', "
                       f"REOPEN_REQUESTED_BY = '{_esc(caller)}', "
                       f"REOPEN_REQUESTED_AT = CURRENT_TIMESTAMP(), "
-                      f"REOPEN_REASON = '{reason[:990]}'")
+                      f"REOPEN_REASON = '{reason}'")
     elif action == "SIGNOFF":
         set_clause = (f"SIGN_OFF_STATUS = '{new_status}', "
                       f"SIGN_OFF_BY = '{_esc(caller)}', "
@@ -529,11 +533,29 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_sub_type,
     # and stopped — nobody was told an approval-gated request was waiting.
     if requires_approval:
         try:
-            _np = json.dumps({"process_type": p_process_type, "cobid": cobid,
-                              "requested_by": caller,
-                              "reason": str(p_reason or "")[:490]}
-                             ).replace("\\", "\\\\").replace("'", "''")
-            _evt = "reopen_requested" if action == "REOPEN" else "approval_pending"
+            # Payload keys MUST be the ones 11_sp_notify.sql actually reads
+            # ('requested_by' for both events). A mis-keyed requester is not
+            # just cosmetic: the recipient query excludes
+            # UPPER(USERNAME) <> UPPER('') — true for everyone — so the
+            # requester would be emailed about their own request.
+            # A sign-off request is NOT an adjustment, so it gets its own
+            # event ('signoff_requested') rather than reusing
+            # 'approval_pending', whose wording describes a submitted
+            # adjustment sitting in the Approval Queue.
+            _evt = "reopen_requested" if action == "REOPEN" else "signoff_requested"
+            _pl = {"process_type": p_process_type, "cobid": cobid,
+                   "requested_by": caller,
+                   "reason": raw_reason}
+            if _evt == "signoff_requested":
+                # RAW values here — `entity`/`sub` above are already _esc()'d
+                # for SQL literals, and json.dumps + the .replace() below do
+                # this payload's escaping.
+                _pl["entity_code"] = (str(p_entity_code).strip()
+                                      if p_entity_code and str(p_entity_code).strip()
+                                      else "*")
+                _pl["sub_type"] = (str(p_sub_type).strip()
+                                   if p_sub_type and str(p_sub_type).strip() else "")
+            _np = json.dumps(_pl).replace("\\", "\\\\").replace("'", "''")
             session.sql(f"CALL ADJUSTMENT_APP.SP_NOTIFY('{_evt}', '{_np}')").collect()
         except Exception as ne:
             print(f"Sign-off notification skipped (non-fatal): {ne}")

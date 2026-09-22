@@ -6,6 +6,38 @@
 -- and nothing else — a fresh environment failed at the first write because
 -- nothing had ever established the underlying table/procedure privileges.
 --
+-- ── EXECUTION MODEL (settled; every grant below follows from it) ────────────
+-- Streamlit in Snowflake runs with OWNER'S RIGHTS. Every query a page issues
+-- through get_active_session() executes as the role that owns the STREAMLIT
+-- object — {{ROLE_OWNER}}, which is the role deploy.py uses for CREATE OR
+-- REPLACE STREAMLIT (deploy.py:28, :346) and therefore the owner of every
+-- object 01-15 create. The viewer's own role is NOT the query role.
+--
+-- Three independent confirmations, so this is not a guess:
+--   • docs/REVIEW_2026-08-19_GO_LIVE.md B2 — force-process fails in the app
+--     with "Unsupported statement type" on CREATE TEMPORARY TABLE. That
+--     error is the owner's-rights SiS restriction exactly; a caller's-rights
+--     session would have run it.
+--   • deploy.py grants {{ROLE_RO}} nothing but USAGE ON STREAMLIT
+--     (deploy.py:364) and the app has been live against real data with only
+--     that. Under viewer's rights every page would fail on its first SELECT.
+--   • The app calls EXECUTE AS CALLER procedures that write to FACT and
+--     BATCH; those succeed, which they could not do under a read-only role.
+--
+-- Consequences, and they are what makes this file short:
+--   • {{ROLE_OWNER}} needs NO grants inside ADJUSTMENT_APP — it owns it.
+--   • {{ROLE_RO}} needs NO object grants for the app to work. It needs only
+--     what SiS itself requires of a viewer: USAGE on the database, the
+--     schema, the STREAMLIT object (deploy.py) and the query warehouse.
+--   • The cross-schema grants (DIMENSION / FACT / BATCH / RAVEN / METADATA)
+--     are the ones that actually matter, and they are needed by
+--     {{ROLE_OWNER}}, not by {{ROLE_RO}} — see the PREREQUISITE block.
+-- An earlier revision of this file granted {{ROLE_RO}} SELECT on all tables
+-- and views "because Streamlit queries run under the viewer's own role".
+-- That reason was wrong. The grants are retained below, re-justified and
+-- completed (dynamic tables included), as ad-hoc read access — not as
+-- something the app depends on.
+--
 -- deploy.py runs files in filename-sorted order (glob.glob + sorted()), so
 -- this file — 00 — runs BEFORE 01_tables.sql creates every other object in
 -- ADJUSTMENT_APP. Two consequences of that ordering, both handled below:
