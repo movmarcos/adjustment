@@ -118,6 +118,53 @@ def _k(name: str) -> str:
     return f"{name}_{st.session_state.get('_wiz_v', 0)}"
 
 
+# filter key → EVERY widget-key stem that can write it. Keys not listed here
+# are rendered with the filter key itself as the stem (the plain text inputs,
+# and the reference dropdowns whose stem IS the key).
+#
+# Several stems per key, not one: the same wiz field is edited by a different
+# widget in each form, and ANY of them can resurrect the value. entity_code is
+# the worst case — "entity_dd" in the main filter row, "er_entity_dd" in the
+# Entity Roll form, "var_entity" in the VaR upload form. Dropping only the one
+# the current form happens to show leaves the other two holding the old code,
+# ready to write it back the moment the user visits that form again.
+_FILTER_WIDGET_KEYS = {
+    "entity_code":            ("entity_dd", "er_entity_dd", "var_entity"),
+    "department_code":        ("dept_dd",),
+    "book_code":              ("book_dd",),
+    "var_component_name":     ("var_comp_dd",),
+    "var_sub_component_name": ("var_sub_dd",),
+    "day_type":               ("day_type_main",),
+}
+
+
+def _drop_filter_widget_state(keys) -> None:
+    """Forget the WIDGET state behind these filter keys.
+
+    Clearing wiz[fk] is only half the job. Streamlit owns
+    st.session_state[_k(stem)] once a widget has been instantiated with that
+    key, and _code_select deliberately does not reseed a stored value that is
+    still valid for the option list — so the next time the same widget
+    renders it restores the old value and `wiz[fk] = _code_select(...)`
+    writes it straight back into the draft.
+
+    That is how a purged filter used to come back: Stress → set Simulation
+    Name → switch to VaR (warned: "Cleared filters not supported…") → switch
+    back to Stress, and Simulation Name was populated again, silently, and
+    rode into the submitted adjustment. A filter the user did not intend must
+    never reach a regulated adjustment, so every site that drops a filter
+    value drops its widget state through this one helper.
+
+    Both widget shapes go, for every stem the key is edited under: the
+    dropdown (`stem`) and the free-text fallback _code_select renders when the
+    reference list is unavailable (`stem + "_txt"`)."""
+    for fk in keys:
+        for stem in _FILTER_WIDGET_KEYS.get(fk, (fk,)):
+            vk = _k(stem)
+            st.session_state.pop(vk, None)
+            st.session_state.pop(vk + "_txt", None)
+
+
 def reset_wizard() -> None:
     """Reset all wizard fields and bump key version to clear widget state.
 
@@ -131,6 +178,14 @@ def reset_wizard() -> None:
     # The Entity Roll wipe-preview counts are memoised OUTSIDE wiz — a reset
     # must drop them too, or a fresh draft shows the previous draft's counts.
     st.session_state.pop("_eroll_recon_cache", None)
+    # Same for the lazily-loaded preview detail frames (_lazy_preview_section
+    # caches each one against the payload signature it was fetched for). The
+    # signature guard would catch a mismatch, but leaving a 1,000-row frame
+    # from the previous draft in session state is a memory leak at best.
+    for _cache in ("_scaling_breakdown_df", "_scaling_sample_df",
+                   "_trf_breakdown_df"):
+        st.session_state.pop(_cache, None)
+        st.session_state.pop(_cache + "_for", None)
 
 
 if "wiz" not in st.session_state:
@@ -1152,16 +1207,6 @@ def _preview_blockers(missing: list) -> list:
 # LEFT COLUMN — FORM SECTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Transfer Book offers every scope, same as the other adjustment types. FRTB
-# scopes (single opaque-column PK) get a NEW FRTBSA_*_KEY per transferred row
-# (source key + target book + resolved trade) so leg ②T never collides with
-# leg ③ or the untouched source row — see _transfer_col in
-# new_adjustment_db_objects/05_sp_process_adjustment.sql. Kept as its own
-# constant (rather than inlining ALL_SCOPES at the call site) so a future
-# restriction is a one-line change here.
-TRANSFER_SCOPES = list(ALL_SCOPES)
-
-
 def _selected_scopes() -> list:
     """Scope codes this draft submits to — one adjustment per code.
 
@@ -1180,7 +1225,7 @@ def _purge_filters_for(scopes: list) -> None:
     of the dropped ones are stashed in wiz['_purged_filters_note'] and shown
     once under the scope pills (_render_scope_pills)."""
     allowed = allowed_filter_keys(scopes)
-    cleared = []
+    cleared, purged = [], []
     for _fk in FILTER_KEYS:
         if _fk in MAIN_FIELDS_SINGLE:
             continue
@@ -1188,41 +1233,41 @@ def _purge_filters_for(scopes: list) -> None:
             if wiz.get(_fk) and str(wiz[_fk]).strip():
                 cleared.append(FIELD_LABELS[_fk][0].rstrip(" *†"))
             wiz[_fk] = None
+            purged.append(_fk)
     wiz["_purged_filters_note"] = (
         ("Cleared filters not supported by the new scope selection: "
          + ", ".join(cleared) + ".") if cleared else None)
-    if "VaR" not in scopes or len(scopes) > 1:
-        for _wk in ("var_comp_dd", "var_sub_dd"):
-            st.session_state.pop(_k(_wk), None)
+    # EVERY purged key, not just the two VaR dropdowns this used to drop: any
+    # surviving widget state writes the value back into the draft the moment
+    # its scope is selected again (see _drop_filter_widget_state).
+    _drop_filter_widget_state(purged)
 
 
-def _render_scope_pills(options: list = None) -> None:
+def _render_scope_pills() -> None:
     """Multi-select scope pills, built from buttons like the category / type
     pickers (icon + label; selected = primary red, white text). A click
     toggles the scope in or out. Sets wiz['process_types'] (list of codes);
     one adjustment is created per selected scope.
 
     Buttons rather than st.pills: the selection is driven purely by wiz
-    state, so there is no widget default-vs-state fight, nothing to purge
-    when `options` is narrowed, and the look matches the other pickers.
+    state, so there is no widget default-vs-state fight and the look matches
+    the other pickers.
 
-    `options` narrows what may be picked (currently unused in practice —
-    every adjustment type, Transfer Book included, offers every scope; the
-    parameter and TRANSFER_SCOPES stay in place so a future restriction is a
-    one-line change). Scopes already in the draft that a narrowed list no
-    longer offers are dropped and named, the same way _purge_filters_for
-    names a dropped filter."""
-    opts = [s for s in ALL_SCOPES if s in (options or ALL_SCOPES)]
-    stored = [s for s in (wiz.get("process_types") or []) if s in ALL_SCOPES]
-    current = [s for s in stored if s in opts]
-    if current != stored:
-        wiz["process_types"] = current
-        wiz["process_type"]  = current[0] if current else None
-        _invalidate_preview()
-        wiz["_scope_drop_note"] = (
-            "FRTB scopes are not available for Transfer Book yet — removed: "
-            + ", ".join(scope_label(s) for s in stored if s not in opts) + ".")
-
+    EVERY adjustment type offers EVERY scope — Transfer Book included. (FRTB
+    scopes have a single opaque-column PK; a transferred row gets a NEW
+    FRTBSA_*_KEY built from source key + target book + resolved trade, so leg
+    ②T never collides with leg ③ or the untouched source row — see
+    _transfer_col in new_adjustment_db_objects/05_sp_process_adjustment.sql.)
+    There used to be an `options` parameter, a TRANSFER_SCOPES constant and a
+    branch that dropped scopes a narrowed list no longer offered: dead in
+    practice (the only caller passed ALL_SCOPES), and wrong if it had ever
+    fired — it emitted a hardcoded "FRTB scopes are not available for
+    Transfer Book yet" that contradicted the constant it was built on, and it
+    dropped the scopes WITHOUT calling _purge_filters_for, so the dropped
+    scopes' filters survived into the payload. Speculative generality that
+    was already a bug: gone."""
+    opts = list(ALL_SCOPES)
+    current = [s for s in (wiz.get("process_types") or []) if s in opts]
     cols = st.columns(len(opts))
     clicked = None
     for i, sc in enumerate(opts):
@@ -1250,9 +1295,6 @@ def _render_scope_pills(options: list = None) -> None:
     if wiz.get("_purged_filters_note"):
         st.warning(wiz["_purged_filters_note"])
         wiz["_purged_filters_note"] = None
-    if wiz.get("_scope_drop_note"):
-        st.warning(wiz["_scope_drop_note"])
-        wiz["_scope_drop_note"] = None
 
 
 # ── Reference-data dropdowns (entity / department / book) ───────────────────
@@ -1559,42 +1601,54 @@ def _code_select(label, key, value, options, help=None, placeholder="— select 
     filter changed the list), then let the widget own it.
 
     `fmt` decorates how an option READS (e.g. "B123 — EQDESK"); the stored and
-    returned value is always the bare code."""
+    returned value is always the bare code.
+
+    When a parent filter narrows the list out from under a stored selection
+    (change the Entity and the row's Book no longer belongs to it; change the
+    Simulation Source and the Simulation Name no longer exists under it) the
+    widget's value is reset — and that reset is NAMED in a caption under the
+    field. Clearing a value the user chose is not allowed to be silent; that
+    is the same policy _purge_filters_for states, and this path used to break
+    it."""
     if not options:
-        return st.text_input(label, value=value or "", key=key + "_txt",
+        return st.text_input(label, value=str(value or ""), key=key + "_txt",
                              help=help).strip()
-    cur = (value or "").strip()
+    cur = str(value or "").strip()
     opts = [""] + list(options)
     if cur and cur not in opts:          # keep an already-set value selectable
         opts.insert(1, cur)
+    dropped = ""
     if key not in st.session_state or st.session_state[key] not in opts:
+        _prev = st.session_state.get(key)
+        # Only a value the WIDGET was holding can be dropped here: a truthy
+        # `cur` is always in `opts` (it is re-inserted above), so the reset
+        # to "" can only lose a selection the model no longer carries. The
+        # callers that reach it are the ones passing value=None and letting
+        # the widget own the field — the Direct per-row grid, where the row's
+        # Book Code is drawn from _book_options(None, <the row's entity>):
+        # change the row's Entity and the Book it no longer contains was
+        # blanked with nothing said, and the blank went into the batch.
+        # A key this helper popped lands in the `key not in session_state`
+        # half, where _prev is None — so a purge (which prints its own
+        # warning) never doubles up with this caption.
+        if _prev and _prev not in opts:
+            dropped = str(_prev)
         st.session_state[key] = cur if cur in opts else ""
-    return st.selectbox(label, opts, key=key, help=help,
-                        format_func=lambda x: placeholder if x == ""
-                                    else (fmt(x) if fmt else x))
+    out = st.selectbox(label, opts, key=key, help=help,
+                       format_func=lambda x: placeholder if x == ""
+                                   else (fmt(x) if fmt else x))
+    if dropped:
+        st.caption(f"Cleared '{dropped}' — not available for the current "
+                   f"selection.")
+    return out
 
 
-_DAY_TYPE_LABELS = {"": "— both —", "1": "1 — 1-day VaR", "10": "10 — 10-day VaR"}
-
-
-def _render_day_type(slot: str) -> None:
-    """Day Type dropdown (VaR only) — rendered in the main filter row (a
-    single VaR scope puts it there; several scopes drop it entirely, see
-    filter_layout). The slot keeps the widget key per render slot; the value
-    is driven from and written back to wiz['day_type']."""
-    k = _k(f"day_type_{slot}")
-    opts = list(_DAY_TYPE_LABELS.keys())
-    cur = str(wiz.get("day_type") or "")
-    st.session_state[k] = cur if cur in opts else ""
-
-    def _sync():
-        wiz["day_type"] = st.session_state.get(k) or None
-
-    st.selectbox("Day Type", opts, key=k,
-                 format_func=lambda v: _DAY_TYPE_LABELS.get(v, v),
-                 on_change=_sync,
-                 help="VaR horizon: 1 = 1-day VaR, 10 = 10-day VaR. "
-                      "Blank applies the adjustment to both horizons.")
+# Day Type is VaR-only and has exactly two real values; the blank option is
+# _code_select's own "— both —" placeholder.
+_DAY_TYPE_OPTIONS = ["1", "10"]
+_DAY_TYPE_LABELS = {"1": "1 — 1-day VaR", "10": "10 — 10-day VaR"}
+_DAY_TYPE_HELP = ("VaR horizon: 1 = 1-day VaR, 10 = 10-day VaR. "
+                  "Blank applies the adjustment to both horizons.")
 
 
 def _render_filter_widget(fk: str) -> None:
@@ -1623,7 +1677,14 @@ def _render_filter_widget(fk: str) -> None:
                                placeholder="— any —",
                                help="Filtered by the selected VaR Component")
     elif fk == "day_type":
-        _render_day_type("main")
+        # Folded into _code_select (M7): the hand-rolled version reseeded
+        # session_state[key] from the model on EVERY rerun — the exact
+        # anti-pattern _code_select's docstring warns against 30 lines above
+        # it — and needed an on_change callback to survive it.
+        wiz[fk] = _code_select("Day Type", _k("day_type_main"), wiz.get(fk),
+                               _DAY_TYPE_OPTIONS, placeholder="— both —",
+                               fmt=lambda v: _DAY_TYPE_LABELS.get(v, v),
+                               help=_DAY_TYPE_HELP) or None
     elif fk == "simulation_source":
         wiz[fk] = _code_select(fl, _k(fk), wiz.get(fk),
                                _sim_source_options(), placeholder="— any —")
@@ -1960,12 +2021,7 @@ def render_scaling_form() -> None:
                 if _was_transfer:
                     wiz["book_code"] = None
                     wiz["entity_code"] = None
-                    for _wk in ("book_dd", "entity_dd"):
-                        # Both widget shapes: the dropdown (key) and the
-                        # free-text fallback _code_select uses when the
-                        # reference list is unavailable (key + "_txt").
-                        st.session_state.pop(_k(_wk), None)
-                        st.session_state.pop(_k(_wk) + "_txt", None)
+                    _drop_filter_widget_state(("book_code", "entity_code"))
             else:
                 # A Transfer is a single-COB operation — never recurring.
                 wiz["occurrence"] = "ADHOC"
@@ -1977,11 +2033,10 @@ def render_scaling_form() -> None:
         return
 
     # ── Scope(s) ─────────────────────────────────────────────────────────
-    _transfer = wiz.get("adjustment_type") == "Transfer"
     with _card():
         _sec(3, "Data Scope",
              "Select one or more data scopes — one adjustment per scope.")
-        _render_scope_pills(TRANSFER_SCOPES if _transfer else ALL_SCOPES)
+        _render_scope_pills()
     if not _selected_scopes():
         st.info("Select at least one data scope to continue.")
         return
@@ -3796,7 +3851,11 @@ def _lazy_preview_section(title, mode, *, state_key, button_key, button_label,
                 st.session_state[state_key] = df
                 st.session_state[f"{state_key}_for"] = sig
             except Exception as exc:
+                # The signature goes with the frame: leaving `_for` behind
+                # would make the next rerun think the (now absent) frame was
+                # current for this payload.
                 st.session_state.pop(state_key, None)
+                st.session_state.pop(f"{state_key}_for", None)
                 st.warning(f"{fail_label}: {exc}")
         _df = st.session_state.get(state_key)
         if _df is not None and not _df.empty:
@@ -3986,18 +4045,12 @@ def _request_reopen(scope, cobid, entity, reason, sub=""):
     except (ValueError, TypeError, IndexError):
         out = {}
     if out.get("status") == "ok":
-        # Best-effort: notify the scope's approvers (gated by the app's
-        # notification switch; never blocks the request).
-        try:
-            _np = json.dumps({
-                "process_type": scope,
-                "cobid":        int(cobid),
-                "requested_by": current_user_name(),
-                "reason":       f"[entity {entity or '*'}] " + str(reason)[:280],
-            }).replace("\\", "\\\\").replace("'", "''")
-            run_query(f"CALL ADJUSTMENT_APP.SP_NOTIFY('reopen_requested', '{_np}')")
-        except Exception:
-            pass
+        # The approvers are notified by SP_REQUEST_SIGNOFF_CHANGE itself,
+        # after its commit, for every approval-gated request from any page
+        # (12_sp_workflow.sql). This page used to fire the same
+        # SP_NOTIFY('reopen_requested', …) call straight afterwards, so every
+        # re-open raised here sent the approvers two identical emails. One
+        # sender, and it is the one that knows the request actually committed.
         _ent_txt = "all entities" if (entity or "*") == "*" else entity
         return True, (f"Re-open request for COB {cobid} / {scope} ({_ent_txt}) "
                       f"submitted — an approver can action it on the Approval "
@@ -4276,16 +4329,27 @@ with left:
             # into (widget state included — see the type-switch branch).
             if wiz.get("adjustment_type") == "Transfer":
                 wiz["book_code"] = None
-                wiz["entity_code"] = None
-                for _wk in ("book_dd", "entity_dd"):
-                    st.session_state.pop(_k(_wk), None)
-                    st.session_state.pop(_k(_wk) + "_txt", None)
+                _drop_filter_widget_state(("book_code",))
+            # The entity goes with the category, always — not only when
+            # leaving a Transfer. A Scaling draft scoped to ENT1 that hops to
+            # Direct Adjustment used to keep entity_code = "ENT1", and
+            # _render_signoff_panel then checked sign-off for ENT1 ALONE
+            # while the per-row Direct batch may target a completely
+            # different set of entities: the panel read "open", Submit
+            # unlocked, and the rows came back rejected_signoff after the
+            # fact. None is the stricter, broader check.
+            _drop_filter_widget_state(("entity_code",))
             # The trade picker is opt-in and its checkbox holds its own widget
             # state: drop it, or a new draft would re-tick itself and query
             # DIMENSION.TRADE unasked.
             st.session_state.pop(_k("trf_pick_trades"), None)
+            # "requires_approval": False below is a no-op on its own — the
+            # checkbox owns _k("approval") and Streamlit ignores `value=`
+            # once a key has stored state, so the old True was handed
+            # straight back into wiz on the next rerun.
+            st.session_state.pop(_k("approval"), None)
             wiz.update({"category": cat, "process_type": None, "process_types": [],
-                        "adjustment_type": None,
+                        "adjustment_type": None, "entity_code": None,
                         "source_cobid": None,
                         "source_book_code": None, "target_book_code": None,
                         "transfer_trade_codes": [], "transfer_pick_trades": False,
@@ -4344,9 +4408,14 @@ with right:
         s = wiz.get("_preview_sum")
         _pv_sig = json.dumps(_preview_payload(), sort_keys=True, default=str)
         preview_current = (s is not None and wiz.get("_preview_for") == _pv_sig)
-        if s is not None:
+        if preview_current:
             # The SQL text is one extra SP call per scope, so it is fetched
             # on request — opening this expander costs nothing.
+            # Gated on preview_current, not on `s is not None`: once the
+            # filters have moved on, "Exactly what the impact preview ran" is
+            # no longer true of the CURRENT payload — the button would fetch
+            # SQL for filters the numbers on screen did not come from and
+            # print it next to them.
             with st.expander("Show preview SQL", expanded=False):
                 st.caption("Exactly what the impact preview ran. Copy it into "
                            "a worksheet to check the numbers yourself. It is "

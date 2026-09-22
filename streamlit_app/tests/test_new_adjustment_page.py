@@ -1,4 +1,4 @@
-import json, os, sys
+import ast, json, os, sys
 import pandas as pd, pytest
 APP = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, APP)
@@ -726,25 +726,32 @@ def test_a_scope_switch_clears_the_sticky_zero_row_block():
 
 
 def test_every_invalidation_site_clears_the_same_preview_state():
-    """S6 — the four sites used to null four keys each by hand and had
+    """S6 — the three sites used to null four keys each by hand and had
     already drifted (only the category switch cleared `_preview_err`, none
     cleared `_preview_for`, `_zero_preview` or `_transfer_fallbacks`). Each
-    one now routes through the single helper: the adjustment-type switch and
-    the category switch are checked here, the scope pills above."""
+    one now routes through the single helper: the adjustment-type switch, the
+    category switch and a scope-pill click, all checked here against the same
+    key list — `_preview_sql_err` included, so a stale "Preview SQL not
+    available: …" cannot outlive the preview it belonged to."""
     _stale = {"_preview_sum": {"ROWS_AFFECTED": 1}, "_preview_sql": "SELECT 1",
-              "_preview_sql_for": "x", "_preview_err": "boom",
+              "_preview_sql_for": "x", "_preview_sql_err": "SQL mode refused",
+              "_preview_err": "boom",
               "_preview_by_scope": {"VaR": 0}, "_preview_scopes": {"VaR": {}},
               "_preview_for": "x", "_zero_preview": True,
               "_transfer_fallbacks": {"VaR": 2}}
 
-    for _click in ("type_Flatten", "cat_Entity Roll"):
+    # A scope pill is keyed on the category it renders under, hence the
+    # lookup rather than a literal third entry.
+    for _click in ("type_Flatten", "cat_Entity Roll", "scope-pill"):
         at = _load()
         _preview_scaling(at, ["VaR"])
         at.session_state["wiz"].update(_stale)
         at.run()
         assert not at.exception, at.exception
         v = at.session_state["_wiz_v"]
-        _button(at, f"{_click}_{v}").click().run()
+        _key = (f"scope_{at.session_state['wiz']['category']}_Stress_{v}"
+                if _click == "scope-pill" else f"{_click}_{v}")
+        _button(at, _key).click().run()
         assert not at.exception, at.exception
         w = at.session_state["wiz"]
         assert all(w.get(k) is None for k in _stale), (_click, w)
@@ -1165,3 +1172,308 @@ def test_a_failed_fallback_query_raises_no_warning():
         assert at.session_state["wiz"]["_preview_sum"]["ROWS_AFFECTED"] == 10
     finally:
         monkey.undo()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Filter & widget state (audit batch 2: C3 purged filters resurrecting,
+#  I2 stale entity, I3 the approval checkbox, I8/S7 scope options,
+#  I10 silent dropdown drops, M7 Day Type)
+# ══════════════════════════════════════════════════════════════════════════
+
+PAGE_SRC = open(os.path.join(APP, "pages", "1_New_Adjustment.py"),
+                encoding="utf-8").read()
+PAGE_AST = ast.parse(PAGE_SRC)
+
+
+def _ss(at, key):
+    """session_state[key] or None — SafeSessionState has no .get()."""
+    return at.session_state[key] if key in at.session_state else None
+
+
+def _module_assignments():
+    """Module-level assigned names in the page (so "this constant is gone"
+    can be asserted without tripping over the docstring that explains why)."""
+    out = set()
+    for node in PAGE_AST.body:
+        for t in (node.targets if isinstance(node, ast.Assign) else
+                  [node.target] if isinstance(node, ast.AnnAssign) else []):
+            if isinstance(t, ast.Name):
+                out.add(t.id)
+    return out
+
+
+def _string_constants():
+    return {n.value for n in ast.walk(PAGE_AST)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+
+
+def _fn_names():
+    return {n.name for n in ast.walk(PAGE_AST)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def _fn_args(name):
+    fn = next(n for n in ast.walk(PAGE_AST)
+              if isinstance(n, ast.FunctionDef) and n.name == name)
+    a = fn.args
+    return [x.arg for x in (a.posonlyargs + a.args + a.kwonlyargs)]
+
+
+def _scope_click(at, scope):
+    """Click a scope pill (keys are scope_<category>_<scope>_<wiz_v>)."""
+    v = at.session_state["_wiz_v"]
+    cat = at.session_state["wiz"].get("category")
+    at.button(key=f"scope_{cat}_{scope}_{v}").click().run()
+    assert not at.exception, at.exception
+
+
+def _scaling_draft(at, scopes, **extra):
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": "Scaling Adjustment",
+                               "adjustment_type": "Scale",
+                               "process_types": list(scopes),
+                               "process_type": scopes[0],
+                               "result": None, "step": 1, **extra}
+    at.run()
+    assert not at.exception, at.exception
+    return at.session_state["_wiz_v"]
+
+
+def test_a_purged_dropdown_filter_does_not_come_back_when_its_scope_returns():
+    """C3 — the headline of this batch. Simulation Name is a Stress filter
+    the engine cannot apply to VaR, so adding VaR purges it (and says so).
+    But `wiz[fk] = None` only clears the MODEL: Streamlit still owned
+    st.session_state[_k("simulation_name")], and dropping VaR again
+    re-instantiated the same widget, which restored "SIM1" and wrote it
+    straight back into the draft — silently, with no second warning, and on
+    into a submitted regulated adjustment.
+
+    Round trip: Stress → SIM1 → +VaR → back to Stress alone."""
+    at = _load()
+    # Real options, so this exercises the DROPDOWN shape of the widget.
+    at.session_state["_ref_sim_names"] = [["SIM1", "SRC1"], ["SIM2", "SRC1"]]
+    v = _scaling_draft(at, ["Stress"], simulation_name="SIM1")
+    assert at.session_state[f"simulation_name_{v}"] == "SIM1"
+
+    _scope_click(at, "VaR")                       # Stress + VaR
+    assert at.session_state["wiz"]["process_types"] == ["VaR", "Stress"]
+    assert at.session_state["wiz"]["simulation_name"] is None
+    assert any("Cleared filters not supported" in w.value
+               and "Simulation Name" in w.value for w in at.warning), \
+        [w.value for w in at.warning]
+
+    _scope_click(at, "VaR")                       # back to Stress alone
+    assert at.session_state["wiz"]["process_types"] == ["Stress"]
+    w = at.session_state["wiz"]
+    assert w["simulation_name"] != "SIM1", w["simulation_name"]
+    assert not w["simulation_name"], w["simulation_name"]
+    assert _ss(at, f"simulation_name_{v}") in (None, "")
+
+    # And it stays gone on the next plain rerun (the widget is re-seeded from
+    # the model, not from its own memory).
+    at.run()
+    assert not at.exception, at.exception
+    assert not at.session_state["wiz"]["simulation_name"]
+
+
+def test_a_purged_free_text_filter_does_not_come_back_either():
+    """C3, the other widget shape: Tenor Code is a plain st.text_input whose
+    key IS the filter key. Sensitivity → 5Y → +VaR (Tenor is not common) →
+    back to Sensitivity alone."""
+    at = _load()
+    v = _scaling_draft(at, ["Sensitivity"], tenor_code="5Y")
+    assert at.session_state[f"tenor_code_{v}"] == "5Y"
+
+    _scope_click(at, "VaR")
+    assert at.session_state["wiz"]["tenor_code"] is None
+
+    _scope_click(at, "VaR")
+    assert at.session_state["wiz"]["tenor_code"] != "5Y"
+    assert not at.session_state["wiz"]["tenor_code"]
+
+
+def test_the_category_switch_clears_the_entity_and_every_entity_widget():
+    """I2 — a Scaling draft scoped to ENT1 that hops to Direct Adjustment
+    used to keep entity_code = "ENT1", so the sign-off panel checked ENT1
+    alone while the per-row Direct batch can target any entity: the panel
+    read "open", Submit unlocked, and the rows came back rejected_signoff.
+
+    The entity is edited by three different widgets across the forms
+    (the main filter row, the Entity Roll form, the VaR upload form) and ANY
+    of them can write the old code back, so all three stems are dropped."""
+    at = _load()
+    v = _scaling_draft(at, ["VaR"], entity_code="ENT1")
+    # The main filter row falls back to free text here (no reference rows).
+    assert at.session_state[f"entity_dd_{v}_txt"] == "ENT1"
+    # The other two forms' entity widgets, as they would be after a visit.
+    at.session_state[f"er_entity_dd_{v}_txt"] = "ENT1"
+    at.session_state[f"var_entity_{v}"] = "ENT1"
+
+    _click_cat(at, "Direct Adjustment")
+    assert at.session_state["wiz"]["entity_code"] is None
+    for stem in ("entity_dd", "er_entity_dd", "var_entity"):
+        assert not _ss(at, f"{stem}_{v}"), stem
+        assert not _ss(at, f"{stem}_{v}_txt"), stem
+
+    _click_cat(at, "Scaling Adjustment")
+    assert at.session_state["wiz"]["entity_code"] != "ENT1"
+    assert not at.session_state["wiz"]["entity_code"]
+
+
+def test_the_category_switch_clears_the_approval_checkbox():
+    """I3 — `wiz.update({... "requires_approval": False ...})` was a no-op:
+    the checkbox owns _k("approval") and Streamlit ignores `value=` once a
+    key has stored state, so the old True was handed straight back into wiz
+    on the very next rerun and the documented reset never happened."""
+    at = _load()
+    v = _scaling_draft(at, ["VaR"], cobid=20260101, scale_factor=1.5,
+                       entity_code="E1", department_code="D1",
+                       adjustment_category="Cat", reason="why")
+    at.checkbox(key=f"approval_{v}").check().run()
+    assert not at.exception, at.exception
+    assert at.session_state["wiz"]["requires_approval"] is True
+
+    _click_cat(at, "Direct Adjustment")
+    assert at.session_state["wiz"]["requires_approval"] is False
+    assert not _ss(at, f"approval_{v}")
+
+
+def test_every_adjustment_type_offers_every_scope():
+    """I8 / S7 — TRANSFER_SCOPES, the `options` parameter of the scope pills
+    and _scope_drop_note existed only to support a restriction that does not
+    exist. The branch was unreachable (the only caller passed ALL_SCOPES),
+    its message contradicted the constant it was built on, and it dropped
+    scopes WITHOUT calling _purge_filters_for — so the dropped scopes'
+    filters survived into the payload. All three are gone."""
+    from utils.styles import ALL_SCOPES
+    at = _load()
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": "Scaling Adjustment",
+                               "adjustment_type": "Transfer"}
+    at.run()
+    assert not at.exception, at.exception
+    v = at.session_state["_wiz_v"]
+    keys = {b.key for b in at.button}
+    for sc in ALL_SCOPES:
+        assert f"scope_Scaling Adjustment_{sc}_{v}" in keys, (sc, sorted(keys))
+    # Read from the parsed module, not the source text: the docstrings
+    # deliberately name what was removed and why.
+    assert "TRANSFER_SCOPES" not in _module_assignments()
+    assert "_scope_drop_note" not in _string_constants()
+    assert not _fn_args("_render_scope_pills")      # no `options` parameter
+
+
+def test_a_dropdown_value_dropped_by_a_narrowed_list_is_named():
+    """I10 — `st.session_state[key] = cur if cur in opts else ""` reset the
+    widget with no notice, contradicting _purge_filters_for's stated policy
+    that clearing a filter the user chose is never silent. The reachable
+    callers are the ones that pass value=None and let the widget own the
+    field (the Direct per-row grid, where the row's Book Code list is
+    narrowed by the row's Entity). Here the same state is set up directly:
+    the widget holds a code the current option list does not offer."""
+    at = _load()
+    at.session_state["_ref_sim_names"] = [["SIM1", "SRC1"], ["SIM2", "SRC1"]]
+    v = _scaling_draft(at, ["Stress"])
+    at.selectbox(key=f"simulation_name_{v}").select("SIM2").run()
+    assert not at.exception, at.exception
+    assert at.session_state["wiz"]["simulation_name"] == "SIM2"
+
+    # The list narrows out from under the widget while the model is not
+    # carrying the value — the shape of every caller that passes value=None.
+    at.session_state["_ref_sim_names"] = [["SIM1", "SRC1"]]
+    at.session_state["wiz"]["simulation_name"] = None
+    at.run()
+    assert not at.exception, at.exception
+
+    assert at.session_state[f"simulation_name_{v}"] == ""
+    assert not at.session_state["wiz"]["simulation_name"]
+    assert any("Cleared 'SIM2'" in c.value for c in at.caption), \
+        [c.value for c in at.caption]
+
+
+def test_a_purge_does_not_also_print_the_dropped_value_caption():
+    """The other half of I10: a purge already prints its own warning naming
+    every filter it cleared. It pops the widget key rather than leaving a
+    stale value in it, which lands in _code_select's "widget is new" branch —
+    so the two messages never double up on the same filter."""
+    at = _load()
+    at.session_state["_ref_sim_names"] = [["SIM1", "SRC1"], ["SIM2", "SRC1"]]
+    _scaling_draft(at, ["Stress"], simulation_name="SIM1")
+    _scope_click(at, "VaR")
+    assert not [c.value for c in at.caption if "Cleared 'SIM1'" in c.value]
+    _scope_click(at, "VaR")
+    assert not [c.value for c in at.caption if "Cleared 'SIM1'" in c.value]
+
+
+def test_day_type_is_an_ordinary_code_select():
+    """M7 — _render_day_type reseeded st.session_state[key] from the model on
+    EVERY rerun, the exact anti-pattern _code_select's docstring warns
+    against thirty lines above it, and needed an on_change callback to
+    survive it. Folded into _code_select, with the labels as the format."""
+    at = _load()
+    v = _scaling_draft(at, ["VaR"])          # Day Type is main-row, VaR only
+    assert "_render_day_type" not in _fn_names()
+
+    sb = at.selectbox(key=f"day_type_main_{v}")
+    assert len(sb.options) == 3              # "— both —", 1-day, 10-day
+    sb.select_index(2).run()
+    assert not at.exception, at.exception
+    assert at.session_state["wiz"]["day_type"] == "10"
+
+    at.selectbox(key=f"day_type_main_{v}").select_index(0).run()
+    assert not at.exception, at.exception
+    # Blank is stored as None, not "" — that is what the payload builder and
+    # the previous on_change callback both wrote.
+    assert at.session_state["wiz"]["day_type"] is None
+
+
+def test_reset_wizard_drops_the_lazy_preview_detail_frames():
+    """reset_wizard already dropped _eroll_recon_cache; the lazily-loaded
+    breakdown / sample / per-trade frames are memoised outside wiz in exactly
+    the same way and must go with it."""
+    at = _load()
+    at.session_state["wiz"] = {
+        **at.session_state["wiz"], "step": 3, "category": "Scaling Adjustment",
+        "process_types": ["VaR"],
+        "result": {"status": "Pending", "adj_id": "x",
+                   "message": "Created with status 'Pending'."}}
+    for key in ("_scaling_breakdown_df", "_scaling_sample_df", "_trf_breakdown_df"):
+        at.session_state[key] = pd.DataFrame({"A": [1]})
+        at.session_state[f"{key}_for"] = "some-old-payload"
+    at.run(); assert not at.exception, at.exception
+
+    at.button(key="new_adj").click().run()      # → reset_wizard()
+    assert not at.exception, at.exception
+    for key in ("_scaling_breakdown_df", "_scaling_sample_df", "_trf_breakdown_df"):
+        assert key not in at.session_state
+        assert f"{key}_for" not in at.session_state
+
+
+def test_the_preview_sql_panel_is_gated_on_a_current_preview():
+    """The SQL panel says "Exactly what the impact preview ran". Once the
+    filters have moved on that is no longer true of the CURRENT payload, so
+    the button would fetch SQL for one set of filters and print it beside
+    numbers that came from another. The panel goes with the numbers."""
+    at = _load()
+    w = _preview_scaling(at, ["VaR"])
+    v = at.session_state["_wiz_v"]
+    assert _button(at, f"preview_sql_load_{v}", required=False) is not None
+
+    # Same preview numbers, different payload: the panel is gone and the page
+    # says why, and nothing can be fetched for the stale figures.
+    at.session_state["wiz"] = {**at.session_state["wiz"], "tenor_code": "5Y"}
+    at.run(); assert not at.exception, at.exception
+    assert at.session_state["wiz"]["_preview_sum"] is not None
+    assert _button(at, f"preview_sql_load_{v}", required=False) is None
+    assert any("Filters changed since the last preview" in i.value
+               for i in at.info), [i.value for i in at.info]
+
+
+def test_the_page_does_not_send_its_own_reopen_notification():
+    """SP_REQUEST_SIGNOFF_CHANGE notifies the approvers itself, after its own
+    commit, for every approval-gated request from any page. _request_reopen
+    fired the same SP_NOTIFY('reopen_requested', …) straight afterwards — so
+    every re-open raised from this page sent the approvers two identical
+    emails, and the page's copy went out even when the request had not
+    committed. One sender, and it is the one inside the transaction."""
+    assert not [s for s in _string_constants() if "SP_NOTIFY" in s]
