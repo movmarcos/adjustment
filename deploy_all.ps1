@@ -5,7 +5,7 @@
 #   .\deploy_all.ps1 -Mode all         # force full deploy (DB + Streamlit)
 #   .\deploy_all.ps1 -Mode db          # force DB objects only
 #   .\deploy_all.ps1 -Mode streamlit   # force Streamlit app only
-#   .\deploy_all.ps1 -Branch main      # deploy from main instead of the change branch
+#   .\deploy_all.ps1 -Branch my-branch # deploy from a feature branch instead of main
 #   .\deploy_all.ps1 -PythonExe C:/path/to/python.exe   # override the interpreter
 #
 # How "auto" decides (the flag is computed from git, so it can never drift):
@@ -18,9 +18,9 @@
 param(
     [ValidateSet("auto", "db", "streamlit", "all")]
     [string]$Mode = "auto",
-    # Git branch to deploy from. Default: the change branch under test.
-    # Switch back to "main" once the branch is merged.
-    [string]$Branch = "feat/multi-scope-transfer-book",
+    # Git branch to deploy from. Default: main.
+    # Point it at a feature branch with -Branch while testing one.
+    [string]$Branch = "main",
     # Python interpreter to run deploy.py with. Defaults to "python" resolved
     # via PATH, or $env:ADJ_DEPLOY_PYTHON when set — never hardcode a
     # personal machine path here (config.py's whole premise is nothing else

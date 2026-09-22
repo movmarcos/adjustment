@@ -209,7 +209,7 @@ and calls `deploy.py` for you.
 .\deploy_all.ps1 -Mode all                          # force full deploy (DB + Streamlit)
 .\deploy_all.ps1 -Mode db                           # force DB objects only
 .\deploy_all.ps1 -Mode streamlit                    # force Streamlit app only
-.\deploy_all.ps1 -Branch main                       # deploy from a specific branch
+.\deploy_all.ps1 -Branch my-branch                  # deploy from a feature branch (default: main)
 .\deploy_all.ps1 -PythonExe C:/path/to/python.exe   # override the interpreter (default: "python" on PATH, or $env:ADJ_DEPLOY_PYTHON)
 ```
 
