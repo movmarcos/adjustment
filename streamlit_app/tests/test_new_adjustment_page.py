@@ -112,6 +112,16 @@ def _load():
     assert not at.exception, at.exception
     return at
 
+
+def _button(at, key, *, required=True):
+    """The button with this key, or None. at.button(key=...) raises when the
+    widget is absent, which is exactly what a "the button is gone" assertion
+    needs to check without an except block."""
+    b = next((x for x in at.button if x.key == key), None)
+    if required:
+        assert b is not None, [x.key for x in at.button]
+    return b
+
 def test_page_loads_without_frtball():
     at = _load()
     labels = [b.label for b in at.button]
@@ -398,8 +408,11 @@ def test_two_scope_preview_sums_counts_and_blanks_measures():
     assert s["EXISTING_ADJ_IDS"] == "ADJ-1"
     # The per-scope rows must not alias the aggregate that was built from them.
     assert w["_preview_scopes"]["VaR"]["ROWS_AFFECTED"] == 10
-    # Both scopes' preview SQL, each under its own header.
-    assert "-- VaR" in w["_preview_sql"] and "-- Stress" in w["_preview_sql"]
+    # The SQL text no longer rides along with the numbers — it is one extra
+    # call per scope for an expander most users never open, so it is fetched
+    # on request (see test_the_preview_sql_is_fetched_only_when_asked).
+    assert w["_preview_sql"] is None
+    assert not [c for c in CALLS if '"mode": "sql"' in c], CALLS
 
 
 def test_single_scope_preview_still_carries_its_measures():
@@ -477,15 +490,17 @@ def test_single_scope_preview_renders_no_split_table():
 
 
 def test_every_preview_job_is_submitted_before_any_result_is_read():
-    """The point of the async jobs: two scopes × (summary, sql) go to
-    Snowflake together and run concurrently — the gather only starts once
-    every statement is in flight."""
+    """The point of the async jobs: both scopes' summaries go to Snowflake
+    together and run concurrently — the gather only starts once every
+    statement is in flight. A preview costs EXACTLY ONE CALL PER SCOPE now;
+    the `sql` text that used to ride along is fetched on request."""
     at = _load()
     _preview_scaling(at, ["VaR", "Stress"])
 
     kinds = [k for k, _ in ORDER]
-    assert kinds == ["submit"] * 4 + ["result"] * 4, ORDER
+    assert kinds == ["submit"] * 2 + ["result"] * 2, ORDER
     assert all("SP_PREVIEW_ADJUSTMENT" in q for _, q in ORDER)
+    assert all('"mode": "summary"' in q for _, q in ORDER), ORDER
 
 
 def test_call_sp_df_async_falls_back_when_the_runtime_has_no_async_jobs(monkeypatch):
@@ -548,10 +563,12 @@ def test_transfer_preview_counts_fallback_trades_from_the_trade_dimension():
     assert w["_transfer_fallbacks"] == {"VaR": 2, "Stress": 2}
     assert w["_preview_sum"]["ROWS_AFFECTED"] == 15
     assert set(w["_preview_scopes"]) == {"VaR", "Stress"}
-    # FOUR jobs (summary + sql, twice) — the two breakdown calls are gone.
+    # TWO jobs (one summary per scope) — the breakdown calls went first, the
+    # advisory `sql` ones followed (both are loaded on request now).
     kinds = [k for k, _ in ORDER]
-    assert kinds == ["submit"] * 4 + ["result"] * 4, ORDER
+    assert kinds == ["submit"] * 2 + ["result"] * 2, ORDER
     assert not any('"mode": "breakdown"' in c for c in CALLS), CALLS
+    assert not any('"mode": "sql"' in c for c in CALLS), CALLS
     # One pinned DIMENSION.TRADE query: the target book AND the trade codes
     # are literals, so it can return at most one row per selected trade.
     dim = [c for c in CALLS if "DIMENSION.TRADE" in c]
@@ -571,8 +588,9 @@ def test_transfer_preview_counts_fallback_trades_from_the_trade_dimension():
 
 def test_a_failing_sql_text_call_does_not_lose_the_preview():
     """The preview SQL is advisory. In fallback mode call_sp_df_async runs the
-    call at submit time and re-raises, so the submission — not just the gather
-    — has to tolerate it: the numbers must still render, with no SQL to show."""
+    call at submit time and re-raises, so the fetch — not just the gather —
+    has to tolerate it: the numbers must still stand, with no SQL to show and
+    a message saying why."""
     class NoSqlModeSQL(SQL):
         def collect_nowait(self):
             if '"mode": "sql"' in self.q:
@@ -592,7 +610,12 @@ def test_a_failing_sql_text_call_does_not_lose_the_preview():
     monkey.setattr(sc, "get_session", lambda: NoSqlModeSess())
     try:
         at = _load()
-        w = _preview_scaling(at, ["VaR", "Stress"])
+        _preview_scaling(at, ["VaR", "Stress"])
+        v = at.session_state["_wiz_v"]
+        _button(at, f"preview_sql_load_{v}").click().run()
+        assert not at.exception, at.exception
+        w = at.session_state["wiz"]
+        warns = [x.value for x in at.warning]
     finally:
         monkey.undo()
 
@@ -600,6 +623,180 @@ def test_a_failing_sql_text_call_does_not_lose_the_preview():
     assert w["_preview_sql"] is None
     assert w["_preview_sum"]["ROWS_AFFECTED"] == 15
     assert set(w["_preview_scopes"]) == {"VaR", "Stress"}
+    assert any("Preview SQL not available" in x for x in warns), warns
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Preview cost — the preview only pays for what the user asked for
+# (audit batch 1: C1 lazy breakdown/sample, I12 lazy SQL text,
+#  C4/S6 one invalidation helper, I7 preview before the Reason)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_the_preview_sql_is_fetched_only_when_asked():
+    """I12 — the `sql` mode used to be submitted once per scope inside every
+    preview (three of the six calls on a three-scope draft) purely to fill an
+    expander most users never open. Nothing fetches it until the button in
+    that expander is pressed, and a plain rerun afterwards refetches nothing."""
+    at = _load()
+    w = _preview_scaling(at, ["VaR", "Stress"])
+    assert w["_preview_sql"] is None
+    assert not [c for c in CALLS if '"mode": "sql"' in c], CALLS
+
+    # Opening the page again (the expander body runs on every rerun) is free.
+    CALLS.clear()
+    at.run()
+    assert not at.exception, at.exception
+    assert not [c for c in CALLS if '"mode": "sql"' in c], CALLS
+
+    v = at.session_state["_wiz_v"]
+    CALLS.clear()
+    _button(at, f"preview_sql_load_{v}").click().run()
+    assert not at.exception, at.exception
+    sql_calls = [c for c in CALLS if '"mode": "sql"' in c]
+    assert len(sql_calls) == 2, sql_calls          # one per scope, on request
+    w = at.session_state["wiz"]
+    assert "-- VaR" in w["_preview_sql"] and "-- Stress" in w["_preview_sql"]
+
+    # Cached against the payload it was fetched for: the next rerun re-reads
+    # nothing.
+    CALLS.clear()
+    at.run()
+    assert not at.exception, at.exception
+    assert not [c for c in CALLS if '"mode": "sql"' in c], CALLS
+    assert at.session_state["wiz"]["_preview_sql"] is not None
+
+
+def test_the_breakdown_and_sample_run_only_when_asked():
+    """C1 — st.expander runs its body on EVERY script run, so the breakdown
+    and the sample-of-1,000 used to fire two full scans of the combined
+    measures view on every click anywhere on the page once a preview existed
+    on a complete ticket — the Submit click included. Nothing runs until the
+    button inside the expander is pressed."""
+    at = _load()
+    _preview_scaling(at, ["VaR"])       # single scope → the full-width block
+
+    CALLS.clear()
+    at.run()                            # a plain rerun, expanders and all
+    assert not at.exception, at.exception
+    assert not [c for c in CALLS
+                if '"mode": "breakdown"' in c or '"mode": "sample"' in c], CALLS
+
+    # Ticking "Requires Approval" is the rerun the audit called out by name.
+    v = at.session_state["_wiz_v"]
+    CALLS.clear()
+    at.checkbox(key=f"approval_{v}").check().run()
+    assert not at.exception, at.exception
+    assert not [c for c in CALLS
+                if '"mode": "breakdown"' in c or '"mode": "sample"' in c], CALLS
+
+    for key, mode in (("scl_brk_load", "breakdown"), ("scl_sample_load", "sample")):
+        CALLS.clear()
+        _button(at, f"{key}_{v}").click().run()
+        assert not at.exception, at.exception
+        assert len([c for c in CALLS if f'"mode": "{mode}"' in c]) == 1, (mode, CALLS)
+
+
+def test_a_scope_switch_clears_the_sticky_zero_row_block():
+    """C4/S6 — the zero-row verdict is sticky WITHIN one filter set (editing
+    a filter must not silently unlock Submit), but nothing cleared it when
+    the draft changed. Submit stayed dead on a draft that shared nothing with
+    the preview that produced the verdict, with no escape short of a reload.
+    Every invalidation site goes through _invalidate_preview() now."""
+    at = _load()
+    _preview_scaling(at, ["VaR"])
+    # A preview that matched 0 rows, then a filter edit: the verdict stands.
+    at.session_state["wiz"].update({"_preview_sum": None, "_preview_for": None,
+                                    "_zero_preview": True})
+    at.run()
+    assert not at.exception, at.exception
+    assert any("Submit is blocked: the current filters match no data" in c.value
+               for c in at.caption), [c.value for c in at.caption]
+    assert any("matched **0 rows**" in x.value for x in at.warning), \
+        [x.value for x in at.warning]
+
+    # Adding a scope is a different draft — the verdict goes with the preview.
+    v = at.session_state["_wiz_v"]
+    _button(at, f"scope_Scaling Adjustment_Stress_{v}").click().run()
+    assert not at.exception, at.exception
+    assert at.session_state["wiz"]["_zero_preview"] is None
+    assert not any("matched **0 rows**" in x.value for x in at.warning), \
+        [x.value for x in at.warning]
+    assert not any("Submit is blocked: the current filters match no data" in c.value
+                   for c in at.caption), [c.value for c in at.caption]
+
+
+def test_every_invalidation_site_clears_the_same_preview_state():
+    """S6 — the four sites used to null four keys each by hand and had
+    already drifted (only the category switch cleared `_preview_err`, none
+    cleared `_preview_for`, `_zero_preview` or `_transfer_fallbacks`). Each
+    one now routes through the single helper: the adjustment-type switch and
+    the category switch are checked here, the scope pills above."""
+    _stale = {"_preview_sum": {"ROWS_AFFECTED": 1}, "_preview_sql": "SELECT 1",
+              "_preview_sql_for": "x", "_preview_err": "boom",
+              "_preview_by_scope": {"VaR": 0}, "_preview_scopes": {"VaR": {}},
+              "_preview_for": "x", "_zero_preview": True,
+              "_transfer_fallbacks": {"VaR": 2}}
+
+    for _click in ("type_Flatten", "cat_Entity Roll"):
+        at = _load()
+        _preview_scaling(at, ["VaR"])
+        at.session_state["wiz"].update(_stale)
+        at.run()
+        assert not at.exception, at.exception
+        v = at.session_state["_wiz_v"]
+        _button(at, f"{_click}_{v}").click().run()
+        assert not at.exception, at.exception
+        w = at.session_state["wiz"]
+        assert all(w.get(k) is None for k in _stale), (_click, w)
+
+
+def test_the_impact_preview_unlocks_before_the_category_and_reason():
+    """I7 — the preview exists to check that the TARGETING matches rows, and
+    neither the Adjustment Category nor the Reason changes a row it counts.
+    Gating it on the whole checklist meant the justification had to be
+    written before the filters could be sanity-checked. Submit stays gated on
+    the full list."""
+    at = _load()
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": "Scaling Adjustment",
+                               "adjustment_type": "Scale",
+                               "process_types": ["VaR"], "process_type": "VaR",
+                               "cobid": 20260101, "scale_factor": 1.5,
+                               "entity_code": "E1", "department_code": "D1",
+                               "adjustment_category": None, "reason": "",
+                               "result": None, "step": 1}
+    at.run()
+    assert not at.exception, at.exception
+    v = at.session_state["_wiz_v"]
+    # Submit is still locked on the full checklist …
+    assert any("Submit unlocks when the ticket is complete" in c.value
+               for c in at.caption), [c.value for c in at.caption]
+    # … and the preview runs anyway.
+    CALLS.clear()
+    _button(at, f"run_preview_{v}").click().run()
+    assert not at.exception, at.exception
+    assert at.session_state["wiz"]["_preview_sum"]["ROWS_AFFECTED"] == 10
+    assert [c for c in CALLS if '"mode": "summary"' in c], CALLS
+
+
+def test_the_impact_preview_still_needs_the_targeting_fields():
+    """The other half of I7: a missing COB (or scope, or entity) is a real
+    blocker — the button is gone and the page says what it is waiting for."""
+    at = _load()
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": "Scaling Adjustment",
+                               "adjustment_type": "Scale",
+                               "process_types": ["VaR"], "process_type": "VaR",
+                               "cobid": None, "scale_factor": 1.5,
+                               "entity_code": "E1", "department_code": "D1",
+                               "adjustment_category": "Cat", "reason": "why",
+                               "result": None, "step": 1}
+    at.run()
+    assert not at.exception, at.exception
+    v = at.session_state["_wiz_v"]
+    assert _button(at, f"run_preview_{v}", required=False) is None
+    assert any("The impact preview needs the targeting rows" in c.value
+               for c in at.caption), [c.value for c in at.caption]
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -689,14 +886,15 @@ def test_transfer_preview_summary_shape_is_unchanged_by_append():
                            "mode"}
         assert pj["adjustment_type"] == "Transfer"
         assert pj["source_cobid"] == pj["cobid"] == 20260101
-        # Only the two CHEAP modes ride along now. `breakdown` used to be
-        # submitted here too, purely to count fallback trades — a whole extra
-        # scan of the combined view on every preview. It is lazy (a button
-        # inside its expander) and the fallback count comes from
-        # DIMENSION.TRADE instead.
+        # ONE mode rides along now. `breakdown` used to be submitted here too,
+        # purely to count fallback trades — a whole extra scan of the combined
+        # view on every preview; it is lazy (a button inside its expander) and
+        # the fallback count comes from DIMENSION.TRADE instead. `sql` used to
+        # follow it, to fill an expander most users never open; it is fetched
+        # on request too.
         assert {json.loads(c[c.index("('") + 2:c.rindex("')")]
                            .replace("''", "'").replace("\\\\", "\\"))["mode"]
-                for c in prev} == {"summary", "sql"}
+                for c in prev} == {"summary"}
 
         w = at.session_state["wiz"]
         assert w["_preview_err"] is None

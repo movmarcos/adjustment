@@ -955,6 +955,34 @@ def _fmt_money(v):
     return f"{n:,.2f}"
 
 
+# Every key the impact preview writes. One list, one function — the four
+# sites that throw the preview away (the two scope-pill branches, the
+# adjustment-type switch and the category switch) used to null four keys each
+# BY HAND and had already drifted apart: only one of them cleared
+# `_preview_err`, none cleared `_preview_for`, `_transfer_fallbacks` or
+# `_zero_preview`.
+_PREVIEW_STATE_KEYS = ("_preview_sum", "_preview_sql", "_preview_sql_for",
+                       "_preview_sql_err", "_preview_err", "_preview_by_scope",
+                       "_preview_scopes", "_preview_for", "_zero_preview",
+                       "_transfer_fallbacks")
+
+
+def _invalidate_preview() -> None:
+    """Throw away the whole preview, including the sticky zero-row verdict.
+
+    `_zero_preview` is deliberately sticky *within one filter set*: once a
+    preview matched 0 rows, editing a filter must not silently unlock Submit
+    — the user has to run the preview again. It was never sticky ACROSS
+    drafts, but nothing cleared it, so a user whose first attempt matched 0
+    rows and who then changed scope, adjustment type or category met a
+    permanently disabled Submit and a warning about a preview that has
+    nothing to do with what is now on screen; the only escape was a browser
+    reload. Changing the scope / type / category IS a different draft, so the
+    verdict goes with the rest of the preview state."""
+    for _pk in _PREVIEW_STATE_KEYS:
+        wiz[_pk] = None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # VALIDATION
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1104,6 +1132,22 @@ def _missing_fields() -> list:
     return [label for label, done in _completion_checks() if not done]
 
 
+# Checklist rows the impact preview does not depend on. The preview exists to
+# sanity-check the TARGETING — does this scope / COB / filter set match any
+# rows, and what do they come to — and neither the adjustment category nor
+# the business justification changes a single row it counts. Gating the
+# button on the whole checklist meant a user could not find out that their
+# filters match nothing until after they had written the justification, which
+# is exactly backwards and taught people to type a placeholder Reason to
+# unlock the button. Submit stays gated on the FULL list.
+_PREVIEW_IRRELEVANT_CHECKS = frozenset({"Adjustment Category", "Reason"})
+
+
+def _preview_blockers(missing: list) -> list:
+    """The missing checklist rows that really do stop a preview running."""
+    return [m for m in missing if m not in _PREVIEW_IRRELEVANT_CHECKS]
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # LEFT COLUMN — FORM SECTIONS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1174,10 +1218,7 @@ def _render_scope_pills(options: list = None) -> None:
     if current != stored:
         wiz["process_types"] = current
         wiz["process_type"]  = current[0] if current else None
-        wiz["_preview_sum"] = None
-        wiz["_preview_sql"] = None
-        wiz["_preview_by_scope"] = None
-        wiz["_preview_scopes"] = None
+        _invalidate_preview()
         wiz["_scope_drop_note"] = (
             "FRTB scopes are not available for Transfer Book yet — removed: "
             + ", ".join(scope_label(s) for s in stored if s not in opts) + ".")
@@ -1199,10 +1240,7 @@ def _render_scope_pills(options: list = None) -> None:
     if picked != current:
         wiz["process_types"] = picked
         wiz["process_type"]  = picked[0] if picked else None   # legacy readers
-        wiz["_preview_sum"] = None
-        wiz["_preview_sql"] = None
-        wiz["_preview_by_scope"] = None
-        wiz["_preview_scopes"] = None
+        _invalidate_preview()
         _purge_filters_for(picked)
         safe_rerun()
     n = len(picked)
@@ -1901,10 +1939,7 @@ def render_scaling_form() -> None:
         if tsel and tsel != wiz.get("adjustment_type"):
             _was_transfer = wiz.get("adjustment_type") == "Transfer"
             wiz["adjustment_type"] = tsel
-            wiz["_preview_sum"] = None
-            wiz["_preview_sql"] = None
-            wiz["_preview_by_scope"] = None
-            wiz["_preview_scopes"] = None
+            _invalidate_preview()
             # The Source COB field only renders for Roll; a value typed for a
             # Roll must not survive a switch to Scale/Flatten, or the preview
             # and submit send it and the engine treats the same-COB Scale as
@@ -3570,16 +3605,18 @@ def _run_preview() -> None:
     per-scope summary rows go to wiz['_preview_scopes'], which feeds the
     impact-by-scope table.
 
-    Every per-scope call (summary, sql and — for a Transfer — breakdown) is
-    SUBMITTED FIRST and gathered afterwards, so Snowflake runs them
-    concurrently as async jobs instead of one after another: a three-scope
-    preview used to cost the sum of nine round trips. On a runtime without
-    async jobs call_sp_df_async degrades to the old behaviour — each call
-    executes eagerly, in submission order, at submit time — which is also why
-    the ADVISORY submissions (sql text, breakdown) each sit in their own
-    try/except: in that mode a failing advisory call raises where the gather
-    used to swallow it, and a preview whose numbers are fine must still
-    render."""
+    Every per-scope call is SUBMITTED FIRST and gathered afterwards, so
+    Snowflake runs them concurrently as async jobs instead of one after
+    another: a three-scope preview used to cost the sum of nine round trips.
+    On a runtime without async jobs call_sp_df_async degrades to the old
+    behaviour — each call executes eagerly, in submission order, at submit
+    time.
+
+    A preview now costs EXACTLY ONE CALL PER SCOPE. The `sql`-mode text and
+    the `breakdown` are advisory extras that most previews never look at, so
+    neither rides along here any more: the SQL text is fetched by
+    _load_preview_sql() when the user opens "Show preview SQL" and presses
+    the button, the breakdown by _lazy_preview_section()."""
     payload = _preview_payload()
     subtypes = _selected_scopes() or [payload.get("process_type")]
     is_transfer = wiz.get("adjustment_type") == "Transfer"
@@ -3596,21 +3633,15 @@ def _run_preview() -> None:
                                 json.dumps({**payload, "process_type": sub,
                                             "mode": mode}))
 
-    def _submit_advisory(mode):
-        """Submit an advisory call per scope, skipping any scope that refuses
-        to start (fallback mode runs it there and then, so it can raise)."""
-        jobs = []
-        for sub in subtypes:
-            try:
-                jobs.append((sub, _submit(sub, mode)))
-            except Exception:
-                pass
-        return jobs
+    # A new run replaces the numbers, so any SQL text fetched for the
+    # previous one is stale the moment the summaries land.
+    wiz["_preview_sql"] = None
+    wiz["_preview_sql_for"] = None
+    wiz["_preview_sql_err"] = None
 
     try:
         # ── Submit everything, then gather ───────────────────────────────
         sum_jobs = [(sub, _submit(sub, "summary")) for sub in subtypes]
-        sql_jobs = _submit_advisory("sql")
         # PERF (2026-09-18): a `breakdown` call per scope used to ride along
         # here, purely to count the trades that fall back to the target's
         # '<BOOK>/Adjustment' trade — a whole extra scan of the combined view
@@ -3618,6 +3649,10 @@ def _run_preview() -> None:
         # only DIMENSION.TRADE decides. It is now one pinned dimension query
         # (_transfer_fallback_count), and the breakdown itself is loaded only
         # when the user opens it and asks.
+        # PERF (2026-09-22): a `sql`-mode call per scope used to ride along
+        # too — on a three-scope draft, three of the six preview calls — to
+        # fill an expander most users never open. It is loaded on request now
+        # (_load_preview_sql).
 
         # Only COUNTS may be added across scopes. Every other numeric column
         # is a MEASURE — VaR P&L, Stress sim P&L, sensitivity measure, FRTB
@@ -3685,20 +3720,91 @@ def _run_preview() -> None:
         else:
             wiz["_transfer_fallbacks"] = None
         wiz["_preview_for"] = json.dumps(payload, sort_keys=True, default=str)
-        # The statement(s) behind the numbers — shown under "Show preview SQL"
-        # so users can run/inspect exactly what the preview executed.
-        try:
-            sqls = []
-            for sub, job in sql_jobs:
-                df_sql = job.result_df()
-                if not df_sql.empty and "PREVIEW_SQL" in df_sql.columns:
-                    sqls.append((f"-- {sub}\n" if len(subtypes) > 1 else "")
-                                + str(df_sql.iloc[0]["PREVIEW_SQL"]))
-            wiz["_preview_sql"] = "\n\n".join(sqls) or None
-        except Exception:
-            wiz["_preview_sql"] = None
     except Exception as exc:
         _fail(str(exc))
+
+
+def _load_preview_sql() -> None:
+    """Fetch the statement(s) behind the current preview, ON REQUEST.
+
+    PERF (2026-09-22): this used to ride along inside every _run_preview() as
+    an advisory `sql`-mode call per scope — three of the six calls on a
+    three-scope draft — purely to fill the "Show preview SQL" expander, which
+    most users never open. It is now fetched only when the user asks, and
+    cached against the payload signature it was fetched for so reruns are
+    free and a filter edit drops it.
+
+    Advisory throughout: every failure lands in wiz['_preview_sql_err'] and
+    the numbers stay on screen. Each submission sits in its own try/except
+    because on a runtime without async jobs call_sp_df_async executes at
+    SUBMIT time and can raise there."""
+    payload = _preview_payload()
+    subtypes = _selected_scopes() or [payload.get("process_type")]
+    jobs, err = [], None
+    for sub in subtypes:
+        try:
+            jobs.append((sub, call_sp_df_async(
+                "ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                json.dumps({**payload, "process_type": sub, "mode": "sql"}))))
+        except Exception as exc:
+            err = str(exc)
+    sqls = []
+    for sub, job in jobs:
+        try:
+            df_sql = job.result_df()
+        except Exception as exc:
+            err = str(exc)
+            continue
+        if not df_sql.empty and "PREVIEW_SQL" in df_sql.columns:
+            sqls.append((f"-- {sub}\n" if len(subtypes) > 1 else "")
+                        + str(df_sql.iloc[0]["PREVIEW_SQL"]))
+    wiz["_preview_sql"] = "\n\n".join(sqls) or None
+    wiz["_preview_sql_err"] = None if sqls else (err or "no SQL came back")
+    wiz["_preview_sql_for"] = json.dumps(payload, sort_keys=True, default=str)
+
+
+def _lazy_preview_section(title, mode, *, state_key, button_key, button_label,
+                          caption="", rename=None, empty_msg=None,
+                          fail_label="Not available") -> None:
+    """An expander whose SP call runs only when the user presses the button.
+
+    PERF (2026-09-22): st.expander runs its body on EVERY script run —
+    collapsing it is a client-side affordance only. The breakdown and
+    sample-rows sections used to call SP_PREVIEW_ADJUSTMENT inline, so once a
+    preview existed on a complete ticket, TWO full scans of the combined
+    measures view fired on every rerun: every button click, every checkbox,
+    every blur out of the Reason box, the Submit click itself. Ticking
+    "Requires Approval" cost two more.
+
+    The work sits behind a button now and the frame is cached in session
+    state under the preview payload's signature, so reruns are free and the
+    result never outlives the filters it was computed for."""
+    with st.expander(title, expanded=False):
+        sig = json.dumps(_preview_payload(), sort_keys=True, default=str)
+        if st.session_state.get(f"{state_key}_for") != sig:
+            st.session_state.pop(state_key, None)
+        if caption:
+            st.caption(caption)
+        if _btn(button_label, key=_k(button_key),
+                icon_name=":material/table_rows:"):
+            try:
+                df = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
+                                json.dumps({**_preview_payload(),
+                                            "mode": mode}))
+                if rename and not df.empty:
+                    df = df.rename(columns=rename)
+                st.session_state[state_key] = df
+                st.session_state[f"{state_key}_for"] = sig
+            except Exception as exc:
+                st.session_state.pop(state_key, None)
+                st.warning(f"{fail_label}: {exc}")
+        _df = st.session_state.get(state_key)
+        if _df is not None and not _df.empty:
+            render_data_grid(_df, height=300)
+        elif _df is not None:
+            # Loaded, but the SP returned nothing — say so, or the button
+            # looks dead.
+            st.info(empty_msg or "No rows came back for these filters.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4184,8 +4290,6 @@ with left:
                         "source_book_code": None, "target_book_code": None,
                         "transfer_trade_codes": [], "transfer_pick_trades": False,
                         "uploaded_df": None, "uploaded_file_name": None,
-                        "_preview_sum": None, "_preview_err": None,
-                        "_preview_by_scope": None, "_preview_scopes": None,
                         "direct_batch_id": None, "direct_ndf": None,
                         "direct_verdicts": None, "_direct_sig": None,
                         "direct_rows": None,
@@ -4196,6 +4300,9 @@ with left:
                         # category's submit error must not show under the new
                         # one either.
                         "requires_approval": False, "result": None})
+            # Preview state (numbers, per-scope split, SQL text, the sticky
+            # zero-row verdict) belongs to the category that produced it.
+            _invalidate_preview()
             safe_rerun()
         if wiz.get("category"):
             st.caption(CATEGORY_UI_DESCS.get(wiz["category"], ""))
@@ -4212,6 +4319,9 @@ with left:
         render_scaling_form()
 
 missing = _missing_fields()
+# The preview only needs the targeting rows of the checklist — see
+# _PREVIEW_IRRELEVANT_CHECKS. Submit is still gated on `missing` itself.
+preview_ready = not _preview_blockers(missing)
 
 with right:
     st.markdown(_ticket_html(missing), unsafe_allow_html=True)
@@ -4223,7 +4333,7 @@ with right:
 
     # ── Impact preview trigger (Scaling, narrow scope only) ─────────────
     zero_rows = False
-    if cat == "Scaling Adjustment" and not missing:
+    if cat == "Scaling Adjustment" and preview_ready:
         if _btn("Run impact preview", icon_name=":material/visibility:",
                 **wide_kwargs(), key=_k("run_preview")):
             with st.spinner("Calculating impact…"):
@@ -4231,14 +4341,28 @@ with right:
             safe_rerun()
         if wiz.get("_preview_err"):
             st.warning(f"Preview not available: {wiz['_preview_err']}")
-        if wiz.get("_preview_sum") is not None and wiz.get("_preview_sql"):
+        s = wiz.get("_preview_sum")
+        _pv_sig = json.dumps(_preview_payload(), sort_keys=True, default=str)
+        preview_current = (s is not None and wiz.get("_preview_for") == _pv_sig)
+        if s is not None:
+            # The SQL text is one extra SP call per scope, so it is fetched
+            # on request — opening this expander costs nothing.
             with st.expander("Show preview SQL", expanded=False):
                 st.caption("Exactly what the impact preview ran. Copy it into "
-                           "a worksheet to check the numbers yourself.")
-                st.code(wiz["_preview_sql"], language="sql")
-        s = wiz.get("_preview_sum")
-        preview_current = (s is not None and wiz.get("_preview_for")
-                           == json.dumps(_preview_payload(), sort_keys=True, default=str))
+                           "a worksheet to check the numbers yourself. It is "
+                           "one extra call per scope, so it is fetched only "
+                           "when you ask for it.")
+                if wiz.get("_preview_sql_for") != _pv_sig:
+                    wiz["_preview_sql"] = None
+                    wiz["_preview_sql_err"] = None
+                if _btn("Load preview SQL", key=_k("preview_sql_load"),
+                        icon_name=":material/code:"):
+                    _load_preview_sql()
+                if wiz.get("_preview_sql"):
+                    st.code(wiz["_preview_sql"], language="sql")
+                elif wiz.get("_preview_sql_err"):
+                    st.warning("Preview SQL not available: "
+                               f"{wiz['_preview_sql_err']}")
         if s is not None and not preview_current:
             st.info("Filters changed since the last preview — run it again.")
         # Per-scope row counts: the summed total hides a scope that matched
@@ -4318,6 +4442,10 @@ with right:
                 f"trade instead of their own. Ask for the trades to be set up "
                 f"in the target book if you need them reported under their own "
                 f"trade code.")
+    elif cat == "Scaling Adjustment":
+        st.caption("The impact preview needs the targeting rows of the "
+                   "checklist — scope, COB and filters. The Adjustment "
+                   "Category and the Reason can come afterwards.")
 
     # ── VaR Upload: replacement confirmation ──────────────────────────────
     dup_ok = True
@@ -4429,7 +4557,7 @@ with right:
 #  breakdown/sample only makes sense per scope.)
 if wiz.get("category") == "Scaling Adjustment" and wiz.get("_preview_sum") \
         and len(_selected_scopes()) == 1 \
-        and not missing:
+        and preview_ready:
     s = wiz["_preview_sum"]
     total_rows = _safe_int(s.get("ROWS_AFFECTED"))
     _is_roll = (wiz.get("adjustment_type") == "Roll"
@@ -4456,62 +4584,46 @@ if wiz.get("category") == "Scaling Adjustment" and wiz.get("_preview_sum") \
             # PERF (2026-09-18): this is the expensive one — a scan of the
             # combined view plus both SCD2 trade lookups — so it is LAZY.
             # Opening the expander costs nothing; the user asks for it.
-            with st.expander("Breakdown by trade", expanded=False):
-                _brk_key = "_trf_breakdown_df"
-                _brk_sig = json.dumps(_preview_payload(), sort_keys=True,
-                                      default=str)
-                if st.session_state.get("_trf_breakdown_for") != _brk_sig:
-                    st.session_state.pop(_brk_key, None)
-                st.caption(
-                    "Which trades the transfer lands on, and which fall back "
-                    "to the target's '/Adjustment' trade because they have no "
-                    "version in the target book. This is where that shows for "
-                    "a whole-book transfer. It reads the full measures view, "
-                    "so it is loaded only when you ask for it.")
-                if _btn("Load per-trade breakdown", key=_k("trf_brk_load"),
-                        icon_name=":material/table_rows:"):
-                    try:
-                        df_trd = call_sp_df(
-                            "ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
-                            json.dumps({**_preview_payload(),
-                                        "mode": "breakdown"}))
-                        if not df_trd.empty:
-                            # Append semantics: the column is what this trade
-                            # ADDS to the target book, not a projected total.
-                            df_trd = df_trd.rename(columns={
-                                "TRADE_CODE": "Trade",
-                                "TARGET_TRADE": "Target trade",
-                                "PROJECTED_VALUE": "Value added"})
-                        st.session_state[_brk_key] = df_trd
-                        st.session_state["_trf_breakdown_for"] = _brk_sig
-                    except Exception as exc:
-                        st.session_state.pop(_brk_key, None)
-                        st.warning(f"Breakdown not available: {exc}")
-                _df_brk = st.session_state.get(_brk_key)
-                if _df_brk is not None and not _df_brk.empty:
-                    render_data_grid(_df_brk, height=300)
-                elif _df_brk is not None:
-                    # Loaded, but the SP returned nothing — say so, or the
-                    # button looks dead.
-                    st.info("No per-trade rows came back for these filters. "
-                            "The summary above still stands; a breakdown needs "
-                            "source rows carrying a trade key.")
+            _lazy_preview_section(
+                "Breakdown by trade", "breakdown",
+                state_key="_trf_breakdown_df", button_key="trf_brk_load",
+                button_label="Load per-trade breakdown",
+                caption="Which trades the transfer lands on, and which fall "
+                        "back to the target's '/Adjustment' trade because "
+                        "they have no version in the target book. This is "
+                        "where that shows for a whole-book transfer. It reads "
+                        "the full measures view, so it is loaded only when "
+                        "you ask for it.",
+                # Append semantics: the column is what this trade ADDS to the
+                # target book, not a projected total.
+                rename={"TRADE_CODE": "Trade", "TARGET_TRADE": "Target trade",
+                        "PROJECTED_VALUE": "Value added"},
+                empty_msg="No per-trade rows came back for these filters. "
+                          "The summary above still stands; a breakdown needs "
+                          "source rows carrying a trade key.",
+                fail_label="Breakdown not available")
     elif total_rows > 0:
-        with st.expander("Breakdown by book / department / entity", expanded=False):
-            try:
-                df_grp = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
-                                    json.dumps({**_preview_payload(), "mode": "breakdown"}))
-                if not df_grp.empty:
-                    df_grp = df_grp.rename(columns={"CURRENT_VALUE": "Original",
-                                                    "ADJUSTMENT_DELTA": "Adjustment",
-                                                    "PROJECTED_VALUE": "Projected"})
-                    render_data_grid(df_grp, height=300)
-            except Exception as exc:
-                st.warning(f"Breakdown not available: {exc}")
-        with st.expander(f"Sample rows (up to 1,000 of {total_rows:,})", expanded=False):
-            try:
-                df_sample = call_sp_df("ADJUSTMENT_APP.SP_PREVIEW_ADJUSTMENT",
-                                       json.dumps({**_preview_payload(), "mode": "sample"}))
-                render_data_grid(df_sample, height=300)
-            except Exception as exc:
-                st.warning(f"Sample not available: {exc}")
+        # PERF (2026-09-22): both of these are the expensive one — a full scan
+        # of the combined measures view — and st.expander runs its body on
+        # EVERY rerun, so they used to fire on every click anywhere on the
+        # page once a preview existed. Same button + signature cache as the
+        # Transfer branch above: nothing runs until the user asks.
+        _lazy_preview_section(
+            "Breakdown by book / department / entity", "breakdown",
+            state_key="_scaling_breakdown_df", button_key="scl_brk_load",
+            button_label="Load breakdown",
+            caption="Where the impact lands, grouped by book, department and "
+                    "entity. It reads the full measures view, so it is loaded "
+                    "only when you ask for it.",
+            rename={"CURRENT_VALUE": "Original",
+                    "ADJUSTMENT_DELTA": "Adjustment",
+                    "PROJECTED_VALUE": "Projected"},
+            fail_label="Breakdown not available")
+        _lazy_preview_section(
+            f"Sample rows (up to 1,000 of {total_rows:,})", "sample",
+            state_key="_scaling_sample_df", button_key="scl_sample_load",
+            button_label="Load sample rows",
+            caption="Up to 1,000 of the rows this adjustment touches. It "
+                    "reads the full measures view, so it is loaded only when "
+                    "you ask for it.",
+            fail_label="Sample not available")
