@@ -39,7 +39,7 @@ st.set_page_config(
 from utils.styles import (inject_css, render_sidebar, section_title, P,
                           bordered_container, render_data_grid, kpi_card,
                           download_csv_link)
-from utils.snowflake_conn import run_query_df
+from utils.snowflake_conn import run_query_df, sql_escape
 
 inject_css()
 render_sidebar()
@@ -100,8 +100,8 @@ def _q(sql):
         return pd.DataFrame()
 
 
-def _esc(v):
-    return str(v).replace("\\", "\\\\").replace("'", "''")
+# The one SQL-literal escape for the whole app (utils.snowflake_conn).
+_esc = sql_escape
 
 
 # Template column → OFFICIAL-table column(s) that carry the same value when

@@ -17,12 +17,11 @@ from utils.styles import (scope_label, scope_meta, wide_kwargs,
     SIGNOFF_STATUS_META, signoff_status_label, type_label,
 )
 from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
-                                  safe_rerun, friendly_error)
+                                  safe_rerun, friendly_error, sql_escape)
 import html as _htmlmod
 
-def _esc(val):
-    """Escape single quotes for safe SQL interpolation."""
-    return str(val).replace("\\", "\\\\").replace("'", "''") if val is not None else ""
+# The one SQL-literal escape for the whole app (utils.snowflake_conn).
+_esc = sql_escape
 
 
 def _txt(v):
@@ -202,11 +201,13 @@ with f2:
 
 try:
     where_parts = []
+    # Closed-enum multiselects, escaped anyway — same convention as every
+    # other filter value, so a future free-text edit cannot reopen a hole.
     if filter_scope:
-        in_list = ",".join(f"'{s}'" for s in filter_scope)
+        in_list = ",".join(f"'{_esc(s)}'" for s in filter_scope)
         where_parts.append(f"PROCESS_TYPE IN ({in_list})")
     if filter_type:
-        in_list = ",".join(f"'{t}'" for t in filter_type)
+        in_list = ",".join(f"'{_esc(t)}'" for t in filter_type)
         where_parts.append(f"ADJUSTMENT_TYPE IN ({in_list})")
 
     where_sql = (" AND " + " AND ".join(where_parts)) if where_parts else ""
@@ -244,7 +245,7 @@ except Exception as e:
 df_overlaps = pd.DataFrame()
 if not df_queue.empty:
     try:
-        queued_ids = ",".join(f"'{str(i).replace(chr(92), chr(92)*2).replace(chr(39), chr(39)*2)}'" for i in df_queue["ADJ_ID"].dropna())
+        queued_ids = ",".join(f"'{_esc(i)}'" for i in df_queue["ADJ_ID"].dropna())
         df_overlaps = run_query_df(f"""
             SELECT ADJ_ID_A, ADJ_ID_B, COBID,
                    ENTITY_A, ENTITY_B, BOOK_A, BOOK_B, ALERT_MESSAGE

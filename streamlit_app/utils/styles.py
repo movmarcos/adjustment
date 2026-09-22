@@ -183,8 +183,8 @@ def get_user_tz() -> str:
         return tz
     tz = STORAGE_TZ
     try:
-        from utils.snowflake_conn import run_query, current_user_name
-        _u = str(current_user_name()).replace("\\", "\\\\").replace("'", "''")
+        from utils.snowflake_conn import run_query, current_user_name, sql_escape
+        _u = sql_escape(current_user_name())
         rows = run_query(
             f"SELECT DISPLAY_TZ FROM ADJUSTMENT_APP.ADJ_USER_PREFS "
             f"WHERE UPPER(USERNAME) = UPPER('{_u}')")
@@ -204,8 +204,8 @@ def set_user_tz(tz: str) -> None:
         return
     st.session_state["_user_tz"] = tz
     try:
-        from utils.snowflake_conn import run_query, current_user_name
-        _u = str(current_user_name()).replace("\\", "\\\\").replace("'", "''")
+        from utils.snowflake_conn import run_query, current_user_name, sql_escape
+        _u = sql_escape(current_user_name())
         run_query(f"""
             MERGE INTO ADJUSTMENT_APP.ADJ_USER_PREFS t
             USING (SELECT '{_u}' AS USERNAME) s
@@ -1699,6 +1699,8 @@ def render_filter_chips(row: dict):
             return str(int(v))
         return str(v).strip()
 
+    import html as _htmlmod
+
     chips = []
     for col, label in dim_labels.items():
         val = row.get(col)
@@ -1706,7 +1708,14 @@ def render_filter_chips(row: dict):
             continue
         text = _fmt(val)
         if text and text.lower() != "none" and text.lower() != "nan":
-            chips.append(f'<span class="filter-chip">{label}: {text}</span>')
+            # User-sourced text is HTML-escaped — same rule as
+            # render_status_timeline below. Several of these dimensions
+            # (TRADE_CODE, STRATEGY, CURVE_CODE, GUARANTEED_ENTITY, …) are
+            # free text a submitter types, and this block is rendered with
+            # unsafe_allow_html for every later viewer of the adjustment.
+            chips.append(f'<span class="filter-chip">'
+                         f'{_htmlmod.escape(str(label))}: '
+                         f'{_htmlmod.escape(text)}</span>')
     if chips:
         st.markdown(f'<div class="adj-filters">{"".join(chips)}</div>', unsafe_allow_html=True)
     else:
@@ -2463,9 +2472,12 @@ def render_grid(headers, rows, *, aligns=None, height=None, caption=None,
 
 def render_sidebar():
     """Render the branded sidebar: MUFG logo, compact nav, user at bottom."""
+    import html as _htmlmod
     from utils.snowflake_conn import current_user_name
 
-    user = current_user_name()
+    # HTML-escaped: the footer below is raw markup, and the identity can come
+    # from st.user (an e-mail / display name), not only CURRENT_USER().
+    user = _htmlmod.escape(str(current_user_name()))
 
     with st.sidebar:
         # ── MUFG Logo (SVG inline, white text for dark background) ──────────

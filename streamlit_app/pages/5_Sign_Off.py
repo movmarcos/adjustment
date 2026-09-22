@@ -27,14 +27,14 @@ from utils.styles import (scope_label, scope_meta, wide_kwargs, inject_css, rend
                           set_flash, render_flash, confirm_gate,
                           SIGNOFF_STATUS_META, signoff_status_label)
 from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
-                                  safe_rerun, signoff_access, can_sign_off)
+                                  safe_rerun, signoff_access, can_sign_off,
+                                  sql_escape)
 
 _FLASH_KEY = "signoff"
 
 
-def _esc(val):
-    """Escape a SQL string literal (backslashes first, then quotes)."""
-    return str(val).replace("\\", "\\\\").replace("'", "''") if val is not None else ""
+# The one SQL-literal escape for the whole app (utils.snowflake_conn).
+_esc = sql_escape
 
 
 def _pill(text, color) -> str:

@@ -17,6 +17,30 @@ except ModuleNotFoundError:
     import config
 
 
+def sql_escape(value) -> str:
+    """THE escape for a value going into a single-quoted Snowflake literal.
+
+    Doubles backslashes FIRST, then single quotes — that order matters:
+    Snowflake interprets `\\` inside a single-quoted literal, so a value
+    ending in a backslash escapes the closing quote and breaks out of the
+    literal when only the quote is doubled. Returns the literal BODY (no
+    surrounding quotes), so call sites keep writing `'{sql_escape(v)}'`.
+
+    None → "" (an empty literal), matching the pages' previous local copies.
+
+    This is the single definition for the whole app: every page used to carry
+    its own two-line copy and one of them (the Admin role lookup) had silently
+    skipped the backslash step. Import this instead of re-implementing it."""
+    if value is None:
+        return ""
+    return str(value).replace("\\", "\\\\").replace("'", "''")
+
+
+def sql_lit(value) -> str:
+    """sql_escape() wrapped in single quotes — for building IN (...) lists."""
+    return "'" + sql_escape(value) + "'"
+
+
 def safe_rerun():
     """Version-compatible rerun — works on both SiS and local Streamlit."""
     if hasattr(st, "rerun"):
@@ -105,11 +129,9 @@ def bust_query_cache():
 
 def call_procedure(proc_name: str, *args):
     """Call a stored procedure and return the result. String args are escaped
-    Snowflake-style (backslashes doubled FIRST, then quotes — see call_sp_df)."""
+    Snowflake-style (backslashes doubled FIRST, then quotes — see sql_escape)."""
     def _lit(a):
-        if isinstance(a, str):
-            return "'" + a.replace("\\", "\\\\").replace("'", "''") + "'"
-        return str(a)
+        return sql_lit(a) if isinstance(a, str) else str(a)
     args_str = ", ".join(_lit(a) for a in args)
     return get_session().sql(f"CALL {proc_name}({args_str})").collect()
 
@@ -117,13 +139,11 @@ def call_procedure(proc_name: str, *args):
 def _sp_call_sql(proc_name: str, *args) -> str:
     """The `CALL proc(arg, …)` text for a stored procedure.
 
-    Double backslashes FIRST (Snowflake literals interpret \\n, \\t, ...),
-    then double single quotes — otherwise JSON args with newlines or quotes
-    break the literal and the SP's json.loads."""
+    String args go through sql_escape (backslashes doubled FIRST — Snowflake
+    literals interpret \\n, \\t, ... — then quotes), otherwise JSON args with
+    newlines or quotes break the literal and the SP's json.loads."""
     def _lit(a):
-        if isinstance(a, str):
-            return "'" + a.replace("\\", "\\\\").replace("'", "''") + "'"
-        return str(a)
+        return sql_lit(a) if isinstance(a, str) else str(a)
     return f"CALL {proc_name}({', '.join(_lit(a) for a in args)})"
 
 

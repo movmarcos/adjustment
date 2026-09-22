@@ -30,7 +30,7 @@ from utils.styles import (wide_kwargs, inject_css, render_sidebar, section_title
                           kpi_card, render_df_table, set_flash, render_flash,
                           confirm_gate)
 from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
-                                  safe_rerun)
+                                  safe_rerun, sql_escape)
 import config
 
 inject_css()
@@ -49,8 +49,8 @@ st.markdown("<br/>", unsafe_allow_html=True)
 render_flash("tasks")
 
 
-def _esc(v):
-    return str(v).replace("\\", "\\\\").replace("'", "''")
+# The one SQL-literal escape for the whole app (utils.snowflake_conn).
+_esc = sql_escape
 
 
 # ── Data fetch (no rendering): task list + SOLUTION tag per task ─────────────

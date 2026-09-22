@@ -13,11 +13,12 @@ from utils.styles import (scope_label, scope_meta, wide_kwargs, inject_css, rend
                           SCOPE_CONFIG, SCOPE_LABEL_HELP, icon, render_df_table,
                           kpi_card, fmt_user_dt, set_flash, render_flash,
                           confirm_gate)
-from utils.snowflake_conn import run_query, run_query_df, current_user_name, safe_rerun
+from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
+                                  safe_rerun, sql_escape)
 
-def _esc(val):
-    """Escape single quotes for safe SQL interpolation."""
-    return str(val).replace("\\", "\\\\").replace("'", "''") if val is not None else ""
+# The one escape for SQL literals lives in utils.snowflake_conn (this page used
+# to carry its own copy — and a second, subtly broken one in _role_members).
+_esc = sql_escape
 
 
 def _identity_keys(name: str) -> set:
@@ -116,7 +117,7 @@ def _role_members(role: str):
     # CTE (roles the target was granted to, then every user holding any
     # role in that set).
     try:
-        _lit = safe.replace("'", "''")
+        _lit = sql_escape(safe)
         rows = run_query(f"""
             WITH RECURSIVE holders AS (
                 SELECT '{_lit}' AS ROLE_NAME
@@ -1008,7 +1009,7 @@ with tab_notify:
                      help="Enter a recipient first — the test bypasses the master switch"):
             try:
                 import json as _json
-                _tp = _json.dumps({"email": test_email.strip()}).replace("\\", "\\\\").replace("'", "''")
+                _tp = sql_escape(_json.dumps({"email": test_email.strip()}))
                 res = run_query(f"CALL ADJUSTMENT_APP.SP_NOTIFY('test', '{_tp}')")
                 try:
                     out = _json.loads(str(res[0][0])) if res else {}

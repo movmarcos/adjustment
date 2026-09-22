@@ -20,7 +20,8 @@ st.set_page_config(
 from utils.styles import (scope_label, scope_meta, wide_kwargs, inject_css, render_sidebar, section_title, P, SCOPE_CONFIG,
                           STATUS_COLORS, fmt_adj_id, icon, render_activity_grid,
                           render_df_table, set_flash, render_flash)
-from utils.snowflake_conn import run_query_df, run_query, current_user_name, safe_rerun
+from utils.snowflake_conn import (run_query_df, run_query, current_user_name,
+                                  safe_rerun, sql_escape)
 
 inject_css()
 render_sidebar()
@@ -600,7 +601,6 @@ with col_alerts:
         with st.expander("Acknowledge a failure (System Status back to HEALTHY)",
                          expanded=False):
             _me = current_user_name() or "UNKNOWN"
-            _esc = lambda v: str(v).replace("\\", "\\\\").replace("'", "''")
             if not _open_rows.empty:
                 _opts = {f"{fmt_adj_id(r.DIMENSION_ADJ_ID)} · {r.PROCESS_TYPE} · "
                          f"{str(r.ERRORMESSAGE or '')[:50]}": str(r.ADJ_ID)
@@ -619,11 +619,11 @@ with col_alerts:
                     try:
                         run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                            SET ERROR_ACK_BY = '{_esc(_me)}',
+                            SET ERROR_ACK_BY = '{sql_escape(_me)}',
                                 ERROR_ACK_AT = CONVERT_TIMEZONE('Europe/London',
                                                    CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9),
-                                ERROR_ACK_NOTE = '{_esc(_n)}'
-                            WHERE ADJ_ID = '{_esc(_opts[_pick])}' AND RUN_STATUS = 'Failed'
+                                ERROR_ACK_NOTE = '{sql_escape(_n)}'
+                            WHERE ADJ_ID = '{sql_escape(_opts[_pick])}' AND RUN_STATUS = 'Failed'
                         """)
                         set_flash("home", "success", f"Acknowledged {_label}")
                         safe_rerun()
@@ -644,7 +644,7 @@ with col_alerts:
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
                             SET ERROR_ACK_BY = NULL, ERROR_ACK_AT = NULL,
                                 ERROR_ACK_NOTE = NULL
-                            WHERE ADJ_ID = '{_esc(_ropts[_rpick])}'
+                            WHERE ADJ_ID = '{sql_escape(_ropts[_rpick])}'
                         """)
                         set_flash("home", "success",
                                   f"Re-opened {_rlabel} — it counts in System Status again")
@@ -663,6 +663,7 @@ with col_alerts:
             GROUP BY USERNAME ORDER BY CNT DESC LIMIT 5
         """)
         if not df_users.empty:
+            import html as _htmlmod
             max_cnt = int(df_users["CNT"].max()) or 1
             rows_html = ""
             for _, row in df_users.iterrows():
@@ -671,7 +672,8 @@ with col_alerts:
                     f'<div style="margin-bottom:0.5rem">'
                     f'<div style="display:flex;justify-content:space-between;'
                     f'font-size:0.8rem;margin-bottom:3px">'
-                    f'<span style="color:{P["grey_900"]};font-weight:500">{row["USERNAME"]}</span>'
+                    f'<span style="color:{P["grey_900"]};font-weight:500">'
+                    f'{_htmlmod.escape(str(row["USERNAME"]))}</span>'
                     f'<span style="font-weight:700;color:{P["accent"]}">{int(row["CNT"])}</span></div>'
                     f'<div style="background:{P["grey_100"]};border-radius:99px;height:4px">'
                     f'<div style="background:{P["primary"]};border-radius:99px;height:4px;'

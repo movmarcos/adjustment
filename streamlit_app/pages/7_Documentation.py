@@ -36,7 +36,8 @@ from utils.styles import (scope_label, scope_meta, wide_kwargs,
     inject_css, render_sidebar, section_title,
     P, SCOPE_CONFIG, icon, bordered_container, status_badge,
 )
-from utils.snowflake_conn import run_query, run_query_df, friendly_error
+from utils.snowflake_conn import (run_query, run_query_df, friendly_error,
+                                  sql_escape)
 
 inject_css()
 render_sidebar()
@@ -117,9 +118,8 @@ def _cfg(key, default=""):
         return default
 
 
-def _sql_lit(s: str) -> str:
-    """Escape a Python string for a Snowflake single-quoted literal."""
-    return str(s).replace("\\", "\\\\").replace("'", "''")
+# The one SQL-literal escape for the whole app (utils.snowflake_conn).
+_sql_lit = sql_escape
 
 
 # What the system IS — a compact, always-true description so the model can

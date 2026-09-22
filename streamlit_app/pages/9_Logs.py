@@ -30,7 +30,7 @@ from utils.styles import (scope_label, scope_meta,
     P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, fmt_adj_id, icon,
     fmt_user_dt, render_df_table, type_label,
 )
-from utils.snowflake_conn import run_query, run_query_df
+from utils.snowflake_conn import run_query, run_query_df, sql_escape
 
 inject_css()
 render_sidebar()
@@ -162,7 +162,7 @@ with f3:
 def _scope_filter(col="PROCESS_TYPE"):
     if not filter_scope:
         return ""
-    in_list = ",".join(f"'{s}'" for s in filter_scope)
+    in_list = ",".join(f"'{sql_escape(s)}'" for s in filter_scope)
     return f" AND {col} IN ({in_list})"
 
 

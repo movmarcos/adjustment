@@ -21,7 +21,7 @@ from utils.styles import (scope_label, scope_meta, wide_kwargs,
 )
 from utils.snowflake_conn import (run_query, run_query_df, run_query_df_cached,
                                   bust_query_cache, current_user_name,
-                                  safe_rerun, friendly_error)
+                                  safe_rerun, friendly_error, sql_escape)
 
 
 def _rerun():
@@ -337,34 +337,37 @@ try:
     where_clauses = ["1=1"]
     _find = (find_id or "").strip().lstrip("#").strip()
     if _find:
-        _fesc = _find.replace("\\", "\\\\").replace("'", "''")
+        _fesc = sql_escape(_find)
         if _find.isdigit():
             where_clauses.append(
                 f"(DIMENSION_ADJ_ID = {int(_find)} OR ADJ_ID LIKE '{_fesc}%')")
         else:
             where_clauses.append(f"ADJ_ID LIKE '{_fesc}%'")
     if mine_only:
-        where_clauses.append(f"SUBMITTED_BY = '{user}'")
+        where_clauses.append(f"SUBMITTED_BY = '{sql_escape(user)}'")
+    # The status/scope/type lists come from closed-enum multiselects, but they
+    # are escaped like every other filter value: a future edit that turns one
+    # into a text input must not silently reopen an injection path.
     if filter_status:
-        in_list = ",".join(f"'{s}'" for s in filter_status)
+        in_list = ",".join(f"'{sql_escape(s)}'" for s in filter_status)
         where_clauses.append(f"RUN_STATUS IN ({in_list})")
     if filter_scope:
-        in_list = ",".join(f"'{s}'" for s in filter_scope)
+        in_list = ",".join(f"'{sql_escape(s)}'" for s in filter_scope)
         where_clauses.append(f"PROCESS_TYPE IN ({in_list})")
     if filter_type:
-        in_list = ",".join(f"'{s}'" for s in filter_type)
+        in_list = ",".join(f"'{sql_escape(s)}'" for s in filter_type)
         where_clauses.append(f"ADJUSTMENT_TYPE IN ({in_list})")
     if filter_cob:
         in_list = ",".join(str(int(c)) for c in filter_cob)
         where_clauses.append(f"COBID IN ({in_list})")
     if filter_entity:
-        in_list = ",".join("'" + str(e).replace("\\", "\\\\").replace("'", "''") + "'" for e in filter_entity)
+        in_list = ",".join(f"'{sql_escape(e)}'" for e in filter_entity)
         where_clauses.append(f"ENTITY_CODE IN ({in_list})")
     if filter_dept:
-        in_list = ",".join("'" + str(d).replace("\\", "\\\\").replace("'", "''") + "'" for d in filter_dept)
+        in_list = ",".join(f"'{sql_escape(d)}'" for d in filter_dept)
         where_clauses.append(f"DEPARTMENT_CODE IN ({in_list})")
     if filter_user:
-        in_list = ",".join("'" + str(u).replace("\\", "\\\\").replace("'", "''") + "'" for u in filter_user)
+        in_list = ",".join(f"'{sql_escape(u)}'" for u in filter_user)
         where_clauses.append(f"SUBMITTED_BY IN ({in_list})")
 
     where_sql = " AND ".join(where_clauses)
@@ -388,8 +391,7 @@ df_track = pd.DataFrame()
 if not df_adjs.empty and "ADJ_ID" in df_adjs.columns:
     _ids = [str(a) for a in df_adjs["ADJ_ID"].dropna().unique().tolist()]
     if _ids:
-        _in = ",".join(
-            "'" + i.replace("\\", "\\\\").replace("'", "''") + "'" for i in _ids)
+        _in = ",".join(f"'{sql_escape(i)}'" for i in _ids)
         try:
             df_track = run_query_df_cached(f"""
                 SELECT ADJ_ID, CURRENT_STAGE, REPORT_STATUS,
@@ -455,7 +457,7 @@ def _do_clone(src_adj_id, new_cob, requires_approval: bool = False) -> None:
     all apply normally."""
     import json as _json
     import uuid as _uuid
-    _sid = str(src_adj_id).replace("\\", "\\\\").replace("'", "''")
+    _sid = sql_escape(src_adj_id)
     copied_line_items_for = None
     try:
         src_rows = run_query(
@@ -520,7 +522,7 @@ def _do_clone(src_adj_id, new_cob, requires_approval: bool = False) -> None:
                 payload["adj_id"] = new_id
                 copied_line_items_for = new_id
 
-        json_str = _json.dumps(payload).replace("\\", "\\\\").replace("'", "''")
+        json_str = sql_escape(_json.dumps(payload))
         res = run_query(f"CALL ADJUSTMENT_APP.SP_SUBMIT_ADJUSTMENT('{json_str}')")
         raw = res[0][0] if res else None
         out = _json.loads(str(raw)) if isinstance(raw, str) else (raw or {})
@@ -681,6 +683,14 @@ def render_adj_card(row, expanded=False):
                                 color_cols={"Value": lambda v: _meta_val_col.get(v, "")},
                                 key=f"adj_meta_{adj_id}")
 
+        # SQL literals for this adjustment — defined ONCE, here, so every
+        # query below (status history included) interpolates the escaped
+        # value. The history query used to run above this point and used the
+        # raw adj_id.
+        _aid = sql_escape(adj_id)
+        _st  = sql_escape(run_status)
+        _usr = sql_escape(user)
+
         # ── Status history ──────────────────────────────────────────────────
         st.markdown("---")
         section_title("Status History", "clock")
@@ -688,7 +698,7 @@ def render_adj_card(row, expanded=False):
             history = run_query(f"""
                 SELECT NEW_STATUS, OLD_STATUS, CHANGED_BY, CHANGED_AT, COMMENT
                 FROM ADJUSTMENT_APP.ADJ_STATUS_HISTORY
-                WHERE ADJ_ID = '{adj_id}'
+                WHERE ADJ_ID = '{_aid}'
                 ORDER BY CHANGED_AT DESC
             """)
             # Convert Row objects to dicts
@@ -704,10 +714,6 @@ def render_adj_card(row, expanded=False):
         if bool(row.get("IS_DELETED")):
             st.caption("This adjustment has been deleted — actions are disabled.")
         act_cols = st.columns(4)   # deleted rows have RUN_STATUS='Deleted' → no buttons render
-
-        _aid = str(adj_id).replace("\\", "\\\\").replace("'", "''")
-        _st  = str(run_status).replace("\\", "\\\\").replace("'", "''")
-        _usr = str(user).replace("\\", "\\\\").replace("'", "''")
 
         _STALE_MSG = ("Nothing changed — this adjustment's status moved on since "
                       "the page loaded (another user or the pipeline acted on it). "
@@ -789,8 +795,7 @@ def render_adj_card(row, expanded=False):
                         WHERE ADJUSTMENT_ID = {dim_adj_id}
                     """)
                     if process_type:
-                        _pt_esc = (process_type.upper()
-                                   .replace("\\", "\\\\").replace("'", "''"))
+                        _pt_esc = sql_escape(process_type.upper())
                         settings = run_query(f"""
                             SELECT ADJUSTMENTS_TABLE, ADJUSTMENTS_SUMMARY_TABLE
                             FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
@@ -831,8 +836,8 @@ def render_adj_card(row, expanded=False):
                 _cob = int(row.get("COBID"))
             except (TypeError, ValueError):
                 return False
-            _pt = str(row.get("PROCESS_TYPE") or "").replace("\\", "\\\\").replace("'", "''")
-            _en = str(row.get("ENTITY_CODE") or "").replace("\\", "\\\\").replace("'", "''")
+            _pt = sql_escape(row.get("PROCESS_TYPE") or "")
+            _en = sql_escape(row.get("ENTITY_CODE") or "")
             try:
                 rows = run_query(f"""
                     SELECT COUNT(*) AS N
@@ -1076,7 +1081,7 @@ if len(_failed_view) >= 2:
                 _ok, _skipped = 0, 0
                 for _, _fr in _failed_view.iterrows():
                     try:
-                        _fid = str(_fr.get("ADJ_ID")).replace("\\", "\\\\").replace("'", "''")
+                        _fid = sql_escape(_fr.get("ADJ_ID"))
                         rows = run_query(f"""
                             UPDATE ADJUSTMENT_APP.ADJ_HEADER
                             SET RUN_STATUS = 'Pending',
@@ -1091,7 +1096,7 @@ if len(_failed_view) >= 2:
                                 INSERT INTO ADJUSTMENT_APP.ADJ_STATUS_HISTORY
                                     (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
                                 VALUES ('{_fid}', 'Failed', 'Pending',
-                                        '{str(user).replace(chr(92), chr(92)*2).replace(chr(39), chr(39)*2)}',
+                                        '{sql_escape(user)}',
                                         'Bulk retry after failure')
                             """)
                             _ok += 1
