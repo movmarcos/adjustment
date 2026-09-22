@@ -699,6 +699,46 @@ def _entity_slice(session, entity_codes, summary_cols, adj_cols):
     return _pred(summary_cols), _pred(adj_cols)
 
 
+def _written_entity_codes(session, adj_tbl, cobid, dim_ids_str, adj_cols):
+    """The entity codes actually present on the rows this batch just wrote.
+
+    ADJ_HEADER.ENTITY_CODE is NOT authoritative for every path. An Upload, or
+    an FRTB Direct file, is ONE header whose rows carry a PER-ROW EntityCode
+    from the payload (build_direct_extract_sql maps it straight out of the
+    JSON), and the upload wizard deliberately accepts a file spanning several
+    entities — it only warns, and seeds the header from the FIRST one. Slicing
+    the summary rebuild by that header would rebuild one entity and leave every
+    other entity in the same file carrying a STALE summary row, with no error
+    raised anywhere. The summary tables are published aggregates, so that is a
+    regulated number quietly going wrong.
+
+    Reading the entity back off the written rows costs one pruned lookup
+    (COBID + this batch's ADJUSTMENT_IDs) and is true for every path by
+    construction. Returns None whenever the answer cannot be established —
+    no ids, no entity column, a blank value, or any error — and the caller
+    then falls back to the whole-COB rebuild: slower, always correct."""
+    if not dim_ids_str:
+        return None
+    if 'ENTITY_CODE' in adj_cols:
+        src, sel = f"{adj_tbl} f", "f.ENTITY_CODE"
+    elif 'ENTITY_KEY' in adj_cols:
+        src = f"{adj_tbl} f JOIN DIMENSION.ENTITY e ON e.ENTITY_KEY = f.ENTITY_KEY"
+        sel = "e.ENTITY_CODE"
+    else:
+        return None
+    try:
+        rows = session.sql(
+            f"SELECT DISTINCT {sel} AS EC FROM {src} "
+            f"WHERE f.COBID = {int(cobid)} "
+            f"  AND f.ADJUSTMENT_ID IN ({dim_ids_str})").collect()
+    except Exception:
+        return None
+    codes = [r["EC"] for r in rows]
+    if not codes or any(c in (None, "") for c in codes):
+        return None
+    return codes
+
+
 def _rebuild_summary(session, ctx, summary_tbl, summary_cols, metric_names,
                      metric_list, metric_sums, adj_tbl, cobid,
                      sum_pred=None, adj_pred=None):
@@ -1099,8 +1139,11 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                         f"METRIC_NAME/METRIC_USD_NAME in ADJUSTMENTS_SETTINGS")
                 # Entity slice (I14): rebuild only the entities this batch
                 # touched, whole-COB only when the batch spans every entity.
-                _ents = [r["ENTITY_CODE"] for r in
-                         df_adj_direct.select("ENTITY_CODE").distinct().collect()]
+                # Read the entity off the WRITTEN ROWS, never off the header:
+                # one Upload header can carry a file spanning several entities
+                # (see _written_entity_codes).
+                _ents = _written_entity_codes(
+                    session, fact_adj_tbl_name, cobid, dim_ids_str, fact_adj_cols)
                 _sum_pred, _adj_pred = _entity_slice(
                     session, _ents, fact_adj_summary_cols, fact_adj_cols)
                 _rebuild_summary(
@@ -1376,8 +1419,10 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                         f"Neither {metric_name} nor {metric_usd_name} exists in both "
                         f"{fact_adj_tbl_name} and {fact_adj_summary_name} — check "
                         f"METRIC_NAME/METRIC_USD_NAME in ADJUSTMENTS_SETTINGS")
-                _ents = [r["ENTITY_CODE"] for r in
-                         df_adj_direct.select("ENTITY_CODE").distinct().collect()]
+                # Written rows, not the header: an FRTB Direct file is one
+                # header whose rows carry a per-row entity from the payload.
+                _ents = _written_entity_codes(
+                    session, fact_adj_tbl_name, cobid, dim_ids_str, fact_adj_cols)
                 _sum_pred, _adj_pred = _entity_slice(
                     session, _ents, fact_adj_summary_cols, fact_adj_cols)
                 _rebuild_summary(

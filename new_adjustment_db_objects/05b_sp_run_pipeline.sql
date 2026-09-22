@@ -298,18 +298,17 @@ def main(session, scope, pipeline_types):
     #    Running rows matching a given (pt, action, cob) combo in a single
     #    batched SQL operation.
     #
-    #    Different combos are INDEPENDENT (they target different row sets in
-    #    ADJ_HEADER and write to different target rows in the fact adjustment
-    #    tables), so we submit each CALL asynchronously via Snowpark's
-    #    `collect_nowait()` and collect the results after all submissions.
-    #    Snowflake runs the queries concurrently on the warehouse — the only
-    #    ceiling is the warehouse's query concurrency limit (default 8) and
-    #    compute capacity.
+    #    Combos targeting DIFFERENT adjustment tables are independent, so they
+    #    are submitted together via Snowpark's `collect_nowait()` and run
+    #    concurrently on the warehouse (ceiling: the warehouse's query
+    #    concurrency limit, default 8). Combos sharing a table are run one
+    #    after another — see the transaction note in 4a.
     #
     #    Parallelism example:
-    #      • (VaR, Scale,   20260326)  ─┐
-    #      • (VaR, Flatten, 20260326)  ─┼─→ all 3 run concurrently
-    #      • (VaR, Scale,   20260325)  ─┘
+    #      • (VaR,     Scale, 20260326)  ─┐
+    #      • (Stress,  Scale, 20260326)  ─┼─→ different tables: concurrent
+    #      • (FRTB,    Scale, 20260326)  ─┘
+    #      • (VaR,   Flatten, 20260326)  ──→ same table as the first: waits
     #
     #    Combos come from the rows THIS run actually claimed (CLAIM_TOKEN
     #    match), not from the pre-claim TEMP_QUEUE snapshot — rows a concurrent
@@ -323,43 +322,91 @@ def main(session, scope, pipeline_types):
         ORDER BY PROCESS_TYPE, ADJUSTMENT_ACTION, COBID
     """).collect()
 
-    # ── 4a. SUBMIT every CALL asynchronously ─────────────────────────────────
-    async_jobs = []  # list of (pt, act, cob, AsyncJob)
-    for row in to_process:
-        pt  = row["PROCESS_TYPE"]
-        act = row["ADJUSTMENT_ACTION"]
-        cob = row["COBID"]
-        job = session.sql(f"""
-            CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT('{pt}', '{act}', {cob}, '{claim_token}')
-        """).collect_nowait()
-        async_jobs.append((pt, act, cob, job))
+    # ── 4a. GROUP combos so that none which share a target table run together ─
+    #    SP_PROCESS_ADJUSTMENT's Scale path wraps its supersede + insert in an
+    #    explicit transaction. Snowflake transactions are SESSION-scoped and a
+    #    session can hold only one at a time — and every CALL below is issued
+    #    on THIS one session. Two combos writing the same ADJUSTMENTS_TABLE
+    #    concurrently would therefore share transaction state: one combo's
+    #    COMMIT could commit another's half-finished write, and one combo's
+    #    ROLLBACK could discard another's supersede while its insert survives.
+    #    That is a silent double count under a "Processed" header, so combos
+    #    that write the same table are run one after another. Combos on
+    #    DIFFERENT tables keep running concurrently, which is where the
+    #    parallelism actually pays: VaR, Stress, Sensitivity and FRTB each
+    #    have their own adjustments table.
+    tbl_of = {}
+    try:
+        for r in session.sql(
+                "SELECT PROCESS_TYPE, ADJUSTMENTS_TABLE "
+                "FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS").collect():
+            tbl_of[str(r["PROCESS_TYPE"]).upper()] = str(
+                r["ADJUSTMENTS_TABLE"] or "").upper()
+    except Exception:
+        tbl_of = {}          # unknown mapping → one bucket per scope below
 
-    # ── 4b. COLLECT results — blocks until each job finishes ─────────────────
-    #    .result() on an AsyncJob waits for that specific query. Because we
-    #    submitted all jobs before calling .result() on any of them, they
-    #    execute concurrently on the warehouse; we simply harvest the outcomes
-    #    in submission order.
-    for pt, act, cob, job in async_jobs:
+    buckets = {}             # target table → [row, ...] in claimed order
+    for row in to_process:
+        key = tbl_of.get(str(row["PROCESS_TYPE"]).upper()) \
+            or f"?{str(row['PROCESS_TYPE']).upper()}"
+        buckets.setdefault(key, []).append(row)
+
+    #    Wave i = the i-th combo of every bucket. A wave is submitted together
+    #    and fully collected before the next is submitted, so within a bucket
+    #    the combos are strictly sequential.
+    waves = []
+    for i in range(max([len(v) for v in buckets.values()] or [0])):
+        waves.append([v[i] for v in buckets.values() if len(v) > i])
+
+    def _soft_error(job_rows):
+        """SP_PROCESS_ADJUSTMENT can RETURN an error instead of raising.
+        Treat that as a failure rather than reporting a clean run."""
         try:
-            job.result()
-            results.append({"process_type": pt, "cobid": cob, "status": "ok"})
-        except Exception as e:
-            err = str(e)[:990].replace("\\", "\\\\").replace("'", "''")
-            # Mark OUR still-Running claims for this specific combo as Failed.
-            # Scoped by CLAIM_TOKEN so a concurrent run's in-flight work is
-            # never collateral damage.
-            session.sql(f"""
-                UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                SET RUN_STATUS = 'Failed', ERRORMESSAGE = '{err}',
-                    PROCESS_DATE = CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9)
-                WHERE CLAIM_TOKEN = '{claim_token}'
-                  AND PROCESS_TYPE = '{pt}'
-                  AND ADJUSTMENT_ACTION = '{act}'
-                  AND COBID = {cob}
-                  AND RUN_STATUS = 'Running'
-                  AND IS_DELETED = FALSE
-            """).collect()
-            results.append({"process_type": pt, "cobid": cob, "status": "failed", "error": err})
+            raw = job_rows[0][0] if job_rows and len(job_rows[0]) else None
+            payload = json.loads(str(raw)) if raw else {}
+        except Exception:
+            return None
+        if str(payload.get("status", "")).lower() in ("error", "failed"):
+            return str(payload.get("message") or payload.get("status"))
+        msg = str(payload.get("message") or "")
+        return msg if msg.lower().startswith("error") else None
+
+    # ── 4b. RUN each wave: submit all, then collect all ──────────────────────
+    for wave in waves:
+        async_jobs = []  # list of (pt, act, cob, AsyncJob)
+        for row in wave:
+            pt  = row["PROCESS_TYPE"]
+            act = row["ADJUSTMENT_ACTION"]
+            cob = row["COBID"]
+            job = session.sql(f"""
+                CALL ADJUSTMENT_APP.SP_PROCESS_ADJUSTMENT('{pt}', '{act}', {cob}, '{claim_token}')
+            """).collect_nowait()
+            async_jobs.append((pt, act, cob, job))
+
+        for pt, act, cob, job in async_jobs:
+            try:
+                soft = _soft_error(job.result())
+                if soft:
+                    raise Exception(soft)
+                results.append({"process_type": pt, "cobid": cob, "status": "ok"})
+                continue
+            except Exception as e:
+                err = str(e)[:990].replace("\\", "\\\\").replace("'", "''")
+                # Mark OUR still-Running claims for this specific combo as Failed.
+                # Scoped by CLAIM_TOKEN so a concurrent run's in-flight work is
+                # never collateral damage.
+                session.sql(f"""
+                    UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                    SET RUN_STATUS = 'Failed', ERRORMESSAGE = '{err}',
+                        PROCESS_DATE = CONVERT_TIMEZONE('Europe/London', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ(9)
+                    WHERE CLAIM_TOKEN = '{claim_token}'
+                      AND PROCESS_TYPE = '{pt}'
+                      AND ADJUSTMENT_ACTION = '{act}'
+                      AND COBID = {cob}
+                      AND RUN_STATUS = 'Running'
+                      AND IS_DELETED = FALSE
+                """).collect()
+                results.append({"process_type": pt, "cobid": cob, "status": "failed", "error": err})
 
     # ── 5. UNBLOCK RESOLVED ──────────────────────────────────────────────────
     #    Any Pending row whose blocker just finished → clear BLOCKED_BY_ADJ_ID
