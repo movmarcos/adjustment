@@ -15,7 +15,9 @@
 --     looked up per scope — req_stress / req_sensitivity / req_var /
 --     req_frtb / req_frtbdrc / req_frtbrrao)
 --   • VALUE_USD numeric, <> 0, and not so large it cannot fit the header
---     column (NUMBER(20,6) — see M14)
+--     column — both of the latter judged on the value AS IT WILL BE STORED
+--     (NUMBER(20,6), i.e. rounded to 6 decimals), not on the scale-10 parse
+--     (see parsed_value below, M12/M14)
 --   • every supplied code exists in its dimension (case-insensitive)
 --
 -- STRUCTURE (why LEFT JOINs, not EXISTS): Snowflake rejects correlated
@@ -32,11 +34,22 @@
 -- wrapped around the dimension column, which defeats pruning and has no
 -- correlation to the batch being validated. staged_trade / staged_instr /
 -- staged_book / staged_dept pre-collect the DISTINCT codes actually present
--- anywhere in ADJ_DIRECT_STAGE (both as typed and upper-cased), and
--- pinned_book / ok_trade / ok_instr filter their dimension with a BARE
--- (unwrapped, prunable) equality against that small set before the
--- case-insensitive match is evaluated. This is a one-time cost shared by
--- all six scopes below instead of six independent full scans.
+-- anywhere in ADJ_DIRECT_STAGE, so the dimension side is narrowed to the
+-- codes in flight before any per-row matching happens. Two different
+-- trade-offs, deliberately:
+--   • TRADE and COMMON_INSTRUMENT (huge, and named by the standing rule)
+--     keep a BARE (unwrapped, prunable) equality, so the staged sets carry
+--     each code twice — as typed and upper-cased. That admits a dimension
+--     row spelled exactly as staged or spelled all-upper, and NOT one
+--     spelled some other way ('Trd1' in the dimension vs 'TRD1' staged is
+--     reported as unknown). This narrowing of case tolerance is the audit's
+--     own prescription for these two tables and is accepted.
+--   • BOOK is a small dimension, so it takes the standing rule's
+--     small-dimension exemption: pinned_book wraps the dimension column in
+--     UPPER() (see the comment there) and therefore keeps the FULL
+--     case-insensitive tolerance ok_book / ok_dept had before pinning.
+-- This is a one-time cost shared by all six scopes below instead of six
+-- independent full scans.
 --
 -- ADJ_DIRECT_STAGE carries no PROCESS_TYPE column (a batch is scoped to one
 -- process type by the caller, not by a stored column), so this view cannot
@@ -120,9 +133,14 @@ req_frtbrrao AS (
 ),
 -- ── shared across all six scopes ────────────────────────────────────────
 ok_entity AS (SELECT DISTINCT UPPER(ENTITY_CODE) EC FROM DIMENSION.ENTITY),
--- I10: pin DIMENSION.TRADE to the codes actually staged (both spellings, so
--- the bare/prunable dimension-side predicate still catches a differently-cased
--- match), instead of an uncorrelated UPPER()-wrapped scan of the whole table.
+-- I10: pin DIMENSION.TRADE to the codes actually staged, instead of an
+-- uncorrelated UPPER()-wrapped scan of the whole table. The predicate on the
+-- dimension side stays BARE (unwrapped) so it can prune, which means the pin
+-- only admits a dimension row spelled exactly as staged or spelled all-upper
+-- — the two spellings staged_trade emits. A dimension row cased any other
+-- way ('Trd1' vs a staged 'TRD1') is therefore reported as unknown; that is
+-- the accepted trade-off for this table's size, not an oversight. BOOK,
+-- being small, does not make that trade-off — see pinned_book below.
 staged_trade AS (
     SELECT DISTINCT TRADE_CODE, UPPER(TRADE_CODE) AS U
     FROM ADJUSTMENT_APP.ADJ_DIRECT_STAGE
@@ -149,30 +167,38 @@ ok_instr AS (
                                  UNION SELECT U FROM staged_instr)
 ),
 -- I10: ok_book / ok_dept are entity/department-qualified per stage row, so
--- they were already correlated to ADJ_DIRECT_STAGE — but the join predicate
--- itself (UPPER(b.BOOK_CODE) = UPPER(s2.BOOK_CODE)) still wraps the
--- dimension column and defeats pruning. pinned_book narrows DIMENSION.BOOK
--- to the small set of codes actually staged (both spellings) with a BARE
--- predicate first, then ok_book/ok_dept do the same case-insensitive,
--- entity/department-qualified match as before against that narrow set.
+-- they were already correlated to ADJ_DIRECT_STAGE — but each one still
+-- drove its join from the whole of DIMENSION.BOOK. pinned_book narrows
+-- DIMENSION.BOOK once to the codes actually staged, and ok_book / ok_dept
+-- then do the same case-insensitive, entity/department-qualified match as
+-- before against that narrow set.
 staged_book AS (
-    SELECT DISTINCT BOOK_CODE, UPPER(BOOK_CODE) AS U
+    SELECT DISTINCT UPPER(BOOK_CODE) AS U
     FROM ADJUSTMENT_APP.ADJ_DIRECT_STAGE
     WHERE BOOK_CODE IS NOT NULL AND BOOK_CODE <> ''
 ),
 staged_dept AS (
-    SELECT DISTINCT DEPARTMENT_CODE, UPPER(DEPARTMENT_CODE) AS U
+    SELECT DISTINCT UPPER(DEPARTMENT_CODE) AS U
     FROM ADJUSTMENT_APP.ADJ_DIRECT_STAGE
     WHERE DEPARTMENT_CODE IS NOT NULL AND DEPARTMENT_CODE <> ''
 ),
+-- CASE TOLERANCE, on purpose: the dimension column IS wrapped in UPPER()
+-- here, unlike ok_trade / ok_instr above. DIMENSION.BOOK is a small
+-- dimension, which the standing "never scan a dimension unpinned" rule
+-- exempts, and the pin that matters is still in place — the row set is
+-- bounded by the codes actually staged, not by a full-table scan with no
+-- correlation to the batch. Matching UPPER(dimension) against the staged
+-- upper-cased set restores exactly the tolerance ok_book / ok_dept had
+-- before pinning (UPPER(dim) = UPPER(staged)): a dimension row spelled
+-- 'Book1' still matches a staged 'BOOK1'. A bare predicate here would only
+-- admit dimension rows spelled as staged or all-upper, silently turning
+-- such rows into "Unknown BOOK_CODE".
 pinned_book AS (
     SELECT b.*
     FROM DIMENSION.BOOK b
     WHERE b.IS_CURRENT_ROW = TRUE
-      AND (b.BOOK_CODE IN (SELECT BOOK_CODE FROM staged_book
-                           UNION SELECT U FROM staged_book)
-        OR b.DEPARTMENT_CODE IN (SELECT DEPARTMENT_CODE FROM staged_dept
-                                 UNION SELECT U FROM staged_dept))
+      AND (UPPER(b.BOOK_CODE)       IN (SELECT U FROM staged_book)
+        OR UPPER(b.DEPARTMENT_CODE) IN (SELECT U FROM staged_dept))
 ),
 ok_book AS (
     SELECT s2.BATCH_ID, s2.ROW_NUM
@@ -207,13 +233,39 @@ ok_mt AS (SELECT DISTINCT UPPER(MEASURE_TYPE_CODE) MC FROM DIMENSION.MEASURE_TYP
 -- Sensitivity only
 ok_tenor AS (SELECT DISTINCT UPPER(TENOR_CURRENCY_CODE) TCC FROM DIMENSION.TENOR_CURRENCY),
 ok_curve AS (SELECT DISTINCT UPPER(CURVE_CODE) CC FROM DIMENSION.CURVE_CURRENCY),
--- M12: scale 10, matching the engine (05:88, 15:285-289) instead of the old
--- scale 6, which silently zeroed (and so rejected as "must not be zero")
--- any value below 5e-7 that the engine would otherwise have kept. Parsed
--- once here and joined by BATCH_ID/ROW_NUM so every scope below shares one
--- definition of "the numeric value of this row".
+-- M12: TWO numbers per row, and the rules below use them for different
+-- things — this is the whole of M12, and using only one of them is what
+-- made this file wrong before.
+--   V  — parsed at scale 10, matching the engine (05:88, 15:285-289). This
+--        is what "is this text a number at all" means, and it is the scale
+--        the magnitude rule reasons about.
+--   V6 — V rounded to scale 6: exactly what the Direct path will STORE.
+--        14:248 writes TRY_TO_NUMBER(s.VALUE_USD, 38, 6) into
+--        ADJ_HEADER.ADJUSTMENT_VALUE_IN_USD NUMBER(20,6) (01:73), and the
+--        engine only guards IS NOT NULL (05:1351). So a value that is
+--        non-zero at scale 10 but rounds to zero at scale 6 (0.0000001,
+--        say) would be stored as 0.000000 and inserted as a zero-valued
+--        fact row — and under supersede-by-filter-scope a zero adjustment
+--        still removes earlier rows inside its filter at that COB. The
+--        "must not be zero" and "too large" rules therefore test V6, not V.
+--        This is also the contract 1_New_Adjustment.py:1509-1522 relies on:
+--        the grid deliberately stages a 0 < |v| < 1e-6 cell at 15 decimals
+--        *so that* this view rejects it instead of the app pretending it
+--        staged a real value.
+-- Parsed once here and joined by BATCH_ID/ROW_NUM so every scope below
+-- shares one definition of "the numeric value of this row".
+-- PARSE_ERR: TRY_TO_NUMBER(…, 38, 10) leaves only 28 digits before the
+-- decimal point, so a pasted 1e30 returns NULL — "not numeric" would be a
+-- misleading message for text that plainly is a number. The regexp (no
+-- second parse) splits the two cases so the user is told which one it is.
 parsed_value AS (
-    SELECT BATCH_ID, ROW_NUM, TRY_TO_NUMBER(VALUE_USD, 38, 10) AS V
+    SELECT BATCH_ID, ROW_NUM,
+           TRY_TO_NUMBER(VALUE_USD, 38, 10)            AS V,
+           ROUND(TRY_TO_NUMBER(VALUE_USD, 38, 10), 6)  AS V6,
+           IFF(REGEXP_LIKE(TRIM(VALUE_USD),
+                           '[+-]?([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][+-]?[0-9]+)?'),
+               'VALUE_USD is too large (max 14 digits before the decimal point): ',
+               'VALUE_USD is not numeric: ') || VALUE_USD AS PARSE_ERR
     FROM ADJUSTMENT_APP.ADJ_DIRECT_STAGE
 )
 SELECT PROCESS_TYPE, BATCH_ID, ROW_NUM,
@@ -231,15 +283,24 @@ FROM (
             IFF(s.BOOK_CODE IS NULL AND COALESCE(req.REQ_BOOK, 0) = 1,
                 'BOOK_CODE is required', NULL),
             IFF(s.VALUE_USD IS NOT NULL AND pv.V IS NULL,
-                'VALUE_USD is not numeric: ' || s.VALUE_USD, NULL),
-            IFF(pv.V = 0,
+                pv.PARSE_ERR, NULL),
+            -- M12: zero is tested at the scale the value is STORED at
+            -- (V6, see parsed_value), not at the scale it is parsed at:
+            -- 0.0000001 is non-zero at scale 10 but is written as 0.000000.
+            IFF(pv.V6 = 0,
                 'VALUE_USD must not be zero', NULL),
             -- M14: NUMBER(20,6) on ADJ_HEADER.ADJUSTMENT_VALUE_IN_USD (01:73)
             -- holds at most 14 digits before the decimal point; anything
             -- bigger fails the SP_SUBMIT_DIRECT_BATCH insert with a raw
             -- Snowflake "Numeric value out of range" instead of a validation
-            -- message, and rolls back the whole batch.
-            IFF(ABS(pv.V) >= 1e14,
+            -- message, and rolls back the whole batch. The threshold is an
+            -- exact integer literal, not 1e14 — a FLOAT literal would force
+            -- the NUMBER(38,10) comparison through a float cast. Tested
+            -- against V6 (the value as stored) so that 99999999999999.9999999,
+            -- which sits under the threshold at scale 10 but rounds up to
+            -- 1e14 at scale 6, is caught here rather than overflowing the
+            -- column at insert time.
+            IFF(ABS(pv.V6) >= 100000000000000,
                 'VALUE_USD is too large (max 14 digits before the decimal point)', NULL),
             IFF(s.ENTITY_CODE IS NOT NULL AND oe.EC IS NULL,
                 'Unknown ENTITY_CODE: ' || s.ENTITY_CODE, NULL),
@@ -289,10 +350,13 @@ FROM (
             IFF(s.BOOK_CODE IS NULL AND COALESCE(req.REQ_BOOK, 0) = 1,
                 'BOOK_CODE is required', NULL),
             IFF(s.VALUE_USD IS NOT NULL AND pv.V IS NULL,
-                'VALUE_USD is not numeric: ' || s.VALUE_USD, NULL),
-            IFF(pv.V = 0,
+                pv.PARSE_ERR, NULL),
+            -- M12: zero is tested at the scale the value is STORED at
+            -- (V6, see parsed_value), not at the scale it is parsed at:
+            -- 0.0000001 is non-zero at scale 10 but is written as 0.000000.
+            IFF(pv.V6 = 0,
                 'VALUE_USD must not be zero', NULL),
-            IFF(ABS(pv.V) >= 1e14,
+            IFF(ABS(pv.V6) >= 100000000000000,
                 'VALUE_USD is too large (max 14 digits before the decimal point)', NULL),
             IFF(s.ENTITY_CODE IS NOT NULL AND oe.EC IS NULL,
                 'Unknown ENTITY_CODE: ' || s.ENTITY_CODE, NULL),
@@ -340,10 +404,13 @@ FROM (
             IFF(s.BOOK_CODE IS NULL AND COALESCE(req.REQ_BOOK, 0) = 1,
                 'BOOK_CODE is required', NULL),
             IFF(s.VALUE_USD IS NOT NULL AND pv.V IS NULL,
-                'VALUE_USD is not numeric: ' || s.VALUE_USD, NULL),
-            IFF(pv.V = 0,
+                pv.PARSE_ERR, NULL),
+            -- M12: zero is tested at the scale the value is STORED at
+            -- (V6, see parsed_value), not at the scale it is parsed at:
+            -- 0.0000001 is non-zero at scale 10 but is written as 0.000000.
+            IFF(pv.V6 = 0,
                 'VALUE_USD must not be zero', NULL),
-            IFF(ABS(pv.V) >= 1e14,
+            IFF(ABS(pv.V6) >= 100000000000000,
                 'VALUE_USD is too large (max 14 digits before the decimal point)', NULL),
             IFF(s.ENTITY_CODE IS NOT NULL AND oe.EC IS NULL,
                 'Unknown ENTITY_CODE: ' || s.ENTITY_CODE, NULL),
@@ -379,10 +446,13 @@ FROM (
             IFF(s.BOOK_CODE IS NULL AND COALESCE(req.REQ_BOOK, 0) = 1,
                 'BOOK_CODE is required', NULL),
             IFF(s.VALUE_USD IS NOT NULL AND pv.V IS NULL,
-                'VALUE_USD is not numeric: ' || s.VALUE_USD, NULL),
-            IFF(pv.V = 0,
+                pv.PARSE_ERR, NULL),
+            -- M12: zero is tested at the scale the value is STORED at
+            -- (V6, see parsed_value), not at the scale it is parsed at:
+            -- 0.0000001 is non-zero at scale 10 but is written as 0.000000.
+            IFF(pv.V6 = 0,
                 'VALUE_USD must not be zero', NULL),
-            IFF(ABS(pv.V) >= 1e14,
+            IFF(ABS(pv.V6) >= 100000000000000,
                 'VALUE_USD is too large (max 14 digits before the decimal point)', NULL),
             IFF(s.ENTITY_CODE IS NOT NULL AND oe.EC IS NULL,
                 'Unknown ENTITY_CODE: ' || s.ENTITY_CODE, NULL),
@@ -421,10 +491,13 @@ FROM (
             IFF(s.BOOK_CODE IS NULL AND COALESCE(req.REQ_BOOK, 0) = 1,
                 'BOOK_CODE is required', NULL),
             IFF(s.VALUE_USD IS NOT NULL AND pv.V IS NULL,
-                'VALUE_USD is not numeric: ' || s.VALUE_USD, NULL),
-            IFF(pv.V = 0,
+                pv.PARSE_ERR, NULL),
+            -- M12: zero is tested at the scale the value is STORED at
+            -- (V6, see parsed_value), not at the scale it is parsed at:
+            -- 0.0000001 is non-zero at scale 10 but is written as 0.000000.
+            IFF(pv.V6 = 0,
                 'VALUE_USD must not be zero', NULL),
-            IFF(ABS(pv.V) >= 1e14,
+            IFF(ABS(pv.V6) >= 100000000000000,
                 'VALUE_USD is too large (max 14 digits before the decimal point)', NULL),
             IFF(s.ENTITY_CODE IS NOT NULL AND oe.EC IS NULL,
                 'Unknown ENTITY_CODE: ' || s.ENTITY_CODE, NULL),
@@ -463,10 +536,13 @@ FROM (
             IFF(s.BOOK_CODE IS NULL AND COALESCE(req.REQ_BOOK, 0) = 1,
                 'BOOK_CODE is required', NULL),
             IFF(s.VALUE_USD IS NOT NULL AND pv.V IS NULL,
-                'VALUE_USD is not numeric: ' || s.VALUE_USD, NULL),
-            IFF(pv.V = 0,
+                pv.PARSE_ERR, NULL),
+            -- M12: zero is tested at the scale the value is STORED at
+            -- (V6, see parsed_value), not at the scale it is parsed at:
+            -- 0.0000001 is non-zero at scale 10 but is written as 0.000000.
+            IFF(pv.V6 = 0,
                 'VALUE_USD must not be zero', NULL),
-            IFF(ABS(pv.V) >= 1e14,
+            IFF(ABS(pv.V6) >= 100000000000000,
                 'VALUE_USD is too large (max 14 digits before the decimal point)', NULL),
             IFF(s.ENTITY_CODE IS NOT NULL AND oe.EC IS NULL,
                 'Unknown ENTITY_CODE: ' || s.ENTITY_CODE, NULL),
