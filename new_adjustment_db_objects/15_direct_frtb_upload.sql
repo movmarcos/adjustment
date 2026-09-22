@@ -30,22 +30,22 @@
 USE SCHEMA ADJUSTMENT_APP;
 
 -- Conditional-rule + header-alias config for upload scopes.
-ALTER TABLE ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
-    ADD COLUMN IF NOT EXISTS VALIDATION_RULES VARIANT;
-ALTER TABLE ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
-    ADD COLUMN IF NOT EXISTS ALIASES VARIANT;
+-- NOTE: VALIDATION_RULES / ALIASES are declared in the CREATE OR ALTER for
+-- DIRECT_SCOPE_SCHEMA in 01_tables.sql, which the deploy always runs first
+-- (deploy.py sorts the glob). The ALTER TABLE … ADD COLUMN IF NOT EXISTS pair
+-- that used to sit here was dead once the columns were folded into 01.
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 1. DIRECT_SCOPE_SCHEMA — FRTB (SBM)
 -- ═══════════════════════════════════════════════════════════════════════════
-BEGIN TRANSACTION;
-DELETE FROM ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA WHERE PROCESS_TYPE = 'FRTB';
-INSERT INTO ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
-    (PROCESS_TYPE, EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS,
-     METRIC_FIELD, METRIC_USD_FIELD, WRITER_OVERRIDE, IS_ACTIVE,
-     VALIDATION_RULES, ALIASES)
+-- Insert-if-missing / update-in-place, never DELETE+INSERT: a redeploy must
+-- not reset IS_ACTIVE (silently re-enabling a scope an admin turned off), and
+-- must not blank a column a future INSERT list happens to omit. Same policy as
+-- DIRECT_ACCEPTED_COLUMNS (01:503-505), ADJUSTMENTS_SETTINGS and ADJ_CATEGORY.
+MERGE INTO ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA t
+USING (
 SELECT
-    'FRTB',
+    'FRTB' AS PROCESS_TYPE,
     PARSE_JSON('[
         {"name":"COBID","type":"number","required":true},
         {"name":"ENTITY_CODE","type":"string","required":true},
@@ -86,19 +86,21 @@ SELECT
         {"name":"SOURCE_SYSTEM","type":"string"},{"name":"SPOT_REPO","type":"string"},
         {"name":"TENOR_CODE","type":"string"},{"name":"TRANCHE","type":"string"},
         {"name":"UNDERLYING_TENOR_CODE","type":"string"},{"name":"VERTEX","type":"string"}
-    ]'),
-    NULL,
+    ]') AS EXPECTED_COLUMNS,
+    NULL::VARIANT AS UNPIVOT,
     PARSE_JSON('[
         {"payload_field":"ENTITY_CODE","target_column":"ENTITY_CODE","type":"string"},
         {"payload_field":"MEASURE_TYPE_CODE","target_column":"MEASURE_TYPE_CODE","type":"string"}
-    ]'),
+    ]') AS FACT_MAPPING,
     PARSE_JSON('[
         {"source_field":"ENTITY_CODE","dimension_table":"DIMENSION.ENTITY",
          "match_column":"ENTITY_CODE","key_column":"ENTITY_KEY","target_column":"ENTITY_CODE"},
         {"source_field":"MEASURE_TYPE_CODE","dimension_table":"DIMENSION.MEASURE_TYPE",
          "match_column":"MEASURE_TYPE_CODE","key_column":"MEASURE_TYPE_KEY","target_column":"MEASURE_TYPE_CODE"}
-    ]'),
-    'AMOUNT', 'AMOUNT_IN_USD', 'write_direct_frtb_sbm', TRUE,
+    ]') AS RESOLUTIONS,
+    'AMOUNT' AS METRIC_FIELD,
+    'AMOUNT_IN_USD' AS METRIC_USD_FIELD,
+    'write_direct_frtb_sbm' AS WRITER_OVERRIDE,
     PARSE_JSON('[
         {"field":"CCY1","conditions":[["RISK_CLASS","FX|GIRR",false]],"error":"CCY1 is required for FX and GIRR positions"},
         {"field":"CCY_AMT","conditions":[["RISK_CLASS","FX|GIRR",false]],"error":"CCY_AMT is required for FX and GIRR positions"},
@@ -119,22 +121,35 @@ SELECT
         {"field":"PRA_BUCKET","conditions":[["RISK_CLASS","EQUIT|CSR",false]],"error":"PRA_BUCKET is required for Equity and CSR positions"},
         {"field":"SECURITY_INFORMATION3","conditions":[["RISK_CLASS","CSR",false]],"error":"SECURITY_INFORMATION3 (Sector) is required for CSR positions"},
         {"field":"BOOK_CODE","conditions":[["TRADE_CODE","^(|NAN|NONE)$",false]],"error":"BOOK_CODE is required when TRADE_CODE is empty (the row is booked to the <BOOK_CODE>/Adjustment trade)"}
-    ]'),
+    ]') AS VALIDATION_RULES,
     PARSE_JSON('{"EVALUATION_DATE":"COBID","VERTEX_UNDERLYING":"UNDERLYING_TENOR_CODE",
-                 "TRADE_ID":"TRADE_CODE","BUSINESS_ORGANIZATION_CODE":"BOOK_CODE"}');
-COMMIT;
+                 "TRADE_ID":"TRADE_CODE","BUSINESS_ORGANIZATION_CODE":"BOOK_CODE"}') AS ALIASES
+) s
+ON t.PROCESS_TYPE = s.PROCESS_TYPE
+WHEN MATCHED THEN UPDATE SET
+    t.EXPECTED_COLUMNS = s.EXPECTED_COLUMNS, t.UNPIVOT = s.UNPIVOT,
+    t.FACT_MAPPING = s.FACT_MAPPING, t.RESOLUTIONS = s.RESOLUTIONS,
+    t.METRIC_FIELD = s.METRIC_FIELD, t.METRIC_USD_FIELD = s.METRIC_USD_FIELD,
+    t.WRITER_OVERRIDE = s.WRITER_OVERRIDE,
+    t.VALIDATION_RULES = s.VALIDATION_RULES, t.ALIASES = s.ALIASES
+    -- IS_ACTIVE deliberately NOT touched.
+WHEN NOT MATCHED THEN INSERT
+    (PROCESS_TYPE, EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS,
+     METRIC_FIELD, METRIC_USD_FIELD, WRITER_OVERRIDE, IS_ACTIVE,
+     VALIDATION_RULES, ALIASES)
+VALUES
+    (s.PROCESS_TYPE, s.EXPECTED_COLUMNS, s.UNPIVOT, s.FACT_MAPPING, s.RESOLUTIONS,
+     s.METRIC_FIELD, s.METRIC_USD_FIELD, s.WRITER_OVERRIDE, TRUE,
+     s.VALIDATION_RULES, s.ALIASES);
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 2. DIRECT_SCOPE_SCHEMA — FRTBDRC
 -- ═══════════════════════════════════════════════════════════════════════════
-BEGIN TRANSACTION;
-DELETE FROM ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA WHERE PROCESS_TYPE = 'FRTBDRC';
-INSERT INTO ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
-    (PROCESS_TYPE, EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS,
-     METRIC_FIELD, METRIC_USD_FIELD, WRITER_OVERRIDE, IS_ACTIVE,
-     VALIDATION_RULES, ALIASES)
+-- Insert-if-missing / update-in-place — see the FRTB seed above for why.
+MERGE INTO ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA t
+USING (
 SELECT
-    'FRTBDRC',
+    'FRTBDRC' AS PROCESS_TYPE,
     PARSE_JSON('[
         {"name":"COBID","type":"number","required":true},
         {"name":"ENTITY_CODE","type":"string","required":true},
@@ -182,13 +197,13 @@ SELECT
         {"name":"SECURITY_INFORMATION3","type":"string"},
         {"name":"SIMULATION_ID","type":"string"},{"name":"SIMULATION_NAME","type":"string"},
         {"name":"STRIKE","type":"string"}
-    ]'),
-    NULL,
+    ]') AS EXPECTED_COLUMNS,
+    NULL::VARIANT AS UNPIVOT,
     PARSE_JSON('[
         {"payload_field":"ENTITY_CODE","target_column":"ENTITY_CODE","type":"string"},
         {"payload_field":"BOOK_CODE","target_column":"BOOK_CODE","type":"string"},
         {"payload_field":"MEASURE_TYPE_CODE","target_column":"MEASURE_TYPE_CODE","type":"string"}
-    ]'),
+    ]') AS FACT_MAPPING,
     PARSE_JSON('[
         {"source_field":"ENTITY_CODE","dimension_table":"DIMENSION.ENTITY",
          "match_column":"ENTITY_CODE","key_column":"ENTITY_KEY","target_column":"ENTITY_CODE"},
@@ -196,8 +211,10 @@ SELECT
          "match_column":"BOOK_CODE","key_column":"BOOK_KEY","target_column":"BOOK_CODE"},
         {"source_field":"MEASURE_TYPE_CODE","dimension_table":"DIMENSION.MEASURE_TYPE",
          "match_column":"MEASURE_TYPE_CODE","key_column":"MEASURE_TYPE_KEY","target_column":"MEASURE_TYPE_CODE"}
-    ]'),
-    'JTD_LOSS', 'JTD_LOSS_USD', 'write_direct_frtb_drc', TRUE,
+    ]') AS RESOLUTIONS,
+    'JTD_LOSS' AS METRIC_FIELD,
+    'JTD_LOSS_USD' AS METRIC_USD_FIELD,
+    'write_direct_frtb_drc' AS WRITER_OVERRIDE,
     PARSE_JSON('[
         {"field":"ISSUER_NAME","conditions":[["RISK_CLASS","NON.*SEC.*CREDIT",false]],"error":"ISSUER_NAME is required for Non-Sec (Credit)"},
         {"field":"ISSUER_NAME","conditions":[["RISK_CLASS","NON.*SEC.*EQUITY",false]],"error":"ISSUER_NAME is required for Non-Sec (Equity)"},
@@ -205,22 +222,35 @@ SELECT
         {"field":"DEFAULT_RISK_WEIGHT","conditions":[["RISK_CLASS","SEC",false],["RISK_CLASS","NON.*SEC",true]],"error":"DEFAULT_RISK_WEIGHT is required for Sec"},
         {"field":"LGD","conditions":[["RISK_CLASS","NON.*SEC.*CREDIT",false]],"error":"LGD is required for Non-Sec (Credit)"},
         {"field":"BOOK_CODE","conditions":[["TRADE_CODE","^(|NAN|NONE)$",false]],"error":"BOOK_CODE is required when TRADE_CODE is empty (the row is booked to the <BOOK_CODE>/Adjustment trade)"}
-    ]'),
+    ]') AS VALIDATION_RULES,
     PARSE_JSON('{"EVALUATION_DATE":"COBID","TRADE_ID":"TRADE_CODE",
-                 "BUSINESS_ORGANIZATION_CODE":"BOOK_CODE"}');
-COMMIT;
+                 "BUSINESS_ORGANIZATION_CODE":"BOOK_CODE"}') AS ALIASES
+) s
+ON t.PROCESS_TYPE = s.PROCESS_TYPE
+WHEN MATCHED THEN UPDATE SET
+    t.EXPECTED_COLUMNS = s.EXPECTED_COLUMNS, t.UNPIVOT = s.UNPIVOT,
+    t.FACT_MAPPING = s.FACT_MAPPING, t.RESOLUTIONS = s.RESOLUTIONS,
+    t.METRIC_FIELD = s.METRIC_FIELD, t.METRIC_USD_FIELD = s.METRIC_USD_FIELD,
+    t.WRITER_OVERRIDE = s.WRITER_OVERRIDE,
+    t.VALIDATION_RULES = s.VALIDATION_RULES, t.ALIASES = s.ALIASES
+    -- IS_ACTIVE deliberately NOT touched.
+WHEN NOT MATCHED THEN INSERT
+    (PROCESS_TYPE, EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS,
+     METRIC_FIELD, METRIC_USD_FIELD, WRITER_OVERRIDE, IS_ACTIVE,
+     VALIDATION_RULES, ALIASES)
+VALUES
+    (s.PROCESS_TYPE, s.EXPECTED_COLUMNS, s.UNPIVOT, s.FACT_MAPPING, s.RESOLUTIONS,
+     s.METRIC_FIELD, s.METRIC_USD_FIELD, s.WRITER_OVERRIDE, TRUE,
+     s.VALIDATION_RULES, s.ALIASES);
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 3. DIRECT_SCOPE_SCHEMA — FRTBRRAO
 -- ═══════════════════════════════════════════════════════════════════════════
-BEGIN TRANSACTION;
-DELETE FROM ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA WHERE PROCESS_TYPE = 'FRTBRRAO';
-INSERT INTO ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
-    (PROCESS_TYPE, EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS,
-     METRIC_FIELD, METRIC_USD_FIELD, WRITER_OVERRIDE, IS_ACTIVE,
-     VALIDATION_RULES, ALIASES)
+-- Insert-if-missing / update-in-place — see the FRTB seed above for why.
+MERGE INTO ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA t
+USING (
 SELECT
-    'FRTBRRAO',
+    'FRTBRRAO' AS PROCESS_TYPE,
     PARSE_JSON('[
         {"name":"COBID","type":"number","required":true},
         {"name":"ENTITY_CODE","type":"string","required":true},
@@ -247,13 +277,13 @@ SELECT
         {"name":"REGION_AREA_CODE","type":"string"},
         {"name":"SIMULATION_ID","type":"string"},{"name":"SIMULATION_NAME","type":"string"},
         {"name":"STRATEGY","type":"string"}
-    ]'),
-    NULL,
+    ]') AS EXPECTED_COLUMNS,
+    NULL::VARIANT AS UNPIVOT,
     PARSE_JSON('[
         {"payload_field":"ENTITY_CODE","target_column":"ENTITY_CODE","type":"string"},
         {"payload_field":"BOOK_CODE","target_column":"BOOK_CODE","type":"string"},
         {"payload_field":"MEASURE_TYPE_CODE","target_column":"MEASURE_TYPE_CODE","type":"string"}
-    ]'),
+    ]') AS FACT_MAPPING,
     PARSE_JSON('[
         {"source_field":"ENTITY_CODE","dimension_table":"DIMENSION.ENTITY",
          "match_column":"ENTITY_CODE","key_column":"ENTITY_KEY","target_column":"ENTITY_CODE"},
@@ -261,14 +291,32 @@ SELECT
          "match_column":"BOOK_CODE","key_column":"BOOK_KEY","target_column":"BOOK_CODE"},
         {"source_field":"MEASURE_TYPE_CODE","dimension_table":"DIMENSION.MEASURE_TYPE",
          "match_column":"MEASURE_TYPE_CODE","key_column":"MEASURE_TYPE_KEY","target_column":"MEASURE_TYPE_CODE"}
-    ]'),
-    'NOTIONAL_AMOUNT', 'NOTIONAL_AMOUNT_USD', 'write_direct_frtb_rrao', TRUE,
+    ]') AS RESOLUTIONS,
+    'NOTIONAL_AMOUNT' AS METRIC_FIELD,
+    'NOTIONAL_AMOUNT_USD' AS METRIC_USD_FIELD,
+    'write_direct_frtb_rrao' AS WRITER_OVERRIDE,
     PARSE_JSON('[
         {"field":"BOOK_CODE","conditions":[["TRADE_CODE","^(|NAN|NONE)$",false]],"error":"BOOK_CODE is required when TRADE_CODE is empty (the row is booked to the <BOOK_CODE>/Adjustment trade)"}
-    ]'),
+    ]') AS VALIDATION_RULES,
     PARSE_JSON('{"EVALUATION_DATE":"COBID","TRADE_ID":"TRADE_CODE",
-                 "BUSINESS_ORGANIZATION_CODE":"BOOK_CODE"}');
-COMMIT;
+                 "BUSINESS_ORGANIZATION_CODE":"BOOK_CODE"}') AS ALIASES
+) s
+ON t.PROCESS_TYPE = s.PROCESS_TYPE
+WHEN MATCHED THEN UPDATE SET
+    t.EXPECTED_COLUMNS = s.EXPECTED_COLUMNS, t.UNPIVOT = s.UNPIVOT,
+    t.FACT_MAPPING = s.FACT_MAPPING, t.RESOLUTIONS = s.RESOLUTIONS,
+    t.METRIC_FIELD = s.METRIC_FIELD, t.METRIC_USD_FIELD = s.METRIC_USD_FIELD,
+    t.WRITER_OVERRIDE = s.WRITER_OVERRIDE,
+    t.VALIDATION_RULES = s.VALIDATION_RULES, t.ALIASES = s.ALIASES
+    -- IS_ACTIVE deliberately NOT touched.
+WHEN NOT MATCHED THEN INSERT
+    (PROCESS_TYPE, EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS,
+     METRIC_FIELD, METRIC_USD_FIELD, WRITER_OVERRIDE, IS_ACTIVE,
+     VALIDATION_RULES, ALIASES)
+VALUES
+    (s.PROCESS_TYPE, s.EXPECTED_COLUMNS, s.UNPIVOT, s.FACT_MAPPING, s.RESOLUTIONS,
+     s.METRIC_FIELD, s.METRIC_USD_FIELD, s.WRITER_OVERRIDE, TRUE,
+     s.VALIDATION_RULES, s.ALIASES);
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 4. VW_DIRECT_FRTB_ENRICHED — SBM line items → FRTBSA_SENSITIVITY shape
@@ -347,6 +395,48 @@ WITH base AS (
       AND UPPER(h.PROCESS_TYPE) = 'FRTB'
       AND h.ADJUSTMENT_ACTION IN ('Direct', 'Upload')   -- file flow is Direct; Upload = pre-retype rows
 ),
+-- ── DIMENSION.TRADE pinning ────────────────────────────────────────────────
+-- Standing rule: never scan DIMENSION.TRADE (the huge SCD2 table) without a
+-- predicate that can prune it. The caller filters this view by ADJ_ID, which
+-- prunes ADJ_LINE_ITEM_JSON only — left as a plain LEFT JOIN the dimension is
+-- the build side and gets read whole. So collect the trade codes this view can
+-- possibly need and pin the dimension on its BARE TRADE_CODE column (a bare
+-- column keeps the predicate prunable; UPPER(TRADE_CODE) would not be).
+-- Case is handled by emitting every spelling we could need, because the match
+-- itself (below) must be case-insensitive — the validation views accept a
+-- trade code in any case (13:345, 13:357).
+wanted_trades AS (
+    SELECT TC FROM (
+        SELECT COALESCE(NULLIF(b.TRADE_CODE, ''),
+                        CONCAT(NULLIF(b.BOOK_CODE_IN, ''), '/Adjustment')) AS TC
+        FROM base b
+        UNION
+        SELECT UPPER(COALESCE(NULLIF(b.TRADE_CODE, ''),
+                        CONCAT(NULLIF(b.BOOK_CODE_IN, ''), '/Adjustment')))
+        FROM base b
+        UNION
+        SELECT LOWER(COALESCE(NULLIF(b.TRADE_CODE, ''),
+                        CONCAT(NULLIF(b.BOOK_CODE_IN, ''), '/Adjustment')))
+        FROM base b
+        -- the synthetic trade is stored as '<BOOK_CODE>/Adjustment' (mixed
+        -- case suffix), so also emit it over the upper/lower book spellings
+        UNION
+        SELECT CONCAT(UPPER(NULLIF(b.BOOK_CODE_IN, '')), '/Adjustment') FROM base b
+        UNION
+        SELECT CONCAT(LOWER(NULLIF(b.BOOK_CODE_IN, '')), '/Adjustment') FROM base b
+    ) WHERE TC IS NOT NULL
+),
+trades AS (
+    SELECT t.TRADE_KEY, t.TRADE_CODE, t.BOOK_CODE, t.ENTITY_CODE, t.INSTRUMENT_KEY,
+           t.TRADE_TYPOLOGY, t.MUREX_INSTRUMENT, t.MUREX_VERSION,
+           t.TRADE_SOURCE_SYSTEM_CODE, t.SABRE_TRADE_CODE,
+           t.PRODUCT_CATEGORY_ATTRIBUTES_KEY,
+           t.EFFECTIVE_START_DATE, t.EFFECTIVE_END_DATE
+    FROM DIMENSION.TRADE t
+    WHERE t.TRADE_CODE IN (SELECT TC FROM wanted_trades)
+      AND t.EFFECTIVE_START_DATE <= (SELECT MAX(EVAL_DATE) FROM base)
+      AND t.EFFECTIVE_END_DATE   >= (SELECT MIN(EVAL_DATE) FROM base)
+),
 enriched AS (
     SELECT base.*,
         -- LOAD_SET mirrors the platform loader: for SBM it is the row's
@@ -424,43 +514,57 @@ SELECT
     enriched.FILE_NAME AS RAVEN_FILENAME,
     enriched.ROW_NUM   AS RAVEN_FILE_ROW_NUMBER
 FROM enriched
+-- Every code join below is UPPER()-wrapped on BOTH sides and treats '' as
+-- NULL, because that is exactly how VW_DIRECT_VALIDATE_FRTB accepts the file
+-- (13:302-359) and how the row-level Direct writer resolves keys (05:1044-1102).
+-- A file the app paints green must not then resolve to a -1 key here.
+-- 'td' is the PINNED trades CTE above, not DIMENSION.TRADE itself.
 -- Direct-adjustment trade rule (all direct scopes): an empty TRADE_CODE
 -- resolves to the book's synthetic '<BOOK_CODE>/Adjustment' trade.
-LEFT JOIN DIMENSION.TRADE td
-  ON td.TRADE_CODE = COALESCE(NULLIF(enriched.TRADE_CODE, ''),
-                              CONCAT(NULLIF(enriched.BOOK_CODE_IN, ''), '/Adjustment'))
- AND td.BOOK_CODE = COALESCE(NULLIF(enriched.BOOK_CODE_IN, ''), td.BOOK_CODE)
- AND td.ENTITY_CODE = enriched.ENTITY_CODE
+LEFT JOIN trades td
+  ON UPPER(td.TRADE_CODE) = UPPER(COALESCE(NULLIF(enriched.TRADE_CODE, ''),
+                              CONCAT(NULLIF(enriched.BOOK_CODE_IN, ''), '/Adjustment')))
+ AND UPPER(td.BOOK_CODE) = UPPER(COALESCE(NULLIF(enriched.BOOK_CODE_IN, ''), td.BOOK_CODE))
+ AND UPPER(td.ENTITY_CODE) = UPPER(enriched.ENTITY_CODE)
  AND enriched.EVAL_DATE BETWEEN td.EFFECTIVE_START_DATE AND td.EFFECTIVE_END_DATE
 LEFT JOIN DIMENSION.BOOK b
-  ON b.BOOK_CODE = COALESCE(NULLIF(enriched.BOOK_CODE_IN, ''), td.BOOK_CODE)
+  ON UPPER(b.BOOK_CODE) = UPPER(COALESCE(NULLIF(enriched.BOOK_CODE_IN, ''), td.BOOK_CODE))
  AND enriched.EVAL_DATE BETWEEN b.EFFECTIVE_START_DATE AND b.EFFECTIVE_END_DATE
 LEFT JOIN DIMENSION.MEASURE_TYPE mt
-  ON enriched.MEASURE_TYPE_CODE = mt.MEASURE_TYPE_CODE
+  ON UPPER(mt.MEASURE_TYPE_CODE) = UPPER(NULLIF(enriched.MEASURE_TYPE_CODE, ''))
+-- The tenor dimension is keyed by CONCAT(tenor_code, '_', COALESCE(ccy,'USD'))
+-- everywhere in the solution (04:267-269, 05:1111-1112, 05:1714-1717, 13:205-206).
+-- Matching a bare TENOR_CODE ('2Y') against TENOR_CURRENCY_CODE ('2Y_USD')
+-- never hit, so every SBM Direct row landed with TENOR_CURRENCY_KEY = -1.
 LEFT JOIN DIMENSION.TENOR_CURRENCY tc
-  ON enriched.TENOR_CODE = tc.TENOR_CURRENCY_CODE
+  ON UPPER(tc.TENOR_CURRENCY_CODE) =
+     UPPER(CONCAT(NULLIF(enriched.TENOR_CODE, ''), '_',
+                  COALESCE(NULLIF(enriched.CURRENCY_CODE, ''), 'USD')))
 LEFT JOIN (SELECT TICKER, MAX(ISIN) AS ISIN
            FROM STATIC_STAGING.TICKER_ISIN_MAP GROUP BY TICKER) tim
   ON enriched.SECURITY_CODE = tim.TICKER
 LEFT JOIN DIMENSION.CURRENCY_PAIR cp
-  ON enriched.CURRENCY_PAIR_CODE = cp.CURRENCY_PAIR
+  ON UPPER(cp.CURRENCY_PAIR) = UPPER(enriched.CURRENCY_PAIR_CODE)
 LEFT JOIN DIMENSION.CURVE_CURRENCY cc
-  ON IFF(COALESCE(enriched.CURVE_TYPE, '') = '', 'N/A', enriched.CURVE_TYPE) = cc.CURVE_CODE
+  ON UPPER(cc.CURVE_CODE) =
+     UPPER(IFF(COALESCE(enriched.CURVE_TYPE, '') = '', 'N/A', enriched.CURVE_TYPE))
 LEFT JOIN DIMENSION.COMMON_INSTRUMENT ci
-  ON NULLIF(enriched.SECURITY_CODE, '') = ci.INSTRUMENT_CODE
+  ON UPPER(ci.INSTRUMENT_CODE) = UPPER(NULLIF(enriched.SECURITY_CODE, ''))
  AND enriched.EVAL_DATE BETWEEN ci.EFFECTIVE_START_DATE AND ci.EFFECTIVE_END_DATE
 LEFT JOIN DIMENSION.COMMON_INSTRUMENT ci2
   ON td.INSTRUMENT_KEY = ci2.INSTRUMENT_KEY
  AND enriched.EVAL_DATE BETWEEN ci2.EFFECTIVE_START_DATE AND ci2.EFFECTIVE_END_DATE
 LEFT JOIN DIMENSION.COMMON_INSTRUMENT_FCD fci
-  ON NULLIF(enriched.SECURITY_CODE, '') = fci.INSTRUMENT_CODE
+  ON UPPER(fci.INSTRUMENT_CODE) = UPPER(NULLIF(enriched.SECURITY_CODE, ''))
  AND fci.IS_CURRENT_ROW = TRUE
 LEFT JOIN DIMENSION.COMMON_INSTRUMENT_FCD fci2
   ON td.INSTRUMENT_KEY = fci2.INSTRUMENT_KEY
  AND fci2.IS_CURRENT_ROW = TRUE
 LEFT JOIN DIMENSION.FRTB_INSTRUMENT fi
-  ON COALESCE(NULLIF(enriched.SECURITY_CODE, ''), 'NA') = fi.FRTB_INSTRUMENT_CODE
- AND COALESCE(NULLIF(enriched.ISSUER_CODE, ''), 'NA') = fi.FRTB_ISSUER_CODE
+  ON UPPER(fi.FRTB_INSTRUMENT_CODE) =
+     UPPER(COALESCE(NULLIF(enriched.SECURITY_CODE, ''), 'NA'))
+ AND UPPER(fi.FRTB_ISSUER_CODE) =
+     UPPER(COALESCE(NULLIF(enriched.ISSUER_CODE, ''), 'NA'))
  AND enriched.EVAL_DATE BETWEEN fi.EFFECTIVE_START_DATE AND fi.EFFECTIVE_END_DATE
 QUALIFY ROW_NUMBER() OVER (
     -- One output row per line item: dimension joins (TRADE by code+entity,
@@ -544,6 +648,37 @@ WITH base AS (
       AND UPPER(h.PROCESS_TYPE) = 'FRTBDRC'
       AND h.ADJUSTMENT_ACTION IN ('Direct', 'Upload')   -- file flow is Direct; Upload = pre-retype rows
 ),
+-- DIMENSION.TRADE pinning — see the SBM view above for the standing rule.
+wanted_trades AS (
+    SELECT TC FROM (
+        SELECT COALESCE(NULLIF(b.TRADE_CODE, ''),
+                        CONCAT(NULLIF(b.BOOK_CODE, ''), '/Adjustment')) AS TC
+        FROM base b
+        UNION
+        SELECT UPPER(COALESCE(NULLIF(b.TRADE_CODE, ''),
+                        CONCAT(NULLIF(b.BOOK_CODE, ''), '/Adjustment')))
+        FROM base b
+        UNION
+        SELECT LOWER(COALESCE(NULLIF(b.TRADE_CODE, ''),
+                        CONCAT(NULLIF(b.BOOK_CODE, ''), '/Adjustment')))
+        FROM base b
+        UNION
+        SELECT CONCAT(UPPER(NULLIF(b.BOOK_CODE, '')), '/Adjustment') FROM base b
+        UNION
+        SELECT CONCAT(LOWER(NULLIF(b.BOOK_CODE, '')), '/Adjustment') FROM base b
+    ) WHERE TC IS NOT NULL
+),
+trades AS (
+    SELECT t.TRADE_KEY, t.TRADE_CODE, t.BOOK_CODE, t.ENTITY_CODE, t.INSTRUMENT_KEY,
+           t.TRADE_TYPOLOGY, t.MUREX_INSTRUMENT, t.MUREX_VERSION,
+           t.TRADE_SOURCE_SYSTEM_CODE, t.SABRE_TRADE_CODE,
+           t.PRODUCT_CATEGORY_ATTRIBUTES_KEY,
+           t.EFFECTIVE_START_DATE, t.EFFECTIVE_END_DATE
+    FROM DIMENSION.TRADE t
+    WHERE t.TRADE_CODE IN (SELECT TC FROM wanted_trades)
+      AND t.EFFECTIVE_START_DATE <= (SELECT MAX(EVAL_DATE) FROM base)
+      AND t.EFFECTIVE_END_DATE   >= (SELECT MIN(EVAL_DATE) FROM base)
+),
 enriched AS (
     SELECT base.*,
         'DRC' AS LOAD_SET,
@@ -599,40 +734,44 @@ SELECT
     enriched.FILE_NAME AS RAVEN_FILENAME,
     enriched.ROW_NUM   AS RAVEN_FILE_ROW_NUMBER
 FROM enriched
+-- Case-insensitive, '' treated as NULL — the rules VW_DIRECT_VALIDATE_FRTBDRC
+-- accepts the file under (13:362-438). 'td' is the PINNED trades CTE above.
 LEFT JOIN DIMENSION.BOOK b
-  ON enriched.BOOK_CODE = b.BOOK_CODE
+  ON UPPER(b.BOOK_CODE) = UPPER(NULLIF(enriched.BOOK_CODE, ''))
  AND enriched.EVAL_DATE BETWEEN b.EFFECTIVE_START_DATE AND b.EFFECTIVE_END_DATE
-LEFT JOIN DIMENSION.TRADE td
-  ON td.TRADE_CODE = COALESCE(NULLIF(enriched.TRADE_CODE, ''),
-                              CONCAT(enriched.BOOK_CODE, '/Adjustment'))
- AND td.BOOK_CODE = COALESCE(enriched.BOOK_CODE, td.BOOK_CODE)
- AND td.ENTITY_CODE = enriched.ENTITY_CODE
+LEFT JOIN trades td
+  ON UPPER(td.TRADE_CODE) = UPPER(COALESCE(NULLIF(enriched.TRADE_CODE, ''),
+                              CONCAT(NULLIF(enriched.BOOK_CODE, ''), '/Adjustment')))
+ AND UPPER(td.BOOK_CODE) = UPPER(COALESCE(NULLIF(enriched.BOOK_CODE, ''), td.BOOK_CODE))
+ AND UPPER(td.ENTITY_CODE) = UPPER(enriched.ENTITY_CODE)
  AND enriched.EVAL_DATE BETWEEN td.EFFECTIVE_START_DATE AND td.EFFECTIVE_END_DATE
 LEFT JOIN DIMENSION.MEASURE_TYPE mt
-  ON enriched.MEASURE_TYPE_CODE = mt.MEASURE_TYPE_CODE
+  ON UPPER(mt.MEASURE_TYPE_CODE) = UPPER(NULLIF(enriched.MEASURE_TYPE_CODE, ''))
 LEFT JOIN (SELECT TICKER, MAX(ISIN) AS ISIN
            FROM STATIC_STAGING.TICKER_ISIN_MAP GROUP BY TICKER) tim
   ON enriched.SECURITY_CODE = tim.TICKER
 LEFT JOIN DIMENSION.COMMON_INSTRUMENT ci
-  ON COALESCE(NULLIF(enriched.SECURITY_CODE, ''), NULLIF(enriched.INSTRUMENT_NAME, ''))
-       = ci.INSTRUMENT_CODE
+  ON UPPER(ci.INSTRUMENT_CODE) = UPPER(COALESCE(NULLIF(enriched.SECURITY_CODE, ''),
+                                                NULLIF(enriched.INSTRUMENT_NAME, '')))
  AND enriched.EVAL_DATE BETWEEN ci.EFFECTIVE_START_DATE AND ci.EFFECTIVE_END_DATE
 LEFT JOIN DIMENSION.COMMON_INSTRUMENT ci2
   ON td.INSTRUMENT_KEY = ci2.INSTRUMENT_KEY
  AND enriched.EVAL_DATE BETWEEN ci2.EFFECTIVE_START_DATE AND ci2.EFFECTIVE_END_DATE
 LEFT JOIN DIMENSION.COMMON_INSTRUMENT_FCD fci
-  ON COALESCE(NULLIF(enriched.SECURITY_CODE, ''), NULLIF(enriched.INSTRUMENT_NAME, ''))
-       = fci.INSTRUMENT_CODE
+  ON UPPER(fci.INSTRUMENT_CODE) = UPPER(COALESCE(NULLIF(enriched.SECURITY_CODE, ''),
+                                                 NULLIF(enriched.INSTRUMENT_NAME, '')))
  AND fci.IS_CURRENT_ROW = TRUE
 LEFT JOIN DIMENSION.COMMON_INSTRUMENT_FCD fci2
   ON td.INSTRUMENT_KEY = fci2.INSTRUMENT_KEY
  AND fci2.IS_CURRENT_ROW = TRUE
 LEFT JOIN DIMENSION.CURRENCY_PAIR cp
-  ON enriched.CURRENCY_PAIR_CODE = cp.CURRENCY_PAIR
+  ON UPPER(cp.CURRENCY_PAIR) = UPPER(enriched.CURRENCY_PAIR_CODE)
 LEFT JOIN DIMENSION.FRTB_INSTRUMENT fi
-  ON COALESCE(NULLIF(enriched.SECURITY_CODE, ''), NULLIF(enriched.INSTRUMENT_NAME, ''), 'NA')
-       = fi.FRTB_INSTRUMENT_CODE
- AND COALESCE(NULLIF(enriched.ISSUER_CODE, ''), 'NA') = fi.FRTB_ISSUER_CODE
+  ON UPPER(fi.FRTB_INSTRUMENT_CODE) =
+     UPPER(COALESCE(NULLIF(enriched.SECURITY_CODE, ''),
+                    NULLIF(enriched.INSTRUMENT_NAME, ''), 'NA'))
+ AND UPPER(fi.FRTB_ISSUER_CODE) =
+     UPPER(COALESCE(NULLIF(enriched.ISSUER_CODE, ''), 'NA'))
  AND enriched.EVAL_DATE BETWEEN fi.EFFECTIVE_START_DATE AND fi.EFFECTIVE_END_DATE
 QUALIFY ROW_NUMBER() OVER (
     -- One output row per line item: dimension joins (TRADE by code+entity,
@@ -686,6 +825,37 @@ WITH base AS (
       AND UPPER(h.PROCESS_TYPE) = 'FRTBRRAO'
       AND h.ADJUSTMENT_ACTION IN ('Direct', 'Upload')   -- file flow is Direct; Upload = pre-retype rows
 ),
+-- DIMENSION.TRADE pinning — see the SBM view above for the standing rule.
+wanted_trades AS (
+    SELECT TC FROM (
+        SELECT COALESCE(NULLIF(b.TRADE_CODE, ''),
+                        CONCAT(NULLIF(b.BOOK_CODE, ''), '/Adjustment')) AS TC
+        FROM base b
+        UNION
+        SELECT UPPER(COALESCE(NULLIF(b.TRADE_CODE, ''),
+                        CONCAT(NULLIF(b.BOOK_CODE, ''), '/Adjustment')))
+        FROM base b
+        UNION
+        SELECT LOWER(COALESCE(NULLIF(b.TRADE_CODE, ''),
+                        CONCAT(NULLIF(b.BOOK_CODE, ''), '/Adjustment')))
+        FROM base b
+        UNION
+        SELECT CONCAT(UPPER(NULLIF(b.BOOK_CODE, '')), '/Adjustment') FROM base b
+        UNION
+        SELECT CONCAT(LOWER(NULLIF(b.BOOK_CODE, '')), '/Adjustment') FROM base b
+    ) WHERE TC IS NOT NULL
+),
+trades AS (
+    SELECT t.TRADE_KEY, t.TRADE_CODE, t.BOOK_CODE, t.ENTITY_CODE, t.INSTRUMENT_KEY,
+           t.TRADE_TYPOLOGY, t.MUREX_INSTRUMENT, t.MUREX_VERSION,
+           t.TRADE_SOURCE_SYSTEM_CODE, t.SABRE_TRADE_CODE,
+           t.PRODUCT_CATEGORY_ATTRIBUTES_KEY,
+           t.EFFECTIVE_START_DATE, t.EFFECTIVE_END_DATE
+    FROM DIMENSION.TRADE t
+    WHERE t.TRADE_CODE IN (SELECT TC FROM wanted_trades)
+      AND t.EFFECTIVE_START_DATE <= (SELECT MAX(EVAL_DATE) FROM base)
+      AND t.EFFECTIVE_END_DATE   >= (SELECT MIN(EVAL_DATE) FROM base)
+),
 enriched AS (
     SELECT base.*,
         MD5(base.ADJ_ID || '-' || base.ROW_NUM || '-DIRECT') AS FRTBSA_RRAO_KEY,
@@ -721,26 +891,30 @@ SELECT
     enriched.FILE_NAME AS RAVEN_FILENAME,
     enriched.ROW_NUM   AS RAVEN_FILE_ROW_NUMBER
 FROM enriched
+-- Case-insensitive, '' treated as NULL — the rules VW_DIRECT_VALIDATE_FRTBRRAO
+-- accepts the file under (13:440-516). 'td' is the PINNED trades CTE above.
 LEFT JOIN DIMENSION.BOOK b
-  ON enriched.BOOK_CODE = b.BOOK_CODE
+  ON UPPER(b.BOOK_CODE) = UPPER(NULLIF(enriched.BOOK_CODE, ''))
  AND enriched.EVAL_DATE BETWEEN b.EFFECTIVE_START_DATE AND b.EFFECTIVE_END_DATE
-LEFT JOIN DIMENSION.TRADE td
-  ON td.TRADE_CODE = COALESCE(NULLIF(enriched.TRADE_CODE, ''),
-                              CONCAT(enriched.BOOK_CODE, '/Adjustment'))
- AND td.BOOK_CODE = COALESCE(enriched.BOOK_CODE, td.BOOK_CODE)
- AND td.ENTITY_CODE = enriched.ENTITY_CODE
+LEFT JOIN trades td
+  ON UPPER(td.TRADE_CODE) = UPPER(COALESCE(NULLIF(enriched.TRADE_CODE, ''),
+                              CONCAT(NULLIF(enriched.BOOK_CODE, ''), '/Adjustment')))
+ AND UPPER(td.BOOK_CODE) = UPPER(COALESCE(NULLIF(enriched.BOOK_CODE, ''), td.BOOK_CODE))
+ AND UPPER(td.ENTITY_CODE) = UPPER(enriched.ENTITY_CODE)
  AND enriched.EVAL_DATE BETWEEN td.EFFECTIVE_START_DATE AND td.EFFECTIVE_END_DATE
+-- PCA: the dimension column stays BARE (prunable) and only the payload side is
+-- normalised — same shape as 04:295 / 05:1743. Left as-is by this batch (M10).
 LEFT JOIN DIMENSION.PRODUCT_CATEGORY_ATTRIBUTES pca
   ON pca.PCA_CONCAT_KEY = REPLACE(enriched.PRODUCT_CATEGORY_ATTRIBUTES, ' ', '')
 LEFT JOIN DIMENSION.MEASURE_TYPE mt
-  ON enriched.MEASURE_TYPE_CODE = mt.MEASURE_TYPE_CODE
+  ON UPPER(mt.MEASURE_TYPE_CODE) = UPPER(NULLIF(enriched.MEASURE_TYPE_CODE, ''))
 LEFT JOIN DIMENSION.CURRENCY_PAIR cp
-  ON enriched.CURRENCY_PAIR_CODE = cp.CURRENCY_PAIR
+  ON UPPER(cp.CURRENCY_PAIR) = UPPER(enriched.CURRENCY_PAIR_CODE)
 LEFT JOIN DIMENSION.COMMON_INSTRUMENT ci
-  ON enriched.INSTRUMENT_CODE = ci.INSTRUMENT_CODE
+  ON UPPER(ci.INSTRUMENT_CODE) = UPPER(NULLIF(enriched.INSTRUMENT_CODE, ''))
  AND enriched.EVAL_DATE BETWEEN ci.EFFECTIVE_START_DATE AND ci.EFFECTIVE_END_DATE
 LEFT JOIN DIMENSION.COMMON_INSTRUMENT_FCD fci
-  ON enriched.INSTRUMENT_CODE = fci.INSTRUMENT_CODE
+  ON UPPER(fci.INSTRUMENT_CODE) = UPPER(NULLIF(enriched.INSTRUMENT_CODE, ''))
  AND fci.IS_CURRENT_ROW = TRUE
 QUALIFY ROW_NUMBER() OVER (
     -- One output row per line item: dimension joins (TRADE by code+entity,
