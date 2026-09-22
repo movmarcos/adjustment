@@ -34,6 +34,7 @@ AS
 $$
 from snowflake.snowpark.functions import col, upper
 import json
+import re
 
 
 def _cfg_list(val):
@@ -497,7 +498,55 @@ def _erl_n(v):
         return "NULL"
 
 
-def _erlog(session, ctx, step, sql_text):
+def _dml_rows(res):
+    """Row count of a just-executed statement, read from the RESULT SET's column
+    NAMES — never scraped out of prose.
+
+    Snowflake answers a DML statement with a one-row result whose column is
+    literally named 'number of rows inserted' / '… updated' / '… deleted' (a
+    MERGE returns several such columns). A CREATE TABLE AS / DDL answers with a
+    one-column 'status' row holding a SENTENCE, e.g.
+        "Table EROL_ROLL_STAGE_1000913 successfully created."
+    The old regex-over-the-text found 1000913 in that sentence and logged the
+    RUN_LOG_ID as ROWS_AFFECTED, so every throughput reading off
+    VW_EROL_PROCESS_LOG for the two heaviest steps (stage_roll / stage_flatten)
+    was fiction (2026-09 review, C3).
+
+    Rule: a value counts only when its column is named 'number of rows …'.
+    Anything else — CTAS, DDL, a SELECT, an unrecognised shape — returns None,
+    which the caller logs as a NULL ROWS_AFFECTED.
+    """
+    try:
+        if not res or res[0] is None:
+            return None
+        row = res[0]
+        names = list(getattr(row, "_fields", None) or [])
+        if not names:
+            try:
+                names = list(row.asDict(True).keys())
+            except Exception:
+                names = []
+        total, seen = 0, False
+        for i, nm in enumerate(names):
+            if "number of rows" not in str(nm).lower():
+                continue
+            val = row[i]
+            if isinstance(val, bool) or val is None:
+                continue
+            if isinstance(val, (int, float)):
+                total += int(val)
+                seen = True
+            else:
+                m = re.fullmatch(r"\s*(-?\d[\d,]*)\s*", str(val))
+                if m:
+                    total += int(m.group(1).replace(",", ""))
+                    seen = True
+        return total if seen else None
+    except Exception:
+        return None
+
+
+def _erlog(session, ctx, step, sql_text, count_tbl=None):
     """Run one engine statement with REAL-TIME logging to EROL_PROCESS_LOG.
 
     Used by ALL processing paths (EntityRoll steps AND the Direct /
@@ -512,11 +561,18 @@ def _erlog(session, ctx, step, sql_text):
     updated to 'DONE' with its wall-clock duration, rows affected, and Snowflake
     QUERY_ID. Pure pass-through: runs the exact SQL and returns its result rows.
 
-    NOTE: the wipe DELETE and the flatten/roll INSERTs run inside an explicit
-    transaction, so their rows only become visible at COMMIT. The heavy staging
-    reads (stage_roll / stage_flatten) and the summary rebuild run OUTSIDE it, so
-    those are live — which is where a slow roll almost always spends its time."""
-    import time, re
+    NOTE: the statements that run inside an explicit transaction (EROL's wipe +
+    flatten/roll INSERTs; the Scale path's supersede DELETE + perm INSERT; every
+    summary rebuild) only become visible at COMMIT, and their log rows roll back
+    with them — _log_failed_step writes the post-mortem row afterwards. The heavy
+    staging reads (stage_build / stage_roll / stage_flatten) run OUTSIDE any
+    transaction, so those are live — which is where a slow run almost always
+    spends its time.
+
+    count_tbl: for a CREATE TABLE AS (which returns a status sentence, never a
+    count) name the table just built and its real row count is logged instead —
+    a metadata-only COUNT(*) on a freshly written table."""
+    import time
     ctx["seq"] += 1
     seq = ctx["seq"]
     rl  = _erl_n(ctx["run_log_id"])
@@ -548,17 +604,16 @@ def _erlog(session, ctx, step, sql_text):
         qid = session.sql("SELECT LAST_QUERY_ID()").collect()[0][0]
     except Exception:
         pass
-    rows = None
-    try:
-        # DML returns a single "number of rows ..." cell; CREATE TABLE AS returns
-        # a status string (no count) → rows stays NULL (the matching INSERT step
-        # carries the count).
-        if res and res[0] is not None and len(res[0]) == 1:
-            m = re.search(r'-?\d[\d,]*', str(res[0][0]))
-            if m:
-                rows = int(m.group(0).replace(',', ''))
-    except Exception:
-        rows = None
+    # DML → the count comes from the result COLUMN NAME ('number of rows …').
+    # CTAS / DDL → no count; log NULL, or the real COUNT(*) when the caller
+    # named the table it just built. Never parse the status sentence (C3).
+    rows = _dml_rows(res)
+    if rows is None and count_tbl:
+        try:
+            rows = int(session.sql(
+                f"SELECT COUNT(*) AS CNT FROM {count_tbl}").collect()[0]["CNT"])
+        except Exception:
+            rows = None
     try:
         session.sql(
             "UPDATE ADJUSTMENT_APP.EROL_PROCESS_LOG SET STATUS = 'DONE', "
@@ -582,6 +637,195 @@ def _erol_mark_failed(session, ctx):
         ).collect()
     except Exception:
         pass
+
+
+def _log_failed_step(session, ctx, step, sql_text):
+    """Record a step that ran INSIDE a transaction which then rolled back.
+
+    _erlog's own rows join that transaction, so they vanish with the rollback —
+    this writes the post-mortem row afterwards, outside it. Best-effort."""
+    try:
+        ctx["seq"] += 1
+        session.sql(
+            "INSERT INTO ADJUSTMENT_APP.EROL_PROCESS_LOG "
+            "(RUN_LOG_ID, PROCESS_TYPE, COBID, STEP_SEQ, "
+            "STEP_NAME, STATUS, STARTED_AT, ENDED_AT, SQL_TEXT) "
+            f"SELECT {_erl_n(ctx['run_log_id'])}, {_erl_s(ctx['pt'])}, "
+            f"{_erl_n(ctx['cobid'])}, {ctx['seq']}, {_erl_s(step)}, 'FAILED', "
+            f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), {_erl_s(sql_text)}"
+        ).collect()
+    except Exception as _le:
+        print(f"failure log write failed (non-fatal): {_le}")
+
+
+# Summary columns that must NEVER become grouping keys (M8). They are per-row
+# bookkeeping, not dimensions: leaving them in GROUP BY ALL degenerates the
+# "summary" to near-detail granularity (one row per load timestamp).
+_SUMMARY_AGG_COLS = ('LOAD_TIMESTAMP', 'RUN_LOG_ID', 'ADJUSTMENT_CREATED_TIMESTAMP')
+
+
+def _entity_slice(session, entity_codes, summary_cols, adj_cols):
+    """Predicates that scope a summary rebuild to just this batch's entities.
+
+    Returns (summary_predicate, adjustment_predicate), or (None, None) when the
+    batch cannot be scoped safely — any header with a NULL/blank ENTITY_CODE
+    means "every entity", and a table with neither ENTITY_CODE nor ENTITY_KEY
+    cannot be sliced at all. Each side is scoped by ITS OWN entity column: the
+    summary and adjustment tables may key the entity differently, and requiring
+    a shared column would silently drop back to the slow whole-COB rebuild.
+    (Same shape as the Entity Roll rebuild, which proved the saving — the
+    whole-COB scan across every entity is what made that run for minutes.)"""
+    ents = [e for e in (entity_codes or []) if e not in (None, "")]
+    if not ents or len(ents) != len(entity_codes or []):
+        return None, None
+    lits = ", ".join(_erl_s(e) for e in sorted({str(e) for e in ents}))
+    cache = {}
+
+    def _pred(cols):
+        if 'ENTITY_CODE' in cols:
+            return f"ENTITY_CODE IN ({lits})"
+        if 'ENTITY_KEY' in cols:
+            if 'keys' not in cache:
+                try:
+                    cache['keys'] = ", ".join(
+                        str(r["ENTITY_KEY"]) for r in session.sql(
+                            f"SELECT ENTITY_KEY FROM DIMENSION.ENTITY "
+                            f"WHERE ENTITY_CODE IN ({lits})").collect())
+                except Exception:
+                    cache['keys'] = ""
+            return f"ENTITY_KEY IN ({cache['keys']})" if cache['keys'] else None
+        return None
+
+    return _pred(summary_cols), _pred(adj_cols)
+
+
+def _rebuild_summary(session, ctx, summary_tbl, summary_cols, metric_names,
+                     metric_list, metric_sums, adj_tbl, cobid,
+                     sum_pred=None, adj_pred=None):
+    """Rebuild the scope's summary table for this COB: DELETE + INSERT inside ONE
+    transaction, so readers never see the COB's summary empty and a failure
+    between the two rolls the delete back instead of leaving it missing.
+
+    Shared by Upload / Direct / Scale / Entity Roll — the four copies had already
+    drifted apart (the entity slice below existed only on the Entity Roll path).
+
+    When sum_pred AND adj_pred are given the rebuild is restricted to those
+    entities (I14): a Direct adjustment on one book no longer re-aggregates every
+    entity's rows at the COB. Rows for other entities are simply left alone, so
+    the resulting numbers are identical.
+
+    Grouping excludes _SUMMARY_AGG_COLS (M8) — they are aggregated with MAX()
+    instead of silently becoming grouping keys."""
+    _metrics = set(metric_names)
+    non_metric = [c for c in summary_cols if c not in _metrics]
+    insert_cols = ', '.join(non_metric)
+    select_cols = ', '.join(
+        (f"MAX({c}) AS {c}" if c in _SUMMARY_AGG_COLS else c) for c in non_metric)
+    scoped = bool(sum_pred and adj_pred)
+    tag = "entity slice" if scoped else "whole COB"
+    if not scoped:
+        print(f"Summary rebuilt whole-COB for {summary_tbl} — the batch spans "
+              f"every entity, or a table has no entity column (slower).")
+    summary_delete = (f"DELETE FROM {summary_tbl} WHERE COBID = {int(cobid)}"
+                      + (f" AND {sum_pred}" if scoped else ""))
+    summary_insert = f"""
+        INSERT INTO {summary_tbl}
+        ({insert_cols}, {metric_list})
+        SELECT {select_cols},
+               {metric_sums}
+        FROM {adj_tbl}
+        WHERE COBID = {int(cobid)}{(" AND " + adj_pred) if scoped else ""}
+        GROUP BY ALL
+    """
+    session.sql("BEGIN").collect()
+    try:
+        # _erlog rows written here join the transaction: they persist at COMMIT
+        # and vanish on ROLLBACK — hence the FAILED row re-insert below.
+        _erlog(session, ctx, f"summary_delete ({tag})", summary_delete)
+        _erlog(session, ctx, f"summary_insert ({tag})", summary_insert)
+        session.sql("COMMIT").collect()
+    except Exception:
+        session.sql("ROLLBACK").collect()
+        _log_failed_step(session, ctx, "summary_rebuild (rolled back)",
+                         summary_insert)
+        raise
+
+
+def _finish_counts(session, fact_adj_tbl_name, cobid, adj_ids_str, dim_ids_str,
+                   dim_adj_map):
+    """Per-ADJUSTMENT RECORD_COUNT on ADJ_HEADER and DIMENSION.ADJUSTMENT.
+
+    Zero-init then a grouped UPDATE: stamping the batch total on every header
+    made multi-adjustment batches lie. Identical in all three write paths, so it
+    lives here once."""
+    session.sql(f"""
+        UPDATE ADJUSTMENT_APP.ADJ_HEADER SET RECORD_COUNT = 0
+        WHERE ADJ_ID IN ({adj_ids_str})
+    """).collect()
+    session.sql(f"""
+        UPDATE ADJUSTMENT_APP.ADJ_HEADER h
+        SET RECORD_COUNT = src.CNT
+        FROM (SELECT ADJUSTMENT_ID, COUNT(*) AS CNT
+              FROM {fact_adj_tbl_name}
+              WHERE COBID = {int(cobid)} AND ADJUSTMENT_ID IN ({dim_ids_str})
+              GROUP BY ADJUSTMENT_ID) src
+        WHERE src.ADJUSTMENT_ID = h.DIMENSION_ADJ_ID
+          AND h.ADJ_ID IN ({adj_ids_str})
+    """).collect()
+    if dim_adj_map:
+        session.sql(f"""
+            UPDATE DIMENSION.ADJUSTMENT
+            SET RECORD_COUNT = 0, RUN_STATUS = 'Processed'
+            WHERE ADJUSTMENT_ID IN ({dim_ids_str})
+        """).collect()
+        session.sql(f"""
+            UPDATE DIMENSION.ADJUSTMENT d
+            SET RECORD_COUNT = src.CNT
+            FROM (SELECT ADJUSTMENT_ID, COUNT(*) AS CNT
+                  FROM {fact_adj_tbl_name}
+                  WHERE COBID = {int(cobid)} AND ADJUSTMENT_ID IN ({dim_ids_str})
+                  GROUP BY ADJUSTMENT_ID) src
+            WHERE src.ADJUSTMENT_ID = d.ADJUSTMENT_ID
+        """).collect()
+
+
+def _prior_run_cleanup(session, fact_adj_tbl_name, cobid, adj_ids_str):
+    """Remove the fact rows a PREVIOUS run of these adjustments wrote, and retire
+    the dimension rows that keyed them — as ONE transaction (I15).
+
+    Both statements are keyed by the DIMENSION_ADJ_ID stored on the header at
+    that time, so this must run BEFORE insert_to_dimension_and_get_ids overwrites
+    it. Committing only one of the two used to be possible: fact rows gone with
+    DIMENSION.ADJUSTMENT still live (or the reverse), which no retry reconciles.
+
+    PRUNING: the DELETE is the FIRST statement in the transaction, so
+    {fact_adj_tbl_name} has not been modified in it yet and the COBID predicate
+    still prunes; the UPDATE targets a different table. This pair is deliberately
+    NOT folded into the later write transaction — the Scale legs' heavy read of
+    the combined view (which reads this same table) happens between the two, and
+    an in-transaction read after a modification scans unpruned."""
+    session.sql("BEGIN").collect()
+    try:
+        session.sql(f"""
+            DELETE FROM {fact_adj_tbl_name}
+            WHERE COBID = {int(cobid)}
+              AND ADJUSTMENT_ID IN (
+                  SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
+                  WHERE ADJ_ID IN ({adj_ids_str})
+                    AND DIMENSION_ADJ_ID IS NOT NULL)
+        """).collect()
+        session.sql(f"""
+            UPDATE DIMENSION.ADJUSTMENT
+            SET IS_DELETED = TRUE
+            WHERE ADJUSTMENT_ID IN (
+                  SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
+                  WHERE ADJ_ID IN ({adj_ids_str})
+                    AND DIMENSION_ADJ_ID IS NOT NULL)
+        """).collect()
+        session.sql("COMMIT").collect()
+    except Exception:
+        session.sql("ROLLBACK").collect()
+        raise
 
 
 def main(session, process_type, adjustment_action, cobid, claim_token=None):
@@ -729,22 +973,8 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             # rows) BEFORE new dimension IDs are generated — otherwise a retry
             # double-counts the upload. Must precede insert_to_dimension_and_
             # get_ids, which overwrites ADJ_HEADER.DIMENSION_ADJ_ID.
-            session.sql(f"""
-                DELETE FROM {fact_adj_tbl_name}
-                WHERE COBID = {cobid}
-                  AND ADJUSTMENT_ID IN (
-                      SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
-                      WHERE ADJ_ID IN ({adj_ids_str})
-                        AND DIMENSION_ADJ_ID IS NOT NULL)
-            """).collect()
-            session.sql(f"""
-                UPDATE DIMENSION.ADJUSTMENT
-                SET IS_DELETED = TRUE
-                WHERE ADJUSTMENT_ID IN (
-                      SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
-                      WHERE ADJ_ID IN ({adj_ids_str})
-                        AND DIMENSION_ADJ_ID IS NOT NULL)
-            """).collect()
+            # Both statements run as ONE transaction (I15).
+            _prior_run_cleanup(session, fact_adj_tbl_name, cobid, adj_ids_str)
 
             # Insert DIMENSION.ADJUSTMENT first to obtain the NUMBER ADJUSTMENT_ID
             # per adjustment. It must succeed before any fact write because that id
@@ -867,84 +1097,22 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                         f"Neither {metric_name} nor {metric_usd_name} exists in both "
                         f"{fact_adj_tbl_name} and {fact_adj_summary_name} — check "
                         f"METRIC_NAME/METRIC_USD_NAME in ADJUSTMENTS_SETTINGS")
-                summary_metric_list = ', '.join(summary_metric_cols)
-                summary_metric_sums = ', '.join(
-                    'SUM(' + c + ')' for c in summary_metric_cols)
-                summary_non_metric = ', '.join([
-                    c for c in fact_adj_summary_cols
-                    if c not in {metric_name, metric_usd_name}
-                ])
-                upload_summary_insert = f"""
-                INSERT INTO {fact_adj_summary_name}
-                ({summary_non_metric}, {summary_metric_list})
-                SELECT {summary_non_metric},
-                       {summary_metric_sums}
-                FROM {fact_adj_tbl_name}
-                WHERE COBID = {cobid}
-                GROUP BY ALL
-                """
-                upload_summary_delete = f"""
-                    DELETE FROM {fact_adj_summary_name}
-                    WHERE COBID = {cobid}
-                """
-                session.sql("BEGIN").collect()
-                try:
-                    _erlog(session, _sqlog, "summary_delete", upload_summary_delete)
-                    _erlog(session, _sqlog, "summary_insert", upload_summary_insert)
-                    session.sql("COMMIT").collect()
-                except Exception:
-                    session.sql("ROLLBACK").collect()
-                    # In-transaction log rows rolled back with everything else —
-                    # record the failed rebuild (with its SQL) so the debug
-                    # trail survives. Best-effort.
-                    try:
-                        _sqlog["seq"] += 1
-                        session.sql(
-                            "INSERT INTO ADJUSTMENT_APP.EROL_PROCESS_LOG "
-                            "(RUN_LOG_ID, PROCESS_TYPE, COBID, STEP_SEQ, "
-                            "STEP_NAME, STATUS, STARTED_AT, ENDED_AT, SQL_TEXT) "
-                            f"SELECT {_erl_n(run_log_id)}, {_erl_s(process_type)}, "
-                            f"{_erl_n(cobid)}, {_sqlog['seq']}, "
-                            f"'summary_rebuild (rolled back)', 'FAILED', "
-                            f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), "
-                            f"{_erl_s(upload_summary_insert)}"
-                        ).collect()
-                    except Exception as _le:
-                        print(f"summary failure log write failed (non-fatal): {_le}")
-                    raise
+                # Entity slice (I14): rebuild only the entities this batch
+                # touched, whole-COB only when the batch spans every entity.
+                _ents = [r["ENTITY_CODE"] for r in
+                         df_adj_direct.select("ENTITY_CODE").distinct().collect()]
+                _sum_pred, _adj_pred = _entity_slice(
+                    session, _ents, fact_adj_summary_cols, fact_adj_cols)
+                _rebuild_summary(
+                    session, _sqlog, fact_adj_summary_name, fact_adj_summary_cols,
+                    (metric_name, metric_usd_name),
+                    ', '.join(summary_metric_cols),
+                    ', '.join('SUM(' + c + ')' for c in summary_metric_cols),
+                    fact_adj_tbl_name, cobid, _sum_pred, _adj_pred)
 
             # ── Common post-processing ───────────────────────────────────
-            # Per-ADJUSTMENT counts (zero-init then grouped update) — a batch
-            # total stamped on every header made multi-adjustment batches lie.
-            session.sql(f"""
-                UPDATE ADJUSTMENT_APP.ADJ_HEADER SET RECORD_COUNT = 0
-                WHERE ADJ_ID IN ({adj_ids_str})
-            """).collect()
-            session.sql(f"""
-                UPDATE ADJUSTMENT_APP.ADJ_HEADER h
-                SET RECORD_COUNT = src.CNT
-                FROM (SELECT ADJUSTMENT_ID, COUNT(*) AS CNT
-                      FROM {fact_adj_tbl_name}
-                      WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
-                      GROUP BY ADJUSTMENT_ID) src
-                WHERE src.ADJUSTMENT_ID = h.DIMENSION_ADJ_ID
-                  AND h.ADJ_ID IN ({adj_ids_str})
-            """).collect()
-            if dim_adj_map:
-                session.sql(f"""
-                    UPDATE DIMENSION.ADJUSTMENT
-                    SET RECORD_COUNT = 0, RUN_STATUS = 'Processed'
-                    WHERE ADJUSTMENT_ID IN ({dim_ids_str})
-                """).collect()
-                session.sql(f"""
-                    UPDATE DIMENSION.ADJUSTMENT d
-                    SET RECORD_COUNT = src.CNT
-                    FROM (SELECT ADJUSTMENT_ID, COUNT(*) AS CNT
-                          FROM {fact_adj_tbl_name}
-                          WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
-                          GROUP BY ADJUSTMENT_ID) src
-                    WHERE src.ADJUSTMENT_ID = d.ADJUSTMENT_ID
-                """).collect()
+            _finish_counts(session, fact_adj_tbl_name, cobid, adj_ids_str,
+                           dim_ids_str, dim_adj_map)
             update_header_status(session, df_adj_direct, cobid, "Processed")
             log_status_history(session, adj_ids, "Running", "Processed")
             result["rows_inserted"] = rows_count
@@ -984,23 +1152,9 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             """).collect()
 
             # Prior-run cleanup (retry): remove fact rows keyed by the
-            # PREVIOUS DIMENSION_ADJ_ID and retire the old dimension rows.
-            session.sql(f"""
-                DELETE FROM {fact_adj_tbl_name}
-                WHERE COBID = {cobid}
-                  AND ADJUSTMENT_ID IN (
-                      SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
-                      WHERE ADJ_ID IN ({adj_ids_str})
-                        AND DIMENSION_ADJ_ID IS NOT NULL)
-            """).collect()
-            session.sql(f"""
-                UPDATE DIMENSION.ADJUSTMENT
-                SET IS_DELETED = TRUE
-                WHERE ADJUSTMENT_ID IN (
-                      SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
-                      WHERE ADJ_ID IN ({adj_ids_str})
-                        AND DIMENSION_ADJ_ID IS NOT NULL)
-            """).collect()
+            # PREVIOUS DIMENSION_ADJ_ID and retire the old dimension rows —
+            # as ONE transaction (I15).
+            _prior_run_cleanup(session, fact_adj_tbl_name, cobid, adj_ids_str)
 
             dim_adj_map = insert_to_dimension_and_get_ids(session, adj_ids, adj_ids_str)
             if not dim_adj_map:
@@ -1204,39 +1358,10 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 """).collect()[0]["CNT"]
 
             # ── Common post-processing ───────────────────────────────────
-            # Per-ADJUSTMENT counts (zero-init then grouped update) — a batch
-            # total stamped on every header made multi-adjustment batches lie.
-            session.sql(f"""
-                UPDATE ADJUSTMENT_APP.ADJ_HEADER SET RECORD_COUNT = 0
-                WHERE ADJ_ID IN ({adj_ids_str})
-            """).collect()
-            session.sql(f"""
-                UPDATE ADJUSTMENT_APP.ADJ_HEADER h
-                SET RECORD_COUNT = src.CNT
-                FROM (SELECT ADJUSTMENT_ID, COUNT(*) AS CNT
-                      FROM {fact_adj_tbl_name}
-                      WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
-                      GROUP BY ADJUSTMENT_ID) src
-                WHERE src.ADJUSTMENT_ID = h.DIMENSION_ADJ_ID
-                  AND h.ADJ_ID IN ({adj_ids_str})
-            """).collect()
-            if dim_adj_map:
-                session.sql(f"""
-                    UPDATE DIMENSION.ADJUSTMENT
-                    SET RECORD_COUNT = 0, RUN_STATUS = 'Processed'
-                    WHERE ADJUSTMENT_ID IN ({dim_ids_str})
-                """).collect()
-                session.sql(f"""
-                    UPDATE DIMENSION.ADJUSTMENT d
-                    SET RECORD_COUNT = src.CNT
-                    FROM (SELECT ADJUSTMENT_ID, COUNT(*) AS CNT
-                          FROM {fact_adj_tbl_name}
-                          WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
-                          GROUP BY ADJUSTMENT_ID) src
-                    WHERE src.ADJUSTMENT_ID = d.ADJUSTMENT_ID
-                """).collect()
+            _finish_counts(session, fact_adj_tbl_name, cobid, adj_ids_str,
+                           dim_ids_str, dim_adj_map)
 
-            # ── Rebuild summary (atomic delete + insert) ─────────────────
+            # ── Rebuild summary (atomic delete + insert, entity-sliced) ──
             if fact_adj_summary_name:
                 # Only metric columns present in BOTH the adjustment and summary
                 # tables — some scopes have no local-currency column (Stress:
@@ -1251,51 +1376,16 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                         f"Neither {metric_name} nor {metric_usd_name} exists in both "
                         f"{fact_adj_tbl_name} and {fact_adj_summary_name} — check "
                         f"METRIC_NAME/METRIC_USD_NAME in ADJUSTMENTS_SETTINGS")
-                summary_metric_list = ', '.join(summary_metric_cols)
-                summary_metric_sums = ', '.join(
-                    'SUM(' + c + ')' for c in summary_metric_cols)
-                summary_non_metric = ', '.join([
-                    c for c in fact_adj_summary_cols
-                    if c not in {metric_name, metric_usd_name}
-                ])
-                upload_summary_insert = f"""
-                INSERT INTO {fact_adj_summary_name}
-                ({summary_non_metric}, {summary_metric_list})
-                SELECT {summary_non_metric},
-                       {summary_metric_sums}
-                FROM {fact_adj_tbl_name}
-                WHERE COBID = {cobid}
-                GROUP BY ALL
-                """
-                upload_summary_delete = f"""
-                    DELETE FROM {fact_adj_summary_name}
-                    WHERE COBID = {cobid}
-                """
-                session.sql("BEGIN").collect()
-                try:
-                    _erlog(session, _sqlog, "summary_delete", upload_summary_delete)
-                    _erlog(session, _sqlog, "summary_insert", upload_summary_insert)
-                    session.sql("COMMIT").collect()
-                except Exception:
-                    session.sql("ROLLBACK").collect()
-                    # In-transaction log rows rolled back with everything else —
-                    # record the failed rebuild (with its SQL) so the debug
-                    # trail survives. Best-effort.
-                    try:
-                        _sqlog["seq"] += 1
-                        session.sql(
-                            "INSERT INTO ADJUSTMENT_APP.EROL_PROCESS_LOG "
-                            "(RUN_LOG_ID, PROCESS_TYPE, COBID, STEP_SEQ, "
-                            "STEP_NAME, STATUS, STARTED_AT, ENDED_AT, SQL_TEXT) "
-                            f"SELECT {_erl_n(run_log_id)}, {_erl_s(process_type)}, "
-                            f"{_erl_n(cobid)}, {_sqlog['seq']}, "
-                            f"'summary_rebuild (rolled back)', 'FAILED', "
-                            f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), "
-                            f"{_erl_s(upload_summary_insert)}"
-                        ).collect()
-                    except Exception as _le:
-                        print(f"summary failure log write failed (non-fatal): {_le}")
-                    raise
+                _ents = [r["ENTITY_CODE"] for r in
+                         df_adj_direct.select("ENTITY_CODE").distinct().collect()]
+                _sum_pred, _adj_pred = _entity_slice(
+                    session, _ents, fact_adj_summary_cols, fact_adj_cols)
+                _rebuild_summary(
+                    session, _sqlog, fact_adj_summary_name, fact_adj_summary_cols,
+                    (metric_name, metric_usd_name),
+                    ', '.join(summary_metric_cols),
+                    ', '.join('SUM(' + c + ')' for c in summary_metric_cols),
+                    fact_adj_tbl_name, cobid, _sum_pred, _adj_pred)
 
             # Zero-match warning: a Direct header whose row was not written
             # (NULL value, or filtered) — surface it, never silently succeed.
@@ -1339,6 +1429,24 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
 
             adj_ids     = [row["ADJ_ID"] for row in df_adj_scale.select("ADJ_ID").collect()]
             adj_ids_str = ", ".join(f"'{a}'" for a in adj_ids)
+
+            # ── SOURCE_COBID must be present (M7) ────────────────────────
+            # Every leg keys off COBID vs SOURCE_COBID: leg ① needs
+            # `adjust.COBID = adjust.SOURCE_COBID`, leg ③ needs `<>`, and
+            # has_cross_cob below is a `<>` count. A NULL makes all three NULL,
+            # so the batch writes ZERO rows and is still reported Processed.
+            # SP_SUBMIT always defaults it; a row inserted outside the app may
+            # not. Fail loudly rather than silently adjust nothing.
+            _null_src = [r["ADJ_ID"] for r in
+                         df_adj_scale.select("ADJ_ID", "SOURCE_COBID").collect()
+                         if r["SOURCE_COBID"] is None]
+            if _null_src:
+                raise Exception(
+                    f"SOURCE_COBID is NULL on {len(_null_src)} Scale header(s) "
+                    f"({', '.join(str(a) for a in _null_src[:5])}) — every leg "
+                    f"compares COBID with SOURCE_COBID, so the batch would write "
+                    f"no rows and still report success. Set SOURCE_COBID (it "
+                    f"equals COBID for a same-COB Scale/Flatten) and retry.")
 
             # Does this batch contain a cross-COB Roll? Only then do we read the
             # adjusted view (FACT_ADJUSTED_TABLE). Keeping the adjusted-view leg
@@ -1439,22 +1547,10 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             # temp-table build below — the netting/supersede reads existing
             # adjustment data and must not see a dead run's rows — and before
             # insert_to_dimension_and_get_ids overwrites the stored ID.
-            session.sql(f"""
-                DELETE FROM {fact_adj_tbl_name}
-                WHERE COBID = {cobid}
-                  AND ADJUSTMENT_ID IN (
-                      SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
-                      WHERE ADJ_ID IN ({adj_ids_str})
-                        AND DIMENSION_ADJ_ID IS NOT NULL)
-            """).collect()
-            session.sql(f"""
-                UPDATE DIMENSION.ADJUSTMENT
-                SET IS_DELETED = TRUE
-                WHERE ADJUSTMENT_ID IN (
-                      SELECT DIMENSION_ADJ_ID FROM ADJUSTMENT_APP.ADJ_HEADER
-                      WHERE ADJ_ID IN ({adj_ids_str})
-                        AND DIMENSION_ADJ_ID IS NOT NULL)
-            """).collect()
+            # Both statements run as ONE transaction (I15); it is committed
+            # before the leg reads below — see _prior_run_cleanup for why it
+            # cannot join the write transaction.
+            _prior_run_cleanup(session, fact_adj_tbl_name, cobid, adj_ids_str)
 
             # ── Insert into DIMENSION.ADJUSTMENT first ───────────────────
             # Obtain DIMENSION.ADJUSTMENT.ADJUSTMENT_ID (NUMBER) before building the
@@ -1567,14 +1663,18 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             # collected into adj_ids above. Filtering on RUN_STATUS/PROCESS_TYPE
             # alone would also pick up rows a concurrent run claimed (double
             # processing) or concurrent Direct rows for the same scope.
+            # CROSS JOIN, not a bare INNER JOIN with no ON (M4): the intent has
+            # always been a cross join filtered in the WHERE, and the metric
+            # predicate is qualified with `fact.` (M5) rather than resolving by
+            # luck because ADJ_HEADER happens to have no column of that name.
             from_where = f"""
                 FROM {fact_tbl_name} fact
-                INNER JOIN {adj_base_tbl_name} adjust
+                CROSS JOIN {adj_base_tbl_name} adjust
                 WHERE adjust.COBID = {cobid}
                   AND adjust.ADJ_ID IN ({adj_ids_str})
                   AND adjust.IS_DELETED = FALSE
                   AND adjust.RUN_STATUS = 'Running'
-                  AND {metric_usd_name} IS NOT NULL
+                  AND fact.{metric_usd_name} IS NOT NULL
             """
 
             # ── Detect which filter fields actually have values ─────────
@@ -2032,24 +2132,28 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             select_with_keys = "*" if key_name == pk_expr else f"{pk_expr}, *"
             exclude_keys = "*" if key_name == pk_expr else f"* EXCLUDE ({key_name})"
 
-            # Unique per run (RUN_LOG_ID) and session-TEMPORARY: with the old
-            # fixed permanent name, two concurrent combos of the same scope
-            # (e.g. VaR Scale for two COBs, dispatched in parallel by
-            # SP_RUN_PIPELINE) overwrote each other's staging table between
-            # build and insert — silently mixing batches.
+            # ── Staging name (I17 / C5) ──────────────────────────────────
+            # Unique per run (RUN_LOG_ID): with the old fixed name, two
+            # concurrent combos of the same scope (e.g. VaR Scale for two COBs,
+            # dispatched in parallel by SP_RUN_PIPELINE) overwrote each other's
+            # staging table between build and insert — silently mixing batches.
+            # SCHEMA: ADJUSTMENT_APP, the app role's own schema. It used to be
+            # f"{fact_adj_tbl_name}_TEMP_…", i.e. inside the shared production
+            # FACT schema — which needs CREATE TABLE ON SCHEMA FACT and littered
+            # it with per-run tables whenever a drop was missed.
             # TRANSIENT, not TEMPORARY: SP_FORCE_PROCESS_ADJUSTMENT runs this
-            # in the app's owner's-rights SiS session, where CREATE TEMPORARY
-            # TABLE raises "Unsupported statement type". Name is unique per
-            # run; dropped after the insert and again in the failure handler.
-            _scale_temp = f"{fact_adj_tbl_name}_TEMP_{int(run_log_id)}"
-            insert_sql = f"""
-            CREATE OR REPLACE TRANSIENT TABLE {_scale_temp}
-            (
-                COBID, ADJUSTMENT_ID, ADJUSTMENT_CREATED_TIMESTAMP,
-                {insert_non_metric}, {metric_col_list},
-                RUN_LOG_ID, LOAD_TIMESTAMP
-            ) AS
-            WITH cte AS (
+            # from the SiS session, where CREATE TEMPORARY TABLE has raised
+            # "Unsupported statement type". Dropped in a finally either way.
+            _scale_temp = f"ADJUSTMENT_APP.SCALE_STAGE_{int(run_log_id)}"
+
+            # The netting query, kept in two halves so the CTE chain can be
+            # spliced into a larger WITH without nesting one inside another:
+            # materialised into _scale_temp first ONLY when a leg reads the
+            # adjusted/combined view (see _stage_first below); otherwise it is
+            # the SELECT of one INSERT (S1) and the delta rows are written once
+            # instead of twice.
+            netted_ctes = f"""
+            cte AS (
                 -- ① Scale/Flatten same COB (COBID = SOURCE_COBID)
                 {select_scale} {from_where}
                 AND fact.COBID = adjust.SOURCE_COBID
@@ -2105,7 +2209,8 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                         ORDER BY ADJUSTMENT_CREATED_TIMESTAMP DESC, ADJUSTMENT_ID DESC
                     ) AS ROW_NUM
                 FROM netted
-            )
+            )"""
+            netted_final = f"""
             SELECT
                 COBID, ADJUSTMENT_ID, ADJUSTMENT_CREATED_TIMESTAMP,
                 {insert_non_metric},
@@ -2116,97 +2221,17 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             WHERE ROW_NUM = 1
             """
 
-            _erlog(session, _sqlog, "stage_build (netted temp)", insert_sql)
+            # Column names for the staged shape (used only when staging).
+            stage_col_list = (
+                "COBID, ADJUSTMENT_ID, ADJUSTMENT_CREATED_TIMESTAMP, "
+                f"{insert_non_metric}, {metric_col_list}, "
+                "RUN_LOG_ID, LOAD_TIMESTAMP")
+
             if has_transfer:
                 _erlog(session, _sqlog, "transfer_leg (note)",
                        "SELECT 'batch contains Transfer Book rows - the transfer leg "
                        "re-keys source-book rows to the target book and ADDS them "
                        "(no flatten leg, no supersede)' AS NOTE")
-
-            # (Prior-run rows were removed before the temp build, keyed by the
-            #  previous DIMENSION_ADJ_ID — the fresh IDs have no rows yet.)
-
-            # NOTE: the whole-COB summary delete used to happen HERE — minutes
-            # before the rebuild at the end, leaving the summary empty for the
-            # entire detail phase (and permanently, on a mid-batch failure).
-            # It now runs right next to the rebuild, inside one transaction.
-
-            # ── Insert from temp table ───────────────────────────────────
-            perm_insert = f"""
-            INSERT INTO {fact_adj_tbl_name}
-            ({perm_col_list})
-            SELECT {perm_col_list}
-            FROM {_scale_temp}
-            """
-            _erlog(session, _sqlog, "perm_insert", perm_insert)
-            session.sql(f"DROP TABLE IF EXISTS {_scale_temp}").collect()
-
-            # ── SCD2 key fix for cross-COB (Roll) adjustments ────────────
-            scd2_update = f"""
-            UPDATE {fact_adj_tbl_name} tgt
-            SET tgt.TRADE_KEY = src.TRADE_KEY_ADJ,
-                tgt.COMMON_INSTRUMENT_KEY = src.COMMON_INSTRUMENT_KEY_ADJ,
-                tgt.COMMON_INSTRUMENT_FCD_KEY = src.COMMON_INSTRUMENT_FCD_KEY_ADJ
-            FROM (
-                WITH adj_cte AS (
-                    SELECT DISTINCT
-                        f.ADJUSTMENT_ID, f.COBID, f.BOOK_KEY, f.TRADE_KEY,
-                        f.COMMON_INSTRUMENT_KEY, f.COMMON_INSTRUMENT_FCD_KEY,
-                        ad.SOURCE_COBID
-                    FROM {fact_adj_tbl_name} f
-                    INNER JOIN {adj_base_tbl_name} ad
-                        ON f.ADJUSTMENT_ID = ad.DIMENSION_ADJ_ID AND f.COBID = ad.COBID
-                    WHERE f.COBID = {cobid}
-                      AND ad.COBID <> ad.SOURCE_COBID
-                )
-                SELECT DISTINCT
-                    f.*,
-                    td2.TRADE_KEY          AS TRADE_KEY_ADJ,
-                    ci2.COMMON_INSTRUMENT_KEY AS COMMON_INSTRUMENT_KEY_ADJ,
-                    cif.COMMON_INSTRUMENT_FCD_KEY AS COMMON_INSTRUMENT_FCD_KEY_ADJ
-                FROM adj_cte f
-                INNER JOIN DIMENSION.BOOK b   ON f.BOOK_KEY = b.BOOK_KEY
-                INNER JOIN DIMENSION.TRADE td ON td.TRADE_KEY = f.TRADE_KEY
-                INNER JOIN DIMENSION.TRADE td2
-                    ON  td.TRADE_CODE = td2.TRADE_CODE
-                    AND b.BOOK_CODE  = td2.BOOK_CODE
-                    AND TO_DATE(f.SOURCE_COBID::STRING, 'YYYYMMDD')
-                        BETWEEN td2.EFFECTIVE_START_DATE AND td2.EFFECTIVE_END_DATE
-                INNER JOIN DIMENSION.COMMON_INSTRUMENT ci
-                    ON ci.COMMON_INSTRUMENT_KEY = f.COMMON_INSTRUMENT_KEY
-                INNER JOIN DIMENSION.COMMON_INSTRUMENT ci2
-                    ON  ci.INSTRUMENT_CODE = ci2.INSTRUMENT_CODE
-                    AND TO_DATE(f.SOURCE_COBID::STRING, 'YYYYMMDD')
-                        BETWEEN ci2.EFFECTIVE_START_DATE AND ci2.EFFECTIVE_END_DATE
-                INNER JOIN DIMENSION.COMMON_INSTRUMENT_FCD cif
-                    ON  ci2.INSTRUMENT_KEY = cif.INSTRUMENT_KEY
-                    AND TO_DATE(f.SOURCE_COBID::STRING, 'YYYYMMDD')
-                        BETWEEN cif.EFFECTIVE_START_DATE AND cif.EFFECTIVE_END_DATE
-                WHERE f.TRADE_KEY <> TRADE_KEY_ADJ
-                   OR f.COMMON_INSTRUMENT_KEY <> COMMON_INSTRUMENT_KEY_ADJ
-                   OR f.COMMON_INSTRUMENT_FCD_KEY <> COMMON_INSTRUMENT_FCD_KEY_ADJ
-            ) src
-            WHERE tgt.TRADE_KEY = src.TRADE_KEY
-              AND tgt.COMMON_INSTRUMENT_KEY = src.COMMON_INSTRUMENT_KEY
-              AND tgt.COMMON_INSTRUMENT_FCD_KEY = src.COMMON_INSTRUMENT_FCD_KEY
-              AND tgt.COBID = src.COBID
-              AND tgt.ADJUSTMENT_ID = src.ADJUSTMENT_ID
-              AND tgt.ADJUSTMENT_ID IN ({dim_ids_str})
-            """
-            # ^ Scoped to THIS batch's rows: without the ADJUSTMENT_ID filter
-            #   the UPDATE also rewrote earlier same-COB adjustments' rows that
-            #   happen to share the trade/instrument keys, stranding them with
-            #   source-COB SCD2 versions that later supersedes can't match.
-            # Only cross-COB Rolls rewrite SCD2 keys. For same-COB Scale/Flatten
-            # batches (the common case) the inner adj_cte is empty (ad.COBID =
-            # ad.SOURCE_COBID), so this UPDATE is a no-op — but Snowflake still
-            # runs the whole multi-dimension join plan. Skip it entirely when the
-            # batch has no cross-COB Roll; earlier Rolls were already SCD2-fixed
-            # when they were processed.
-            # Transfer rows are re-keyed inside leg ②T and are same-COB, so
-            # adj_cte (COBID <> SOURCE_COBID) already excludes them.
-            if has_cross_cob:
-                _erlog(session, _sqlog, "scd2_key_fix", scd2_update)
 
             # ── Supersede earlier adjustments INSIDE this batch's filter scope ──
             # Rule (Marcos, 2026-09-14): the newest adjustment replaces every
@@ -2249,58 +2274,204 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                         {_fa_join_cond}
                   )
             """
-            _erlog(session, _sqlog, "supersede_delete (filter scope)", supersede_sql)
 
-            # ── Rebuild summary (atomic delete + insert) ─────────────────
-            # One transaction: readers never see the COB's summary empty, and
-            # a failure between the two statements rolls the delete back
-            # instead of leaving the summary permanently missing.
-            if fact_adj_summary_name:
-                summary_non_metric = ', '.join([
-                    c for c in fact_adj_summary_cols
-                    if c not in {metric_name, metric_usd_name}
-                ])
-                summary_insert = f"""
-                INSERT INTO {fact_adj_summary_name}
-                ({summary_non_metric}, {metric_col_list})
-                SELECT {summary_non_metric},
-                       {metric_sum_list}
-                FROM {fact_adj_tbl_name}
-                WHERE COBID = {cobid}
-                GROUP BY ALL
-                """
-                summary_delete = f"""
-                    DELETE FROM {fact_adj_summary_name}
-                    WHERE COBID = {cobid}
-                """
+            # ═══ WRITE: supersede + insert, one transaction (C4) ═══════════
+            # ORDER MATTERS, and not only for correctness — Snowflake stops
+            # pruning a table's micro-partitions once that table has been
+            # modified earlier in the SAME explicit transaction (the lesson the
+            # Entity Roll path is built around). So:
+            #
+            #   ① stage (ONLY when a leg reads the combined view) — OUTSIDE the
+            #      transaction, against committed data, so the view's read of
+            #      {fact_adj_tbl_name} prunes.
+            #   ② BEGIN
+            #   ③ supersede_delete FIRST — {fact_adj_tbl_name} has not been
+            #      touched in this transaction yet, so its COBID predicate
+            #      prunes. Running it before the insert does NOT change which
+            #      rows it removes: it already excludes this batch's own
+            #      DIMENSION_ADJ_IDs, and those rows do not exist yet (the
+            #      prior-run cleanup removed the batch's previous rows, and the
+            #      ids were freshly minted moments ago). The NOT IN is kept as
+            #      a belt-and-braces guard.
+            #   ④ perm_insert
+            #   ⑤ COMMIT
+            #
+            # Before this change the two ran in autocommit: between them the
+            # table held BOTH the new batch's rows AND the rows they supersede,
+            # so anything reading the combined view in that window (Preview,
+            # PowerBI, a concurrent Roll leg) double-counted — and if the DELETE
+            # then failed, the double count was PERMANENT (the run raises, the
+            # header flips to Failed, but the inserted rows are committed and
+            # the next retry's cleanup only removes rows keyed by the previous
+            # DIMENSION_ADJ_ID).
+            #
+            # scd2_key_fix stays AFTER the COMMIT — see below for why.
+            _stage_first = needs_adjusted_view
+            # The try/finally opens BEFORE the staging CTAS so a failure in the
+            # build itself still drops the stage (same fix as M3 on EROL).
+            try:
+                if _stage_first:
+                    # A cross-COB Roll (leg ②) or a Transfer (leg ②T) reads
+                    # {fact_adjusted_tbl_name}, a view OVER {fact_adj_tbl_name}.
+                    # Inside the transaction — after the supersede DELETE on
+                    # that same table — that read would scan it unpruned
+                    # (billions of rows). Materialise it first, exactly as the
+                    # Entity Roll path stages its roll leg, and let the
+                    # transaction insert from a table nothing in it has written.
+                    _erlog(session, _sqlog,
+                           "stage_build (netted stage — leg reads the combined view)",
+                           f"CREATE OR REPLACE TRANSIENT TABLE {_scale_temp} "
+                           f"({stage_col_list}) AS WITH {netted_ctes}"
+                           f"{netted_final}",
+                           count_tbl=_scale_temp)
+                    perm_insert = f"""
+                    INSERT INTO {fact_adj_tbl_name}
+                    ({perm_col_list})
+                    SELECT {perm_col_list}
+                    FROM {_scale_temp}
+                    """
+                else:
+                    # Same-COB Scale / Flatten (the common case): the legs read
+                    # the BASE fact table and ADJ_HEADER only — neither is
+                    # written by this transaction — so the netting can run as
+                    # the SELECT of the INSERT itself and still prune. That
+                    # drops a full write+read pass over every delta row (S1: the
+                    # staging table existed only because its name used to be
+                    # fixed and concurrent combos clobbered it; it is per-run
+                    # now, so that reason is gone — but the pruning reason above
+                    # still applies to the adjusted-view legs).
+                    # The CTE chain is spliced in flat — `staged` becomes the
+                    # last CTE rather than a WITH nested inside a WITH — and the
+                    # outer SELECT re-projects by NAME into perm_col_list, which
+                    # is exactly what the old `SELECT {perm_col_list} FROM
+                    # {_scale_temp}` did (the staging table's column list was
+                    # the same names in the same order).
+                    perm_insert = f"""
+                    INSERT INTO {fact_adj_tbl_name}
+                    ({perm_col_list})
+                    WITH {netted_ctes},
+                    staged AS ({netted_final})
+                    SELECT {perm_col_list}
+                    FROM staged
+                    """
+
                 session.sql("BEGIN").collect()
                 try:
-                    # _erlog rows written here join the transaction: they
-                    # persist at COMMIT, vanish on ROLLBACK — hence the
-                    # FAILED row re-insert after the rollback below.
-                    _erlog(session, _sqlog, "summary_delete", summary_delete)
-                    _erlog(session, _sqlog, "summary_insert", summary_insert)
+                    _erlog(session, _sqlog,
+                           "supersede_delete (filter scope, pre-insert)", supersede_sql)
+                    _erlog(session, _sqlog,
+                           "perm_insert" + ("" if _stage_first else " (netted, single statement)"),
+                           perm_insert)
                     session.sql("COMMIT").collect()
                 except Exception:
                     session.sql("ROLLBACK").collect()
-                    # The in-transaction log rows rolled back with everything
-                    # else — record the failed rebuild (with its SQL) so the
-                    # debug trail survives. Best-effort.
-                    try:
-                        _sqlog["seq"] += 1
-                        session.sql(
-                            "INSERT INTO ADJUSTMENT_APP.EROL_PROCESS_LOG "
-                            "(RUN_LOG_ID, PROCESS_TYPE, COBID, STEP_SEQ, "
-                            "STEP_NAME, STATUS, STARTED_AT, ENDED_AT, SQL_TEXT) "
-                            f"SELECT {_erl_n(run_log_id)}, {_erl_s(process_type)}, "
-                            f"{_erl_n(cobid)}, {_sqlog['seq']}, "
-                            f"'summary_rebuild (rolled back)', 'FAILED', "
-                            f"CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), "
-                            f"{_erl_s(summary_insert)}"
-                        ).collect()
-                    except Exception as _le:
-                        print(f"summary failure log write failed (non-fatal): {_le}")
+                    # Both _erlog rows rolled back with the transaction.
+                    _log_failed_step(session, _sqlog,
+                                     "supersede+insert (rolled back)",
+                                     supersede_sql + "\n;\n" + perm_insert)
                     raise
+            finally:
+                if _stage_first:
+                    try:
+                        session.sql(f"DROP TABLE IF EXISTS {_scale_temp}").collect()
+                    except Exception:
+                        pass
+
+            # ── SCD2 key fix for cross-COB (Roll) adjustments ────────────
+            # DELIBERATELY AFTER THE COMMIT (C4). It reads {fact_adj_tbl_name}
+            # back — `WHERE f.COBID = {cobid}` — so inside the write transaction,
+            # after perm_insert modified that table, the read would scan every
+            # micro-partition instead of pruning to the COB. Correctness does not
+            # need it inside: it only rewrites SCD2 trade/instrument keys on rows
+            # THIS batch just inserted (tgt.ADJUSTMENT_ID IN this batch's ids),
+            # never a value or a row count. If it fails, the run raises, the
+            # header flips to Failed, and the retry's prior-run cleanup deletes
+            # those rows before writing them again — no double count, and the
+            # only exposure in between is source-COB trade/instrument attribution
+            # on a Failed adjustment. Pruning wins.
+            scd2_update = f"""
+            UPDATE {fact_adj_tbl_name} tgt
+            SET tgt.TRADE_KEY = src.TRADE_KEY_ADJ,
+                tgt.COMMON_INSTRUMENT_KEY = src.COMMON_INSTRUMENT_KEY_ADJ,
+                tgt.COMMON_INSTRUMENT_FCD_KEY = src.COMMON_INSTRUMENT_FCD_KEY_ADJ
+            FROM (
+                WITH adj_cte AS (
+                    SELECT DISTINCT
+                        f.ADJUSTMENT_ID, f.COBID, f.BOOK_KEY, f.TRADE_KEY,
+                        f.COMMON_INSTRUMENT_KEY, f.COMMON_INSTRUMENT_FCD_KEY,
+                        ad.SOURCE_COBID
+                    FROM {fact_adj_tbl_name} f
+                    INNER JOIN {adj_base_tbl_name} ad
+                        ON f.ADJUSTMENT_ID = ad.DIMENSION_ADJ_ID AND f.COBID = ad.COBID
+                    WHERE f.COBID = {cobid}
+                      AND ad.COBID <> ad.SOURCE_COBID
+                )
+                SELECT DISTINCT
+                    f.*,
+                    td2.TRADE_KEY          AS TRADE_KEY_ADJ,
+                    ci2.COMMON_INSTRUMENT_KEY AS COMMON_INSTRUMENT_KEY_ADJ,
+                    cif.COMMON_INSTRUMENT_FCD_KEY AS COMMON_INSTRUMENT_FCD_KEY_ADJ
+                FROM adj_cte f
+                INNER JOIN DIMENSION.BOOK b   ON f.BOOK_KEY = b.BOOK_KEY
+                INNER JOIN DIMENSION.TRADE td ON td.TRADE_KEY = f.TRADE_KEY
+                INNER JOIN DIMENSION.TRADE td2
+                    ON  td.TRADE_CODE = td2.TRADE_CODE
+                    AND b.BOOK_CODE  = td2.BOOK_CODE
+                    AND TO_DATE(f.SOURCE_COBID::STRING, 'YYYYMMDD')
+                        BETWEEN td2.EFFECTIVE_START_DATE AND td2.EFFECTIVE_END_DATE
+                INNER JOIN DIMENSION.COMMON_INSTRUMENT ci
+                    ON ci.COMMON_INSTRUMENT_KEY = f.COMMON_INSTRUMENT_KEY
+                INNER JOIN DIMENSION.COMMON_INSTRUMENT ci2
+                    ON  ci.INSTRUMENT_CODE = ci2.INSTRUMENT_CODE
+                    AND TO_DATE(f.SOURCE_COBID::STRING, 'YYYYMMDD')
+                        BETWEEN ci2.EFFECTIVE_START_DATE AND ci2.EFFECTIVE_END_DATE
+                INNER JOIN DIMENSION.COMMON_INSTRUMENT_FCD cif
+                    ON  ci2.INSTRUMENT_KEY = cif.INSTRUMENT_KEY
+                    AND TO_DATE(f.SOURCE_COBID::STRING, 'YYYYMMDD')
+                        BETWEEN cif.EFFECTIVE_START_DATE AND cif.EFFECTIVE_END_DATE
+                -- IS DISTINCT FROM, not <> (M6): with <>, a NULL on either side
+                -- yields NULL, so a row needing a remap on one key while another
+                -- key is NULL was skipped and kept its source-COB version.
+                WHERE f.TRADE_KEY IS DISTINCT FROM TRADE_KEY_ADJ
+                   OR f.COMMON_INSTRUMENT_KEY IS DISTINCT FROM COMMON_INSTRUMENT_KEY_ADJ
+                   OR f.COMMON_INSTRUMENT_FCD_KEY IS DISTINCT FROM COMMON_INSTRUMENT_FCD_KEY_ADJ
+            ) src
+            WHERE tgt.TRADE_KEY = src.TRADE_KEY
+              AND tgt.COMMON_INSTRUMENT_KEY = src.COMMON_INSTRUMENT_KEY
+              AND tgt.COMMON_INSTRUMENT_FCD_KEY = src.COMMON_INSTRUMENT_FCD_KEY
+              AND tgt.COBID = src.COBID
+              AND tgt.ADJUSTMENT_ID = src.ADJUSTMENT_ID
+              AND tgt.ADJUSTMENT_ID IN ({dim_ids_str})
+            """
+            # ^ Scoped to THIS batch's rows: without the ADJUSTMENT_ID filter
+            #   the UPDATE also rewrote earlier same-COB adjustments' rows that
+            #   happen to share the trade/instrument keys, stranding them with
+            #   source-COB SCD2 versions that later supersedes can't match.
+            # Only cross-COB Rolls rewrite SCD2 keys. For same-COB Scale/Flatten
+            # batches (the common case) the inner adj_cte is empty (ad.COBID =
+            # ad.SOURCE_COBID), so this UPDATE is a no-op — but Snowflake still
+            # runs the whole multi-dimension join plan. Skip it entirely when the
+            # batch has no cross-COB Roll; earlier Rolls were already SCD2-fixed
+            # when they were processed.
+            # Transfer rows are re-keyed inside leg ②T and are same-COB, so
+            # adj_cte (COBID <> SOURCE_COBID) already excludes them.
+            if has_cross_cob:
+                _erlog(session, _sqlog, "scd2_key_fix", scd2_update)
+
+            # ── Rebuild summary (atomic delete + insert, entity-sliced) ──
+            # Its own later transaction, deliberately NOT part of the write
+            # above: it re-reads {fact_adj_tbl_name} across the COB, which
+            # inside the write transaction would scan unpruned.
+            if fact_adj_summary_name:
+                _ents = [r["ENTITY_CODE"] for r in
+                         df_adj_scale.select("ENTITY_CODE").distinct().collect()]
+                _sum_pred, _adj_pred = _entity_slice(
+                    session, _ents, fact_adj_summary_cols, fact_adj_cols)
+                _rebuild_summary(
+                    session, _sqlog, fact_adj_summary_name, fact_adj_summary_cols,
+                    (metric_name, metric_usd_name),
+                    metric_col_list, metric_sum_list,
+                    fact_adj_tbl_name, cobid, _sum_pred, _adj_pred)
 
             # ── Count rows inserted and update RECORD_COUNT ──────────────
             rows_count_row = session.sql(f"""
@@ -2310,38 +2481,8 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                   AND ADJUSTMENT_ID IN ({dim_ids_str})
             """).collect()
             rows_count = rows_count_row[0]["CNT"] if rows_count_row else 0
-            # Per-ADJUSTMENT counts (zero-init then grouped update) — a batch
-            # total stamped on every header made multi-adjustment batches lie.
-            session.sql(f"""
-                UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                SET RECORD_COUNT = 0
-                WHERE ADJ_ID IN ({adj_ids_str})
-            """).collect()
-            session.sql(f"""
-                UPDATE ADJUSTMENT_APP.ADJ_HEADER h
-                SET RECORD_COUNT = src.CNT
-                FROM (SELECT ADJUSTMENT_ID, COUNT(*) AS CNT
-                      FROM {fact_adj_tbl_name}
-                      WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
-                      GROUP BY ADJUSTMENT_ID) src
-                WHERE src.ADJUSTMENT_ID = h.DIMENSION_ADJ_ID
-                  AND h.ADJ_ID IN ({adj_ids_str})
-            """).collect()
-            if dim_adj_map:
-                session.sql(f"""
-                    UPDATE DIMENSION.ADJUSTMENT
-                    SET RECORD_COUNT = 0, RUN_STATUS = 'Processed'
-                    WHERE ADJUSTMENT_ID IN ({dim_ids_str})
-                """).collect()
-                session.sql(f"""
-                    UPDATE DIMENSION.ADJUSTMENT d
-                    SET RECORD_COUNT = src.CNT
-                    FROM (SELECT ADJUSTMENT_ID, COUNT(*) AS CNT
-                          FROM {fact_adj_tbl_name}
-                          WHERE COBID = {cobid} AND ADJUSTMENT_ID IN ({dim_ids_str})
-                          GROUP BY ADJUSTMENT_ID) src
-                    WHERE src.ADJUSTMENT_ID = d.ADJUSTMENT_ID
-                """).collect()
+            _finish_counts(session, fact_adj_tbl_name, cobid, adj_ids_str,
+                           dim_ids_str, dim_adj_map)
             result["rows_inserted"] = rows_count
 
             # ── Zero-match warning ───────────────────────────────────────
@@ -2656,81 +2797,96 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             # in the same session — with a fixed name, one combo's stage
             # replaced another's between its CTAS and its INSERT, producing
             # column-count mismatches (112 columns vs a 94-column table).
-            _roll_stage = f"EROL_ROLL_STAGE_{int(run_log_id)}"
-            _flat_stage = f"EROL_FLAT_STAGE_{int(run_log_id)}"
-            _erlog(session, _erctx, "stage_roll (combined view @ source)",
-                   f"CREATE OR REPLACE TRANSIENT TABLE {_roll_stage} AS {er_roll_select}")
-            er_roll_insert = (f"INSERT INTO {fact_adj_tbl_name} ({ins_cols}) "
-                              f"SELECT * FROM {_roll_stage}")
+            # SCHEMA-QUALIFIED (C5): `USE SCHEMA ADJUSTMENT_APP` at the top of
+            # this file applies at DEPLOY time only. The proc is EXECUTE AS
+            # CALLER, and SP_RUN_PIPELINE is called from a serverless task that
+            # sets no database/schema — so an unqualified CREATE landed wherever
+            # the session happened to point, or failed outright with "this
+            # session does not have a current schema", and the finally's DROP
+            # then resolved against that same undefined name.
+            _roll_stage = f"ADJUSTMENT_APP.EROL_ROLL_STAGE_{int(run_log_id)}"
+            _flat_stage = f"ADJUSTMENT_APP.EROL_FLAT_STAGE_{int(run_log_id)}"
 
-            er_flatten_insert = None
-            if do_flatten:
-                er_flat_select = f"""
-                SELECT {int(cobid)} AS COBID, {int(new_dim_adj_id)} AS ADJUSTMENT_ID,
-                       {_flat_non_metric}, {er_neg}{sel_extra}
-                FROM {_flat_src} fact
-                WHERE fact.COBID = {int(cobid)} AND {_flat_pred}
-                  AND fact.{er_metric_usd} IS NOT NULL AND fact.{er_metric_usd} <> 0
-                """
-                if _flat_from_base:
-                    # The flatten reads the BASE FACT_TABLE, which this proc never
-                    # writes — so it prunes fine even inside the transaction. Insert
-                    # it DIRECTLY and skip the temp materialization (a full extra
-                    # read+write pass over the entity's rows). The roll leg still
-                    # stages, because its combined view reads the ADJUSTMENTS_TABLE
-                    # the wipe modifies (an in-transaction read of that table after
-                    # the wipe would not prune).
-                    er_flatten_insert = (f"INSERT INTO {fact_adj_tbl_name} ({ins_cols}) "
-                                         f"{er_flat_select}")
-                else:
-                    # Fallback: flatten reads the combined/adjusted view, so it must
-                    # be staged outside the transaction to prune (same as the roll).
-                    _erlog(session, _erctx, "stage_flatten (adjusted view @ target)",
-                           f"CREATE OR REPLACE TRANSIENT TABLE {_flat_stage} AS {er_flat_select}")
-                    er_flatten_insert = (f"INSERT INTO {fact_adj_tbl_name} ({ins_cols}) "
-                                         f"SELECT * FROM {_flat_stage}")
-
-            # ── Atomic wipe + insert (fast: temp-table inserts only) ──────
-            session.sql("BEGIN").collect()
+            # The try/finally opens BEFORE the first CTAS (M3): it used to start
+            # at the BEGIN below, so a failure in stage_flatten left
+            # EROL_ROLL_STAGE_<id> behind for good.
             try:
-                # Flag superseded in DIMENSION.ADJUSTMENT (includes external rows)
-                session.sql(f"""
-                    UPDATE DIMENSION.ADJUSTMENT
-                    SET IS_DELETED = TRUE, RUN_STATUS = 'Superseded'
-                    WHERE COBID = {int(cobid)} AND ENTITY_CODE = '{esc_entity}'
-                      AND {er_pt_pred}
-                      AND IS_DELETED = FALSE
-                      AND ADJUSTMENT_ID <> {int(new_dim_adj_id)}
-                """).collect()
-                # …and in ADJ_HEADER (the rows this tool tracks)
-                session.sql(f"""
-                    UPDATE ADJUSTMENT_APP.ADJ_HEADER
-                    SET IS_DELETED   = TRUE,
-                        RUN_STATUS   = 'Superseded',
-                        DELETED_BY   = 'ENTITY_ROLL',
-                        DELETED_DATE = CURRENT_TIMESTAMP(),
-                        ERRORMESSAGE = 'Superseded by Entity Roll {adj_ids[0]}'
-                    WHERE COBID = {int(cobid)} AND ENTITY_CODE = '{esc_entity}'
-                      AND {er_pt_pred}
-                      AND IS_DELETED = FALSE
-                      AND ADJ_ID NOT IN ({adj_ids_str})
-                """).collect()
-                # Wipe every entity row at the target COB (one direct predicate),
-                # then roll. Capture the rows-deleted count Snowflake returns.
-                _del = _erlog(session, _erctx, "wipe_delete (target COB+entity)", f"""
-                    DELETE FROM {fact_adj_tbl_name}
-                    WHERE COBID = {int(cobid)} AND {er_adj_ent_pred}
-                """)
-                rows_wiped = int(_del[0][0]) if _del and _del[0] is not None else 0
+                _erlog(session, _erctx, "stage_roll (combined view @ source)",
+                       f"CREATE OR REPLACE TRANSIENT TABLE {_roll_stage} AS {er_roll_select}",
+                       count_tbl=_roll_stage)
+                er_roll_insert = (f"INSERT INTO {fact_adj_tbl_name} ({ins_cols}) "
+                                  f"SELECT * FROM {_roll_stage}")
+
+                er_flatten_insert = None
                 if do_flatten:
-                    _erlog(session, _erctx, "flatten_insert (leg ① negate base)",
-                           er_flatten_insert)                  # leg ① negate base
-                _erlog(session, _erctx, "roll_insert (leg ② copy source)",
-                       er_roll_insert)                         # leg ② copy source
-                session.sql("COMMIT").collect()
-            except Exception:
-                session.sql("ROLLBACK").collect()
-                raise
+                    er_flat_select = f"""
+                    SELECT {int(cobid)} AS COBID, {int(new_dim_adj_id)} AS ADJUSTMENT_ID,
+                           {_flat_non_metric}, {er_neg}{sel_extra}
+                    FROM {_flat_src} fact
+                    WHERE fact.COBID = {int(cobid)} AND {_flat_pred}
+                      AND fact.{er_metric_usd} IS NOT NULL AND fact.{er_metric_usd} <> 0
+                    """
+                    if _flat_from_base:
+                        # The flatten reads the BASE FACT_TABLE, which this proc never
+                        # writes — so it prunes fine even inside the transaction. Insert
+                        # it DIRECTLY and skip the temp materialization (a full extra
+                        # read+write pass over the entity's rows). The roll leg still
+                        # stages, because its combined view reads the ADJUSTMENTS_TABLE
+                        # the wipe modifies (an in-transaction read of that table after
+                        # the wipe would not prune).
+                        er_flatten_insert = (f"INSERT INTO {fact_adj_tbl_name} ({ins_cols}) "
+                                             f"{er_flat_select}")
+                    else:
+                        # Fallback: flatten reads the combined/adjusted view, so it must
+                        # be staged outside the transaction to prune (same as the roll).
+                        _erlog(session, _erctx, "stage_flatten (adjusted view @ target)",
+                               f"CREATE OR REPLACE TRANSIENT TABLE {_flat_stage} AS {er_flat_select}",
+                               count_tbl=_flat_stage)
+                        er_flatten_insert = (f"INSERT INTO {fact_adj_tbl_name} ({ins_cols}) "
+                                             f"SELECT * FROM {_flat_stage}")
+
+                # ── Atomic wipe + insert (fast: temp-table inserts only) ──
+                session.sql("BEGIN").collect()
+                try:
+                    # Flag superseded in DIMENSION.ADJUSTMENT (includes external rows)
+                    session.sql(f"""
+                        UPDATE DIMENSION.ADJUSTMENT
+                        SET IS_DELETED = TRUE, RUN_STATUS = 'Superseded'
+                        WHERE COBID = {int(cobid)} AND ENTITY_CODE = '{esc_entity}'
+                          AND {er_pt_pred}
+                          AND IS_DELETED = FALSE
+                          AND ADJUSTMENT_ID <> {int(new_dim_adj_id)}
+                    """).collect()
+                    # …and in ADJ_HEADER (the rows this tool tracks)
+                    session.sql(f"""
+                        UPDATE ADJUSTMENT_APP.ADJ_HEADER
+                        SET IS_DELETED   = TRUE,
+                            RUN_STATUS   = 'Superseded',
+                            DELETED_BY   = 'ENTITY_ROLL',
+                            DELETED_DATE = CURRENT_TIMESTAMP(),
+                            ERRORMESSAGE = 'Superseded by Entity Roll {adj_ids[0]}'
+                        WHERE COBID = {int(cobid)} AND ENTITY_CODE = '{esc_entity}'
+                          AND {er_pt_pred}
+                          AND IS_DELETED = FALSE
+                          AND ADJ_ID NOT IN ({adj_ids_str})
+                    """).collect()
+                    # Wipe every entity row at the target COB (one direct predicate),
+                    # then roll. The rows-deleted count comes from the result's
+                    # column name, never from prose (C3).
+                    _del = _erlog(session, _erctx, "wipe_delete (target COB+entity)", f"""
+                        DELETE FROM {fact_adj_tbl_name}
+                        WHERE COBID = {int(cobid)} AND {er_adj_ent_pred}
+                    """)
+                    rows_wiped = _dml_rows(_del) or 0
+                    if do_flatten:
+                        _erlog(session, _erctx, "flatten_insert (leg ① negate base)",
+                               er_flatten_insert)              # leg ① negate base
+                    _erlog(session, _erctx, "roll_insert (leg ② copy source)",
+                           er_roll_insert)                     # leg ② copy source
+                    session.sql("COMMIT").collect()
+                except Exception:
+                    session.sql("ROLLBACK").collect()
+                    raise
             finally:
                 # Session-scoped temps would otherwise linger for the session's
                 # lifetime; drop them so long-lived sessions stay clean.
@@ -2765,47 +2921,16 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             # entity by DIFFERENT columns (e.g. summary by ENTITY_KEY, adjustment
             # by ENTITY_CODE), so each side is scoped by ITS OWN column — requiring
             # a shared column would silently drop to the slow whole-COB rebuild.
+            # The shared rebuild helper carries what this path pioneered — the
+            # entity slice — plus the atomic delete+insert and the M8 grouping
+            # fix, so all four write paths now behave identically.
             if fact_adj_summary_name:
-                summary_non_metric = ', '.join([
-                    c for c in fact_adj_summary_cols
-                    if c not in {er_metric, er_metric_usd}
-                ])
-
-                def _entity_where(cols):
-                    if 'ENTITY_CODE' in cols:
-                        return f"ENTITY_CODE = '{esc_entity}'"
-                    if 'ENTITY_KEY' in cols and entity_keys_csv:
-                        return f"ENTITY_KEY IN ({entity_keys_csv})"
-                    return None
-
-                _sum_pred = _entity_where(fact_adj_summary_cols)   # summary side
-                _adj_pred = _entity_where(fact_adj_cols)           # adjustment side
-                if _sum_pred and _adj_pred:
-                    _erlog(session, _erctx, "summary_delete (entity slice)",
-                           f"DELETE FROM {fact_adj_summary_name} "
-                           f"WHERE COBID = {int(cobid)} AND {_sum_pred}")
-                    _erlog(session, _erctx, "summary_insert (entity slice)", f"""
-                        INSERT INTO {fact_adj_summary_name}
-                        ({summary_non_metric}, {er_metric_cols})
-                        SELECT {summary_non_metric}, {er_metric_sums}
-                        FROM {fact_adj_tbl_name}
-                        WHERE COBID = {int(cobid)} AND {_adj_pred}
-                        GROUP BY ALL
-                    """)
-                else:
-                    # Last resort (a table has no entity column): whole-COB rebuild.
-                    print("EntityRoll: summary rebuilt whole-COB (no entity column) — slow")
-                    _erlog(session, _erctx, "summary_delete (whole COB)",
-                           f"DELETE FROM {fact_adj_summary_name} "
-                           f"WHERE COBID = {int(cobid)}")
-                    _erlog(session, _erctx, "summary_insert (whole COB)", f"""
-                        INSERT INTO {fact_adj_summary_name}
-                        ({summary_non_metric}, {er_metric_cols})
-                        SELECT {summary_non_metric}, {er_metric_sums}
-                        FROM {fact_adj_tbl_name}
-                        WHERE COBID = {int(cobid)}
-                        GROUP BY ALL
-                    """)
+                _sum_pred, _adj_pred = _entity_slice(
+                    session, [entity_code], fact_adj_summary_cols, fact_adj_cols)
+                _rebuild_summary(
+                    session, _erctx, fact_adj_summary_name, fact_adj_summary_cols,
+                    (er_metric, er_metric_usd), er_metric_cols, er_metric_sums,
+                    fact_adj_tbl_name, cobid, _sum_pred, _adj_pred)
 
             # ── Counts + bookkeeping ──────────────────────────────────────
             rows_count = session.sql(f"""
@@ -2852,29 +2977,31 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             result["message"] = f"Invalid adjustment_action: {adjustment_action}"
 
     except Exception as e:
-        error_msg = str(e)[:900].replace("\\", "\\\\").replace("'", "''")
+        # NOT SQL-escaped here (M1): update_header_status hands this to Snowpark
+        # DataFrame.update(), which escapes it itself — doubling it stored
+        # "don''t" and showed it that way in the app. The one consumer that
+        # needs a literal (the run-log close below) escapes separately.
+        error_msg = str(e)[:900]
         print(f"Error: {error_msg}")
         result["message"] = f"Error: {error_msg}"
 
-        # Best-effort cleanup of the Scale path's transient staging table
-        # (EROL's stages have their own finally-drop).
-        if '_scale_temp' in dir():
-            try:
-                session.sql(f"DROP TABLE IF EXISTS {_scale_temp}").collect()
-            except Exception:
-                pass
+        # (The Scale staging table is dropped by its own finally, and EROL's
+        #  stages by theirs — the duplicate best-effort drop that used to sit
+        #  here was dead code.)
 
         # On failure, flip the still-RUNNING step to FAILED so the log pinpoints
         # where the run stopped (its RUNNING row was already committed live).
-        if adjustment_action.lower() == 'entityroll' and '_erctx' in dir():
+        # `in locals()` says what is meant; bare `dir()` happened to return the
+        # local scope, which is undocumented behaviour (M2).
+        if adjustment_action.lower() == 'entityroll' and '_erctx' in locals():
             _erol_mark_failed(session, _erctx)
-        elif '_sqlog' in dir():
+        elif '_sqlog' in locals():
             _erol_mark_failed(session, _sqlog)
 
         # Try to mark as Failed — scoped exactly like the claim read (combo +
         # claim token), so a concurrent run's Running rows are untouched.
         try:
-            if 'adj_base_tbl_name' in dir():
+            if 'adj_base_tbl_name' in locals():
                 df_adj_err = session.table(adj_base_tbl_name).filter(
                     (col('COBID') == cobid) &
                     (upper(col('PROCESS_TYPE')) == process_type.upper()) &
@@ -2900,7 +3027,7 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
 
         # Close run log with failure status (do NOT trigger PowerBI refresh)
         try:
-            if 'run_log_id' in dir() and run_log_id:
+            if 'run_log_id' in locals() and run_log_id:
                 import json as _j
                 json_err = _j.dumps(str(e)[:200])[1:-1].replace("\\", "\\\\").replace("'", "''")
                 session.sql(f"""

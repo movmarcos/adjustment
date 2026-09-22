@@ -166,14 +166,21 @@ def main(session, p_batch):
         ok_status = STATUS_PENDING_APPROV if requires_approval else STATUS_PENDING
 
         # ── Scope must be active ─────────────────────────────────────────
+        # Select the canonical PROCESS_TYPE spelling back from the settings
+        # row instead of interpolating the caller's own string into the
+        # view-name identifier below (I2 / M13) — the lookup already
+        # case-insensitively gates on an active scope, so using its
+        # canonical value costs nothing and means the identifier is always
+        # built from a value this database itself produced.
         settings = session.sql(f"""
-            SELECT 1 FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
+            SELECT PROCESS_TYPE FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
             WHERE UPPER(PROCESS_TYPE) = UPPER('{_esc(process_type)}')
               AND IS_ACTIVE = TRUE
         """).collect()
         if not settings:
             return {"status": "Error", "created": 0,
                     "message": f"Scope '{process_type}' is not active or not configured."}
+        process_type = str(settings[0]["PROCESS_TYPE"])
 
         view = f"ADJUSTMENT_APP.VW_DIRECT_VALIDATE_{process_type.upper()}"
         b_esc = _esc(batch_id)
