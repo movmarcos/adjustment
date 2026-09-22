@@ -15,8 +15,23 @@ scheduled processing, and PowerBI refresh. Two halves:
   (dashboard), pages under `pages/`, shared design system in
   `utils/styles.py`, connection helpers in `utils/snowflake_conn.py`.
 - `new_adjustment_db_objects/` — Snowflake DDL + stored procedures, numbered
-  in deploy order (`01_tables.sql` … `08_views.sql`). `deploy.py` deploys.
+  in deploy order (`01_tables.sql` … `15_direct_frtb_upload.sql`, incl.
+  `05b`/`05c` which sort correctly between `05` and `06`). `deploy.py`
+  deploys the whole directory in filename-sorted order.
   Old prototypes were removed from the tree (2026-09-17); they remain in git history only.
+
+  **Never deploy a single SQL file individually, out of numeric order.**
+  Later files reference columns/objects added in earlier ones
+  unconditionally (e.g. `05_sp_process_adjustment.sql` and `08_views.sql`
+  both reference `ADJ_HEADER.SOURCE_BOOK_CODE`, added in `01_tables.sql`).
+  Snowflake does not validate a stored procedure body against live schema
+  at `CREATE OR ALTER PROCEDURE` time — a hand-pasted single-file "hotfix"
+  against an environment missing an earlier file's change will succeed
+  silently and only fail later, at first invocation, deep in a pipeline
+  run. Full-directory deploys via `python deploy.py` (or `deploy.py
+  --db-only`, which still deploys everything) only. If a hotfix to one
+  procedure is operationally necessary, re-run `01_tables.sql` first — it's
+  `CREATE OR ALTER`, so idempotent/safe.
 
 **End users are non-technical.** Error prevention and clear messages beat
 features. Anything ambiguous in the UI is a bug.
@@ -150,12 +165,22 @@ features. Anything ambiguous in the UI is a bug.
   data. Test adjustments are opt-in, never seeded by default.
 - Commits: conventional prefixes (`fix(submit):`, `ux(wizard):`,
   `docs:`), imperative subject, body explains the why.
-- Verification: there is **no Python test harness for the Streamlit app**.
-  Minimum bar: `python3 -m py_compile` every touched file, then deploy to
-  SiS and click through the affected flow. SQL-side tests live in
-  `new_adjustment_db_objects/tests/`. Snowflake behaviour (literal
-  escaping, SP results) cannot be fully verified locally — say so in the
-  commit/PR instead of claiming verification.
+- Verification: two pytest suites exist and should be run first, before
+  falling back to manual click-through.
+  - `streamlit_app/tests/` — widget/form/page logic against a mocked
+    Streamlit (`streamlit.testing.v1.AppTest`), no Snowflake connection:
+    `pytest streamlit_app/tests -v`.
+  - `tests/` (repo root) — UAT automation: drives the real stored
+    procedures against a live Snowflake environment (`config.py`) with a
+    far-future isolation COB, writes `docs/UAT_AUTOMATION_REPORT.md`:
+    `pytest tests -v`. See `tests/README.md` for env vars and coverage.
+  Minimum bar for every touched file regardless: `python3 -m py_compile`,
+  then run the relevant suite(s) above, then deploy to SiS and click
+  through the affected flow. SQL-side integration tests also live in
+  `new_adjustment_db_objects/tests/`. Snowflake behaviour that no local
+  suite reaches (literal escaping edge cases, SiS-runtime-only bugs) cannot
+  be fully verified locally — say so in the commit/PR instead of claiming
+  verification.
 - When the user reports a bug: find the root cause before patching
   (read the code path end-to-end; the bug class here is usually an
   escaping/NaN/widget-state/test-id-mismatch issue, see invariants above).
@@ -165,18 +190,40 @@ features. Anything ambiguous in the UI is a bug.
 
 ## Quick file map
 
+Regenerate this table (and keep it current) from `ls streamlit_app/pages/`
+and `ls new_adjustment_db_objects/*.sql` in the same PR that adds/renames a
+page or SQL file.
+
 | Area | File |
 |---|---|
 | Dashboard / KPIs | `streamlit_app/app.py` |
 | New Adjustment (order ticket) | `streamlit_app/pages/1_New_Adjustment.py` |
 | Browse/manage + delete + history | `streamlit_app/pages/2_Adjustments.py` |
 | Approval queue | `streamlit_app/pages/3_Approval_Queue.py` |
-| Pipeline monitor / force process | `streamlit_app/pages/4_Adjustment_Pipeline.py` |
-| Admin (settings, sign-off, approvers) | `streamlit_app/pages/5_Admin.py` |
+| Sign-Off (sign off / request re-open / sync) | `streamlit_app/pages/5_Sign_Off.py` |
+| Admin (settings, sign-off users, approvers, admins) | `streamlit_app/pages/6_Admin.py` |
+| Documentation (in-app AI assistant / how-it-works) | `streamlit_app/pages/7_Documentation.py` |
+| FRTB Explore (browse official FRTB fact tables) | `streamlit_app/pages/8_FRTB_Explore.py` |
+| Logs (runs, activity, errors, sign-off audit) | `streamlit_app/pages/9_Logs.py` |
+| Tasks & Cost (task health + serverless cost) | `streamlit_app/pages/10_Tasks_Cost.py` |
 | Design tokens, icons, components | `streamlit_app/utils/styles.py` |
 | Session/queries | `streamlit_app/utils/snowflake_conn.py` |
 | Tables + settings seed | `new_adjustment_db_objects/01_tables.sql` |
+| Streams (CDC on adjustment tables) | `new_adjustment_db_objects/02_streams.sql` |
 | Submit SP (validation, ACTION_MAP, blocking) | `new_adjustment_db_objects/03_sp_submit_adjustment.sql` |
 | Preview SP (summary/breakdown/sample modes) | `new_adjustment_db_objects/04_sp_preview_adjustment.sql` |
-| Process SP (Direct/Scale/EntityRoll paths) | `new_adjustment_db_objects/05_sp_process_adjustment.sql` |
+| Process SP (Direct/Scale/EntityRoll/Transfer paths) | `new_adjustment_db_objects/05_sp_process_adjustment.sql` |
+| Pipeline runner SP | `new_adjustment_db_objects/05b_sp_run_pipeline.sql` |
+| Force-process SP | `new_adjustment_db_objects/05c_sp_force_process.sql` |
+| Scheduled tasks (5 pipeline tasks) | `new_adjustment_db_objects/06_tasks.sql` |
+| Dynamic tables | `new_adjustment_db_objects/07_dynamic_tables.sql` |
+| Views (combined/adjusted, tracking) | `new_adjustment_db_objects/08_views.sql` |
+| Entity Roll debug SP | `new_adjustment_db_objects/09_sp_debug_entity_roll.sql` |
+| Sign-off feed sync SP | `new_adjustment_db_objects/10_sp_signoff_sync.sql` |
+| Notification SP | `new_adjustment_db_objects/11_sp_notify.sql` |
+| Workflow SP | `new_adjustment_db_objects/12_sp_workflow.sql` |
+| Direct-upload validation | `new_adjustment_db_objects/13_direct_validation.sql` |
+| Direct batch submit SP | `new_adjustment_db_objects/14_sp_submit_direct_batch.sql` |
+| Direct FRTB upload SP | `new_adjustment_db_objects/15_direct_frtb_upload.sql` |
 | Entity Roll v2 spec | `docs/superpowers/specs/2026-06-11-entity-roll-flatten-design.md` |
+| Transfer Book / multi-scope spec | `docs/superpowers/specs/2026-09-17-transfer-book-multi-scope-design.md` |

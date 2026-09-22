@@ -1,5 +1,8 @@
-# Streamlit Adjustment Engine
-# Requires: streamlit, snowflake-snowpark-python, plotly, pandas
-streamlit>=1.30.0
+# Local-dev pip reference only. Streamlit-in-Snowflake resolves packages
+# from streamlit_app/environment.yml (Anaconda channel) — it does NOT
+# install from this file (no general pip/internet access inside the SiS
+# sandbox). environment.yml is authoritative for the deployed runtime
+# version; keep this pin matching it so local dev doesn't drift from SiS.
+streamlit==1.50.0
 plotly>=5.18.0
 pandas>=2.0.0

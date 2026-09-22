@@ -26,7 +26,7 @@ The direct answer to "is there other code like the backfill UPDATEs":
 
 | # | Where | What re-running destroys | Class |
 |---|-------|--------------------------|-------|
-| A1 | 01_tables.sql:675 `DELETE FROM ADJUSTMENTS_SETTINGS;` + reseed | **The whole engine config** — scopes added in prod, IS_ACTIVE toggles, hotfixed FACT_TABLE_PK. Non-transactional: a mid-window reader sees ZERO config; in-flight adjustments fail. (= July review M7, still open) | HIGH — move to a seed-once/MERGE pattern |
+| A1 | ~~01_tables.sql:675~~ `DELETE FROM ADJUSTMENTS_SETTINGS;` + reseed | **RESOLVED** (per this doc's own STATUS UPDATE banner above) — `01_tables.sql`'s seed for `ADJUSTMENTS_SETTINGS` is now an insert-if-missing pattern (comment: "was DELETE + reseed"), not a DELETE+reseed. Table row corrected 2026-09-22 (docs-drift pass); was previously left showing "still open" despite the fix. | RESOLVED |
 | A2 | 01_tables.sql:1035 `DELETE FROM ADJ_CATEGORY;` + reseed | Categories added/deactivated in prod; empty list during window | LOW |
 | A3 | 01_tables.sql:514 + 15_direct_frtb_upload.sql:36/121/204 `DELETE FROM DIRECT_SCOPE_SCHEMA WHERE PROCESS_TYPE=…` + INSERT | Dev-maintained config (reseed intended) but non-transactional: deploy abort between DELETE and INSERT leaves that scope's upload path dead | MEDIUM |
 | A4 | 01_tables.sql:488 DIRECT_ACCEPTED_COLUMNS MERGE forces `IS_ACTIVE=TRUE` on matched rows | Admin-deactivated aliases resurrect on redeploy; removed seeds never retire | LOW |

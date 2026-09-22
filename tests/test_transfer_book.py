@@ -166,6 +166,15 @@ def test_trf05_fallback_trades_are_flagged(session, ev):
                          f"source fact rows for these trades; point "
                          f"TEST_TRF_FALLBACK_TRADES at real source-book trades "
                          f"(absent from the target book) to exercise the flag.")
+    if len(out) == 0:
+        # No breakdown rows means the discriminating assertions below would
+        # be trivially true (0 == 0) rather than actually checked — skip
+        # loudly instead of recording a silent pass (I5).
+        pytest.skip(
+            "No breakdown rows returned — the fake COB carries no source "
+            f"fact rows for {trades}. Set TEST_TRF_FALLBACK_TRADES to real "
+            "source-book trades (absent from the target book) to exercise "
+            "the fallback flag.")
     # .get(): an error/message row from the SP carries no TARGET_TRADE —
     # it must fail the check, not raise a KeyError.
     flagged = [r for r in out
@@ -173,7 +182,7 @@ def test_trf05_fallback_trades_are_flagged(session, ev):
     ev.check("every returned trade is flagged as a fallback (none claims a "
              "target-book trade)", len(flagged) == len(out))
     ev.check("the breakdown reports one row per trade under test, all flagged",
-             len(out) == 0 or (len(out) == len(trades) and len(flagged) == len(trades)))
+             len(out) == len(trades) and len(flagged) == len(trades))
 
 
 @pytest.mark.uat("TRF-06", title="A Transfer appends: the preview shows it added on top, and an adjustment already on the target book is left in place", priority="P1")
@@ -219,40 +228,43 @@ def test_trf06_transfer_appends_and_supersedes_nothing(session, ev):
 
     if not r or "TOTAL_PROJECTED_VALUE" not in r:
         # An error/MESSAGE row, or nothing at all: the fake COB carries no
-        # source rows for these books. Reported, never passed off as success.
-        ev.note("Preview skipped",
-                "SP_PREVIEW_ADJUSTMENT returned no summary row (MESSAGE row or "
-                "empty) — the fake COB holds no fact rows for "
-                f"{SRC} / {TGT}. Point TEST_TRF_SRC_BOOK / TEST_TRF_TGT_BOOK at "
-                "books with data at a real COB to exercise the append identity.")
-    else:
-        cur   = float(r["TOTAL_CURRENT_VALUE"]   or 0)
-        delta = float(r["TOTAL_ADJUSTMENT_DELTA"] or 0)
-        proj  = float(r["TOTAL_PROJECTED_VALUE"]  or 0)
-        src   = float(r["SOURCE_ADJUSTED_VALUE"]  or 0)
+        # source rows for these books. This P1 case exists specifically to
+        # prove the append-vs-replace preview identity — with no summary row
+        # there is nothing to check, so skip loudly rather than silently
+        # falling through to the weaker header-only checks below (I5).
+        pytest.skip(
+            "SP_PREVIEW_ADJUSTMENT returned no summary row (MESSAGE row or "
+            f"empty) — the fake COB holds no fact rows for {SRC} / {TGT}. "
+            "Point TEST_TRF_SRC_BOOK / TEST_TRF_TGT_BOOK at books with data "
+            "at a real COB to exercise the append identity.")
 
-        def _close(a, b):
-            # Relative tolerance — these are NUMBER(19,4)-ish sums of many rows.
-            return abs(a - b) <= 1e-6 * max(1.0, abs(a), abs(b))
+    cur   = float(r["TOTAL_CURRENT_VALUE"]   or 0)
+    delta = float(r["TOTAL_ADJUSTMENT_DELTA"] or 0)
+    proj  = float(r["TOTAL_PROJECTED_VALUE"]  or 0)
+    src   = float(r["SOURCE_ADJUSTED_VALUE"]  or 0)
 
-        ev.note("Preview figures",
-                f"current={cur} delta={delta} projected={proj} source_adjusted={src}")
-        ev.check("delta = factor x source adjusted (append; the old engine "
-                 "returned factor x source MINUS current)",
-                 _close(delta, factor * src))
-        ev.check("projected = current + delta (append; the old engine returned "
-                 "factor x source, ignoring what the target already had)",
-                 _close(proj, cur + delta))
-        # Only meaningful when the target book actually holds something — with
-        # cur = 0 the append and replace identities coincide.
-        ev.note("Discriminating?",
-                "yes — the target book's current total is non-zero, so append "
-                "and replace give different numbers"
-                if abs(cur) > 0 else
-                "NO — the target book's current total in scope is 0, so the "
-                "append and replace identities coincide and the two checks "
-                "above cannot tell the engines apart. Point the test at a "
-                "target book that carries rows at this COB.")
+    def _close(a, b):
+        # Relative tolerance — these are NUMBER(19,4)-ish sums of many rows.
+        return abs(a - b) <= 1e-6 * max(1.0, abs(a), abs(b))
+
+    ev.note("Preview figures",
+            f"current={cur} delta={delta} projected={proj} source_adjusted={src}")
+    ev.check("delta = factor x source adjusted (append; the old engine "
+             "returned factor x source MINUS current)",
+             _close(delta, factor * src))
+    ev.check("projected = current + delta (append; the old engine returned "
+             "factor x source, ignoring what the target already had)",
+             _close(proj, cur + delta))
+    # Only meaningful when the target book actually holds something — with
+    # cur = 0 the append and replace identities coincide.
+    ev.note("Discriminating?",
+            "yes — the target book's current total is non-zero, so append "
+            "and replace give different numbers"
+            if abs(cur) > 0 else
+            "NO — the target book's current total in scope is 0, so the "
+            "append and replace identities coincide and the two checks "
+            "above cannot tell the engines apart. Point the test at a "
+            "target book that carries rows at this COB.")
 
     # ── 2. Header-level: the two adjustments coexist ─────────────────────
     ent = rows(session, f"""SELECT MAX(ENTITY_CODE) AS E FROM DIMENSION.BOOK
@@ -359,10 +371,9 @@ def test_trf08_current_value_equals_the_adjusted_view(session, ev):
         FROM ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS
         WHERE UPPER(PROCESS_TYPE) = UPPER('{scope}') AND IS_ACTIVE = TRUE""")
     if not cfg or not cfg[0]["FACT_ADJUSTED_TABLE"]:
-        ev.note("Skipped", f"{scope} has no FACT_ADJUSTED_TABLE configured — a "
-                           f"transfer preview refuses outright in that case, so "
-                           f"there is no 'current' to compare.")
-        return
+        pytest.skip(f"{scope} has no FACT_ADJUSTED_TABLE configured — a "
+                    f"transfer preview refuses outright in that case, so "
+                    f"there is no 'current' to compare.")
     view = str(cfg[0]["FACT_ADJUSTED_TABLE"])
     m_name, m_usd = str(cfg[0]["METRIC_NAME"]), str(cfg[0]["METRIC_USD_NAME"] or "")
 
@@ -375,15 +386,13 @@ def test_trf08_current_value_equals_the_adjusted_view(session, ev):
         WHERE TABLE_SCHEMA = '{_schema}' AND TABLE_NAME = '{_tbl}'""", max_rows=0)
     colset = {str(c["COLUMN_NAME"]).upper() for c in cols}
     if not colset:
-        ev.note("Skipped", f"Could not read the columns of {view} from "
-                           f"INFORMATION_SCHEMA — cannot build the independent "
-                           f"sum without knowing which metric column it carries.")
-        return
+        pytest.skip(f"Could not read the columns of {view} from "
+                    f"INFORMATION_SCHEMA — cannot build the independent "
+                    f"sum without knowing which metric column it carries.")
     if "BOOK_KEY" not in colset:
-        ev.note("Skipped", f"{view} has no BOOK_KEY, so 04 builds no book "
-                           f"semi-join for this scope and the target filter this "
-                           f"case reproduces does not exist.")
-        return
+        pytest.skip(f"{view} has no BOOK_KEY, so 04 builds no book "
+                    f"semi-join for this scope and the target filter this "
+                    f"case reproduces does not exist.")
     metric = m_usd if (m_usd and m_usd.upper() in colset) else m_name
     ev.note("Comparison basis", f"view={view} metric={metric} book={TGT} cob={FAKE_COB}")
 
@@ -396,12 +405,11 @@ def test_trf08_current_value_equals_the_adjusted_view(session, ev):
     ev.note("Preview summary", str(out)[:600])
     r = out[0] if out else None
     if not r or "TOTAL_CURRENT_VALUE" not in r:
-        ev.note("Skipped", "SP_PREVIEW_ADJUSTMENT returned no summary row (an "
-                           "error/MESSAGE row, or nothing) — the fake COB holds "
-                           f"no rows for {SRC} / {TGT}. Point "
-                           "TEST_TRF_SRC_BOOK / TEST_TRF_TGT_BOOK at books with "
-                           "data at a real COB to exercise the equivalence.")
-        return
+        pytest.skip("SP_PREVIEW_ADJUSTMENT returned no summary row (an "
+                    "error/MESSAGE row, or nothing) — the fake COB holds "
+                    f"no rows for {SRC} / {TGT}. Point "
+                    "TEST_TRF_SRC_BOOK / TEST_TRF_TGT_BOOK at books with "
+                    "data at a real COB to exercise the equivalence.")
     preview_current = r["TOTAL_CURRENT_VALUE"]
 
     # ── 2. The adjusted view's own total, same predicates ────────────────
@@ -415,11 +423,10 @@ def test_trf08_current_value_equals_the_adjusted_view(session, ev):
           AND fact.{metric} IS NOT NULL""")
 
     if not indep or int(indep[0]["N"] or 0) == 0:
-        ev.note("Skipped", f"{view} carries no rows for book {TGT} at COB "
-                           f"{FAKE_COB}, so both sides are empty and the "
-                           f"comparison cannot discriminate. Point the test at a "
-                           f"target book with data at a real COB.")
-        return
+        pytest.skip(f"{view} carries no rows for book {TGT} at COB "
+                    f"{FAKE_COB}, so both sides are empty and the "
+                    f"comparison cannot discriminate. Point the test at a "
+                    f"target book with data at a real COB.")
 
     view_total = float(indep[0]["V"] or 0)
     cur = float(preview_current or 0)

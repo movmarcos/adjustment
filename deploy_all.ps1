@@ -6,6 +6,7 @@
 #   .\deploy_all.ps1 -Mode db          # force DB objects only
 #   .\deploy_all.ps1 -Mode streamlit   # force Streamlit app only
 #   .\deploy_all.ps1 -Branch main      # deploy from main instead of the change branch
+#   .\deploy_all.ps1 -PythonExe C:/path/to/python.exe   # override the interpreter
 #
 # How "auto" decides (the flag is computed from git, so it can never drift):
 #   - a change under  new_adjustment_db_objects\  (or config.py / deploy.py) -> deploy DB
@@ -19,10 +20,15 @@ param(
     [string]$Mode = "auto",
     # Git branch to deploy from. Default: the change branch under test.
     # Switch back to "main" once the branch is merged.
-    [string]$Branch = "feat/multi-scope-transfer-book"
+    [string]$Branch = "feat/multi-scope-transfer-book",
+    # Python interpreter to run deploy.py with. Defaults to "python" resolved
+    # via PATH, or $env:ADJ_DEPLOY_PYTHON when set — never hardcode a
+    # personal machine path here (config.py's whole premise is nothing else
+    # in the repo hardcodes an environment/machine detail).
+    [string]$PythonExe = $(if ($env:ADJ_DEPLOY_PYTHON) { $env:ADJ_DEPLOY_PYTHON } else { "python" })
 )
 
-$pythonExe   = "C:/Users/n319464/AppData/Local/Programs/Python/Python313/python.exe"
+$pythonExe   = $PythonExe
 $deployScript = "deploy.py"
 $markerFile  = ".last_deploy_commit"
 
