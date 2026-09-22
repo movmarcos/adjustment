@@ -19,7 +19,7 @@ USE SCHEMA ADJUSTMENT_APP;
 -- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE OR REPLACE VIEW ADJUSTMENT_APP.VW_SIGNOFF_STATUS
-    COMMENT = 'Sign-off lifecycle per COB + scope + entity (''*'' = whole scope). IS_SIGNED_OFF = TRUE (SIGNED_OFF or REOPEN_REQUESTED) blocks new adjustments for that entity. Reads from ADJ_SIGNOFF_STATUS.'
+    COMMENT = 'Sign-off lifecycle per COB + scope + entity (''*'' = whole scope). IS_SIGNED_OFF = TRUE (SIGNED_OFF, REOPEN_REQUESTED, or SIGNOFF_REQUESTED) blocks new adjustments for that entity, matching the submit-gate BLOCKED set. Reads from ADJ_SIGNOFF_STATUS.'
 AS
 SELECT
     s.COBID,
@@ -28,7 +28,7 @@ SELECT
     s.ENTITY_CODE,
     s.SIGN_OFF_STATUS,
     CASE
-        WHEN UPPER(s.SIGN_OFF_STATUS) IN ('SIGNED_OFF', 'REOPEN_REQUESTED') THEN TRUE
+        WHEN UPPER(s.SIGN_OFF_STATUS) IN ('SIGNED_OFF', 'REOPEN_REQUESTED', 'SIGNOFF_REQUESTED') THEN TRUE
         ELSE FALSE
     END AS IS_SIGNED_OFF,
     s.SIGN_OFF_BY,
@@ -226,6 +226,8 @@ SELECT
     h.SCALE_FACTOR_ADJUSTED,
     h.SOURCE_COBID,
     h.ADJUSTMENT_VALUE_IN_USD,
+    h.ADJUSTMENT_CATEGORY,
+    h.BLOCKED_BY_ADJ_ID,
     h.REASON,
     h.RUN_STATUS,
     h.USERNAME                AS SUBMITTED_BY,
@@ -301,6 +303,7 @@ SELECT
     h.SCALE_FACTOR_ADJUSTED,
     h.SOURCE_COBID,
     h.ADJUSTMENT_VALUE_IN_USD,
+    h.ADJUSTMENT_CATEGORY,
     h.REASON,
     h.RUN_STATUS,
     h.USERNAME                AS SUBMITTED_BY,

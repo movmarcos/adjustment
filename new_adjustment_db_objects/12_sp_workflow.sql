@@ -147,6 +147,122 @@ $$;
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- SP_PROPAGATE_SIGNOFF_FEED — push an applied sign-off/re-open change into
+-- the upstream feed table (BATCH.PUBLISH_SIGNOFF_STATUS by default).
+--
+-- Was previously duplicated verbatim inside both SP_REQUEST_SIGNOFF_CHANGE
+-- (direct-apply path) and SP_DECIDE_SIGNOFF_CHANGE (approved-decision path)
+-- — identical bodies, identical docstrings, plus two independent copies each
+-- of _esc and FEED_NATIVE_SCOPES. Snowflake needs one dollar-quoted body per
+-- procedure, so this is the shared procedure both now CALL instead of
+-- carrying their own copy of the logic.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE OR ALTER PROCEDURE ADJUSTMENT_APP.SP_PROPAGATE_SIGNOFF_FEED(
+    p_cobid          INT,
+    p_process_type   VARCHAR,
+    p_entity_code    VARCHAR,   -- '*' = whole-scope
+    p_sub_type       VARCHAR,   -- ''/NULL = no sub-type
+    p_publish_status VARCHAR    -- 'SignedOff' | 'InProgress'
+)
+RETURNS VARCHAR
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER = 'main'
+COMMENT = 'Push an applied sign-off/re-open lifecycle change into the upstream feed table (ADJ_APP_CONFIG.SIGNOFF_FEED_TABLE, default BATCH.PUBLISH_SIGNOFF_STATUS). Shared by SP_REQUEST_SIGNOFF_CHANGE and SP_DECIDE_SIGNOFF_CHANGE so the propagation rule is defined exactly once.'
+EXECUTE AS CALLER
+AS
+$$
+import json
+
+
+def _esc(v):
+    return str(v).replace("\\", "\\\\").replace("'", "''") if v is not None else ""
+
+
+# Scopes the publish process natively knows — a missing feed row may be
+# INSERTED for these. FRTBDRC/FRTBRRAO rows are created upstream by Marcos
+# when needed, so for those the propagation is UPDATE-ONLY: the app never
+# invents feed rows the publish process didn't define.
+FEED_NATIVE_SCOPES = ("VAR", "STRESS", "SENSITIVITY", "FRTB")
+
+
+def _cfg(session, key, default=""):
+    rows = session.sql(
+        f"SELECT CONFIG_VALUE FROM ADJUSTMENT_APP.ADJ_APP_CONFIG "
+        f"WHERE CONFIG_KEY = '{key}'").collect()
+    v = rows[0]["CONFIG_VALUE"] if rows else None
+    return str(v) if v is not None else default
+
+
+def main(session, p_cobid, p_process_type, p_entity_code, p_sub_type, p_publish_status):
+    """publish_status 'SignedOff' (sign-off applied): update-or-insert for the
+    feed's native scopes, UPDATE-ONLY for FRTBDRC/FRTBRRAO (the app never
+    invents process types the publish process didn't define).
+    publish_status 'InProgress' (re-open approved): the feed goes BACK to
+    InProgress; UPDATE-ONLY of currently-SignedOff rows, never an insert
+    (nothing to revert if the feed has no row).
+
+    EXACT process-type match: the feed's 'FRTB' row is SBM only.
+    Skipped while SIGNOFF_FEED_ENABLED is false (feed migration)."""
+    if _cfg(session, "SIGNOFF_FEED_ENABLED", "true").strip().lower() != "true":
+        return json.dumps({"status": "skipped",
+                           "message": "SIGNOFF_FEED_ENABLED is false — "
+                                      "propagation skipped."})
+
+    feed = _cfg(session, "SIGNOFF_FEED_TABLE", "BATCH.PUBLISH_SIGNOFF_STATUS").strip()
+    cobid  = int(p_cobid)
+    scope  = _esc(p_process_type)
+    entity = _esc(p_entity_code) if p_entity_code else "*"
+    sub    = _esc(p_sub_type) if p_sub_type else ""
+    publish_status = _esc(p_publish_status)
+
+    signing_off = str(p_publish_status).upper() == "SIGNEDOFF"
+    may_insert = signing_off and str(p_process_type).upper() in FEED_NATIVE_SCOPES
+    # Sign-off touches rows not yet SignedOff; re-open touches ONLY rows
+    # that currently say SignedOff (never resurrects anything else).
+    state_guard = ("AND UPPER(PUBLISH_STATUS) <> 'SIGNEDOFF'" if signing_off
+                   else "AND UPPER(PUBLISH_STATUS) = 'SIGNEDOFF'")
+
+    if entity == "*" or not may_insert:
+        ent_pred = ("" if entity == "*"
+                    else f"AND UPPER(ENTITY_CODE) = UPPER('{entity}')")
+        session.sql(f"""
+            UPDATE {feed}
+            SET PUBLISH_STATUS = '{publish_status}',
+                SIGNOFF_UPDATE_TIME = CURRENT_TIMESTAMP()
+            WHERE COBID = {cobid}
+              AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
+              {ent_pred}
+              AND COALESCE(UPPER(TRIM(SUB_TYPE)), '') = UPPER('{sub}')
+              {state_guard}
+        """).collect()
+    else:
+        session.sql(f"""
+            MERGE INTO {feed} t
+            USING (SELECT {cobid} AS COBID, '{scope}' AS PROCESS_TYPE,
+                          '{entity}' AS ENTITY_CODE,
+                          NULLIF('{sub}', '') AS SUB_TYPE) s
+            ON t.COBID = s.COBID
+               AND UPPER(t.PROCESS_TYPE) = UPPER(s.PROCESS_TYPE)
+               AND UPPER(t.ENTITY_CODE) = UPPER(s.ENTITY_CODE)
+               AND COALESCE(UPPER(TRIM(t.SUB_TYPE)), '') = UPPER('{sub}')
+            WHEN MATCHED THEN UPDATE SET
+                t.PUBLISH_STATUS = 'SignedOff',
+                t.SIGNOFF_UPDATE_TIME = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (COBID, ENTITY_CODE, PROCESS_TYPE, SUB_TYPE,
+                 PUBLISH_STATUS, SIGNOFF_UPDATE_TIME)
+            VALUES (s.COBID, s.ENTITY_CODE, s.PROCESS_TYPE, s.SUB_TYPE,
+                    'SignedOff', CURRENT_TIMESTAMP())
+        """).collect()
+
+    return json.dumps({"status": "ok"})
+$$;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- SP_REQUEST_SIGNOFF_CHANGE — raise a sign-off OR re-open request on a COB
 --
 -- There is no standalone "open the COB" concept: open rows come from the
@@ -190,78 +306,17 @@ ACTIONS = {
 }
 
 
-# Scopes the publish process natively knows — a missing feed row may be
-# INSERTED for these. FRTBDRC/FRTBRRAO rows are created upstream by Marcos
-# when needed, so for those the propagation is UPDATE-ONLY: the app never
-# invents feed rows the publish process didn't define.
-FEED_NATIVE_SCOPES = ("VAR", "STRESS", "SENSITIVITY", "FRTB")
-
-
 def _propagate_to_feed(session, cobid, scope, entity, sub, publish_status):
     """Push an APPLIED lifecycle change into the upstream feed table — the
     batch process reads BATCH.PUBLISH_SIGNOFF_STATUS, so the ADJUSTMENT_APP
-    state must propagate there (same pattern as the rest of the schema).
-    Rows are matched on the SAME SUB_TYPE ('' = none); entity '*' updates
-    every entity of the scope at that COB.
-
-    publish_status 'SignedOff' (sign-off applied): update-or-insert for the
-    feed's native scopes, UPDATE-ONLY for FRTBDRC/FRTBRRAO (the app never
-    invents process types the publish process didn't define).
-    publish_status 'InProgress' (re-open approved — Marcos, 2026-08): the
-    feed goes BACK to InProgress; UPDATE-ONLY of currently-SignedOff rows,
-    never an insert (nothing to revert if the feed has no row).
-
-    EXACT process-type match: the feed's 'FRTB' row is SBM only.
-    Skipped while SIGNOFF_FEED_ENABLED is false (feed migration)."""
-    def _cfg(key, default=""):
-        rows = session.sql(
-            f"SELECT CONFIG_VALUE FROM ADJUSTMENT_APP.ADJ_APP_CONFIG "
-            f"WHERE CONFIG_KEY = '{key}'").collect()
-        v = rows[0]["CONFIG_VALUE"] if rows else None
-        return str(v) if v is not None else default
-
-    if _cfg("SIGNOFF_FEED_ENABLED", "true").strip().lower() != "true":
-        return
-    feed = _cfg("SIGNOFF_FEED_TABLE", "BATCH.PUBLISH_SIGNOFF_STATUS").strip()
-    signing_off = str(publish_status).upper() == "SIGNEDOFF"
-    may_insert = signing_off and str(scope).upper() in FEED_NATIVE_SCOPES
-    # Sign-off touches rows not yet SignedOff; re-open touches ONLY rows
-    # that currently say SignedOff (never resurrects anything else).
-    state_guard = ("AND UPPER(PUBLISH_STATUS) <> 'SIGNEDOFF'" if signing_off
-                   else "AND UPPER(PUBLISH_STATUS) = 'SIGNEDOFF'")
-
-    if str(entity) == "*" or not may_insert:
-        ent_pred = ("" if str(entity) == "*"
-                    else f"AND UPPER(ENTITY_CODE) = UPPER('{entity}')")
-        session.sql(f"""
-            UPDATE {feed}
-            SET PUBLISH_STATUS = '{publish_status}',
-                SIGNOFF_UPDATE_TIME = CURRENT_TIMESTAMP()
-            WHERE COBID = {int(cobid)}
-              AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
-              {ent_pred}
-              AND COALESCE(UPPER(TRIM(SUB_TYPE)), '') = UPPER('{sub}')
-              {state_guard}
-        """).collect()
-    else:
-        session.sql(f"""
-            MERGE INTO {feed} t
-            USING (SELECT {int(cobid)} AS COBID, '{scope}' AS PROCESS_TYPE,
-                          '{entity}' AS ENTITY_CODE,
-                          NULLIF('{sub}', '') AS SUB_TYPE) s
-            ON t.COBID = s.COBID
-               AND UPPER(t.PROCESS_TYPE) = UPPER(s.PROCESS_TYPE)
-               AND UPPER(t.ENTITY_CODE) = UPPER(s.ENTITY_CODE)
-               AND COALESCE(UPPER(TRIM(t.SUB_TYPE)), '') = UPPER('{sub}')
-            WHEN MATCHED THEN UPDATE SET
-                t.PUBLISH_STATUS = 'SignedOff',
-                t.SIGNOFF_UPDATE_TIME = CURRENT_TIMESTAMP()
-            WHEN NOT MATCHED THEN INSERT
-                (COBID, ENTITY_CODE, PROCESS_TYPE, SUB_TYPE,
-                 PUBLISH_STATUS, SIGNOFF_UPDATE_TIME)
-            VALUES (s.COBID, s.ENTITY_CODE, s.PROCESS_TYPE, s.SUB_TYPE,
-                    'SignedOff', CURRENT_TIMESTAMP())
-        """).collect()
+    state must propagate there. Thin wrapper over the shared
+    SP_PROPAGATE_SIGNOFF_FEED (defined above SP_REQUEST_SIGNOFF_CHANGE in
+    this file) so both this proc and SP_DECIDE_SIGNOFF_CHANGE call one
+    definition of the propagation rule instead of each carrying its own copy."""
+    session.sql(f"""
+        CALL ADJUSTMENT_APP.SP_PROPAGATE_SIGNOFF_FEED(
+            {int(cobid)}, '{scope}', '{entity}', '{sub}', '{publish_status}')
+    """).collect()
 
 
 def _esc(v):
@@ -359,6 +414,17 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_sub_type,
                     'SIGNED_OFF', 'REOPEN_REQUESTED',
                     '{_esc(caller)}', 'Re-open requested (upstream sign-off, not yet synced)')
         """).collect()
+        # Best-effort notify — this early-return branch is also an
+        # approval-gated request (REOPEN always requires approval), so it
+        # needs the same notify as the main success path below.
+        try:
+            _np = json.dumps({"process_type": p_process_type, "cobid": cobid,
+                              "requested_by": caller,
+                              "reason": str(p_reason or "")[:490]}
+                             ).replace("\\", "\\\\").replace("'", "''")
+            session.sql(f"CALL ADJUSTMENT_APP.SP_NOTIFY('reopen_requested', '{_np}')").collect()
+        except Exception as ne:
+            print(f"Sign-off notification skipped (non-fatal): {ne}")
         return json.dumps({"status": "ok", "action": action,
                            "new_status": "REOPEN_REQUESTED", "by": caller,
                            "pending_approval": True})
@@ -377,8 +443,12 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_sub_type,
     new_status = pending_status if requires_approval else direct_status
     from_in = ", ".join(f"'{s}'" for s in from_statuses)
     # Slice the RAW text first, escape after — slicing an escaped string can
-    # split a doubled quote/backslash pair and break the literal.
-    reason = _esc(str(p_reason or "")[:490])
+    # split a doubled quote/backslash pair and break the literal. Keep the
+    # raw, unescaped copy too (raw_reason) for building the history COMMENT
+    # below, which composes further text around it and must not re-slice
+    # anything already escaped.
+    raw_reason = str(p_reason or "")[:490]
+    reason = _esc(raw_reason)
 
     if requires_approval:
         set_clause = (f"SIGN_OFF_STATUS = '{new_status}', "
@@ -425,15 +495,20 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_sub_type,
             _propagate_to_feed(session, cobid, scope, entity, sub, "InProgress")
 
         verb = "Sign-off" if action == "SIGNOFF" else "Re-open"
-        comment = (f"{verb} requested by {_esc(caller)}"
-                   + (f": {reason[:900]}" if reason else "")) if requires_approval \
-                  else f"{verb} applied directly by {_esc(caller)} (approval not required)"
+        # Build the RAW comment (unescaped caller/reason), slice it, THEN
+        # escape once — the previous version composed from already-escaped
+        # _esc(caller) and reason[:900] and re-sliced the result, which can
+        # split a doubled quote/backslash pair mid-string.
+        raw_comment = (f"{verb} requested by {caller}"
+                       + (f": {raw_reason}" if raw_reason else "")) if requires_approval \
+                      else f"{verb} applied directly by {caller} (approval not required)"
+        comment = _esc(raw_comment[:1980])
         session.sql(f"""
             INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
                 (COBID, PROCESS_TYPE, ENTITY_CODE, SUB_TYPE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
             VALUES ({cobid}, '{scope}', '{entity}', NULLIF('{sub}', ''),
                     '{cur}', '{new_status}',
-                    '{_esc(caller)}', '{comment[:1980]}')
+                    '{_esc(caller)}', '{comment}')
         """).collect()
         session.sql("COMMIT").collect()
     except Exception as e:
@@ -444,6 +519,24 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_sub_type,
         return json.dumps({"status": "error",
                            "message": f"Sign-off could not be applied (nothing "
                                       f"was changed): {str(e)[:300]}"})
+
+    # Best-effort notify — AFTER the commit, outside the try/except above, so
+    # a notification failure can never turn a successful state change into a
+    # reported error (or trigger a ROLLBACK of work that already committed).
+    # This is the one path that was missing it: the New Adjustment page's
+    # quick-action re-open notifies the approvers itself, but a re-open (or
+    # sign-off) request raised from the Sign-Off page called only this proc
+    # and stopped — nobody was told an approval-gated request was waiting.
+    if requires_approval:
+        try:
+            _np = json.dumps({"process_type": p_process_type, "cobid": cobid,
+                              "requested_by": caller,
+                              "reason": str(p_reason or "")[:490]}
+                             ).replace("\\", "\\\\").replace("'", "''")
+            _evt = "reopen_requested" if action == "REOPEN" else "approval_pending"
+            session.sql(f"CALL ADJUSTMENT_APP.SP_NOTIFY('{_evt}', '{_np}')").collect()
+        except Exception as ne:
+            print(f"Sign-off notification skipped (non-fatal): {ne}")
 
     return json.dumps({"status": "ok", "action": action,
                        "new_status": new_status, "by": caller,
@@ -486,78 +579,17 @@ PENDING = {
 }
 
 
-# Scopes the publish process natively knows — a missing feed row may be
-# INSERTED for these. FRTBDRC/FRTBRRAO rows are created upstream by Marcos
-# when needed, so for those the propagation is UPDATE-ONLY: the app never
-# invents feed rows the publish process didn't define.
-FEED_NATIVE_SCOPES = ("VAR", "STRESS", "SENSITIVITY", "FRTB")
-
-
 def _propagate_to_feed(session, cobid, scope, entity, sub, publish_status):
     """Push an APPLIED lifecycle change into the upstream feed table — the
     batch process reads BATCH.PUBLISH_SIGNOFF_STATUS, so the ADJUSTMENT_APP
-    state must propagate there (same pattern as the rest of the schema).
-    Rows are matched on the SAME SUB_TYPE ('' = none); entity '*' updates
-    every entity of the scope at that COB.
-
-    publish_status 'SignedOff' (sign-off applied): update-or-insert for the
-    feed's native scopes, UPDATE-ONLY for FRTBDRC/FRTBRRAO (the app never
-    invents process types the publish process didn't define).
-    publish_status 'InProgress' (re-open approved — Marcos, 2026-08): the
-    feed goes BACK to InProgress; UPDATE-ONLY of currently-SignedOff rows,
-    never an insert (nothing to revert if the feed has no row).
-
-    EXACT process-type match: the feed's 'FRTB' row is SBM only.
-    Skipped while SIGNOFF_FEED_ENABLED is false (feed migration)."""
-    def _cfg(key, default=""):
-        rows = session.sql(
-            f"SELECT CONFIG_VALUE FROM ADJUSTMENT_APP.ADJ_APP_CONFIG "
-            f"WHERE CONFIG_KEY = '{key}'").collect()
-        v = rows[0]["CONFIG_VALUE"] if rows else None
-        return str(v) if v is not None else default
-
-    if _cfg("SIGNOFF_FEED_ENABLED", "true").strip().lower() != "true":
-        return
-    feed = _cfg("SIGNOFF_FEED_TABLE", "BATCH.PUBLISH_SIGNOFF_STATUS").strip()
-    signing_off = str(publish_status).upper() == "SIGNEDOFF"
-    may_insert = signing_off and str(scope).upper() in FEED_NATIVE_SCOPES
-    # Sign-off touches rows not yet SignedOff; re-open touches ONLY rows
-    # that currently say SignedOff (never resurrects anything else).
-    state_guard = ("AND UPPER(PUBLISH_STATUS) <> 'SIGNEDOFF'" if signing_off
-                   else "AND UPPER(PUBLISH_STATUS) = 'SIGNEDOFF'")
-
-    if str(entity) == "*" or not may_insert:
-        ent_pred = ("" if str(entity) == "*"
-                    else f"AND UPPER(ENTITY_CODE) = UPPER('{entity}')")
-        session.sql(f"""
-            UPDATE {feed}
-            SET PUBLISH_STATUS = '{publish_status}',
-                SIGNOFF_UPDATE_TIME = CURRENT_TIMESTAMP()
-            WHERE COBID = {int(cobid)}
-              AND UPPER(PROCESS_TYPE) = UPPER('{scope}')
-              {ent_pred}
-              AND COALESCE(UPPER(TRIM(SUB_TYPE)), '') = UPPER('{sub}')
-              {state_guard}
-        """).collect()
-    else:
-        session.sql(f"""
-            MERGE INTO {feed} t
-            USING (SELECT {int(cobid)} AS COBID, '{scope}' AS PROCESS_TYPE,
-                          '{entity}' AS ENTITY_CODE,
-                          NULLIF('{sub}', '') AS SUB_TYPE) s
-            ON t.COBID = s.COBID
-               AND UPPER(t.PROCESS_TYPE) = UPPER(s.PROCESS_TYPE)
-               AND UPPER(t.ENTITY_CODE) = UPPER(s.ENTITY_CODE)
-               AND COALESCE(UPPER(TRIM(t.SUB_TYPE)), '') = UPPER('{sub}')
-            WHEN MATCHED THEN UPDATE SET
-                t.PUBLISH_STATUS = 'SignedOff',
-                t.SIGNOFF_UPDATE_TIME = CURRENT_TIMESTAMP()
-            WHEN NOT MATCHED THEN INSERT
-                (COBID, ENTITY_CODE, PROCESS_TYPE, SUB_TYPE,
-                 PUBLISH_STATUS, SIGNOFF_UPDATE_TIME)
-            VALUES (s.COBID, s.ENTITY_CODE, s.PROCESS_TYPE, s.SUB_TYPE,
-                    'SignedOff', CURRENT_TIMESTAMP())
-        """).collect()
+    state must propagate there. Thin wrapper over the shared
+    SP_PROPAGATE_SIGNOFF_FEED (defined above SP_REQUEST_SIGNOFF_CHANGE in
+    this file) so both this proc and SP_REQUEST_SIGNOFF_CHANGE call one
+    definition of the propagation rule instead of each carrying its own copy."""
+    session.sql(f"""
+        CALL ADJUSTMENT_APP.SP_PROPAGATE_SIGNOFF_FEED(
+            {int(cobid)}, '{scope}', '{entity}', '{sub}', '{publish_status}')
+    """).collect()
 
 
 def _esc(v):
@@ -670,14 +702,19 @@ def main(session, p_cobid, p_process_type, p_entity_code, p_sub_type,
         elif new_status == "REOPENED":
             _propagate_to_feed(session, cobid, scope, entity, sub, "InProgress")
 
-        comment = _esc(str(p_comment)[:990]) if p_comment \
-                  else f"{label.capitalize()} {decision.lower()} by {_esc(caller)}"
+        # Slice the RAW text first, escape once at the end — a comment built
+        # from an already-escaped fragment (e.g. _esc(caller) embedded in an
+        # f-string) and then re-sliced can split a doubled quote/backslash
+        # pair and break the literal.
+        raw_comment = str(p_comment)[:990] if p_comment \
+                      else f"{label.capitalize()} {decision.lower()} by {caller}"
+        comment = _esc(raw_comment[:1980])
         session.sql(f"""
             INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
                 (COBID, PROCESS_TYPE, ENTITY_CODE, SUB_TYPE, OLD_STATUS, NEW_STATUS, ACTION_BY, COMMENT)
             VALUES ({cobid}, '{scope}', '{entity}', NULLIF('{sub}', ''),
                     '{cur}', '{new_status}',
-                    '{_esc(caller)}', '{comment[:1980]}')
+                    '{_esc(caller)}', '{comment}')
         """).collect()
         session.sql("COMMIT").collect()
     except Exception as e:
@@ -697,5 +734,6 @@ $$;
 -- VERIFY
 -- ═══════════════════════════════════════════════════════════════════════════
 DESCRIBE PROCEDURE ADJUSTMENT_APP.SP_DECIDE_ADJUSTMENT(VARCHAR, VARCHAR, VARCHAR, VARCHAR);
+DESCRIBE PROCEDURE ADJUSTMENT_APP.SP_PROPAGATE_SIGNOFF_FEED(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR);
 DESCRIBE PROCEDURE ADJUSTMENT_APP.SP_REQUEST_SIGNOFF_CHANGE(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, BOOLEAN, VARCHAR);
 DESCRIBE PROCEDURE ADJUSTMENT_APP.SP_DECIDE_SIGNOFF_CHANGE(INT, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR);

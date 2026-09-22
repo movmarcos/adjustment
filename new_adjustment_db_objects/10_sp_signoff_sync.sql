@@ -153,6 +153,33 @@ def main(session):
             summary["synced"][scope] = 0
             continue
 
+        # Set-based history write, run BEFORE the MERGE below so both describe
+        # exactly the same set (identical join + WHERE to `to_change` and to
+        # the MERGE's WHEN NOT MATCHED / WHEN MATCHED AND OPEN branches).
+        # Previously this built one VALUES tuple per row of `to_change` in
+        # Python — on the first sync after a feed migration that is tens of
+        # thousands of tuples in a single INSERT, which can exceed Snowflake's
+        # statement-text cap. That failure landed AFTER the MERGE had already
+        # committed, so app rows flipped to SIGNED_OFF with no history. A
+        # set-based INSERT has no such row-count-driven text limit, and running
+        # it first means a failure here aborts before any status is changed.
+        session.sql(f"""
+            INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
+                (COBID, PROCESS_TYPE, ENTITY_CODE, SUB_TYPE, OLD_STATUS,
+                 NEW_STATUS, ACTION_BY, COMMENT)
+            SELECT s.COBID, '{scope}', s.ENTITY_CODE, s.SUB_TYPE,
+                   a.SIGN_OFF_STATUS, 'SIGNED_OFF', 'EXTERNAL FEED',
+                   'Signed off by the upstream publish system (synced)'
+            FROM ({src_sql}) s
+            LEFT JOIN ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS a
+              ON a.COBID = s.COBID
+             AND UPPER(a.PROCESS_TYPE) = '{scope.upper()}'
+             AND UPPER(a.ENTITY_CODE) = s.ENTITY_CODE
+             AND COALESCE(UPPER(a.SUB_TYPE), '') = COALESCE(UPPER(s.SUB_TYPE), '')
+            WHERE a.COBID IS NULL
+               OR UPPER(a.SIGN_OFF_STATUS) = 'OPEN'
+        """).collect()
+
         session.sql(f"""
             MERGE INTO ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS t
             USING ({src_sql}) s
@@ -172,23 +199,6 @@ def main(session):
             VALUES
                 (s.COBID, '{scope}', s.ENTITY_CODE, s.SUB_TYPE, 'SIGNED_OFF',
                  'EXTERNAL FEED', CURRENT_TIMESTAMP(), 'EXTERNAL')
-        """).collect()
-
-        def _hv(v):
-            return ("NULL" if v is None else
-                    "'" + str(v).replace(chr(92), chr(92) * 2)
-                                .replace(chr(39), chr(39) * 2) + "'")
-        hist_values = ", ".join(
-            f"({int(r['COBID'])}, '{scope}', {_hv(r['ENTITY_CODE'])}, "
-            f"{_hv(r['SUB_TYPE'])}, {_hv(r['OLD_STATUS'])}, "
-            "'SIGNED_OFF', 'EXTERNAL FEED', "
-            "'Signed off by the upstream publish system (synced)')"
-            for r in to_change)
-        session.sql(f"""
-            INSERT INTO ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY
-                (COBID, PROCESS_TYPE, ENTITY_CODE, SUB_TYPE, OLD_STATUS,
-                 NEW_STATUS, ACTION_BY, COMMENT)
-            VALUES {hist_values}
         """).collect()
 
         summary["synced"][scope] = len(to_change)

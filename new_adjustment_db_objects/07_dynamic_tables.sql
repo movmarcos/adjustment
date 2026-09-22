@@ -79,6 +79,14 @@ WITH active_adjustments AS (
         ADJ_ID,
         COBID,
         PROCESS_TYPE,
+        -- SP_RUN_PIPELINE blocks across the whole pipeline, not just the exact
+        -- PROCESS_TYPE (05b:479 PROCESS_TYPE IN ({pipeline_in})) — the three
+        -- FRTB sub-scopes (FRTB, FRTBDRC, FRTBRRAO) share one pipeline and
+        -- serialise against each other. Match that here or this view warns
+        -- about overlaps the engine never actually blocks on, and stays
+        -- silent on overlaps that will really serialise.
+        CASE WHEN PROCESS_TYPE IN ('FRTB', 'FRTBDRC', 'FRTBRRAO') THEN 'FRTB'
+             ELSE UPPER(PROCESS_TYPE) END           AS PIPELINE_KEY,
         ADJUSTMENT_TYPE,
         ADJUSTMENT_ACTION,
         -- Build a normalised "filter fingerprint" for overlap detection
@@ -111,6 +119,12 @@ WITH active_adjustments AS (
     FROM ADJUSTMENT_APP.ADJ_HEADER
     WHERE IS_DELETED = FALSE
       AND RUN_STATUS IN ('Pending', 'Pending Approval', 'Approved', 'Running', 'Processed')
+      -- Direct/Upload adjustments never participate in overlap serialisation —
+      -- SP_RUN_PIPELINE excludes them from its own overlap queries
+      -- (05b _OVERLAP_ACTION_FILTER: ADJUSTMENT_ACTION NOT IN ('Direct','Upload')).
+      -- Without this exclusion here, the UI warns about overlaps that will
+      -- never actually serialise.
+      AND ADJUSTMENT_ACTION NOT IN ('Direct', 'Upload')
       -- Bound the pair-join: unbounded, the N² self-join grew with ALL
       -- Processed history and would eventually outrun its 1-minute lag. The
       -- UI only warns about current work, so ~35 days of COBs is plenty.
@@ -143,7 +157,7 @@ overlaps AS (
     FROM active_adjustments a
     INNER JOIN active_adjustments b
         ON  a.COBID        = b.COBID
-        AND a.PROCESS_TYPE = b.PROCESS_TYPE
+        AND a.PIPELINE_KEY  = b.PIPELINE_KEY   -- pipeline-wide, matches SP_RUN_PIPELINE's blocking scope
         AND a.ADJ_ID       < b.ADJ_ID     -- avoid self-join duplicates
         -- Overlap condition: dimensions must match OR one side is wildcard
         -- Must match all 21 OVERLAP_DIMS used by SP_RUN_PIPELINE

@@ -218,7 +218,12 @@ COMMENT = 'Direct Adjustment uploads: one row per CSV line, raw fields in PAYLOA
 -- VALID row into its own ADJ_HEADER. Rows are deleted after submit/cancel;
 -- anything older than 2 days is abandoned and may be purged.
 -- ═══════════════════════════════════════════════════════════════════════════
--- widths mirror ADJ_HEADER so green rows cannot fail at submit with truncation errors
+-- widths mirror ADJ_HEADER so green rows cannot fail at submit with truncation
+-- errors — EXCEPT USERNAME, which is wider (200 vs ADJ_HEADER.USERNAME(50)):
+-- SP_SUBMIT_DIRECT_BATCH writes the CALLER's resolved username into
+-- ADJ_HEADER, never this stage column, so the mismatch does not bite today.
+-- If a future change ever inserts the stage column's USERNAME into
+-- ADJ_HEADER, cap it to 50 chars at that insert.
 CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_DIRECT_STAGE (
     BATCH_ID            VARCHAR(36)  NOT NULL,
     ROW_NUM             NUMBER(38,0) NOT NULL,
@@ -530,13 +535,15 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA (
 )
 COMMENT = 'Per-scope Direct Adjustment schema: how to extract/resolve/map JSON payload into the scope fact table.';
 
-BEGIN TRANSACTION;
-DELETE FROM ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA WHERE PROCESS_TYPE = 'VaR';
-INSERT INTO ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA
-    (PROCESS_TYPE, EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS,
-     METRIC_FIELD, METRIC_USD_FIELD, WRITER_OVERRIDE, IS_ACTIVE)
-SELECT
-    'VaR',
+-- MERGE, not DELETE+INSERT: a redeploy must not wipe VALIDATION_RULES/
+-- ALIASES (this seed never sets them — they're admin/15_direct_frtb_upload
+-- managed) or reset IS_ACTIVE if an admin turned this scope off. Matches the
+-- insert-if-missing / update-in-place policy already used for
+-- DIRECT_ACCEPTED_COLUMNS above and ADJUSTMENTS_SETTINGS / ADJ_CATEGORY below.
+MERGE INTO ADJUSTMENT_APP.DIRECT_SCOPE_SCHEMA t
+USING (
+    SELECT
+    'VaR' AS PROCESS_TYPE,
     PARSE_JSON('[
         {"name":"COBId","type":"number","required":true},
         {"name":"EntityCode","type":"string","required":true},
@@ -568,7 +575,7 @@ SELECT
         {"name":"ParCreditSpreadVaR","type":"number","required":false},
         {"name":"Category","type":"string","required":false},
         {"name":"Detail","type":"string","required":false}
-    ]'),
+    ]') AS EXPECTED_COLUMNS,
     PARSE_JSON('{
         "measure_map":{
             "AllVaR":"ALL VAR","AllVaRSkew":"ALL VAR SKEW","BasisVaR":"BASIS VAR",
@@ -584,21 +591,34 @@ SELECT
         },
         "measure_name_field":"VAR_SUB_COMPONENT_NAME",
         "value_field":"ADJ_VALUE"
-    }'),
+    }') AS UNPIVOT,
     PARSE_JSON('[
         {"payload_field":"COBId","target_column":"COBID","type":"number"},
         {"payload_field":"EntityCode","target_column":"ENTITY_CODE","type":"string"},
         {"payload_field":"SourceSystemCode","target_column":"SOURCE_SYSTEM_CODE","type":"string"},
         {"payload_field":"CurrencyCode","target_column":"CURRENCY_CODE","type":"string"},
         {"payload_field":"ScenarioDate","target_column":"SCENARIO_DATE_ID","type":"number"}
-    ]'),
+    ]') AS FACT_MAPPING,
     PARSE_JSON('[
         {"source_field":"VAR_SUB_COMPONENT_NAME","dimension_table":"DIMENSION.VAR_SUB_COMPONENT",
          "match_column":"VAR_SUB_COMPONENT_NAME","key_column":"VAR_SUB_COMPONENT_ID",
          "target_column":"VAR_SUBCOMPONENT_ID"}
-    ]'),
-    'ADJ_VALUE', 'ADJ_VALUE', NULL, TRUE;
-COMMIT;
+    ]') AS RESOLUTIONS,
+    'ADJ_VALUE' AS METRIC_FIELD, 'ADJ_VALUE' AS METRIC_USD_FIELD, NULL AS WRITER_OVERRIDE
+) src
+ON t.PROCESS_TYPE = src.PROCESS_TYPE
+WHEN MATCHED THEN UPDATE SET
+    t.EXPECTED_COLUMNS = src.EXPECTED_COLUMNS, t.UNPIVOT = src.UNPIVOT,
+    t.FACT_MAPPING = src.FACT_MAPPING, t.RESOLUTIONS = src.RESOLUTIONS,
+    t.METRIC_FIELD = src.METRIC_FIELD, t.METRIC_USD_FIELD = src.METRIC_USD_FIELD,
+    t.WRITER_OVERRIDE = src.WRITER_OVERRIDE
+    -- IS_ACTIVE, VALIDATION_RULES, ALIASES deliberately NOT touched
+WHEN NOT MATCHED THEN INSERT
+    (PROCESS_TYPE, EXPECTED_COLUMNS, UNPIVOT, FACT_MAPPING, RESOLUTIONS,
+     METRIC_FIELD, METRIC_USD_FIELD, WRITER_OVERRIDE, IS_ACTIVE)
+VALUES
+    (src.PROCESS_TYPE, src.EXPECTED_COLUMNS, src.UNPIVOT, src.FACT_MAPPING, src.RESOLUTIONS,
+     src.METRIC_FIELD, src.METRIC_USD_FIELD, src.WRITER_OVERRIDE, TRUE);
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -957,10 +977,22 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_ADMINS (
 )
 COMMENT = 'Users (ADMIN_TYPE=USER) and Snowflake roles (ADMIN_TYPE=ROLE, direct grantees resolved via SHOW GRANTS OF ROLE) authorized to use the Admin page. Empty table = bootstrap mode. Only the BI_DEVELOPER role row is seeded; survives redeploys.';
 
+-- Backfill NULL ADMIN_TYPE on rows written before the column existed (the
+-- column comment above has always claimed "the UPDATE below backfills
+-- NULLs" — this is that UPDATE; it was previously missing). Every row
+-- created through this table before ADMIN_TYPE existed was a named-user
+-- entry (ROLE support was added together with this column), so 'USER' is
+-- the correct backfill value. Idempotent: a no-op once no NULLs remain.
+UPDATE ADJUSTMENT_APP.ADJ_ADMINS SET ADMIN_TYPE = 'USER' WHERE ADMIN_TYPE IS NULL;
+
 -- Standing admin role (Marcos, 2026-08): BI_DEVELOPER members are admins.
+-- COALESCE on the join is defense-in-depth alongside the backfill above:
+-- without it, a NULL ADMIN_TYPE row (NULL = 'ROLE' is NULL, never TRUE)
+-- fails to match this seed's source row and MERGE inserts a second
+-- BI_DEVELOPER row on every redeploy.
 MERGE INTO ADJUSTMENT_APP.ADJ_ADMINS t
 USING (SELECT 'BI_DEVELOPER' AS USERNAME, 'ROLE' AS ADMIN_TYPE) s
-ON UPPER(t.USERNAME) = s.USERNAME AND t.ADMIN_TYPE = s.ADMIN_TYPE
+ON UPPER(t.USERNAME) = s.USERNAME AND COALESCE(t.ADMIN_TYPE, 'ROLE') = s.ADMIN_TYPE
 WHEN NOT MATCHED THEN INSERT (USERNAME, ADMIN_TYPE, IS_ACTIVE, ADDED_BY)
 VALUES (s.USERNAME, s.ADMIN_TYPE, TRUE, 'SEED');
 
