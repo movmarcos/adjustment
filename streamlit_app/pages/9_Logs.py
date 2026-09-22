@@ -16,6 +16,11 @@ only the Errors cards stay as HTML because they carry multi-line messages
 and the acknowledgement note.
 
 Reads from ADJ_HEADER, VW_RECENT_ACTIVITY, VW_ERRORS — no extra tables.
+
+Every read goes through run_query_df_cached (60-second, SQL-keyed): this page
+is strictly read-only — it has no button, no write and nothing it gates — and
+each rerun (a filter change, a tab click, a run selection) re-issued five or
+six queries. Nothing here can go stale behind an action the user just took.
 """
 import streamlit as st
 import pandas as pd
@@ -30,7 +35,7 @@ from utils.styles import (scope_label, scope_meta,
     P, SCOPE_CONFIG, ALL_SCOPES, STATUS_COLORS, fmt_adj_id, icon,
     fmt_user_dt, render_df_table, type_label,
 )
-from utils.snowflake_conn import run_query, run_query_df, sql_escape
+from utils.snowflake_conn import run_query_df_cached, sql_escape
 
 inject_css()
 render_sidebar()
@@ -142,11 +147,12 @@ def _scope_pill(scope) -> str:
 f1, f2, f3 = st.columns([1, 2, 1])
 with f1:
     try:
-        cob_rows = run_query("""
+        _cob_df = run_query_df_cached("""
             SELECT DISTINCT COBID FROM ADJUSTMENT_APP.ADJ_HEADER
             WHERE IS_DELETED = FALSE ORDER BY COBID DESC LIMIT 30
         """)
-        cob_options = [int(r["COBID"]) for r in cob_rows] if cob_rows else []
+        cob_options = ([int(c) for c in _cob_df["COBID"]]
+                       if _cob_df is not None and not _cob_df.empty else [])
     except Exception:
         cob_options = []
     filter_cob = st.selectbox("COB", options=["All"] + cob_options, index=0, key="lg_cob")
@@ -190,7 +196,7 @@ with tab_runs:
         f"</span>", unsafe_allow_html=True)
 
     try:
-        df_runs = run_query_df(f"""
+        df_runs = run_query_df_cached(f"""
             SELECT
                 RUN_LOG_ID,
                 ANY_VALUE(COBID)                                      AS COBID,
@@ -297,7 +303,7 @@ with tab_runs:
             f"</span>", unsafe_allow_html=True)
 
         try:
-            df_adj = run_query_df(f"""
+            df_adj = run_query_df_cached(f"""
                 SELECT
                     DIMENSION_ADJ_ID, PROCESS_TYPE, ADJUSTMENT_TYPE,
                     COBID, SOURCE_COBID, ENTITY_CODE, BOOK_CODE,
@@ -357,7 +363,7 @@ with tab_activity:
         unsafe_allow_html=True)
 
     try:
-        df_act = run_query_df(f"""
+        df_act = run_query_df_cached(f"""
             SELECT
                 EVENT_TIME, EVENT_TYPE, CURRENT_STATUS,
                 PROCESS_TYPE, ADJUSTMENT_TYPE, ENTITY_CODE, BOOK_CODE,
@@ -430,14 +436,14 @@ with tab_errors:
             LIMIT {int(row_limit)}"""
     try:
         try:
-            df_err = run_query_df(f"""
+            df_err = run_query_df_cached(f"""
                 SELECT {_err_cols},
                     IS_ACKNOWLEDGED, ERROR_ACK_BY, ERROR_ACK_NOTE
                 {_err_tail}
             """)
         except Exception:
             # View not yet redeployed with the acknowledgement columns.
-            df_err = run_query_df(f"""
+            df_err = run_query_df_cached(f"""
                 SELECT {_err_cols},
                     FALSE AS IS_ACKNOWLEDGED, NULL AS ERROR_ACK_BY,
                     NULL AS ERROR_ACK_NOTE
@@ -540,7 +546,7 @@ with tab_signoff:
     try:
         # Page filters (COB / Scope / Max rows) apply here like every other
         # tab; TOTAL_N tells the user when the row limit truncated the trail.
-        _so_hist_all = run_query_df(f"""
+        _so_hist_all = run_query_df_cached(f"""
             SELECT COBID, PROCESS_TYPE, COALESCE(ENTITY_CODE, '*') AS ENTITY_CODE,
                    SUB_TYPE, OLD_STATUS, NEW_STATUS, ACTION_BY, ACTION_AT, COMMENT,
                    COUNT(*) OVER () AS TOTAL_N

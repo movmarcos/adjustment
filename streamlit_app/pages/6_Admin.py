@@ -515,13 +515,17 @@ with tab_approvers:
             section_title("Toggle Approver Status", "refresh-cw")
             toggle_cols = st.columns([2, 1, 1])
             with toggle_cols[0]:
-                approver_options = [
-                    f"{r['USERNAME']} (ID {r['APPROVER_ID']}) — {'Active' if r['IS_ACTIVE'] else 'Inactive'}"
+                # label → (id, name): the row's identity is carried in a dict,
+                # never parsed back out of the label the user sees (a username
+                # containing "ID " used to break the lookup).
+                _approver_by_label = {
+                    f"{r['USERNAME']} (ID {r['APPROVER_ID']}) — {'Active' if r['IS_ACTIVE'] else 'Inactive'}":
+                        (int(r["APPROVER_ID"]), str(r["USERNAME"]).strip())
                     for _, r in df_approvers.iterrows()
-                ]
+                }
+                approver_options = list(_approver_by_label)
                 sel_approver = st.selectbox("Select approver", approver_options, key="toggle_approver")
-            approver_id   = int(sel_approver.split("ID ")[1].split(")")[0])
-            approver_name = sel_approver.split(" (ID ")[0].strip()
+            approver_id, approver_name = _approver_by_label[sel_approver]
             with toggle_cols[1]:
                 if st.button("Activate", key="activate_approver_btn"):
                     try:
@@ -627,14 +631,15 @@ with tab_approvers:
             section_title("Toggle Sign-Off User Status", "refresh-cw")
             sg_cols = st.columns([2, 1, 1])
             with sg_cols[0]:
-                signer_options = [
-                    f"{r['USERNAME']} (ID {r['SIGNER_ID']}) — {'Active' if r['IS_ACTIVE'] else 'Inactive'}"
+                _signer_by_label = {
+                    f"{r['USERNAME']} (ID {r['SIGNER_ID']}) — {'Active' if r['IS_ACTIVE'] else 'Inactive'}":
+                        (int(r["SIGNER_ID"]), str(r["USERNAME"]).strip())
                     for _, r in df_signers.iterrows()
-                ]
+                }
+                signer_options = list(_signer_by_label)
                 sel_signer = st.selectbox("Select sign-off user", signer_options,
                                           key="toggle_signer")
-            signer_id   = int(sel_signer.split("ID ")[1].split(")")[0])
-            signer_name = sel_signer.split(" (ID ")[0].strip()
+            signer_id, signer_name = _signer_by_label[sel_signer]
             with sg_cols[1]:
                 if st.button("Activate", key="activate_signer_btn"):
                     try:
@@ -719,14 +724,15 @@ with tab_approvers:
             render_df_table(df_admins, max_rows=100, height=300)
             adm_cols = st.columns([2, 1, 1])
             with adm_cols[0]:
-                admin_options = [
-                    f"{r['USERNAME']} [{r['ADMIN_TYPE']}] (ID {r['ADMIN_ID']}) — {'Active' if r['IS_ACTIVE'] else 'Inactive'}"
+                _admin_by_label = {
+                    f"{r['USERNAME']} [{r['ADMIN_TYPE']}] (ID {r['ADMIN_ID']}) — {'Active' if r['IS_ACTIVE'] else 'Inactive'}":
+                        (int(r["ADMIN_ID"]), str(r["USERNAME"]).strip().upper())
                     for _, r in df_admins.iterrows()
-                ]
+                }
+                admin_options = list(_admin_by_label)
                 sel_admin = st.selectbox("Select administrator", admin_options,
                                          key="toggle_admin")
-            _sel_admin_id   = int(sel_admin.split("ID ")[1].split(")")[0])
-            _sel_admin_user = sel_admin.split(" [")[0].strip().upper()
+            _sel_admin_id, _sel_admin_user = _admin_by_label[sel_admin]
             with adm_cols[1]:
                 if st.button("Activate", key="activate_admin_btn"):
                     try:
@@ -961,10 +967,12 @@ with tab_notify:
 
     nc1, nc2, nc3 = st.columns([1, 2, 1])
     with nc1:
-        # st.checkbox, not st.toggle: the SiS runtime is 1.22 and st.toggle
-        # (1.23+) raises AttributeError there, killing the page mid-render.
-        n_enabled = st.checkbox("Notifications enabled", value=_enabled_now,
-                                key="ntf_enabled")
+        # st.toggle (Streamlit ≥1.23) — environment.yml pins 1.50.0, so the
+        # old "the SiS runtime is 1.22, st.toggle kills the page" workaround
+        # that forced a checkbox here no longer applies. A master switch
+        # reads as on/off, which is what a toggle shows.
+        n_enabled = st.toggle("Notifications enabled", value=_enabled_now,
+                              key="ntf_enabled")
     with nc2:
         n_integ = st.text_input("Email integration name", value=_integ_now,
                                 key="ntf_integration",
@@ -1042,15 +1050,16 @@ with tab_notify:
             render_df_table(df_prefs, max_rows=100, height=300)
             pcols = st.columns([2, 1, 1])
             with pcols[0]:
-                pref_options = [
+                _pref_by_label = {
                     f"{r['USERNAME']} (ID {r['PREF_ID']}) — "
-                    f"{'Active' if r['IS_ACTIVE'] else 'Inactive'}"
+                    f"{'Active' if r['IS_ACTIVE'] else 'Inactive'}":
+                        (int(r["PREF_ID"]), str(r["USERNAME"]).strip())
                     for _, r in df_prefs.iterrows()
-                ]
+                }
+                pref_options = list(_pref_by_label)
                 sel_pref = st.selectbox("Select recipient", pref_options,
                                         key="ntf_pref_pick")
-            _sel_pref_id   = int(sel_pref.split("ID ")[1].split(")")[0])
-            _sel_pref_user = sel_pref.split(" (ID ")[0].strip()
+            _sel_pref_id, _sel_pref_user = _pref_by_label[sel_pref]
             with pcols[1]:
                 if st.button("Activate", key="ntf_pref_on"):
                     try:
@@ -1168,7 +1177,9 @@ with tab_notify:
 
     ai1, ai2, ai3 = st.columns([1, 2, 2])
     with ai1:
-        ai_enabled = st.checkbox(
+        # Same as the notifications master switch above: a feature switch
+        # reads as on/off, and st.toggle is available on the pinned 1.50.
+        ai_enabled = st.toggle(
             "Assistant enabled", key="ai_cfg_enabled",
             value=_ai.get("AI_ASSISTANT_ENABLED", "true").strip().lower() == "true")
     with ai2:

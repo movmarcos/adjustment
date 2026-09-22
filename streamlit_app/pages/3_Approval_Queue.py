@@ -308,12 +308,18 @@ else:
                 st.markdown(status_badge("Pending Approval"), unsafe_allow_html=True)
                 st.markdown("<br/>", unsafe_allow_html=True)
 
-                # Key details — a two-column Field/Value grid.
+                # Key details — a two-column Field/Value grid. Category is the
+                # submitter's classification of WHY (Late Booking, Market Data
+                # Error, …) from the managed ADJ_CATEGORY list: the approver
+                # reads it next to the free-text Business Reason below.
+                # VW_APPROVAL_QUEUE exposes ADJUSTMENT_CATEGORY and this page
+                # selects *, so no query change was needed.
                 _meta_df = pd.DataFrame(
                     [("COB", _txt(row.get("COBID"))),
                      ("Source COB", _txt(row.get("SOURCE_COBID"))),
                      ("From book", _txt(row.get("SOURCE_BOOK_CODE"))),
                      ("Type", type_label(adj_type) if adj_type else "—"),
+                     ("Category", _txt(row.get("ADJUSTMENT_CATEGORY"))),
                      ("Entity", entity),
                      ("Book", book),
                      ("Submitted", _txt(submitted_at)),

@@ -18,8 +18,6 @@ Three panels, COST FIRST (Marcos: the money is the headline):
 All queries are plain run_query/run_query_df with loud warnings on failure —
 no caching, no async (SiS runtime).
 """
-import datetime as dt
-
 import streamlit as st
 import pandas as pd
 

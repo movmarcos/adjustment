@@ -20,7 +20,8 @@ st.set_page_config(
 from utils.styles import (scope_label, scope_meta, wide_kwargs, inject_css, render_sidebar, section_title, P, SCOPE_CONFIG,
                           STATUS_COLORS, fmt_adj_id, icon, render_activity_grid,
                           render_df_table, set_flash, render_flash)
-from utils.snowflake_conn import (run_query_df, run_query, current_user_name,
+from utils.snowflake_conn import (run_query_df_cached, run_query,
+                                  bust_query_cache, current_user_name,
                                   safe_rerun, sql_escape)
 
 inject_css()
@@ -35,8 +36,15 @@ user = current_user_name()
 #                      DUMMY_* dataset) that a Control-M job polls to start dbt
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Every read on this page goes through run_query_df_cached (60-second,
+# SQL-keyed — utils/snowflake_conn.py): Home is the most-visited page and it
+# re-ran nine queries on every widget click (COB range, timezone picker).
+# Nothing here gates an action — the page's only writes (acknowledge /
+# re-open a failure, below) call bust_query_cache() before their rerun, so
+# the numbers reflect them at once. The approver/admin/config reads that DO
+# gate actions live on other pages and stay uncached on purpose.
 try:
-    df_pbi_kpi = run_query_df("""
+    df_pbi_kpi = run_query_df_cached("""
         SELECT
             COALESCE(SUM(CASE WHEN START_TIME IS NULL THEN 1 ELSE 0 END), 0)     AS PBI_QUEUED,
             COALESCE(SUM(CASE WHEN START_TIME IS NOT NULL THEN 1 ELSE 0 END), 0) AS PBI_RUNNING
@@ -50,7 +58,7 @@ except Exception as e:
     st.warning(f"Could not load Power BI hand-off status: {e}")
 
 try:
-    df_dbt_kpi = run_query_df("""
+    df_dbt_kpi = run_query_df_cached("""
         SELECT COALESCE(COUNT(*), 0) AS DBT_TRIGGERS
         FROM RAVEN.LOG_STAGE_ME_STATUS
         WHERE DATASET_NAME IN ('DUMMY_Sensitivity_Adjustment',
@@ -140,7 +148,7 @@ def _render_banner(health_color, health_label, health_title=""):
 # ──────────────────────────────────────────────────────────────────────────────
 
 try:
-    _cob_rows = run_query_df("""
+    _cob_rows = run_query_df_cached("""
         SELECT DISTINCT COBID FROM ADJUSTMENT_APP.ADJ_HEADER
         WHERE IS_DELETED = FALSE ORDER BY COBID DESC LIMIT 60
     """)
@@ -197,12 +205,12 @@ _kpi_sql = """
         WHERE {cob_where}"""
 try:
     try:
-        df_kpi = run_query_df(_kpi_sql.format(
+        df_kpi = run_query_df_cached(_kpi_sql.format(
             acked="COALESCE(SUM(ACKNOWLEDGED_FAILED_COUNT), 0) AS ACKED,",
             cob_where=cob_where))
     except Exception:
         # View not yet redeployed with the acknowledgement column
-        df_kpi = run_query_df(_kpi_sql.format(acked="0 AS ACKED,",
+        df_kpi = run_query_df_cached(_kpi_sql.format(acked="0 AS ACKED,",
                                               cob_where=cob_where))
     kpis = df_kpi.iloc[0].to_dict() if not df_kpi.empty else {}
 except Exception as e:
@@ -216,35 +224,33 @@ _render_banner(_hc, _hl,
                 f"see Current Errors" if _acked_n else f"Status for {_range_txt}"))
 
 # ──────────────────────────────────────────────────────────────────────────────
-# KPI STRIP — each card LINKS to the Adjustments page with the matching
-# status pre-filtered (?status=...; the page reads the query param). Plain
-# <a> links because st.switch_page needs Streamlit 1.30 and SiS runs 1.26.
+# KPI STRIP — every status card OPENS the Adjustments page with that status
+# already filtered (the deep link this strip lost while the runtime was 1.26).
+# environment.yml pins streamlit==1.50.0, so st.switch_page is available: the
+# button hands the wanted statuses over in session_state (switch_page carries
+# session_state but not query params) and page 2 applies them before its
+# filter widgets are built. A pasted ?status=... URL still works there too.
 # ──────────────────────────────────────────────────────────────────────────────
 
 queued = int(kpis.get("PENDING", 0)) + int(kpis.get("APPROVED", 0))
 
-# NOTE: cards were briefly <a> links to deep-link the Adjustments page, but
-# relative navigation renders a blank page inside the Snowsight iframe —
-# removed until a reliable navigation mechanism exists (st.switch_page needs
-# Streamlit 1.30; SiS runs 1.26). Page 2 still honours ?status=... params.
+# label, value, sub-caption, colour, icon, deep-link statuses:
+#   "Pending,Approved" → pre-tick those statuses on the Adjustments page
+#   ""                 → open it with no status filter (every adjustment)
+#   None               → not a status view (no button on that card)
 kpi_items = [
-    ("Total",             int(kpis.get("TOTAL", 0)),           "All adjustments",      P["primary"], "list"),
-    ("Awaiting Approval", int(kpis.get("PENDING_APPROVAL", 0)), "Need approval",        P["info"],    "clipboard"),
-    ("Queued",            queued,                               "Pending + Approved",   P["warning"], "clock"),
-    ("Running",           int(kpis.get("RUNNING", 0)),          "Processing now",       P["info"],    "zap"),
-    ("Processed",         int(kpis.get("PROCESSED", 0)),        "In the data",          P["success"], "check-circle"),
-    ("Power BI",          pbi_pending,                           "VaR/Stress refreshes pending", P["info"], "line-chart"),
-    ("dbt Rebuild",       dbt_triggers,                          "Sens/FRTB triggers (24h)", P["purple"], "refresh-cw"),
-    ("Overlaps",          int(kpis.get("OVERLAPS", 0)),         "Overlap alerts",       P["purple"],  "alert-triangle"),
+    ("Total",             int(kpis.get("TOTAL", 0)),            "All adjustments",      P["primary"], "list",            ""),
+    ("Awaiting Approval", int(kpis.get("PENDING_APPROVAL", 0)), "Need approval",        P["info"],    "clipboard",       "Pending Approval"),
+    ("Queued",            queued,                               "Pending + Approved",   P["warning"], "clock",           "Pending,Approved"),
+    ("Running",           int(kpis.get("RUNNING", 0)),          "Processing now",       P["info"],    "zap",             "Running"),
+    ("Processed",         int(kpis.get("PROCESSED", 0)),        "In the data",          P["success"], "check-circle",    "Processed"),
+    ("Power BI",          pbi_pending,                          "VaR/Stress refreshes pending", P["info"], "line-chart", None),
+    ("dbt Rebuild",       dbt_triggers,                         "Sens/FRTB triggers (24h)", P["purple"], "refresh-cw",   None),
+    ("Overlaps",          int(kpis.get("OVERLAPS", 0)),         "Overlap alerts",       P["purple"],  "alert-triangle",  None),
 ]
 
-# NOTE: cards_html must START with the grid <div> — markdown keeps everything
-# inside one raw-HTML block only while the first line opens a block-level tag
-# (a leading <style> terminated the block and turned the cards into an
-# indented code block, showing raw HTML). The hover CSS lives in inject_css.
-cards_html = ('<div style="display:grid;grid-template-columns:repeat(8,1fr);'
-              'gap:10px;margin-bottom:0.5rem">')
-for label, val, sub, color, icon_name in kpi_items:
+_kpi_cols = st.columns(len(kpi_items), gap="small")
+for _kcol, (label, val, sub, color, icon_name, link_status) in zip(_kpi_cols, kpi_items):
     # val is None when the hand-off source could not be queried — show "n/a"
     # in grey rather than a reassuring 0 (the warning above says why).
     _na = val is None
@@ -253,31 +259,51 @@ for label, val, sub, color, icon_name in kpi_items:
     val_color = P["grey_500"] if _na else (color if _n > 0 else P["grey_400"])
     val_shown = "n/a" if _na else str(_n)
     val_title = ' title="Status could not be loaded — see the warning above"' if _na else ""
-    cards_html += f"""
-    <div style="position:relative;background:white;border:1px solid {P['border']};
-      border-radius:10px;padding:0.9rem 0.8rem 0.9rem 1rem;{alert_style}
-      box-shadow:0 1px 2px rgba(15,23,42,.05);overflow:hidden"{val_title}>
-      <div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:{color}"></div>
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.3rem">
-        <span style="font-size:0.72rem;font-weight:700;text-transform:uppercase;
-          letter-spacing:.08em;color:{P['grey_700']}">{label}</span>
-        {icon(icon_name, size=13, color=val_color, valign="0")}
-      </div>
-      <div style="font-size:1.75rem;font-weight:800;color:{val_color};
-        line-height:1;font-variant-numeric:tabular-nums">{val_shown}</div>
-      <div style="font-size:0.72rem;color:{P['grey_700']};margin-top:4px">{sub}</div>
-    </div>"""
-cards_html += '</div>'
+    with _kcol:
+        # ONE raw-HTML line, never an indented block: markdown turns any line
+        # starting with 4+ spaces into a code block and the card would show
+        # as raw HTML (the bug the old single-string strip was guarding).
+        st.markdown(
+            f'<div style="position:relative;background:white;border:1px solid {P["border"]};'
+            f'border-radius:10px;padding:0.9rem 0.8rem 0.9rem 1rem;margin-bottom:6px;{alert_style}'
+            f'box-shadow:0 1px 2px rgba(15,23,42,.05);overflow:hidden"{val_title}>'
+            f'<div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:{color}"></div>'
+            f'<div style="display:flex;justify-content:space-between;align-items:center;'
+            f'margin-bottom:0.3rem">'
+            f'<span style="font-size:0.72rem;font-weight:700;text-transform:uppercase;'
+            f'letter-spacing:.08em;color:{P["grey_700"]}">{label}</span>'
+            f'{icon(icon_name, size=13, color=val_color, valign="0")}</div>'
+            f'<div style="font-size:1.75rem;font-weight:800;color:{val_color};'
+            f'line-height:1;font-variant-numeric:tabular-nums">{val_shown}</div>'
+            f'<div style="font-size:0.72rem;color:{P["grey_700"]};margin-top:4px">{sub}</div>'
+            f'</div>',
+            unsafe_allow_html=True)
+        if link_status is not None:
+            _help = ("Open the Adjustments page with every status shown"
+                     if link_status == ""
+                     else f"Open the Adjustments page filtered to "
+                          f"{link_status.replace(',', ' + ')}")
+            if st.button("View", key=f"kpi_go_{label}", help=_help,
+                         **wide_kwargs()):
+                # Page 2 pops this before it builds its filter widgets.
+                st.session_state["_home_status_filter"] = link_status
+                try:
+                    st.switch_page("pages/2_Adjustments.py")
+                except Exception:
+                    st.warning("Could not open the Adjustments page from here "
+                               "— use the sidebar; the status filter is "
+                               "already set for you.")
+
 # Plain-language explainer for the two report hand-off paths (non-technical
 # users need to know WHERE their processed numbers go next).
-cards_html += (
-    f'<div style="font-size:0.72rem;color:{P["grey_700"]};margin-bottom:1.4rem">'
+st.markdown(
+    f'<div style="font-size:0.72rem;color:{P["grey_700"]};margin:0.5rem 0 1.4rem">'
     f'{icon("info", size=12, color=P["grey_700"])} '
     f'<strong>Reports:</strong> VaR &amp; Stress adjustments queue a '
     f'<strong>Power BI refresh</strong> (picked up ~every 5 min). Sensitivity '
     f'&amp; FRTB write a <strong>rebuild trigger</strong> that Control-M '
-    f'detects and runs the dbt job to rebuild the reporting model.</div>')
-st.markdown(cards_html, unsafe_allow_html=True)
+    f'detects and runs the dbt job to rebuild the reporting model.</div>',
+    unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # MAIN CONTENT: charts left | alerts right
@@ -291,7 +317,7 @@ with col_charts:
     # ── Scope & Status bar chart ─────────────────────────────────────────────
     section_title("Adjustments by Scope & Status", "bar-chart")
     try:
-        df_dash = run_query_df(f"""
+        df_dash = run_query_df_cached(f"""
             SELECT PROCESS_TYPE, RUN_STATUS,
                    SUM(ADJUSTMENT_COUNT) AS CNT
             FROM ADJUSTMENT_APP.DT_DASHBOARD
@@ -354,7 +380,7 @@ with col_charts:
     try:
         _trend_where = ("COBID IN (" + ",".join(str(c) for c in _trend_cobs) + ")"
                         if _trend_cobs else "1=0")
-        df_cob = run_query_df(f"""
+        df_cob = run_query_df_cached(f"""
             SELECT
                 COBID, PROCESS_TYPE,
                 COUNT(*)                        AS ADJ_COUNT,
@@ -449,7 +475,7 @@ with col_alerts:
     # is applied inside the sub-select so `COBID` stays unambiguous.
     _overlaps_failed = False
     try:
-        df_overlaps = run_query_df(f"""
+        df_overlaps = run_query_df_cached(f"""
             SELECT o.ADJ_ID_A, o.ADJ_ID_B,
                    ha.DIMENSION_ADJ_ID AS DIM_A, hb.DIMENSION_ADJ_ID AS DIM_B,
                    o.PROCESS_TYPE, o.ENTITY_A, o.ENTITY_B,
@@ -517,7 +543,7 @@ with col_alerts:
     _errors_failed = False
     try:
         try:
-            df_errors = run_query_df(f"""
+            df_errors = run_query_df_cached(f"""
                 SELECT ADJ_ID, DIMENSION_ADJ_ID, PROCESS_TYPE, ENTITY_CODE, ERRORMESSAGE,
                        USERNAME, ERROR_TIME, IS_ACKNOWLEDGED, ERROR_ACK_BY, ERROR_ACK_AT,
                        ERROR_ACK_NOTE
@@ -528,7 +554,7 @@ with col_alerts:
             """)
         except Exception:
             # View not yet redeployed with the acknowledgement columns
-            df_errors = run_query_df(f"""
+            df_errors = run_query_df_cached(f"""
                 SELECT ADJ_ID, DIMENSION_ADJ_ID, PROCESS_TYPE, ENTITY_CODE, ERRORMESSAGE,
                        USERNAME, ERROR_TIME, FALSE AS IS_ACKNOWLEDGED,
                        NULL AS ERROR_ACK_BY, NULL AS ERROR_ACK_AT, NULL AS ERROR_ACK_NOTE
@@ -626,6 +652,7 @@ with col_alerts:
                             WHERE ADJ_ID = '{sql_escape(_opts[_pick])}' AND RUN_STATUS = 'Failed'
                         """)
                         set_flash("home", "success", f"Acknowledged {_label}")
+                        bust_query_cache()   # the KPI/error reads are cached
                         safe_rerun()
                     except Exception as ex:
                         st.error(f"Could not acknowledge: {ex}")
@@ -648,6 +675,7 @@ with col_alerts:
                         """)
                         set_flash("home", "success",
                                   f"Re-opened {_rlabel} — it counts in System Status again")
+                        bust_query_cache()   # the KPI/error reads are cached
                         safe_rerun()
                     except Exception as ex:
                         st.error(f"Could not re-open: {ex}")
@@ -656,7 +684,7 @@ with col_alerts:
     st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Top Submitters", "user")
     try:
-        df_users = run_query_df(f"""
+        df_users = run_query_df_cached(f"""
             SELECT USERNAME, COUNT(*) AS CNT
             FROM ADJUSTMENT_APP.ADJ_HEADER
             WHERE IS_DELETED = FALSE AND {cob_where}
@@ -698,7 +726,7 @@ section_title("Recent Activity", "clock")
 try:
     # Query ADJ_HEADER directly — avoids VW_RECENT_ACTIVITY's cross-table JOIN
     # which can fail if ADJ_STATUS_HISTORY.ADJ_ID type differs from ADJ_HEADER.ADJ_ID.
-    df_activity = run_query_df(f"""
+    df_activity = run_query_df_cached(f"""
         SELECT
             DIMENSION_ADJ_ID, COBID, SOURCE_COBID, PROCESS_TYPE, ADJUSTMENT_TYPE,
             RUN_STATUS, IS_DELETED, ENTITY_CODE, DEPARTMENT_CODE, BOOK_CODE,

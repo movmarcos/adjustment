@@ -538,7 +538,7 @@ def inject_css():
         overflow: hidden;
         transition: box-shadow .15s ease-out;
     }}
-    .kpi-link .kpi-card:hover, .kpi-card.is-link:hover {{ box-shadow: var(--sh-md); }}
+    .kpi-card:hover {{ box-shadow: var(--sh-md); }}
     .kpi-card::before {{
         content: ""; position: absolute; left: 0; top: 0; bottom: 0;
         width: 3px; background: var(--border);
@@ -628,45 +628,6 @@ def inject_css():
     .queue-item.completed {{ border-left: 3px solid {P["success"]}; opacity: 0.85; }}
     .queue-item.failed {{ border-left: 3px solid {P["danger"]}; }}
 
-    /* Pipeline diagram */
-    .pipeline {{
-        display: flex; align-items: center; gap: 0; overflow-x: auto;
-        padding: 1rem; background: {P["grey_100"]}; border-radius: var(--r-md); margin: 1rem 0;
-    }}
-    .pipe-node {{
-        background: var(--card); border: 1.5px solid var(--border);
-        border-radius: var(--r-sm); padding: 0.6rem 0.9rem; text-align: center;
-        min-width: 100px; flex-shrink: 0;
-    }}
-    .pipe-node.active {{ border-color: {P["info"]}; background: {P["info_lt"]}; }}
-    .pipe-node.done {{ border-color: {P["success"]}; background: {P["success_lt"]}; }}
-    .pipe-node .pn-icon {{ display: flex; justify-content: center; color: var(--ink-2); }}
-    .pipe-node.active .pn-icon {{ color: {P["info"]}; }}
-    .pipe-node.done .pn-icon {{ color: {P["success"]}; }}
-    .pipe-node .pn-label {{ font-size: 0.75rem; font-weight: 600; margin-top: 5px; color: var(--ink-2); }}
-    .pipe-arrow {{ color: var(--ink-3); display: flex; align-items: center; padding: 0 4px; flex-shrink: 0; }}
-
-    /* Step indicator */
-    .step-bar {{ display: flex; align-items: center; gap: 0; margin-bottom: 1.5rem; }}
-    .step {{ display: flex; align-items: center; gap: 6px; flex: 1; }}
-    .step-dot {{
-        width: 26px; height: 26px; border-radius: 50%;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 0.75rem; font-weight: 700; flex-shrink: 0;
-        transition: background .15s ease-out;
-    }}
-    .step-dot.done    {{ background: {P["success"]}; color: white; }}
-    .step-dot.active  {{ background: {P["primary"]}; color: white;
-                         box-shadow: 0 0 0 3px rgba(213,0,50,.18); }}
-    .step-dot.pending {{ background: {P["grey_100"]}; color: var(--ink-2); border: 2px solid var(--ink-3); }}
-    .step-label {{ font-size: 0.78rem; font-weight: 600; white-space: nowrap; }}
-    .step-label.done    {{ color: {P["success"]}; }}
-    .step-label.active  {{ color: {P["primary"]}; }}
-    .step-label.pending {{ color: var(--ink-2); }}
-    .step-line {{ flex: 1; height: 2px; background: var(--border); margin: 0 6px; }}
-    .step-line.done {{ background: {P["success"]}; }}
-
-    /* Section headers */
     /* Section headers — real chapter breaks, not captions (Marcos 2026-09:
        the old 0.72rem uppercase style made pages with many sections blur
        together). A full-width rule ABOVE marks where the previous section
@@ -684,13 +645,6 @@ def inject_css():
         background: var(--brand); flex-shrink: 0;
     }}
     .section-title svg {{ color: var(--ink-2); }}
-
-    /* Home KPI cards — clickable */
-    .kpi-link {{ text-decoration: none; color: inherit; display: block; }}
-    .kpi-link:hover .kpi-card, .kpi-card.is-link:hover {{
-        transform: translateY(-1px);
-        box-shadow: 0 4px 14px rgba(15,23,42,.12);
-    }}
 
     /* Tags */
     .tag {{
@@ -1158,10 +1112,12 @@ def inject_css():
     .stNumberInput > div > div, .stDateInput > div > div {{
         background-color: var(--card) !important;
     }}
-    /* UNSCOPED on purpose: [data-testid="stMainBlockContainer"] does not
-       exist on the SiS 1.26 runtime, so rules scoped to it never applied
-       there — which is why input borders stayed invisible. #94A3B8 (grey_400)
-       is well above --border so fields read clearly on white cards. */
+    /* UNSCOPED on purpose: [data-testid="stMainBlockContainer"] did not
+       exist on the older SiS runtime this app shipped on, so rules scoped to
+       it never applied — which is why input borders stayed invisible. Left
+       unscoped because it is also correct on the pinned 1.50. #94A3B8
+       (grey_400) is well above --border so fields read clearly on white
+       cards. */
     [data-baseweb="input"], [data-baseweb="textarea"] {{
         border: 1px solid {P["grey_400"]} !important;
         background-color: var(--card) !important;
@@ -1282,43 +1238,6 @@ def inject_css():
     .stTabs [data-baseweb="tab-highlight"],
     .stTabs [data-baseweb="tab-border"] {{ display: none !important; }}
 
-    /* ── Canonical GRID (.mgrid) — one look for every table in the app.
-       All HTML grids (render_df_table, render_grid, the page tables) emit
-       <div class="mgrid-wrap"><table class="mgrid"> so they are visually
-       identical regardless of which page or helper built them.
-       This is the ORIGINAL Logs-table styling, restored 2026-09-03 at the
-       user's request ('we had a quite decent grid except when we freeze the
-       header'). The ONLY deliberate difference from the original is that
-       headers are NOT sticky — frozen headers were the confirmed white-box
-       overlay. Do not add sticky, truncation, or pagination back. */
-    .mgrid-wrap {{
-        overflow-x: auto; background: {P["card"]};
-        border: 1px solid {P["border"]}; border-radius: 8px;
-    }}
-    .mgrid {{ width: 100%; border-collapse: separate; border-spacing: 0; }}
-    .mgrid th {{
-        text-align: left; padding: 8px 10px; font-size: 0.75rem;
-        font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
-        color: {P["grey_700"]}; background: {P["card"]};
-        border-bottom: 2px solid {P["border"]}; white-space: nowrap;
-    }}
-    .mgrid td {{
-        padding: 7px 10px; font-size: 0.82rem; color: {P["grey_900"]};
-        border-bottom: 1px solid {P["border"]}; vertical-align: middle;
-        font-variant-numeric: tabular-nums;
-    }}
-    .mgrid tbody tr:last-child td {{ border-bottom: none; }}
-    .mgrid tbody tr:hover td {{ background: {P["grey_100"]}; }}
-    .mgrid th.r, .mgrid td.r {{ text-align: right; }}
-    .mgrid td.nw {{ white-space: nowrap; }}
-    /* full-width day/section divider row inside a grid */
-    .mgrid tr.mgrid-div td {{
-        padding: 9px 12px 3px; font-size: 0.75rem; font-weight: 700;
-        text-transform: uppercase; letter-spacing: .06em;
-        color: {P["grey_700"]}; background: {P["bg"]};
-    }}
-    .mgrid tr.mgrid-div:hover td {{ background: {P["bg"]}; }}
-
     /* Expanders + bordered containers */
     [data-testid="stExpander"] {{
         background-color: var(--card) !important;
@@ -1431,9 +1350,11 @@ def inject_css():
         border: 1px solid var(--border) !important;
     }}
 
-    /* ═══ Marker cards — visible section cards on SiS 1.26 ═══
-       st.container(border=True) needs Streamlit 1.29; on 1.26
-       bordered_container() drops a hidden .sec-card-flag inside a plain
+    /* ═══ Marker cards — fallback for a pre-1.29 runtime ═══
+       The app is pinned to streamlit==1.50.0 (environment.yml), where
+       st.container(border=True) works and this branch never runs. Kept as a
+       safety net: if bordered_container() ever lands on a runtime without
+       the border kwarg it drops a hidden .sec-card-flag inside a plain
        container and these :has() rules paint that container as a card.
        Child-scoped (>) so only the container holding the marker matches —
        ancestor blocks see the marker deeper than one element level. */
@@ -1450,8 +1371,8 @@ def inject_css():
         box-sizing: border-box;
         overflow-x: clip;   /* guardrail: nothing may poke past the border */
     }}
-    /* Streamlit 1.26 gives widgets FIXED PIXEL widths (via generated CSS
-       classes, NOT inline styles) measured before the card padding exists,
+    /* The pre-1.29 runtimes gave widgets FIXED PIXEL widths (via generated
+       CSS classes, NOT inline styles) measured before the card padding exists,
        so full-width children — section hairlines, textareas, the Business
        Context fields — protruded past the card edge. Force every widget
        wrapper inside a marker card back to fluid width; width:auto beats
@@ -1480,7 +1401,7 @@ def inject_css():
        width:auto makes the observer re-measure and re-write forever — the
        grid grows unbounded and locks the page (hit live on the Direct
        preview inside a card). The :not() above therefore excludes the
-       widget (both testids — the live 1.22 runtime uses
+       widget (both testids are matched — older runtimes emitted
        stDataFrameResizable), its descendants, AND every ancestor that
        contains one. */
     [data-testid="stDataFrameResizable"] {{
@@ -1653,22 +1574,6 @@ def signoff_status_label(code: str) -> str:
 SCOPE_LABEL_HELP = "FRTB covers FRTBDRC and FRTBRRAO"
 
 
-def render_step_bar(current_step: int, steps: list):
-    dots = []
-    for i, label in enumerate(steps, 1):
-        state = "done" if i < current_step else ("active" if i == current_step else "pending")
-        glyph = icon("check", size=13, color="white", valign="0") if state == "done" else str(i)
-        dots.append(
-            f'<div class="step">'
-            f'<div class="step-dot {state}">{glyph}</div>'
-            f'<span class="step-label {state}">{label}</span>'
-            f'</div>')
-        if i < len(steps):
-            line_state = "done" if i < current_step else ""
-            dots.append(f'<div class="step-line {line_state}"></div>')
-    st.markdown(f'<div class="step-bar">{"".join(dots)}</div>', unsafe_allow_html=True)
-
-
 def render_filter_chips(row: dict):
     """Render filter dimension chips from an adjustment row (dict or pandas row).
 
@@ -1752,26 +1657,6 @@ def render_status_timeline(history_rows):
             + '</div>')
     html += '</div>'
     st.markdown(html, unsafe_allow_html=True)
-
-
-def render_pipeline_diagram(current_stage: int = 0):
-    stages = [
-        ("database",   "ADJ Header\nInsert"),
-        ("timer",      "Task Polls\n(≤1 min)"),
-        ("play",       "SP_RUN_PIPELINE\nExecutes"),
-        ("table",      "Dynamic Table\nRefresh"),
-        ("line-chart", "Report\nRefresh"),
-    ]
-    nodes = []
-    for i, (icon_name, label) in enumerate(stages, 1):
-        state_class = "done" if i < current_stage else ("active" if i == current_stage else "")
-        nodes.append(
-            f'<div class="pipe-node {state_class}">'
-            f'<div class="pn-icon">{icon(icon_name, size=18, valign="0")}</div>'
-            f'<div class="pn-label">{label}</div></div>')
-        if i < len(stages):
-            nodes.append(f'<div class="pipe-arrow">{icon("chevron-right", size=16, valign="0")}</div>')
-    st.markdown(f'<div class="pipeline">{"".join(nodes)}</div>', unsafe_allow_html=True)
 
 
 def render_lifecycle_bar(track_row: dict):
@@ -2053,8 +1938,8 @@ def render_activity_grid(df_source, *, selectable=False, key=None,
     a FIXED height with internal scroll, BY THE USER'S EXPLICIT CHOICE
     (2026-09-03): these two pages list hundreds of rows, and the user asked
     to keep 'the other type of grid' for them after seeing both live. This
-    is the deliberate exception to the app-wide .mgrid HTML family (which
-    every other page uses) — it was also the presentation the Grid Lab
+    is the deliberate exception to render_df_table (which every other page
+    uses) — it was also the presentation the Grid Lab
     verified clean in their environment (style A). Do not 'unify' it away
     again. Status colour via a version-safe Styler. Selection is via the
     caller's picker — returns SELECTION_UNSUPPORTED when selectable, else
@@ -2127,12 +2012,12 @@ def render_data_grid(df, height=380, empty_msg="No rows."):
 
 
 def bordered_container():
-    """Version-safe st.container(border=True): the border kwarg needs
-    Streamlit ≥ 1.29, but the live SiS runtime is 1.22.0 (confirmed 2026-09).
-    On older runtimes the fallback container gets a hidden
-    .sec-card-flag marker; CSS `:has()` (inject_css) then paints the container
-    as a bordered card — so sections look like cards on 1.26 too. Browsers
-    without :has() (pre-Chrome 105) just see a plain container.
+    """Version-safe st.container(border=True). The app is pinned to
+    streamlit==1.50.0 (environment.yml), where the border kwarg (≥1.29) is
+    available and the first branch always wins. The fallbacks are kept for an
+    unexpected older runtime: the container then gets a hidden .sec-card-flag
+    marker and CSS `:has()` (inject_css) paints it as a bordered card;
+    browsers without :has() (pre-Chrome 105) just see a plain container.
     Catches broadly on purpose — some runtimes surface the unknown-kwarg as
     a StreamlitAPIException rather than a TypeError."""
     # Streamlit 1.50 dropped the stVerticalBlockBorderWrapper test-id that the
@@ -2216,8 +2101,10 @@ def render_df_table(df, max_rows=200, height=None, highlight=None,
                     formats=None, color_cols=None, column_config=None,
                     right_cols=(), key=None, wrap_cols=None, nowrap_cols=()):
     """READ-ONLY table on the NATIVE st.dataframe grid (sort / search /
-    fullscreen / CSV toolbar). Replaces the .mgrid HTML table for tabular
-    data (2026-09); the signature is unchanged so no caller moves.
+    fullscreen / CSV toolbar). Replaced the legacy .mgrid HTML table for
+    tabular data (2026-09) — that table, its render_grid()/df_from_grid()
+    helpers and the .mgrid CSS are gone (unused everywhere, 2026-09-22); the
+    signature is unchanged so no caller moves.
 
     highlight:     callable(row_dict)->bool; True tints the row (danger_lt)
                    via a pandas Styler. row_dict carries the ORIGINAL values.
@@ -2394,80 +2281,6 @@ def render_df_table(df, max_rows=200, height=None, highlight=None,
             st.dataframe(data, **kw)
     if len(df) > max_rows:
         st.caption(f"Showing first {max_rows:,} of {len(df):,} rows.")
-
-
-_HTML_TAG_RE = re.compile(r"<[^>]+>")
-
-
-def df_from_grid(headers, rows):
-    """Turn the legacy render_grid (headers, rows) structure into a plain
-    DataFrame for render_df_table / st.dataframe.
-
-    rows: list of cell lists, or {"cells": [...]} dicts; {"divider": ...}
-    rows are skipped (the native grid has no section rows — callers that
-    need the grouping put it in a column). String cells have their HTML
-    (pill/badge/chip markup) stripped: tags removed, entities unescaped,
-    whitespace collapsed. Non-string cells pass through untouched."""
-    import html as _hm
-    import pandas as _pd
-
-    def _plain(c):
-        if not isinstance(c, str):
-            return c
-        return " ".join(_hm.unescape(_HTML_TAG_RE.sub(" ", c)).split())
-
-    headers = [str(h) for h in headers]
-    n = len(headers)
-    out = []
-    for row in rows or ():
-        if isinstance(row, dict):
-            if "divider" in row:
-                continue
-            cells = row.get("cells", [])
-        else:
-            cells = list(row)
-        cells = [_plain(c) for c in cells][:n]
-        cells += [None] * (n - len(cells))
-        out.append(cells)
-    return _pd.DataFrame(out, columns=headers)
-
-def render_grid(headers, rows, *, aligns=None, height=None, caption=None,
-                return_html=False, color_cols=None):
-    """LEGACY HTML grid — kept only for Documentation (authored HTML). New
-    tabular content goes through render_df_table / st.dataframe; convert an
-    existing (headers, rows) call site with df_from_grid(headers, rows).
-
-    The legacy (headers, rows) grid — cells are RENDERED AS-IS, so the
-    pill/badge/entity-chip markup pages compose (Sign-Off per-entity detail,
-    Approval history, Logs) shows exactly as authored — the Logs look the
-    user called the canonical style. Divider rows ({"divider": text}) render
-    as full-width section rows. The table flows in the page: no sticky
-    header, no scroll boxes, no truncation, no pagination.
-    return_html=True returns the HTML instead of rendering (Logs per-day
-    chunks). height/color_cols accepted for compatibility; unused."""
-    _al = aligns or []
-    _rc = ["r" if (i < len(_al) and _al[i] == "right") else ""
-           for i in range(len(headers))]
-    _th = "".join(f'<th class="{_rc[i]}">{h}</th>'
-                  for i, h in enumerate(headers))
-    _body = []
-    for row in rows:
-        if isinstance(row, dict) and "divider" in row:
-            _body.append(f'<tr class="mgrid-div"><td colspan="{len(headers)}">'
-                         f'{row["divider"]}</td></tr>')
-            continue
-        cells = row.get("cells", []) if isinstance(row, dict) else row
-        _body.append("<tr>" + "".join(
-            f'<td class="{_rc[i] if i < len(_rc) else ""}">{c}</td>'
-            for i, c in enumerate(cells)) + "</tr>")
-    html = (f'<div class="mgrid-wrap"><table class="mgrid">'
-            f'<thead><tr>{_th}</tr></thead>'
-            f'<tbody>{"".join(_body)}</tbody></table></div>')
-    if return_html:
-        return html
-    st.markdown(html, unsafe_allow_html=True)
-    if caption:
-        st.caption(caption)
 
 
 def render_sidebar():
