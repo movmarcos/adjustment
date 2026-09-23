@@ -498,7 +498,7 @@ def deploy_notebooks(session):
               f"locally yet. Re-run this deploy once it exists.")
         return False
 
-    success = True
+    live_version_ok = True
 
     # ── Create the Notebook object ───────────────────────────────────────
     print(f"\n  🚀 Creating Notebook {notebook_name}...")
@@ -535,17 +535,26 @@ def deploy_notebooks(session):
               f"manually (notebook page -> \"•••\" menu -> \"Add live version\"), "
               f"or confirm this Snowflake account's release supports "
               f"'ALTER NOTEBOOK ... ADD LIVE VERSION FROM LAST'.")
-        success = False
+        # Deliberately NOT a deploy failure. The notebook object exists and is
+        # usable; only the convenience of a pre-activated version is missing.
+        # Failing the deploy over an optional statement is the mistake
+        # 16_grants.sql was renamed to avoid.
+        live_version_ok = False
 
     # ── Grant access ─────────────────────────────────────────────────────
     print(f"\n  🔐 Granting USAGE on Notebook...")
     try:
-        session.sql(f"GRANT USAGE ON NOTEBOOK {notebook_name} TO ROLE {config.ROLE_OWNER}").collect()
-        print(f"     ✅ USAGE granted to {config.ROLE_OWNER}")
-        session.sql(f"GRANT USAGE ON NOTEBOOK {notebook_name} TO ROLE {config.ROLE_RO}").collect()
-        print(f"     ✅ USAGE granted to {config.ROLE_RO}")
+        for _role in (config.ROLE_OWNER, config.ROLE_RO):
+            try:
+                session.sql(f"GRANT USAGE ON NOTEBOOK {notebook_name} "
+                            f"TO ROLE {_role}").collect()
+                print(f"     ✅ USAGE granted to {_role}")
+            except Exception as e:
+                # ROLE_OWNER already owns the notebook, so its grant is a
+                # no-op that some releases reject. Neither grant is required
+                # for the notebook to run.
+                print(f"     ℹ️  {_role}: {str(e)[:100]}")
     except Exception as e:
-        # May fail if role already owns it — that's fine
         print(f"     ℹ️  Grant note: {str(e)[:100]}")
 
     # ── Show details ─────────────────────────────────────────────────────
@@ -560,12 +569,12 @@ def deploy_notebooks(session):
     except Exception:
         pass
 
-    if success:
+    if live_version_ok:
         print(f"\n  ✅ Notebook deployed successfully!")
     else:
-        print(f"\n  ⚠️  Notebook staged and object created, but live-version "
-              f"activation needs manual follow-up — see ACTION above.")
-    return success
+        print(f"\n  ✅ Notebook deployed — live-version activation needs a "
+              f"one-off manual step, see ACTION above. Not a deploy failure.")
+    return True
 
 
 # ─── Resume Tasks ────────────────────────────────────────────────────────────
