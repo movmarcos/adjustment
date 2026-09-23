@@ -568,40 +568,71 @@ def test_verify_scale_fails_when_written_does_not_match_the_factor():
     assert checks["scale wrote base x (factor - 1)"] is False
 
 
-def test_verify_transfer_fails_when_source_book_totals_changed():
-    session = _verify_session(written_total=200.0, fact_total=1500.0, fact_n=12)
+def _transfer_verify_session(on_target, on_source, written_n=5,
+                             written_total=200.0, dimension_adj_id=42):
+    """Verify-session for a Transfer, answering the book-spread query first.
+
+    The spread query also reads the adjustments table, so its rule has to be
+    registered before the generic totals rule — first match wins.
+    """
+    session = FakeSession()
+    session.when(lambda q: "ON_TARGET" in q.upper(),
+                 [{"N": on_target + on_source, "ON_TARGET": on_target,
+                   "ON_SOURCE": on_source}])
+    session.when("FROM " + kit.APP + ".ADJ_HEADER",
+                 [{"RUN_STATUS": "Processed",
+                   "DIMENSION_ADJ_ID": dimension_adj_id, "IS_DELETED": False}])
+    session.when("FROM DIMENSION.ADJUSTMENT",
+                 [{"RECORD_COUNT": written_n, "RUN_STATUS": "Processed",
+                   "IS_DELETED": False}])
+    session.when("FROM TESTDB.ADJ_VAR",
+                 [{"N": written_n, "TOTAL": written_total}])
+    return session
+
+
+def _transfer_checks(session):
     scope_cfg = _scope_cfg()
     scenario, result = _base_scenario_result(
         adj_type="Transfer",
         params={"source_book_code": "UATBOOK", "book_code": "UATBOOK2"})
     pv = {"rows": 5, "nonzero": 5, "current": 0.0, "delta": 200.0,
           "projected": 200.0, "error": ""}
-    cfg = _cfg()
-    context = {"book_key": 7,
-               "source_before": {"rows": 12, "total": 1000.0}}
-
-    kit.verify(session, scenario, scope_cfg, "ADJ1", pv, result, cfg, context)
-
-    checks = dict((c[0], c[1]) for c in result.checks)
-    assert checks["source book untouched by the transfer"] is False
+    context = {"source_book_key": 7, "target_book_key": 8, "book_key": 7}
+    kit.verify(session, scenario, scope_cfg, "ADJ1", pv, result, _cfg(), context)
+    return dict((c[0], c[1]) for c in result.checks)
 
 
-def test_verify_transfer_passes_when_source_book_totals_are_unchanged():
-    session = _verify_session(written_total=200.0, fact_total=1000.0, fact_n=12)
-    scope_cfg = _scope_cfg()
-    scenario, result = _base_scenario_result(
-        adj_type="Transfer",
-        params={"source_book_code": "UATBOOK", "book_code": "UATBOOK2"})
-    pv = {"rows": 5, "nonzero": 5, "current": 0.0, "delta": 200.0,
-          "projected": 200.0, "error": ""}
-    cfg = _cfg()
-    context = {"book_key": 7,
-               "source_before": {"rows": 12, "total": 1000.0}}
+def test_verify_transfer_passes_when_every_row_landed_on_the_target_book():
+    # Transfer is append-only and re-keys onto the target: all 5 rows there.
+    checks = _transfer_checks(_transfer_verify_session(on_target=5, on_source=0))
+    assert checks["every transferred row landed on the target book"] is True
+    assert checks["nothing was written against the source book"] is True
 
-    kit.verify(session, scenario, scope_cfg, "ADJ1", pv, result, cfg, context)
 
-    checks = dict((c[0], c[1]) for c in result.checks)
-    assert checks["source book untouched by the transfer"] is True
+def test_verify_transfer_fails_when_rows_were_written_against_the_source_book():
+    # The regression this guards: the engine writing back to the source book
+    # instead of only appending to the target.
+    checks = _transfer_checks(_transfer_verify_session(on_target=3, on_source=2))
+    assert checks["every transferred row landed on the target book"] is False
+    assert checks["nothing was written against the source book"] is False
+
+
+def test_verify_transfer_fails_when_nothing_was_written_at_all():
+    checks = _transfer_checks(_transfer_verify_session(on_target=0, on_source=0,
+                                                       written_n=0))
+    assert checks["every transferred row landed on the target book"] is False
+
+
+def test_verify_transfer_book_spread_query_reads_the_adjustments_table():
+    # The check must look at where the ADJUSTMENT rows landed, not at the base
+    # fact table — no adjustment ever writes to the base fact, so a
+    # before/after comparison there would pass no matter what the engine did.
+    session = _transfer_verify_session(on_target=5, on_source=0)
+    _transfer_checks(session)
+    spread = [q for q in session.calls if "ON_TARGET" in q.upper()]
+    assert len(spread) == 1, "expected exactly one book-spread query"
+    assert "TESTDB.ADJ_VAR" in spread[0], spread[0]
+    assert "ADJUSTMENT_ID" in spread[0].upper()
 
 
 def test_verify_stops_early_when_header_never_reaches_processed():

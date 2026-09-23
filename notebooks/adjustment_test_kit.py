@@ -905,14 +905,32 @@ def _verify_by_type(session, scenario, scope_cfg, head, pv, written, result,
                      " expected=" + repr(expected))
 
     elif adj_type == "Transfer":
-        # A transfer is pure append: the source book must be untouched.
-        before = context.get("source_before")
-        if before is not None and book_key is not None:
-            after = base_total(session, scope_cfg, cfg.cob, book_key)
-            result.check("source book untouched by the transfer",
-                         after["rows"] == before["rows"] and
-                         close_enough(after["total"], before["total"]),
-                         "before=" + repr(before) + " after=" + repr(after))
+        # A transfer is pure append, re-keyed onto the target book. The
+        # meaningful check is WHERE the written rows landed: every row under
+        # this adjustment must carry the target book, none the source. (The
+        # base fact table is never written by any adjustment, so comparing it
+        # before and after would pass no matter what the engine did.)
+        src_key = context.get("source_book_key")
+        tgt_key = context.get("target_book_key")
+        dim_id = head.get("DIMENSION_ADJ_ID")
+        if dim_id is not None and (src_key is not None or tgt_key is not None):
+            spread = one(session,
+                         "SELECT COUNT(*) AS N, "
+                         "COUNT_IF(BOOK_KEY = " + str(int(tgt_key)) + ") AS ON_TARGET, "
+                         "COUNT_IF(BOOK_KEY = " + str(int(src_key)) + ") AS ON_SOURCE "
+                         "FROM " + scope_cfg.adjustments_table +
+                         " WHERE ADJUSTMENT_ID = " + str(int(dim_id))
+                         ) if (src_key is not None and tgt_key is not None) else None
+            if spread:
+                total_n = int(_num(spread.get("N"), 0))
+                on_target = int(_num(spread.get("ON_TARGET"), 0))
+                on_source = int(_num(spread.get("ON_SOURCE"), 0))
+                result.check("every transferred row landed on the target book",
+                             total_n > 0 and on_target == total_n,
+                             "rows=" + str(total_n) + " on_target=" +
+                             str(on_target) + " on_source=" + str(on_source))
+                result.check("nothing was written against the source book",
+                             on_source == 0, "on_source=" + str(on_source))
         result.check("transfer added rows to the target",
                      written["rows"] > 0, "rows=" + str(written["rows"]))
 
@@ -1049,13 +1067,18 @@ def run_scenario(session, scenario, cfg, scopes=None, sleep=time.sleep):
             and scenario.expect == "processed":
         src = resolve_book(session, scenario.params.get("source_book_code",
                                                         cfg.book_code))
+        tgt = resolve_book(session, scenario.params.get("book_code",
+                                                        cfg.target_book_code))
         if src and src.get("book_key") is not None:
             context["book_key"] = src["book_key"]
+            context["source_book_key"] = src["book_key"]
             try:
                 context["source_before"] = base_total(session, scope_cfg,
                                                       cfg.cob, src["book_key"])
             except Exception:
                 pass
+        if tgt and tgt.get("book_key") is not None:
+            context["target_book_key"] = tgt["book_key"]
 
     # ── preview ──────────────────────────────────────────────────────────
     pv = {"rows": 0, "nonzero": 0, "current": 0.0, "delta": 0.0,
