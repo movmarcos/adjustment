@@ -14,10 +14,81 @@ import os
 import re
 import sys
 import glob
+import time
+import hashlib
 import argparse
 from pathlib import Path
 
 import config
+
+# ─── Timing ──────────────────────────────────────────────────────────────────
+# A deploy is well over a hundred Snowflake round trips. When it feels slow the
+# only useful question is WHICH part is slow, so every phase is timed and the
+# breakdown is printed at the end, slowest first.
+
+_PHASE_TIMES = []
+
+
+class phase_timer:
+    """Context manager recording how long a named deploy phase took."""
+
+    def __init__(self, label):
+        self.label = label
+        self.t0 = 0.0
+
+    def __enter__(self):
+        self.t0 = time.time()
+        return self
+
+    def __exit__(self, *exc):
+        _PHASE_TIMES.append((self.label, time.time() - self.t0))
+        return False
+
+
+def print_timing_breakdown():
+    if not _PHASE_TIMES:
+        return
+    total = sum(sec for _, sec in _PHASE_TIMES)
+    print("\n  ⏱  Where the time went:")
+    for label, sec in sorted(_PHASE_TIMES, key=lambda r: -r[1]):
+        share = (sec / total * 100) if total else 0
+        bar = "█" * max(1, int(share / 4))
+        print(f"     {label:<34} {sec:7.1f}s  {share:5.1f}%  {bar}")
+    print(f"     {'TOTAL':<34} {total:7.1f}s")
+
+
+# ─── Stage upload helpers ────────────────────────────────────────────────────
+
+def file_md5(path):
+    """MD5 of a local file, to compare against what LIST reports on a stage."""
+    digest = hashlib.md5()
+    with open(path, 'rb') as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def staged_md5_map(session, stage_name):
+    """{relative stage path (lowercased): md5} for everything on a stage.
+
+    Lets an unchanged file skip its PUT. Uploads are one network round trip
+    each and dominate a Streamlit-only deploy, where usually one or two of the
+    seventeen files actually changed. Returns {} if LIST fails, which just
+    means every file uploads as before.
+    """
+    out = {}
+    try:
+        for row in session.sql(f"LIST @{stage_name}").collect():
+            data = row.asDict()
+            raw = data.get('name') or ''
+            slash = raw.find('/')
+            rel = raw[slash + 1:] if slash != -1 else raw
+            md5 = data.get('md5') or data.get('MD5') or ''
+            if rel and md5:
+                out[rel.lower()] = str(md5).lower()
+    except Exception:
+        pass
+    return out
 
 # ─── Connection ──────────────────────────────────────────────────────────────
 
@@ -161,6 +232,7 @@ def deploy_db_objects(session):
 
     for sql_file in sql_files:
         file_name = os.path.basename(sql_file)
+        file_t0 = time.time()
         print(f"\n  📄 {file_name}")
         print(f"     {'─' * 50}")
 
@@ -183,8 +255,15 @@ def deploy_db_objects(session):
             short_desc = first_line[:80] + ('...' if len(first_line) > 80 else '')
 
             try:
+                _t0 = time.time()
                 session.sql(stmt).collect()
-                print(f"     ✅ [{i}] {short_desc}")
+                _took = time.time() - _t0
+                # Most DDL is metadata-only and returns in well under a
+                # second. Anything that does not is what makes a deploy feel
+                # slow (an initial dynamic-table refresh, a table rewrite),
+                # so name it rather than hiding it in the total.
+                _slow = f"   ⏱ {_took:.1f}s" if _took >= 2.0 else ""
+                print(f"     ✅ [{i}] {short_desc}{_slow}")
                 file_stmts += 1
             except Exception as e:
                 # Full message, whitespace-normalized — Snowflake often puts
@@ -197,7 +276,10 @@ def deploy_db_objects(session):
         total_stmts += file_stmts
         total_errors += file_errors
         status = "✅" if file_errors == 0 else "⚠️"
-        print(f"     {status} {file_name}: {file_stmts} succeeded, {file_errors} failed")
+        file_secs = time.time() - file_t0
+        _PHASE_TIMES.append((f"sql: {file_name}", file_secs))
+        print(f"     {status} {file_name}: {file_stmts} succeeded, "
+              f"{file_errors} failed, {file_secs:.1f}s")
 
     print(f"\n  {'═' * 60}")
     print(f"  DB Objects: {total_stmts} statements succeeded, {total_errors} failed")
@@ -309,13 +391,25 @@ def deploy_streamlit_app(session):
     except Exception as e:
         print(f"     ⚠️  Stage cleanup warning: {e}")
 
+    # Every PUT is a network round trip, and on a normal deploy almost every
+    # file is byte-identical to what is already staged. Compare MD5s once and
+    # upload only what actually changed.
+    staged_md5 = staged_md5_map(session, stage_name)
     print(f"\n  📤 Uploading {len(files_to_upload)} files...")
     upload_errors = 0
+    uploaded = 0
+    skipped = 0
 
     for fpath, subdir in files_to_upload:
         stage_path = f'@{stage_name}/{subdir}' if subdir else f'@{stage_name}'
         local_path = str(fpath).replace('\\', '/')
         display_name = f"{subdir + '/' if subdir else ''}{fpath.name}"
+        try:
+            if staged_md5.get(display_name.lower()) == file_md5(fpath):
+                skipped += 1
+                continue
+        except Exception:
+            pass    # unreadable hash — fall through and upload it
         try:
             session.file.put(
                 local_path,
@@ -324,9 +418,13 @@ def deploy_streamlit_app(session):
                 overwrite=True,
             )
             print(f"     ✅ {display_name}")
+            uploaded += 1
         except Exception as e:
             print(f"     ❌ {display_name}: {e}")
             upload_errors += 1
+
+    if skipped:
+        print(f"     ⏭️  {skipped} unchanged, {uploaded} uploaded")
 
     if upload_errors > 0:
         print(f"  ⚠️ {upload_errors} files failed to upload")
@@ -461,13 +559,25 @@ def deploy_notebooks(session):
     except Exception as e:
         print(f"     ⚠️  Stage cleanup warning: {e}")
 
+    # Every PUT is a network round trip, and on a normal deploy almost every
+    # file is byte-identical to what is already staged. Compare MD5s once and
+    # upload only what actually changed.
+    staged_md5 = staged_md5_map(session, stage_name)
     print(f"\n  📤 Uploading {len(files_to_upload)} files...")
     upload_errors = 0
+    uploaded = 0
+    skipped = 0
 
     for fpath, subdir in files_to_upload:
         stage_path = f'@{stage_name}/{subdir}' if subdir else f'@{stage_name}'
         local_path = str(fpath).replace('\\', '/')
         display_name = f"{subdir + '/' if subdir else ''}{fpath.name}"
+        try:
+            if staged_md5.get(display_name.lower()) == file_md5(fpath):
+                skipped += 1
+                continue
+        except Exception:
+            pass    # unreadable hash — fall through and upload it
         try:
             session.file.put(
                 local_path,
@@ -476,9 +586,13 @@ def deploy_notebooks(session):
                 overwrite=True,
             )
             print(f"     ✅ {display_name}")
+            uploaded += 1
         except Exception as e:
             print(f"     ❌ {display_name}: {e}")
             upload_errors += 1
+
+    if skipped:
+        print(f"     ⏭️  {skipped} unchanged, {uploaded} uploaded")
 
     if upload_errors > 0:
         print(f"  ⚠️ {upload_errors} files failed to upload")
@@ -935,10 +1049,14 @@ def main():
 
     # ── Connect ──────────────────────────────────────────────────────────
     print("\n  🔌 Connecting to Snowflake...")
+    _connect_t0 = time.time()
     try:
         session = get_session()
         ctx = session.sql("SELECT CURRENT_ROLE() AS R, CURRENT_WAREHOUSE() AS W, CURRENT_DATABASE() AS D").collect()[0]
-        print(f"     ✅ Connected — Role: {ctx['R']}, Warehouse: {ctx['W']}, Database: {ctx['D']}")
+        _connect_secs = time.time() - _connect_t0
+        _PHASE_TIMES.append(("connect + warehouse resume", _connect_secs))
+        print(f"     ✅ Connected — Role: {ctx['R']}, Warehouse: {ctx['W']}, "
+              f"Database: {ctx['D']} ({_connect_secs:.1f}s)")
     except Exception as e:
         print(f"     ❌ Connection failed: {e}")
         sys.exit(1)
@@ -967,12 +1085,15 @@ def main():
         print("\n" + "─" * 64)
         print("  PHASE 1b: Resume pipeline tasks")
         print("─" * 64)
-        resume_pipeline_tasks(session)
+        with phase_timer("resume pipeline tasks"):
+            resume_pipeline_tasks(session)
 
         print("\n" + "─" * 64)
         print("  PHASE 1c: Validate schema")
         print("─" * 64)
-        if not validate_schema(session):
+        with phase_timer("validate schema"):
+            _schema_ok = validate_schema(session)
+        if not _schema_ok:
             print("\n  ⚠️  Schema validation FAILED — adjustments may error until fixed.")
             success = False
 
@@ -981,7 +1102,9 @@ def main():
         print("\n" + "─" * 64)
         print("  PHASE 2: Streamlit Application")
         print("─" * 64)
-        if not deploy_streamlit_app(session):
+        with phase_timer("streamlit app"):
+            _st_ok = deploy_streamlit_app(session)
+        if not _st_ok:
             print("\n  ⚠️  Streamlit deployment had errors — review above.")
             success = False
 
@@ -990,7 +1113,9 @@ def main():
         print("\n" + "─" * 64)
         print("  PHASE 2b: Snowflake Notebooks")
         print("─" * 64)
-        if not deploy_notebooks(session):
+        with phase_timer("notebooks"):
+            _nb_ok = deploy_notebooks(session)
+        if not _nb_ok:
             print("\n  ⚠️  Notebook deployment had errors — review above.")
             success = False
 
@@ -999,10 +1124,14 @@ def main():
         print("\n" + "─" * 64)
         print("  PHASE 3: Submit Test Adjustment (VaR Flatten)")
         print("─" * 64)
-        if not submit_test_adjustment(session):
+        with phase_timer("test adjustment"):
+            _adj_ok = submit_test_adjustment(session)
+        if not _adj_ok:
             print("\n  ⚠️  Test adjustment submission failed — review above.")
 
     # ── Summary ──────────────────────────────────────────────────────────
+    print_timing_breakdown()
+
     print("\n" + "=" * 64)
     if success:
         print("  ✅ DEPLOYMENT COMPLETE — All objects deployed successfully!")
