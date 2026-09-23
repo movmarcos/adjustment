@@ -135,8 +135,12 @@ Adjustment categories:
 - Scaling: Flatten (zero the scope), Scale (multiply by a factor), Roll (carry
   another COB's adjusted values forward).
   Scaling and Entity Roll accept SEVERAL data scopes at once — the app
-  creates one adjustment per selected scope. With several scopes the filter
-  form offers only the fields every selected scope supports. Each scope
+  creates one adjustment per selected scope. "Select all" / "Clear" sit
+  above the scope pills. With several scopes the filter form offers only the
+  fields every selected scope supports. If one selected scope previews 0
+  rows it is SKIPPED, not blocked: the other scopes are still created and a
+  warning names the one left out. Submit is only blocked when EVERY selected
+  scope matches nothing. Each scope
   measures a different quantity (VaR P&L vs Stress sim P&L vs a JTD loss vs
   a notional, etc.), so the preview never sums those figures across scopes —
   it shows them per scope only; row counts are the only thing totalled.
@@ -158,6 +162,13 @@ Adjustment categories:
   adjustment (type "Direct"); the columns are the scope's upload template, the
   COB is read-only and comes from the file's COBID column, and a new file with
   the same COB + Reference replaces the previous submission.
+  FRTB files carry the USD figure ONLY (AMOUNT_IN_USD / JTD_LOSS_USD /
+  NOTIONAL_AMOUNT_USD). The local-currency amount is no longer typed: the
+  engine derives it as usd / exchange rate, using FACT.EXCHANGE_RATE matched
+  on COB, REGION_AREA_CODE and the row's currency (CCY1, else CCY_AMT/CCY2).
+  A USD row needs no rate. A non-USD row with no matching rate FAILS the
+  whole adjustment and names the COB and currency, rather than writing a
+  blank local amount — check REGION_AREA_CODE in the file first.
 - VaR Upload: one CSV in VaR legacy layout = one adjustment; re-upload with the
   same COB+Reference replaces the previous one.
 - Entity Roll: destructive replace of an entity's figures at a COB; always
@@ -183,6 +194,13 @@ Who may sign off or request a re-open is the "Authorized Sign-Off Users" list
 on the Admin page (optionally per scope); while that list is empty everyone
 may. Approving those requests is a separate list: "Authorized Approvers".
 
+Who may SUBMIT is a third list, "Authorized Submitters" (Admin page,
+optionally per scope). It gates the Submit button ONLY — anyone can open New
+Adjustment, build a draft and run the impact preview; only listed users can
+book it. Same bootstrap rule: while the list is empty everyone may submit,
+and adding the first user locks it down. Enforced server-side in
+SP_SUBMIT_ADJUSTMENT, so every path is covered.
+
 Reports hand-off: VaR/Stress -> Power BI refresh (~5 min); Sensitivity/FRTB ->
 dbt rebuild trigger via Control-M. If hand-off fails the numbers are still
 applied but reports may be stale.
@@ -201,7 +219,7 @@ with Retry/Delete/Recall), Approval Queue (approve/reject, 4-eyes), Sign-Off
 (sign off — approval optional; request re-open — approval required; sync),
 FRTB Explore (browse the OFFICIAL FRTB fact tables by COB / entity / risk
 class / sensitivity type / book / trade, with summary KPIs, a grid and a CSV
-download of max 1,000 rows whose columns are exactly the FRTB upload template —
+download of max 5,000 rows whose columns are exactly the FRTB upload template —
 edit the file and re-upload it as a Direct adjustment), Admin (config,
 approvers, admins), Logs (runs, activity, errors, sign-off audit), Tasks & Cost
 (task health + serverless cost). Approvers never approve their own requests.
@@ -685,7 +703,7 @@ with tab_overview:
         ["<strong>FRTB Explore</strong>",
          "Browse the <em>official</em> FRTB fact tables (SBM, DRC, RRAO) by "
          "COB, entity, risk class, sensitivity type, book or trade: summary "
-         "KPIs, a grid, and a CSV download (max 1,000 rows) whose columns are "
+         "KPIs, a grid, and a CSV download (max 5,000 rows) whose columns are "
          "exactly the FRTB upload template — edit the file and re-upload it "
          "as a Direct adjustment."],
         ["<strong>Admin</strong>",
@@ -732,7 +750,8 @@ with tab_create:
     _html(_card(
         f'{icon("layers", size=13, color="#7E22CE")} <strong>Several data scopes at once:</strong> '
         f'the scope pills are multi-select — click a scope to add it, click again to '
-        f'remove it. Submit creates <strong>one adjustment per selected scope</strong> '
+        f'remove it, or use <strong>Select all</strong> / <strong>Clear</strong> '
+        f'above the pills. Submit creates <strong>one adjustment per selected scope</strong> '
         f'(the ticket says how many). With several scopes the filter form offers the '
         f'eight main fields (Entity, Source System, Department, Book, Instrument, '
         f'Strategy, Trade Typology, Trade Code) plus, under <em>More filters</em>, only '
@@ -740,8 +759,11 @@ with tab_create:
         f'added scope cannot use is cleared and you are told which. Each scope '
         f'measures a different quantity (a VaR P&amp;L, a jump-to-default loss, a '
         f'notional, …), so the preview shows the figures per scope and never sums '
-        f'them into a blended total — only row counts are totalled; a scope that '
-        f'matches 0 rows blocks Submit until you deselect it or fix the filters.', "#7E22CE"))
+        f'them into a blended total — only row counts are totalled. A scope that '
+        f'matches <strong>0 rows is skipped</strong>, not blocked: the other scopes '
+        f'are still created and a warning names the one left out, so one empty '
+        f'scope cannot cost you the rest. Submit is only blocked when '
+        f'<em>every</em> selected scope matches nothing.', "#7E22CE"))
     _html(_card(
         f'{icon("eye", size=13, color=P["info"])} <strong>Impact preview:</strong> '
         f'for narrow scopes (book/department level) run the preview before '
@@ -813,6 +835,23 @@ with tab_create:
         f'old ticket is marked <em>Replaced</em> and its rows removed. '
         f'Typical workflow: FRTB Explore → download the rows you need → edit '
         f'the values → upload here as a Direct adjustment.', "#7E22CE"))
+    _html(_card(
+        f'{icon("dollar-sign", size=13, color=P["info"])} <strong>FRTB files '
+        f'carry the USD value only.</strong> Fill in '
+        f'<code>AMOUNT_IN_USD</code>, <code>JTD_LOSS_USD</code> or '
+        f'<code>NOTIONAL_AMOUNT_USD</code> for your scope. The '
+        f'local-currency amount is no longer typed in — the engine works it '
+        f'out as <em>USD ÷ exchange rate</em>, taking the rate from '
+        f'<code>FACT.EXCHANGE_RATE</code> matched on the COB, the row\'s '
+        f'<code>REGION_AREA_CODE</code> and its currency '
+        f'(<code>CCY1</code>, otherwise <code>CCY_AMT</code> / '
+        f'<code>CCY2</code>). A row already in USD needs no rate.<br/><br/>'
+        f'If a non-USD row finds <strong>no rate</strong>, the whole '
+        f'adjustment fails and the error names the COB and the currency. '
+        f'Nothing is written — it will not quietly land with a blank local '
+        f'figure. The usual cause is a missing or wrong '
+        f'<code>REGION_AREA_CODE</code> in the file, so check that first.',
+        P["info"]))
 
     section_title("VaR Upload (CSV file)", "upload")
     _html(_card(
@@ -846,6 +885,11 @@ with tab_create:
     section_title("What happens at Submit", "send")
     _html(_table(["Check", "Outcome"], [
         ["Scope active", "Inactive/unknown scope → submission refused."],
+        ["Submitter permission", "Not on the <strong>Authorized Submitters</strong> "
+         "list for that scope → submission refused, and the Submit button is "
+         "already disabled with the reason. Building the draft and running "
+         "the impact preview are never gated. While the list is empty, "
+         "everyone may submit."],
         ["Sign-off", "COB signed off (in-app or by the upstream publish feed) "
          "→ ticket stored as <em>Rejected - SignedOff</em>; request a re-open "
          "instead (see Approvals &amp; Sign-Off)."],
@@ -922,15 +966,20 @@ with tab_approval:
 
     section_title("Who can do what", "user")
     _html(_table(["Action", "Who"], [
-        ["Submit adjustments", "Any app user"],
+        ["Build a draft and run the impact preview", "Any app user"],
+        ["Submit adjustments",
+         "Users on the <strong>Authorized Submitters</strong> list (Admin "
+         "page, optionally per scope). While that list is empty, any app "
+         "user. Only the Submit button is gated — anyone can still build a "
+         "draft and preview the impact."],
         ["Sign off a COB, request a COB re-open, re-sign-off a re-opened COB",
          "Users on the <strong>Authorized Sign-Off Users</strong> list (Admin "
          "page, optionally per scope). While that list is empty, any app user."],
         ["Approve/reject adjustments and re-open requests",
          "Registered approvers (per scope), never for their own requests"],
         ["View COB sign-off status", "Any app user (Sign-Off page)"],
-        ["Manage approvers, sign-off users, scope config, page admins, "
-         "the AI assistant models",
+        ["Manage approvers, submitters, sign-off users, scope config, page "
+         "admins, the AI assistant models",
          "Page administrators (Admin page; access controlled by the "
          "administrators list, with a warning-flagged open ‘bootstrap’ mode "
          "until the first admin is registered)"],
@@ -1202,9 +1251,15 @@ with tab_reference:
          "surrogate key definition, active flag."],
         ["<code>ADJ_SIGNOFF_STATUS</code> / <code>ADJ_SIGNOFF_HISTORY</code>",
          "Sign-off lifecycle per COB + entity + scope ('*' = whole scope) + its audit trail."],
-        ["<code>ADJ_APPROVERS</code> / <code>ADJ_SIGNOFF_USERS</code> / <code>ADJ_ADMINS</code> / <code>ADJ_CATEGORY</code>",
-         "Approver registry (per scope), Admin-page access list, managed "
-         "business-category list."],
+        ["<code>ADJ_APPROVERS</code> / <code>ADJ_SUBMITTERS</code> / <code>ADJ_SIGNOFF_USERS</code> / <code>ADJ_ADMINS</code> / <code>ADJ_CATEGORY</code>",
+         "Approver registry (per scope), submitter permission list (per "
+         "scope; gates Submit only), sign-off user list, Admin-page access "
+         "list, managed business-category list. Each is empty-means-everyone "
+         "until its first active row is added."],
+        ["<code>FACT.EXCHANGE_RATE</code>",
+         "Source of the USD rate used to derive the local-currency amount on "
+         "FRTB Direct uploads (matched on COB, region area and currency; "
+         "read-only to this app)."],
         ["<code>SP_SUBMIT_ADJUSTMENT</code>",
          "Validates, checks sign-off (app + upstream feed), handles VaR "
          "Upload replacement transactionally, inserts the ticket."],
