@@ -1279,6 +1279,9 @@ def _render_scope_pills() -> None:
     toggles the scope in or out. Sets wiz['process_types'] (list of codes);
     one adjustment is created per selected scope.
 
+    A "Select all" / "Clear" pair sits above the pills: picking every scope
+    was six clicks, and a Transfer Book across all of them is a normal ask.
+
     Buttons rather than st.pills: the selection is driven purely by wiz
     state, so there is no widget default-vs-state fight and the look matches
     the other pickers.
@@ -1298,6 +1301,24 @@ def _render_scope_pills() -> None:
     was already a bug: gone."""
     opts = list(ALL_SCOPES)
     current = [s for s in (wiz.get("process_types") or []) if s in opts]
+
+    # Select all / Clear. Six scopes took six clicks, and a Transfer Book
+    # across every scope is a normal thing to want (Marcos, 2026-09-23).
+    # Icons are ones already proven to render in this page: an unknown
+    # Material name raises at render time, and _btn only rescues TypeError.
+    bulk = None
+    _c_all, _c_clear, _ = st.columns([1, 1, 4])
+    with _c_all:
+        if _btn("Select all", icon_name=":material/playlist_add:",
+                key=_k(f"scope_all_{wiz.get('category')}"),
+                disabled=len(current) == len(opts), **wide_kwargs()):
+            bulk = list(opts)
+    with _c_clear:
+        if _btn("Clear", icon_name=":material/remove_circle:",
+                key=_k(f"scope_clear_{wiz.get('category')}"),
+                disabled=not current, **wide_kwargs()):
+            bulk = []
+
     cols = st.columns(len(opts))
     clicked = None
     for i, sc in enumerate(opts):
@@ -1308,10 +1329,15 @@ def _render_scope_pills() -> None:
                     **wide_kwargs(),
                     type="primary" if sc in current else "secondary"):
                 clicked = sc
-    picked = current
-    if clicked:
+    # Bulk wins over a pill click: they cannot both fire in one rerun, but
+    # ordering it explicitly keeps that true if the layout ever changes.
+    if bulk is not None:
+        picked = bulk
+    elif clicked:
         picked = ([s for s in current if s != clicked] if clicked in current
                   else [s for s in opts if s in current or s == clicked])
+    else:
+        picked = current
     if picked != current:
         wiz["process_types"] = picked
         wiz["process_type"]  = picked[0] if picked else None   # legacy readers
@@ -1319,8 +1345,11 @@ def _render_scope_pills() -> None:
         _purge_filters_for(picked)
         safe_rerun()
     n = len(picked)
-    st.caption("Pick one or more scopes — one adjustment is created per scope."
-               + (f" **{n} adjustments** will be created." if n > 1 else ""))
+    st.caption("Pick one or more scopes, or use Select all — one adjustment is "
+               "created per scope."
+               + (f" **{n} adjustments** will be created." if n > 1 else "")
+               + (" A scope whose preview matches no rows is skipped rather "
+                  "than blocking the others." if n > 1 else ""))
     # Shown once, on the rerun that follows the purge (see _purge_filters_for).
     if wiz.get("_purged_filters_note"):
         st.warning(wiz["_purged_filters_note"])

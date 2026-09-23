@@ -1477,3 +1477,82 @@ def test_the_page_does_not_send_its_own_reopen_notification():
     emails, and the page's copy went out even when the request had not
     committed. One sender, and it is the one inside the transaction."""
     assert not [s for s in _string_constants() if "SP_NOTIFY" in s]
+
+
+# ── Select all / Clear on the scope pills (Marcos, 2026-09-23) ───────────────
+# Six scopes took six clicks, and a Transfer Book across every scope is a
+# normal thing to want. These drive the real buttons through AppTest rather
+# than calling the renderer, so a renamed key or a bad Material icon name
+# fails here instead of in the deployed app.
+
+def _scope_draft(at, scopes, category="Scaling Adjustment"):
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": category,
+                               "adjustment_type": "Scale",
+                               "process_types": list(scopes),
+                               "process_type": scopes[0] if scopes else None}
+    at.run()
+    assert not at.exception, at.exception
+    return at
+
+
+def test_select_all_picks_every_scope():
+    from utils.styles import ALL_SCOPES
+    at = _scope_draft(_load(), ["VaR"])
+    at.button(key=f"scope_all_Scaling Adjustment_"
+                  f"{at.session_state['_wiz_v']}").click().run()
+    assert not at.exception, at.exception
+    assert at.session_state["wiz"]["process_types"] == list(ALL_SCOPES)
+
+
+def test_select_all_keeps_the_canonical_scope_order():
+    """One adjustment per scope is created in this order, so it must be stable."""
+    from utils.styles import ALL_SCOPES
+    at = _scope_draft(_load(), ["FRTBDRC", "VaR"])
+    at.button(key=f"scope_all_Scaling Adjustment_"
+                  f"{at.session_state['_wiz_v']}").click().run()
+    assert at.session_state["wiz"]["process_types"] == list(ALL_SCOPES)
+
+
+def test_select_all_sets_the_legacy_single_scope_too():
+    """wiz['process_type'] still feeds older readers; it must not go stale."""
+    from utils.styles import ALL_SCOPES
+    at = _scope_draft(_load(), [])
+    at.button(key=f"scope_all_Scaling Adjustment_"
+                  f"{at.session_state['_wiz_v']}").click().run()
+    assert at.session_state["wiz"]["process_type"] == ALL_SCOPES[0]
+
+
+def test_clear_empties_the_selection():
+    at = _scope_draft(_load(), ["VaR", "Stress"])
+    at.button(key=f"scope_clear_Scaling Adjustment_"
+                  f"{at.session_state['_wiz_v']}").click().run()
+    assert not at.exception, at.exception
+    assert at.session_state["wiz"]["process_types"] == []
+    assert at.session_state["wiz"]["process_type"] is None
+
+
+def test_select_all_throws_away_the_previous_preview():
+    """The preview belonged to the old scope set; keeping it would let a
+    stale zero-row verdict skip a scope the user just added."""
+    at = _load()
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": "Scaling Adjustment",
+                               "adjustment_type": "Scale",
+                               "process_types": ["VaR"], "process_type": "VaR",
+                               "_preview_by_scope": {"VaR": 0},
+                               "_zero_preview": True}
+    at.run(); assert not at.exception, at.exception
+    at.button(key=f"scope_all_Scaling Adjustment_"
+                  f"{at.session_state['_wiz_v']}").click().run()
+    assert not at.exception, at.exception
+    assert not at.session_state["wiz"].get("_preview_by_scope")
+    assert not at.session_state["wiz"].get("_zero_preview")
+
+
+def test_both_bulk_buttons_render_for_entity_roll():
+    """Entity Roll shares the pills, so it gets the shortcut too."""
+    at = _scope_draft(_load(), ["VaR"], category="Entity Roll")
+    v = at.session_state["_wiz_v"]
+    assert _button(at, f"scope_all_Entity Roll_{v}") is not None
+    assert _button(at, f"scope_clear_Entity Roll_{v}") is not None
