@@ -1,5 +1,5 @@
 -- =============================================================================
--- 00_GRANTS.SQL
+-- 16_GRANTS.SQL
 -- Establishes the privileges the engine and the read-only app role need.
 -- Before this file, `grep GRANT new_adjustment_db_objects/*.sql` returned only
 -- two comment lines (01:15, 01:936) and deploy.py granted USAGE ON STREAMLIT
@@ -39,17 +39,17 @@
 -- something the app depends on.
 --
 -- deploy.py runs files in filename-sorted order (glob.glob + sorted()), so
--- this file — 00 — runs BEFORE 01_tables.sql creates every other object in
+-- this file — 16 — runs AFTER 01-15 have created every object in
 -- ADJUSTMENT_APP. Two consequences of that ordering, both handled below:
 --
 --   1. Every statement in the AUTO-EXECUTED section only touches the
---      ADJUSTMENT_APP schema itself, which THIS file creates defensively
---      (CREATE SCHEMA IF NOT EXISTS, same idempotent form 01_tables.sql also
---      uses) before granting on it. That makes it safe to run first even
---      against a brand-new, never-deployed database: there is no ordering
---      dependency on 01 having run yet, and re-running this file on every
---      later deploy is a no-op (GRANT is idempotent; CREATE SCHEMA IF NOT
---      EXISTS is a no-op once 01 has created it for real).
+--      ADJUSTMENT_APP schema, which 01_tables.sql has already created and
+--      {{ROLE_OWNER}} owns. GRANT ... ON ALL TABLES/VIEWS therefore covers
+--      everything this same deploy just created, which is why no FUTURE
+--      grant is needed — and FUTURE could not be used anyway, because it
+--      requires the global MANAGE GRANTS privilege that {{ROLE_OWNER}} does
+--      not hold. Re-running this file on every later deploy is a no-op
+--      (GRANT is idempotent).
 --   2. The engine and the workflow procedures (03, 04, 05, 12) ALSO read and
 --      write tables/sequences/procedures in the DIMENSION, FACT, BATCH,
 --      RAVEN and METADATA schemas (see the table in the audit this file
@@ -57,8 +57,9 @@
 --      this repo (grep CREATE SCHEMA new_adjustment_db_objects/*.sql — only
 --      ADJUSTMENT_APP appears) and {{ROLE_OWNER}} does not own them, so the
 --      deploy role most likely lacks GRANT authority there. Rather than emit
---      statements that fail on every deploy (harmless but noisy — deploy.py
---      tolerates per-statement failures and keeps going), those grants are
+--      statements that fail on every deploy — deploy.py keeps going after a
+--      failed statement but COUNTS it and exits non-zero, so a "harmless"
+--      failure still reports the whole deploy as failed — those grants are
 --      documented below as a PREREQUISITE to be run ONCE by whoever owns
 --      those schemas (or ACCOUNTADMIN) — the same pattern already used for
 --      the READ SESSION prerequisite in 01_tables.sql:13-18.
@@ -128,20 +129,37 @@
 --   -- sync.sql SP_SYNC_SIGNOFF_STATUS). Table name is configurable via
 --   -- ADJ_APP_CONFIG.SIGNOFF_FEED_TABLE — this is the default.
 --   GRANT SELECT, INSERT, UPDATE ON TABLE {{DATABASE}}.BATCH.PUBLISH_SIGNOFF_STATUS TO ROLE {{ROLE_OWNER}};
+--
+--   -- OPTIONAL, and the reason this file no longer runs first.
+--   -- A FUTURE grant may only be issued by a role holding the global MANAGE
+--   -- GRANTS privilege (SECURITYADMIN by default). OWNING the schema is NOT
+--   -- enough, which is why {{ROLE_OWNER}} cannot issue these and an earlier
+--   -- revision failed the deploy on exactly these two statements.
+--   -- They are not needed for the app: this file now runs LAST, so the
+--   -- GRANT ... ON ALL TABLES/VIEWS below already covers everything 01-15
+--   -- just created. Add these only if you also want objects created OUTSIDE
+--   -- a deploy to be readable by {{ROLE_RO}} without waiting for the next one.
+--   GRANT SELECT ON FUTURE TABLES IN SCHEMA {{DATABASE}}.ADJUSTMENT_APP TO ROLE {{ROLE_RO}};
+--   GRANT SELECT ON FUTURE VIEWS  IN SCHEMA {{DATABASE}}.ADJUSTMENT_APP TO ROLE {{ROLE_RO}};
 -- ═══════════════════════════════════════════════════════════════════════════
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- AUTO-EXECUTED — runs on every deploy, as {{ROLE_OWNER}} (deploy.py's
 -- session role). Touches ONLY the ADJUSTMENT_APP schema, which {{ROLE_OWNER}}
 -- owns (it is the role that creates every object in 01-15), so no cross-
--- schema GRANT authority is required and there is no ordering hazard even
--- on a brand-new database.
+-- schema GRANT authority is required.
+--
+-- WHY THIS FILE IS NUMBERED 16 AND NOT 00. deploy.py runs the .sql files in
+-- filename order, so this one runs LAST, after every object exists. That is
+-- deliberate:
+--   • GRANT ... ON ALL TABLES/VIEWS then covers everything 01-15 created in
+--     THIS deploy. Running first, it could only ever grant on the previous
+--     deploy's objects, which is what FUTURE grants were compensating for.
+--   • FUTURE grants require the global MANAGE GRANTS privilege, which
+--     {{ROLE_OWNER}} does not hold — owning the schema is not sufficient.
+--     Issuing them here failed the deploy. They now live in the PREREQUISITE
+--     block above as an optional DBA step, and nothing depends on them.
 -- ═══════════════════════════════════════════════════════════════════════════
-
--- Defensive: makes every grant below valid even if this file runs before
--- 01_tables.sql has created the schema (00 sorts first). Same idempotent
--- form 01_tables.sql itself uses — a no-op once 01 has run for real.
-CREATE SCHEMA IF NOT EXISTS {{DATABASE}}.ADJUSTMENT_APP;
 
 -- {{ROLE_RO}} — read-only app viewers (granted USAGE ON STREAMLIT by
 -- deploy.py's deploy_streamlit_app()). Streamlit pages query several
@@ -151,10 +169,11 @@ CREATE SCHEMA IF NOT EXISTS {{DATABASE}}.ADJUSTMENT_APP;
 -- procedure context — so SELECT is needed on both tables and views.
 GRANT USAGE ON DATABASE {{DATABASE}} TO ROLE {{ROLE_RO}};
 GRANT USAGE ON SCHEMA {{DATABASE}}.ADJUSTMENT_APP TO ROLE {{ROLE_RO}};
-GRANT SELECT ON ALL TABLES IN SCHEMA {{DATABASE}}.ADJUSTMENT_APP TO ROLE {{ROLE_RO}};
-GRANT SELECT ON FUTURE TABLES IN SCHEMA {{DATABASE}}.ADJUSTMENT_APP TO ROLE {{ROLE_RO}};
-GRANT SELECT ON ALL VIEWS IN SCHEMA {{DATABASE}}.ADJUSTMENT_APP TO ROLE {{ROLE_RO}};
-GRANT SELECT ON FUTURE VIEWS IN SCHEMA {{DATABASE}}.ADJUSTMENT_APP TO ROLE {{ROLE_RO}};
+-- ALL (not FUTURE) on purpose — see the ordering note above. Re-run on every
+-- deploy, so each deploy re-grants over whatever 01-15 has just (re)created.
+GRANT SELECT ON ALL TABLES         IN SCHEMA {{DATABASE}}.ADJUSTMENT_APP TO ROLE {{ROLE_RO}};
+GRANT SELECT ON ALL VIEWS          IN SCHEMA {{DATABASE}}.ADJUSTMENT_APP TO ROLE {{ROLE_RO}};
+GRANT SELECT ON ALL DYNAMIC TABLES IN SCHEMA {{DATABASE}}.ADJUSTMENT_APP TO ROLE {{ROLE_RO}};
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- VERIFY
