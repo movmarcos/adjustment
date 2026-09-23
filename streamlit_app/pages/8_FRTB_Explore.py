@@ -48,12 +48,28 @@ st.markdown("## FRTB Explore")
 st.markdown(
     f"<span style='color:{P['grey_700']};font-size:0.9rem'>"
     f"Browse the FRTB fact data, filter what you need, and download it as "
-    f"CSV (up to 1,000 rows). The columns are the upload template of the "
+    f"CSV (up to 5,000 rows). The columns are the upload template of the "
     f"FRTB type, so the file can be edited and uploaded as an adjustment."
     f"</span>", unsafe_allow_html=True)
 st.markdown("<br/>", unsafe_allow_html=True)
 
-MAX_ROWS = 1000
+# Caps the query, the grid and the CSV together. Raised from 1,000 on
+# 2026-09-23 at Marcos's request.
+#
+# The ceiling is the DOWNLOAD MECHANISM, not the query. download_csv_link
+# embeds the CSV as a base64 data: URI inside the page HTML, because
+# st.download_button serves from a presigned Azure URL that the corporate
+# browser-isolation proxy rewrites and breaks. Base64 adds a third, and the
+# payload sits in the page and crosses the websocket on every rerun.
+#
+# Measured on the widest layout here (16 columns), ~234 bytes of page HTML
+# per row:  5,000 rows = 1.2 MB, 10,000 = 2.3 MB, 50,000 = 11.7 MB.
+# 5,000 is comfortably under both Streamlit's markdown trimming and the
+# browser's data-link ceiling. Do NOT push this past ~10,000 while the
+# download is a data: URI — change the mechanism instead (the results grid
+# is already a native st.dataframe whose hover toolbar downloads CSV
+# client-side, with no presigned URL and nothing added to the page).
+MAX_ROWS = 5000
 
 # Per-type config: base fact table, the risk-class-like dimension, the USD
 # measure for the summary, and the reporting columns (the fields used to

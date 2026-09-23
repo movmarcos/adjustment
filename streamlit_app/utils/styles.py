@@ -2037,8 +2037,9 @@ def download_csv_link(data, filename, label="⬇ Download CSV",
     'AuthenticationFailed / Signature fields not well formed'). A data:
     URI embeds the bytes in the page itself: the click saves the file with
     NO network request, so there is no signature to break. Only for small
-    extracts (the callers cap at ~1,000 rows); Streamlit trims markdown
-    over a few MB.
+    extracts (the callers cap at ~5,000 rows, about 1.2 MB of page HTML);
+    Streamlit trims markdown over a few MB, so do not let a caller past
+    ~10,000 rows without changing the mechanism.
 
     data: bytes or str (the CSV content). filename: the save-as name.
 
