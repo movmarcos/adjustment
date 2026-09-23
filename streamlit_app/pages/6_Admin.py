@@ -705,6 +705,120 @@ with tab_approvers:
                 except Exception as ex:
                     st.error(f"Failed to add sign-off user: {ex}")
 
+    # ── Authorized submitters (New Adjustment page — Submit action) ──────────
+    st.markdown("<br/>", unsafe_allow_html=True)
+    section_title("Authorized Submitters", "send")
+    st.markdown(
+        f'<span style="font-size:0.85rem;color:{P["grey_700"]}">'
+        f'Users listed here can <strong>submit</strong> an adjustment (New '
+        f'Adjustment page). Anyone can still open the page, build a draft and '
+        f'run the impact preview — only pressing Submit is gated. '
+        f'Set <code>PROCESS_TYPE</code> to limit a user to one scope, or leave blank for all scopes.'
+        f'</span>',
+        unsafe_allow_html=True)
+
+    try:
+        df_submitters = run_query_df("""
+            SELECT SUBMITTER_ID, USERNAME, PROCESS_TYPE, IS_ACTIVE,
+                   ADDED_BY, ADDED_DATE
+            FROM ADJUSTMENT_APP.ADJ_SUBMITTERS
+            ORDER BY IS_ACTIVE DESC, USERNAME
+        """)
+        _n_active_submitters = (int(df_submitters[df_submitters["IS_ACTIVE"] == True].shape[0])
+                                if not df_submitters.empty else 0)
+        if _n_active_submitters == 0:
+            st.warning("The submitters list has no active user, so **everyone** "
+                       "can submit adjustments (bootstrap). Add the "
+                       "first user below to restrict it.")
+
+        if not df_submitters.empty:
+            _inactive_submitters = len(df_submitters) - _n_active_submitters
+            st.markdown(
+                f'<span style="font-size:0.85rem">'
+                f'<strong style="color:{P["success"]}">{_n_active_submitters} active</strong> · '
+                f'<strong style="color:{P["grey_700"]}">{_inactive_submitters} inactive</strong>'
+                f'</span>',
+                unsafe_allow_html=True)
+            render_df_table(df_submitters, max_rows=200, height=260)
+
+            st.markdown("<br/>", unsafe_allow_html=True)
+            section_title("Toggle Submitter Status", "refresh-cw")
+            sb_cols = st.columns([2, 1, 1])
+            with sb_cols[0]:
+                _submitter_by_label = {
+                    f"{r['USERNAME']} (ID {r['SUBMITTER_ID']}) — {'Active' if r['IS_ACTIVE'] else 'Inactive'}":
+                        (int(r["SUBMITTER_ID"]), str(r["USERNAME"]).strip())
+                    for _, r in df_submitters.iterrows()
+                }
+                submitter_options = list(_submitter_by_label)
+                sel_submitter = st.selectbox("Select submitter", submitter_options,
+                                             key="toggle_submitter")
+            submitter_id, submitter_name = _submitter_by_label[sel_submitter]
+            with sb_cols[1]:
+                if st.button("Activate", key="activate_submitter_btn"):
+                    try:
+                        run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_SUBMITTERS
+                            SET IS_ACTIVE = TRUE
+                            WHERE SUBMITTER_ID = {submitter_id}
+                        """)
+                        set_flash("admin", "success", f"Submitter {submitter_name} activated.")
+                        safe_rerun()
+                    except Exception as ex:
+                        set_flash("admin", "error", f"Failed to activate submitter: {ex}")
+                        safe_rerun()
+            with sb_cols[2]:
+                # Deactivating the LAST active user re-opens submission to
+                # everyone (bootstrap rule) — two clicks, not one.
+                _cfm_sb = confirm_gate(f"Confirm deactivating {submitter_name}",
+                                       key=f"cfm_deact_submitter_{submitter_id}")
+                if st.button("Deactivate", key="deactivate_submitter_btn",
+                             disabled=not _cfm_sb):
+                    try:
+                        run_query(f"""
+                            UPDATE ADJUSTMENT_APP.ADJ_SUBMITTERS
+                            SET IS_ACTIVE = FALSE
+                            WHERE SUBMITTER_ID = {submitter_id}
+                        """)
+                        set_flash("admin", "success", f"Submitter {submitter_name} deactivated.")
+                        safe_rerun()
+                    except Exception as ex:
+                        set_flash("admin", "error", f"Failed to deactivate submitter: {ex}")
+                        safe_rerun()
+        else:
+            st.info("No submitters configured yet. Add one below.")
+    except Exception as e:
+        st.info(f"Submitters table not available: {e}")
+
+    st.markdown("<br/>", unsafe_allow_html=True)
+    section_title("Add New Submitter", "send")
+
+    with st.form("new_submitter_form"):
+        sb1, sb2 = st.columns(2)
+        with sb1:
+            b_username = st.text_input("Username", placeholder="e.g. JSMITH", key="submitter_user")
+        with sb2:
+            b_scope = st.selectbox("Scope (optional)", ["All Scopes"] + list(SCOPE_CONFIG.keys()),
+                                   key="submitter_scope", help=SCOPE_LABEL_HELP)
+
+        b_submit = st.form_submit_button("Add Submitter", type="primary")
+        if b_submit:
+            if not b_username.strip():
+                st.error("Username is required.")
+            else:
+                try:
+                    b_scope_val = "NULL" if b_scope == "All Scopes" else f"'{_esc(b_scope)}'"
+                    run_query(f"""
+                        INSERT INTO ADJUSTMENT_APP.ADJ_SUBMITTERS
+                            (USERNAME, PROCESS_TYPE, IS_ACTIVE, ADDED_BY)
+                        VALUES (UPPER('{_esc(b_username.strip())}'), {b_scope_val}, TRUE, '{_esc(user)}')
+                    """)
+                    set_flash("admin", "success",
+                              f"Submitter {b_username.strip().upper()} added.")
+                    safe_rerun()
+                except Exception as ex:
+                    st.error(f"Failed to add submitter: {ex}")
+
     # ── Page administrators (gate for THIS Admin page) ────────────────────────
     st.markdown("<br/>", unsafe_allow_html=True)
     section_title("Page Administrators", "lock")
@@ -1266,6 +1380,7 @@ with tab_schema:
         ("ADJUSTMENT_APP.ADJ_SIGNOFF_HISTORY",   "TABLE",         "Append-only audit of sign-off / re-open transitions"),
         ("ADJUSTMENT_APP.ADJ_APPROVERS",         "TABLE",         "Authorized approvers with optional scope restriction. Managed via Admin page"),
         ("ADJUSTMENT_APP.ADJ_SIGNOFF_USERS",     "TABLE",         "Users allowed to sign off / request re-open, optional scope. Empty = everyone (bootstrap). Managed via Admin page"),
+        ("ADJUSTMENT_APP.ADJ_SUBMITTERS",        "TABLE",         "Users allowed to submit an adjustment, optional scope. Empty = everyone (bootstrap). Managed via Admin page"),
         ("ADJUSTMENT_APP.ADJ_ADMINS",            "TABLE",         "Users and Snowflake roles allowed to open this Admin page. Managed via Admin page"),
         ("ADJUSTMENT_APP.ADJ_APP_CONFIG",        "TABLE",         "App-level key/value config (notification master switch, email integration name)"),
         ("ADJUSTMENT_APP.ADJ_NOTIFICATION_PREFS","TABLE",         "Per-user email notification opt-ins (recipients). Managed via Admin page"),
