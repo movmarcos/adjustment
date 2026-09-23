@@ -407,17 +407,46 @@ def inject_css():
     [data-testid="stDecoration"] {{ display: none !important; }}
     [data-testid="stToolbar"] {{ display: none !important; }}
 
-    /* The re-open-the-menu button must always be reachable. Streamlit only
-       renders it while the sidebar is collapsed, so its own display rule is
-       left alone — this just guarantees it is clickable and on top. */
-    [data-testid="stSidebarCollapsedControl"] {{
-        pointer-events: auto !important;
+    /* ── The menu cannot be collapsed ──────────────────────────────────────
+       Hiding Streamlit's chrome header used to take the "reopen the sidebar"
+       control down with it, so collapsing the menu once left no way back
+       short of reloading. Rather than keep chasing where that button lives
+       from release to release, remove the failure mode: the sidebar is not
+       collapsible at all. Every control that collapses it is hidden, across
+       the testids Streamlit has used for it. */
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="stSidebarNavCollapseIcon"],
+    [data-testid="collapsedControl"],
+    [data-testid="stSidebarHeader"] button,
+    [data-testid="stSidebar"] button[kind="header"],
+    [data-testid="stSidebar"] button[kind="headerNoPadding"] {{
+        display: none !important;
+    }}
+
+    /* Rescue an already-collapsed sidebar. A viewer who collapsed the menu
+       before this shipped still carries that state, and with the button now
+       gone they would be stuck for good. Anything Streamlit uses to push the
+       panel off-screen is overridden while it reports itself collapsed.
+       Width is only forced in that state, so dragging the edge to resize an
+       expanded sidebar still works. */
+    [data-testid="stSidebar"][aria-expanded="false"] {{
+        display: flex !important;
         visibility: visible !important;
         opacity: 1 !important;
-        z-index: 1000000 !important;
+        transform: none !important;
+        margin-left: 0 !important;
+        left: 0 !important;
+        width: 244px !important;
+        min-width: 244px !important;
+        max-width: 244px !important;
+        overflow: visible !important;
     }}
-    [data-testid="stSidebarCollapsedControl"] button {{
-        pointer-events: auto !important;
+    [data-testid="stSidebar"][aria-collapsed="true"] {{
+        transform: none !important;
+        margin-left: 0 !important;
+        width: 244px !important;
+        min-width: 244px !important;
     }}
     [data-testid="stAppViewContainer"] {{ background: var(--bg) !important; }}
     [data-testid="stMainBlockContainer"] {{ padding-top: 1.5rem; padding-bottom: 3rem; }}

@@ -10,9 +10,14 @@ Hiding the header therefore removed the only way back to the menu: a user who
 collapsed the sidebar once had no button to restore it, and no way out short
 of reloading the page. Marcos hit exactly that on 2026-09-23.
 
-These tests pin the resolution: the header may be neutralised any way we like,
-but it must never be removed from the layout, and the sidebar control must
-never be suppressed.
+Keeping that button reachable turned out to be the wrong fix — it moves
+between testids across Streamlit releases, and Marcos still could not find it.
+So the failure mode is gone instead: the sidebar is not collapsible at all.
+
+These tests pin that. Every control that collapses the menu stays hidden, a
+sidebar that reports itself collapsed is forced back open, and the header is
+still never removed from the layout (that is what caused the original bug, and
+what the white-box rules must not go back to).
 """
 import os
 import re
@@ -81,18 +86,47 @@ def test_header_is_never_display_none(css):
         "zero height, pointer-events none.")
 
 
-def test_sidebar_collapsed_control_is_never_hidden(css):
-    """Nothing may suppress the re-open-the-menu button."""
-    body = _norm(_block_for(css, '[data-testid="stSidebarCollapsedControl"]'))
-    assert body, "no rule protects stSidebarCollapsedControl"
+@pytest.mark.parametrize("selector", [
+    '[data-testid="stSidebarCollapseButton"]',
+    '[data-testid="stSidebarCollapsedControl"]',
+    '[data-testid="stSidebarNavCollapseIcon"]',
+    '[data-testid="collapsedControl"]',
+])
+def test_every_collapse_control_is_hidden(css, selector):
+    """The menu must not be collapsible — that is the whole fix."""
+    body = _norm(_block_for(css, selector))
+    assert "display:none" in body, (
+        selector + " is not hidden. If any collapse control survives, a user "
+        "can hide the menu again and be stuck, because the control that "
+        "reopens it moves between testids across Streamlit releases.")
+
+
+def test_a_collapsed_sidebar_is_forced_back_open(css):
+    """Rescues a viewer who collapsed the menu before this shipped.
+
+    Their browser still carries the collapsed state, and with the button now
+    hidden they would have no way back at all.
+    """
+    body = _norm(_block_for(css, '[data-testid="stSidebar"][aria-expanded="false"]'))
+    assert body, "nothing overrides a sidebar that reports itself collapsed"
+    assert "transform:none" in body, (
+        "Streamlit slides the panel off-screen with a transform; it must be "
+        "cancelled or the sidebar stays invisible.")
+    assert "margin-left:0" in body, (
+        "A negative left margin also hides the panel; it must be cancelled.")
     for killer in ("display:none", "visibility:hidden", "opacity:0"):
         assert killer not in body, (
-            "stSidebarCollapsedControl is suppressed with " + killer +
-            " — that is the button users click to get the menu back.")
-    assert "pointer-events:auto" in body, (
-        "The header sets pointer-events:none so it does not swallow clicks. "
-        "The collapsed control must re-enable them or the button renders but "
-        "cannot be clicked.")
+            "The collapsed-state rule suppresses the sidebar with " + killer)
+    assert "width:244px" in body and "min-width:244px" in body, (
+        "A rescued sidebar needs a real width, or it reopens at zero pixels.")
+
+
+def test_expanded_sidebar_width_is_not_forced(css):
+    """Resizing by dragging the edge must still work when expanded."""
+    body = _norm(_block_for(css, '[data-testid="stSidebar"]'))
+    assert "width:244px!important" not in body, (
+        "Forcing a width on the sidebar in every state breaks drag-to-resize. "
+        "Force it only in the collapsed-state rule that rescues it.")
 
 
 def test_header_does_not_reserve_vertical_space(css):
