@@ -2306,8 +2306,12 @@ def _stage_and_validate(ndf, scope: str):
 def render_direct_form() -> None:
     with _card():
         _sec(2, "Data Scope", "Select the data scope for this Direct Adjustment.")
+        # fmt=scope_label or the pill reads "FRTB"; the app calls that scope
+        # FRTBSBM everywhere else. _pill_row returns the OPTION, so the code
+        # still comes back unchanged and nothing downstream sees the label.
         dsel = _pill_row(DIRECT_SCOPES, wiz.get("process_type"),
-                         "direct_scope", icons=DIRECT_SCOPE_ICONS)
+                         "direct_scope", fmt=scope_label,
+                         icons=DIRECT_SCOPE_ICONS)
         if dsel and dsel != wiz.get("process_type"):
             old_batch = wiz.get("direct_batch_id")
             if old_batch:
@@ -2356,11 +2360,11 @@ def render_direct_form() -> None:
         _dadj_mode_key = _k("dadj_mode")
         _cur_in_mode = st.session_state.get(_dadj_mode_key, "Paste content")
         if _cur_in_mode == "Enter rows":
-            _sec(3, f"Row Entry — {scope}",
+            _sec(3, f"Row Entry — {scope_label(scope)}",
                  "Fill the fields and add each row to the batch — every valid "
                  "row becomes its own adjustment.")
         else:
-            _sec(3, f"CSV Data — {scope}",
+            _sec(3, f"CSV Data — {scope_label(scope)}",
                  "Paste or upload rows — one row = one adjustment. Column order and case don't matter.")
         _ordered_chip_cols = [c for c, _ in _accepted_columns(scope)[2]]
         if _ordered_chip_cols:
@@ -2477,16 +2481,16 @@ def render_direct_form() -> None:
                 # DIFFERENT scope — Sensitivity files carry every Stress
                 # column plus more, so they used to pass the Stress check.
                 if unknown_cols:
-                    st.error(f"Column(s) not in the {scope} template: "
+                    st.error(f"Column(s) not in the {scope_label(scope)} template: "
                              + ", ".join(unknown_cols)
-                             + f" — the file must match the {scope} template "
+                             + f" — the file must match the {scope_label(scope)} template "
                                f"exactly (column order doesn't matter). If this "
                                f"file was made for another scope, switch the "
                                f"Data Scope above; otherwise remove the extra "
                                f"column(s) or start from the CSV template.")
                 if missing_cols:
                     st.error(f"Missing column(s): " + ", ".join(missing_cols)
-                             + f" — the file must include every {scope} template "
+                             + f" — the file must include every {scope_label(scope)} template "
                                f"column (optional columns may be left blank, "
                                f"but the header must be there). Download the "
                                f"CSV template above for the full list.")
@@ -2748,7 +2752,8 @@ def render_var_upload_form() -> None:
     _csv_card = _card()
     _csv_card.__enter__()
     _preview_after = None
-    _sec(2, f"CSV Upload — {wiz['process_type']}", "Paste exact adjustment values.")
+    _sec(2, f"CSV Upload — {scope_label(wiz['process_type'])}",
+         "Paste exact adjustment values.")
     if expected_cols:
         _info_banner('Provide a CSV of exact adjustment values — paste the '
                      'content or upload the file. Expected columns:')
@@ -4111,7 +4116,7 @@ def _request_reopen(scope, cobid, entity, reason, sub=""):
         # re-open raised here sent the approvers two identical emails. One
         # sender, and it is the one that knows the request actually committed.
         _ent_txt = "all entities" if (entity or "*") == "*" else entity
-        return True, (f"Re-open request for COB {cobid} / {scope} ({_ent_txt}) "
+        return True, (f"Re-open request for COB {cobid} / {scope_label(scope)} ({_ent_txt}) "
                       f"submitted — an approver can action it on the Approval "
                       f"Queue page.")
     return False, out.get("message",
@@ -4142,7 +4147,7 @@ def _resign_off(scope, cobid, entity, sub=""):
         return False, out.get("message",
                               "The sign-off was not applied.")
     _ent_txt = "all entities" if (entity or "*") == "*" else entity
-    return True, (f"COB {cobid} / {scope} ({_ent_txt}) signed off — new "
+    return True, (f"COB {cobid} / {scope_label(scope)} ({_ent_txt}) signed off — new "
                   f"adjustment submissions are blocked again.")
 
 
@@ -4176,7 +4181,7 @@ def _render_signoff_panel() -> bool:
         gov_ent = state.get("entity")
         ent_txt = ("all entities" if gov_ent == "*"
                    else gov_ent if gov_ent else "several entities")
-        label = f"COB {cobid} · {scope} · {ent_txt}"
+        label = f"COB {cobid} · {scope_label(scope)} · {ent_txt}"
         if status in _SIGNOFF_BLOCKED:
             blocked = True
 
@@ -4203,7 +4208,7 @@ def _render_signoff_panel() -> bool:
             reason = st.text_input(
                 "Reason for re-opening", key=_k(f"reopen_reason_{scope}"),
                 placeholder="Why does this need to be re-opened?")
-            if st.button(f"Request re-open — {scope} ({ent_txt})",
+            if st.button(f"Request re-open — {scope_label(scope)} ({ent_txt})",
                          key=_k(f"reopen_btn_{scope}"), **wide_kwargs(),
                          disabled=not reason.strip()):
                 try:
@@ -4238,7 +4243,7 @@ def _render_signoff_panel() -> bool:
                 f"Confirm — all adjustments for {label} are done; sign off "
                 f"and block new submissions again",
                 key=_k(f"resign_confirm_{scope}"), value=False)
-            if st.button(f"Sign off {scope} ({ent_txt}) again",
+            if st.button(f"Sign off {scope_label(scope)} ({ent_txt}) again",
                          key=_k(f"resign_btn_{scope}"), **wide_kwargs(),
                          disabled=not confirm):
                 try:

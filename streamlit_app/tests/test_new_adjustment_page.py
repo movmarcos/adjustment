@@ -1556,3 +1556,60 @@ def test_both_bulk_buttons_render_for_entity_roll():
     v = at.session_state["_wiz_v"]
     assert _button(at, f"scope_all_Entity Roll_{v}") is not None
     assert _button(at, f"scope_clear_Entity Roll_{v}") is not None
+
+
+# ── FRTB is shown as FRTBSBM everywhere it is displayed ─────────────────────
+# The stored PROCESS_TYPE is "FRTB"; the app has called that scope "FRTBSBM"
+# since 2026-09-15 (utils/styles.SCOPE_DISPLAY). The Direct Adjustment scope
+# pills were still rendering the raw code, because _pill_row falls back to
+# str(option) when no `fmt` is passed (Marcos, 2026-09-23).
+
+def _direct_draft(at):
+    at.session_state["wiz"] = {**at.session_state["wiz"],
+                               "category": "Direct Adjustment",
+                               "process_type": "VaR", "step": 1}
+    at.run()
+    assert not at.exception, at.exception
+    return at
+
+
+def test_direct_scope_pill_is_labelled_frtbsbm():
+    at = _direct_draft(_load())
+    v = at.session_state["_wiz_v"]
+    pill = _button(at, f"direct_scope_FRTB_{v}")
+    assert pill.label == "FRTBSBM", (
+        "The Direct scope pill shows " + repr(pill.label) + ". The app calls "
+        "this scope FRTBSBM; only the stored PROCESS_TYPE stays 'FRTB'.")
+
+
+def test_direct_scope_pills_use_display_names_throughout():
+    """Every Direct pill must show its display name, not its stored code."""
+    from utils.styles import scope_label
+    at = _direct_draft(_load())
+    v = at.session_state["_wiz_v"]
+    for code in ("VaR", "Stress", "Sensitivity", "FRTB", "FRTBDRC", "FRTBRRAO"):
+        pill = _button(at, f"direct_scope_{code}_{v}")
+        assert pill.label == scope_label(code), (code, pill.label)
+
+
+def test_direct_scope_pill_keys_still_carry_the_stored_code():
+    """Keys are state, not display: relabelling must not rename them.
+
+    A renamed key resets the widget and, worse, would make the click handler
+    hand a label where a PROCESS_TYPE is expected.
+    """
+    at = _direct_draft(_load())
+    v = at.session_state["_wiz_v"]
+    assert _button(at, f"direct_scope_FRTB_{v}", required=False) is not None
+    assert _button(at, f"direct_scope_FRTBSBM_{v}", required=False) is None, \
+        "The pill key must stay the stored code, not the display label."
+
+
+def test_clicking_the_frtbsbm_pill_stores_the_code_frtb():
+    """The round trip that matters: label out, code in."""
+    at = _direct_draft(_load())
+    at.button(key=f"direct_scope_FRTB_"
+                  f"{at.session_state['_wiz_v']}").click().run()
+    assert not at.exception, at.exception
+    assert at.session_state["wiz"]["process_type"] == "FRTB", \
+        "Selecting the pill must store the PROCESS_TYPE, never the label."
