@@ -379,8 +379,46 @@ def inject_css():
        z-index ~1e6. Page content scrolls UNDER it, which reads as a white
        block covering the grids — the recurring "white box" bug, independent
        of how any grid is rendered. Snowsight supplies its own chrome, so
-       remove Streamlit's entirely. */
-    header[data-testid="stHeader"] {{ display: none !important; }}
+       Streamlit's is not wanted.
+
+       It must NOT be display:none. The control that re-opens a COLLAPSED
+       sidebar (stSidebarCollapsedControl) is a child of this header, so
+       hiding the header removes the only way back to the menu: collapse the
+       sidebar once and it is gone until you reload the page. Neutralise the
+       bar instead — transparent, zero height, click-through — and leave its
+       children visible and clickable. */
+    header[data-testid="stHeader"] {{
+        background: transparent !important;
+        height: 0 !important;
+        min-height: 0 !important;
+        box-shadow: none !important;
+        border: none !important;
+        overflow: visible !important;
+        pointer-events: none !important;
+    }}
+    header[data-testid="stHeader"]::before,
+    header[data-testid="stHeader"]::after {{ display: none !important; }}
+    /* The bar swallows no clicks; anything inside it still works. */
+    header[data-testid="stHeader"] > * {{ pointer-events: auto !important; }}
+
+    /* The parts of the header we actually do want gone: the decoration
+       stripe and the Deploy / overflow toolbar. Named explicitly so the
+       sidebar control above is never caught by a blanket rule. */
+    [data-testid="stDecoration"] {{ display: none !important; }}
+    [data-testid="stToolbar"] {{ display: none !important; }}
+
+    /* The re-open-the-menu button must always be reachable. Streamlit only
+       renders it while the sidebar is collapsed, so its own display rule is
+       left alone — this just guarantees it is clickable and on top. */
+    [data-testid="stSidebarCollapsedControl"] {{
+        pointer-events: auto !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        z-index: 1000000 !important;
+    }}
+    [data-testid="stSidebarCollapsedControl"] button {{
+        pointer-events: auto !important;
+    }}
     [data-testid="stAppViewContainer"] {{ background: var(--bg) !important; }}
     [data-testid="stMainBlockContainer"] {{ padding-top: 1.5rem; padding-bottom: 3rem; }}
     [data-testid="stVerticalBlock"] {{ gap: 0.75rem; }}
