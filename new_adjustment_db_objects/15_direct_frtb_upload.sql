@@ -55,7 +55,6 @@ SELECT
         {"name":"TRADING_DESK","type":"string","required":true},
         {"name":"SENSITIVITY_TYPE","type":"string","required":true},
         {"name":"RISK_CLASS","type":"string","required":true},
-        {"name":"AMOUNT","type":"number","required":true},
         {"name":"AMOUNT_IN_USD","type":"number","required":true},
         {"name":"TRADE_CODE","type":"string"},{"name":"BOOK_CODE","type":"string"},
         {"name":"BOND_CDS","type":"string"},
@@ -168,7 +167,6 @@ SELECT
         {"name":"JTD_RISK_DIRECTION","type":"string","required":true},
         {"name":"RISK_CLASS","type":"string","required":true},
         {"name":"BUCKET","type":"string","required":true},
-        {"name":"JTD_LOSS","type":"number","required":true},
         {"name":"JTD_LOSS_USD","type":"number","required":true},
         {"name":"ATTACHMENT","type":"string"},{"name":"BT_TYPE","type":"string"},
         {"name":"BUSINESS_PRODUCT_CODE1","type":"string"},
@@ -263,7 +261,6 @@ SELECT
         {"name":"CCY1","type":"string","required":true},
         {"name":"CCY_AMT","type":"string","required":true},
         {"name":"SA_RRAO_PRODUCT_TYPE","type":"string","required":true},
-        {"name":"NOTIONAL_AMOUNT","type":"number","required":true},
         {"name":"NOTIONAL_AMOUNT_USD","type":"number","required":true},
         {"name":"BT_TYPE","type":"string"},
         {"name":"BUSINESS_PRODUCT_CODE1","type":"string"},
@@ -331,7 +328,12 @@ WITH base AS (
         h.DIMENSION_ADJ_ID                         AS ADJUSTMENT_ID,
         h.COBID, h.RUN_LOG_ID, h.FILE_NAME,
         TO_DATE(h.COBID::VARCHAR, 'YYYYMMDD')      AS EVAL_DATE,
-        TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"AMOUNT"), 38, 10)        AS AMOUNT,
+        -- AMOUNT is NOT read from the payload any more: the uploader gives
+        -- the USD figure only, and `enriched` derives the local amount.
+        -- One definition of the row's currency, used by the FX join and by
+        -- CURRENCY_CODE below — it used to be spelled out at each use.
+        COALESCE(NULLIF(TO_VARCHAR(j.PAYLOAD:"CCY1"), ''),
+                 TO_VARCHAR(j.PAYLOAD:"CCY_AMT"))                    AS CURRENCY_CODE_SRC,
         TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"AMOUNT_IN_USD"), 38, 10) AS AMOUNT_IN_USD,
         TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"DELTA_SUBTRACT"), 38, 10) AS DELTA_SUBTRACT,
         TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"PV_CURRENT"), 38, 10)     AS PV_CURRENT,
@@ -395,6 +397,28 @@ WITH base AS (
       AND h.IS_DELETED = FALSE
       AND UPPER(h.PROCESS_TYPE) = 'FRTB'
       AND h.ADJUSTMENT_ACTION IN ('Direct', 'Upload')   -- file flow is Direct; Upload = pre-retype rows
+),
+-- ── USD → local currency ──────────────────────────────────────────────────
+-- The uploader supplies ONLY the USD figure (2026-09-23). The local-currency
+-- amount is derived in `enriched` below as  local = usd / rate,  where the
+-- rate converts the row's currency INTO USD
+-- (FACT.EXCHANGE_RATE.TO_CURRENCY_CODE = 'USD'). A USD row needs no rate and
+-- passes straight through.
+--
+-- Pre-AGGREGATED on purpose. Nothing in this database enforces the grain of
+-- FACT.EXCHANGE_RATE, and a duplicate rate row would fan the join out and
+-- silently DOUBLE an uploaded adjustment. GROUP BY makes that impossible by
+-- construction rather than by trusting the data. COBID is pinned from the
+-- batch so the scan prunes instead of reading every COB ever loaded.
+fx AS (
+    SELECT r.COBID,
+           UPPER(r.REGION_AREA_CODE)   AS REGION_AREA_CODE_U,
+           UPPER(r.FROM_CURRENCY_CODE) AS FROM_CURRENCY_CODE_U,
+           MAX(r.EXCHANGE_RATE)        AS EXCHANGE_RATE
+    FROM FACT.EXCHANGE_RATE r
+    WHERE r.TO_CURRENCY_CODE = 'USD'
+      AND r.COBID IN (SELECT DISTINCT COBID FROM base)
+    GROUP BY 1, 2, 3
 ),
 -- ── DIMENSION pinning: TRADE, BOOK, COMMON_INSTRUMENT(_FCD) ───────────────
 -- Standing rule: never scan a large SCD2 dimension without a predicate that
@@ -516,12 +540,31 @@ enriched AS (
         'DIRECT-SBM' AS RAVEN_DATASET_NAME,
         'NonCVA'     AS LOAD_SOURCE,
         CURRENT_TIMESTAMP()::TIMESTAMP_NTZ(9) AS LOAD_TIMESTAMP,
-        COALESCE(NULLIF(base.CCY1, ''), base.CCY_AMT) AS CURRENCY_CODE,
+        base.CURRENCY_CODE_SRC AS CURRENCY_CODE,
+        fx.EXCHANGE_RATE       AS FX_RATE_USED,
+        -- TRUE when a non-USD row found no usable rate. The writer refuses
+        -- the whole adjustment on this rather than letting a row through
+        -- with an empty local amount: a blank figure in a reported number
+        -- is worse than a rejected upload, and nothing downstream would
+        -- have flagged it (the write-time skip only drops rows where BOTH
+        -- legs are zero, so a filled USD leg would carry it through).
+        (UPPER(COALESCE(base.CURRENCY_CODE_SRC, 'USD')) <> 'USD'
+         AND COALESCE(fx.EXCHANGE_RATE, 0) = 0) AS FX_RATE_MISSING,
+        CASE
+            WHEN base.AMOUNT_IN_USD IS NULL THEN NULL
+            WHEN UPPER(COALESCE(base.CURRENCY_CODE_SRC, 'USD')) = 'USD'
+                THEN base.AMOUNT_IN_USD
+            ELSE base.AMOUNT_IN_USD / NULLIF(fx.EXCHANGE_RATE, 0)
+        END AS AMOUNT,
         IFF(LEN(CONCAT(base.CCY2, '-', base.CCY1)) < 7, NULL,
             CONCAT(base.CCY2, '-', base.CCY1)) AS CURRENCY_PAIR_CODE,
         -- Deterministic per (adjustment, row): retries overwrite, never fork
         MD5(base.ADJ_ID || '-' || base.ROW_NUM || '-DIRECT') AS FRTBSA_SENSITIVITY_KEY
     FROM base
+    LEFT JOIN fx
+      ON  fx.COBID                = base.COBID
+      AND fx.REGION_AREA_CODE_U   = UPPER(base.REGION_AREA_CODE)
+      AND fx.FROM_CURRENCY_CODE_U = UPPER(base.CURRENCY_CODE_SRC)
 )
 SELECT
     enriched.*,
@@ -698,7 +741,10 @@ WITH base AS (
         h.DIMENSION_ADJ_ID AS ADJUSTMENT_ID,
         h.COBID, h.RUN_LOG_ID, h.FILE_NAME,
         TO_DATE(h.COBID::VARCHAR, 'YYYYMMDD') AS EVAL_DATE,
-        TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"JTD_LOSS"), 38, 10)              AS JTD_LOSS,
+        -- One definition of the row's currency, used by the FX join and by
+        -- CURRENCY_CODE below.
+        COALESCE(NULLIF(TO_VARCHAR(j.PAYLOAD:"CCY1"), ''),
+                 TO_VARCHAR(j.PAYLOAD:"CCY2"))                       AS CURRENCY_CODE_SRC,
         TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"JTD_LOSS_ORIGINAL"), 38, 10)     AS JTD_LOSS_ORIGINAL,
         TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"JTD_LOSS_USD"), 38, 10)          AS JTD_LOSS_USD,
         TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"JTD_LOSS_USD_ORIGINAL"), 38, 10) AS JTD_LOSS_USD_ORIGINAL,
@@ -762,6 +808,19 @@ WITH base AS (
       AND h.IS_DELETED = FALSE
       AND UPPER(h.PROCESS_TYPE) = 'FRTBDRC'
       AND h.ADJUSTMENT_ACTION IN ('Direct', 'Upload')   -- file flow is Direct; Upload = pre-retype rows
+),
+fx AS (
+    -- Same contract as the SBM view above: one USD rate per COB, region and
+    -- source currency, pre-AGGREGATED so a duplicate rate row cannot fan the
+    -- join out and double an uploaded adjustment. COBID pinned so it prunes.
+    SELECT r.COBID,
+           UPPER(r.REGION_AREA_CODE)   AS REGION_AREA_CODE_U,
+           UPPER(r.FROM_CURRENCY_CODE) AS FROM_CURRENCY_CODE_U,
+           MAX(r.EXCHANGE_RATE)        AS EXCHANGE_RATE
+    FROM FACT.EXCHANGE_RATE r
+    WHERE r.TO_CURRENCY_CODE = 'USD'
+      AND r.COBID IN (SELECT DISTINCT COBID FROM base)
+    GROUP BY 1, 2, 3
 ),
 -- DIMENSION pinning (TRADE / BOOK / COMMON_INSTRUMENT(_FCD)) and the SCD2
 -- convention — see the SBM view above for the standing rule and the rationale.
@@ -844,11 +903,26 @@ enriched AS (
         'DRC' AS LOAD_SET,
         'DIRECT-DRC' AS RAVEN_DATASET_NAME,
         CURRENT_TIMESTAMP()::TIMESTAMP_NTZ(9) AS LOAD_TIMESTAMP,
-        COALESCE(NULLIF(base.CCY1, ''), base.CCY2) AS CURRENCY_CODE,
+        base.CURRENCY_CODE_SRC AS CURRENCY_CODE,
+        fx.EXCHANGE_RATE       AS FX_RATE_USED,
+        -- See the SBM view: a non-USD row with no usable rate fails the
+        -- adjustment rather than writing an empty local amount.
+        (UPPER(COALESCE(base.CURRENCY_CODE_SRC, 'USD')) <> 'USD'
+         AND COALESCE(fx.EXCHANGE_RATE, 0) = 0) AS FX_RATE_MISSING,
+        CASE
+            WHEN base.JTD_LOSS_USD IS NULL THEN NULL
+            WHEN UPPER(COALESCE(base.CURRENCY_CODE_SRC, 'USD')) = 'USD'
+                THEN base.JTD_LOSS_USD
+            ELSE base.JTD_LOSS_USD / NULLIF(fx.EXCHANGE_RATE, 0)
+        END AS JTD_LOSS,
         IFF(LEN(CONCAT(base.CCY1, '-', base.CCY2)) < 7, NULL,
             CONCAT(base.CCY1, '-', base.CCY2)) AS CURRENCY_PAIR_CODE,
         MD5(base.ADJ_ID || '-' || base.ROW_NUM || '-DIRECT') AS FRTBSA_DRC_KEY
     FROM base
+    LEFT JOIN fx
+      ON  fx.COBID                = base.COBID
+      AND fx.REGION_AREA_CODE_U   = UPPER(base.REGION_AREA_CODE)
+      AND fx.FROM_CURRENCY_CODE_U = UPPER(base.CURRENCY_CODE_SRC)
 )
 SELECT
     enriched.*,
@@ -978,7 +1052,10 @@ WITH base AS (
         h.DIMENSION_ADJ_ID AS ADJUSTMENT_ID,
         h.COBID, h.RUN_LOG_ID, h.FILE_NAME,
         TO_DATE(h.COBID::VARCHAR, 'YYYYMMDD') AS EVAL_DATE,
-        TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"NOTIONAL_AMOUNT"), 38, 10)     AS NOTIONAL_AMOUNT,
+        -- One definition of the row's currency, used by the FX join and by
+        -- CURRENCY_CODE below.
+        COALESCE(NULLIF(TO_VARCHAR(j.PAYLOAD:"CCY1"), ''),
+                 TO_VARCHAR(j.PAYLOAD:"CCY2"))                       AS CURRENCY_CODE_SRC,
         TRY_TO_NUMBER(TO_VARCHAR(j.PAYLOAD:"NOTIONAL_AMOUNT_USD"), 38, 10) AS NOTIONAL_AMOUNT_USD,
         TO_VARCHAR(j.PAYLOAD:"BOOK_CODE")   AS BOOK_CODE,
         TO_VARCHAR(j.PAYLOAD:"BT_TYPE")     AS BT_TYPE,
@@ -1012,6 +1089,19 @@ WITH base AS (
       AND h.IS_DELETED = FALSE
       AND UPPER(h.PROCESS_TYPE) = 'FRTBRRAO'
       AND h.ADJUSTMENT_ACTION IN ('Direct', 'Upload')   -- file flow is Direct; Upload = pre-retype rows
+),
+fx AS (
+    -- Same contract as the SBM view above: one USD rate per COB, region and
+    -- source currency, pre-AGGREGATED so a duplicate rate row cannot fan the
+    -- join out and double an uploaded adjustment. COBID pinned so it prunes.
+    SELECT r.COBID,
+           UPPER(r.REGION_AREA_CODE)   AS REGION_AREA_CODE_U,
+           UPPER(r.FROM_CURRENCY_CODE) AS FROM_CURRENCY_CODE_U,
+           MAX(r.EXCHANGE_RATE)        AS EXCHANGE_RATE
+    FROM FACT.EXCHANGE_RATE r
+    WHERE r.TO_CURRENCY_CODE = 'USD'
+      AND r.COBID IN (SELECT DISTINCT COBID FROM base)
+    GROUP BY 1, 2, 3
 ),
 -- DIMENSION pinning (TRADE / BOOK / COMMON_INSTRUMENT(_FCD)) and the SCD2
 -- convention — see the SBM view above for the standing rule and the rationale.
@@ -1091,10 +1181,25 @@ enriched AS (
         'RRAO' AS LOAD_SET,
         'DIRECT-RRAO' AS RAVEN_DATASET_NAME,
         CURRENT_TIMESTAMP()::TIMESTAMP_NTZ(9) AS LOAD_TIMESTAMP,
-        COALESCE(NULLIF(base.CCY1, ''), base.CCY2) AS CURRENCY_CODE,
+        base.CURRENCY_CODE_SRC AS CURRENCY_CODE,
+        fx.EXCHANGE_RATE       AS FX_RATE_USED,
+        -- See the SBM view: a non-USD row with no usable rate fails the
+        -- adjustment rather than writing an empty local amount.
+        (UPPER(COALESCE(base.CURRENCY_CODE_SRC, 'USD')) <> 'USD'
+         AND COALESCE(fx.EXCHANGE_RATE, 0) = 0) AS FX_RATE_MISSING,
+        CASE
+            WHEN base.NOTIONAL_AMOUNT_USD IS NULL THEN NULL
+            WHEN UPPER(COALESCE(base.CURRENCY_CODE_SRC, 'USD')) = 'USD'
+                THEN base.NOTIONAL_AMOUNT_USD
+            ELSE base.NOTIONAL_AMOUNT_USD / NULLIF(fx.EXCHANGE_RATE, 0)
+        END AS NOTIONAL_AMOUNT,
         IFF(LEN(CONCAT(base.CCY1, '-', base.CCY2)) < 7, NULL,
             CONCAT(base.CCY1, '-', base.CCY2)) AS CURRENCY_PAIR_CODE
     FROM base
+    LEFT JOIN fx
+      ON  fx.COBID                = base.COBID
+      AND fx.REGION_AREA_CODE_U   = UPPER(base.REGION_AREA_CODE)
+      AND fx.FROM_CURRENCY_CODE_U = UPPER(base.CURRENCY_CODE_SRC)
 )
 SELECT
     enriched.*,

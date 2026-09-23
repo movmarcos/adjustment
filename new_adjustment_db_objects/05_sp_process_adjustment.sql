@@ -148,6 +148,29 @@ def _write_direct_frtb_enriched(session, adj_ids_str, cobid, dim_ids_str,
     if not tgt_cols:
         raise Exception(f"No overlapping columns between {view_name} and "
                         f"{fact_adj_tbl_name} — check the enriched view.")
+    # The uploader supplies the USD figure only; the enriched view derives
+    # the local-currency amount from FACT.EXCHANGE_RATE. When a non-USD row
+    # finds no rate the local figure would be written EMPTY, and the
+    # skip-zero predicate below would not catch it because the USD leg is
+    # populated. Refuse the whole adjustment instead — a blank number in a
+    # reported figure is worse than a rejected upload.
+    if "FX_RATE_MISSING" in view_cols:
+        bad = session.sql(f"""
+            SELECT COUNT(*) AS N,
+                   LISTAGG(DISTINCT COALESCE(NULLIF(CURRENCY_CODE, ''),
+                                             '(blank)'), ', ') AS CCYS
+            FROM {view_name}
+            WHERE ADJ_ID IN ({adj_ids_str}) AND FX_RATE_MISSING
+        """).collect()
+        n_bad = int(bad[0]["N"] or 0) if bad else 0
+        if n_bad:
+            raise Exception(
+                f"{n_bad} row(s) have no USD exchange rate at COB {cobid} "
+                f"for: {bad[0]['CCYS']}. FACT.EXCHANGE_RATE needs a row for "
+                f"that COB, REGION_AREA_CODE and currency (TO_CURRENCY_CODE "
+                f"= 'USD'), or the file must carry the right "
+                f"REGION_AREA_CODE. Nothing was written.")
+
     nz = [f"COALESCE(v.{m}, 0) <> 0"
           for m in dict.fromkeys((metric_name, metric_usd_name))
           if m in view_cols]
