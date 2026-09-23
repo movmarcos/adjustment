@@ -74,6 +74,15 @@ MAX_ROWS = 5000
 # Per-type config: base fact table, the risk-class-like dimension, the USD
 # measure for the summary, and the reporting columns (the fields used to
 # report the adjustment — mirrors the _ADJUSTMENT fact layout).
+#
+# `columns` is only a FALLBACK: the export normally takes its columns from
+# DIRECT_SCOPE_SCHEMA so it matches the upload template exactly. It still
+# has to track that template, because a download taken through this branch
+# is what a user edits and uploads. Since 2026-09-23 uploaders supply the
+# USD figure only and the local-currency amount is derived from
+# FACT.EXCHANGE_RATE, so no local metric belongs in these lists.
+# (DRC's NOTIONAL_AMOUNT is not a metric pair — it has no USD counterpart
+# on the fact table and is still supplied by hand, so it stays.)
 _TYPES = {
     "FRTBSBM (Sensitivities)": dict(
         code="SBM", scope="FRTB",
@@ -84,7 +93,7 @@ _TYPES = {
         columns=["COBID", "ENTITY_CODE", "BUSINESS_ORGANIZATION_CODE", "RAPTOR_TRADE_CODE",
                  "RISK_CLASS", "SENSITIVITY_TYPE", "BUCKET", "CURVE_CODE",
                  "VERTEX", "MEASURE_TYPE_CODE", "SIMULATION_NAME",
-                 "CURRENCY_CODE", "AMOUNT", "AMOUNT_IN_USD",
+                 "CURRENCY_CODE", "AMOUNT_IN_USD",
                  "LOAD_SET", "RAVEN_DATASET_NAME"]),
     "DRC (Default Risk Charge)": dict(
         code="DRC", scope="FRTBDRC", table="FACT.FRTBSA_DRC_MEASURES_OFFICIAL",
@@ -93,7 +102,7 @@ _TYPES = {
         columns=["COBID", "ENTITY_CODE", "BUSINESS_ORGANIZATION_CODE", "RAPTOR_TRADE_CODE",
                  "RISK_CLASS", "BUCKET", "SECURITY_CODE", "ISSUER_CODE",
                  "ISSUER_RATING", "MATURITY_DATE", "JTD_RISK_DIRECTION",
-                 "NOTIONAL_AMOUNT", "JTD_LOSS", "JTD_LOSS_USD",
+                 "NOTIONAL_AMOUNT", "JTD_LOSS_USD",
                  "MEASURE_TYPE_CODE", "LOAD_SET"]),
     "RRAO (Residual Risk Add-On)": dict(
         code="RRAO", scope="FRTBRRAO", table="FACT.FRTBSA_RRAO_MEASURES_OFFICIAL",
@@ -101,7 +110,7 @@ _TYPES = {
         measure="NOTIONAL_AMOUNT_USD", measure_label="Notional (USD)",
         columns=["COBID", "ENTITY_CODE", "BUSINESS_ORGANIZATION_CODE", "RAPTOR_TRADE_CODE",
                  "SA_RRAO_PRODUCT_TYPE", "MEASURE_TYPE_CODE",
-                 "SIMULATION_NAME", "CURRENCY_CODE", "NOTIONAL_AMOUNT",
+                 "SIMULATION_NAME", "CURRENCY_CODE",
                  "NOTIONAL_AMOUNT_USD", "LOAD_SET"]),
 }
 

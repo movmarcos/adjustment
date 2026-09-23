@@ -234,3 +234,80 @@ def test_the_template_no_longer_asks_for_the_local_amount(views, view):
     assert '{"name":"' + usd + '","type":"number","required":true}' in src, (
         "The template must still require " + usd + " — it is the only "
         "number the uploader provides.")
+
+
+# ── The FRTB Explore export must not carry the local amount either ──────────
+# Explore's whole point is that its CSV IS the upload template: you download
+# rows, edit them, upload them back. If it still exported the local amount,
+# the file would be rejected as carrying an unknown column, and before that
+# it would have invited people to hand-enter a number the system now derives.
+
+import ast as _ast
+
+EXPLORE = os.path.join(os.path.dirname(__file__), "..", "pages",
+                       "8_FRTB_Explore.py")
+
+#: PROCESS_TYPE -> (local metric, USD metric), same pairs as the views.
+EXPLORE_SCOPES = {
+    "FRTB":     ("AMOUNT", "AMOUNT_IN_USD"),
+    "FRTBDRC":  ("JTD_LOSS", "JTD_LOSS_USD"),
+    "FRTBRRAO": ("NOTIONAL_AMOUNT", "NOTIONAL_AMOUNT_USD"),
+}
+
+
+def _explore_fallback_columns():
+    """{scope: [column, ...]} from the _TYPES config, parsed not grepped."""
+    out = {}
+    for node in _ast.walk(_ast.parse(_source(EXPLORE))):
+        if not isinstance(node, _ast.Call):
+            continue
+        kw = {k.arg: k.value for k in node.keywords if k.arg}
+        if "scope" not in kw or "columns" not in kw:
+            continue
+        try:
+            out[_ast.literal_eval(kw["scope"])] = _ast.literal_eval(kw["columns"])
+        except ValueError:
+            continue
+    return out
+
+
+@pytest.mark.parametrize("scope", sorted(EXPLORE_SCOPES))
+def test_explore_fallback_columns_drop_the_local_metric(scope):
+    local, usd = EXPLORE_SCOPES[scope]
+    cols = _explore_fallback_columns()
+    assert scope in cols, sorted(cols)
+    if scope == "FRTBDRC":
+        # DRC's NOTIONAL_AMOUNT is not a metric pair — no USD counterpart on
+        # the fact table, still supplied by hand — so only JTD_LOSS goes.
+        assert "NOTIONAL_AMOUNT" in cols[scope]
+    assert local not in cols[scope], (
+        "FRTB Explore still exports " + local + " for " + scope + ". The "
+        "export is the upload template, and uploaders supply USD only now.")
+    assert usd in cols[scope], (
+        "FRTB Explore must still export " + usd + " for " + scope)
+
+
+def test_explore_prefers_the_upload_template_over_its_own_list():
+    """The fallback exists for a missing schema row; it is not the main path."""
+    src = _source(EXPLORE)
+    assert "sel_cols = list(tmpl_cols)" in src, (
+        "FRTB Explore no longer takes its columns from DIRECT_SCOPE_SCHEMA. "
+        "That link is what keeps the export and the upload template in step.")
+    assert "DIRECT_SCOPE_SCHEMA" in src
+
+
+def test_the_template_row_is_refreshed_on_redeploy():
+    """Dropping a column from the seed only helps if the MERGE writes it.
+
+    DIRECT_SCOPE_SCHEMA rows already exist in every deployed environment, so
+    a MERGE that only set columns on INSERT would leave the old template —
+    and the local amount — in place forever.
+    """
+    src = _source(VIEWS_SQL)
+    updates = re.findall(r"WHEN MATCHED THEN UPDATE SET(.*?)WHEN NOT MATCHED",
+                         src, re.S)
+    assert len(updates) == 3, "expected one MERGE per FRTB scope"
+    for block in updates:
+        assert "t.EXPECTED_COLUMNS = s.EXPECTED_COLUMNS" in block, (
+            "A MERGE does not refresh EXPECTED_COLUMNS, so redeploying would "
+            "leave the old template (and the local amount column) in place.")
