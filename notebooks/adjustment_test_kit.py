@@ -1157,6 +1157,13 @@ def run_scenario(session, scenario, cfg, scopes=None, sleep=time.sleep):
         except Exception:
             result.pruning = {"checked": False, "detail": "unavailable"}
 
+    except Exception as exc:
+        # One scenario blowing up must not abandon the rest of a suite, and
+        # must not skip the cleanup below.
+        result.check("scenario ran without raising", False,
+                     type(exc).__name__ + ": " + str(exc))
+        result.message = str(exc)
+
     finally:
         result.passed = not result.failed_checks
         # ── cleanup ──────────────────────────────────────────────────────
