@@ -16,6 +16,36 @@ def first_scope(scopes):
     return (list(scopes or []) or [None])[0]
 
 
+def scopes_to_submit(selected, preview_by_scope):
+    """(scopes_to_create, scopes_skipped) — drop scopes the preview emptied.
+
+    A multi-scope draft creates one adjustment per scope. When the preview
+    shows a scope matching 0 rows, an adjustment for it would change nothing,
+    so it is dropped from the submission rather than blocking the whole draft
+    (Marcos, 2026-09-23: "I should not block the adjustment to be created
+    because there is one scope with zero, just don't create the adjustment
+    for it").
+
+    `preview_by_scope` maps scope -> row count from the LATEST preview. An
+    empty mapping means no current preview, so nothing is skipped: dropping a
+    scope on the strength of a stale count would silently lose an adjustment
+    the user asked for, which is worse than creating an empty one.
+
+    A scope missing from the mapping is kept for the same reason — absence is
+    not evidence of zero.
+
+    When EVERY scope is zero, everything is reported as skipped and the
+    caller blocks instead: there is nothing worth creating.
+    """
+    selected = [s for s in (selected or []) if s]
+    counts = preview_by_scope or {}
+    if not counts:
+        return list(selected), []
+    skipped = [s for s in selected if s in counts and counts[s] == 0]
+    kept = [s for s in selected if s not in skipped]
+    return kept, skipped
+
+
 def submit_fanout(payload: dict, scopes: list, submit_one, is_success, scope_label) -> dict:
     """One submit call per scope (same payload, scope swapped).
     Scopes sharing a pipeline are serialised by the engine. No rollback on a

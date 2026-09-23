@@ -31,7 +31,8 @@ from utils.snowflake_conn import (run_query, call_sp_df, call_sp_df_async,
                                   safe_rerun, friendly_error)
 from utils.scope_filters import (FIELD_LABELS, MAIN_FIELDS_SINGLE,
                                  filter_layout, allowed_filter_keys)
-from utils.submit_fanout import (submit_fanout as _submit_fanout_pure,
+from utils.submit_fanout import (scopes_to_submit as _scopes_to_submit_pure,
+                                 submit_fanout as _submit_fanout_pure,
                                  first_scope as _first_scope)
 from utils.transfer_book import (transfer_jobs, book_entity,
                                  submit_jobs as _submit_jobs_pure)
@@ -617,10 +618,10 @@ def _planned_submit_count() -> int:
     set-based call however many rows they carry.)"""
     if wiz.get("category") == "Scaling Adjustment" \
             and wiz.get("adjustment_type") == "Transfer":
-        return max(1, len(transfer_jobs(_selected_scopes(),
+        return max(1, len(transfer_jobs(_submit_scopes(),
                                         wiz.get("transfer_trade_codes"))))
     if wiz.get("category") in ("Scaling Adjustment", "Entity Roll"):
-        return max(1, len(_selected_scopes()))
+        return max(1, len(_submit_scopes()))
     return 1
 
 
@@ -707,7 +708,9 @@ def _do_submit() -> dict:
 
         payload = _build_payload()
 
-        scopes = _selected_scopes()
+        # Scopes whose preview matched nothing are dropped here, not blocked
+        # upstream: one empty scope must not stop the others being created.
+        scopes = _submit_scopes()
         # Transfer Book fans out over scope × trade code (one adjustment per
         # trade), so it is routed before the plain per-scope fan-out.
         if wiz.get("adjustment_type") == "Transfer":
@@ -1215,6 +1218,33 @@ def _selected_scopes() -> list:
     if wiz.get("category") in ("Scaling Adjustment", "Entity Roll"):
         return [s for s in (wiz.get("process_types") or []) if s in ALL_SCOPES]
     return [wiz["process_type"]] if wiz.get("process_type") else []
+
+
+def _skipped_scopes() -> list:
+    """Selected scopes the latest preview showed matching 0 rows.
+
+    An adjustment for one of these would change nothing, so it is left OUT of
+    the submission instead of blocking the whole draft (Marcos, 2026-09-23:
+    "I should not block the adjustment to be created because there is one
+    scope with zero, just don't create the adjustment for it").
+
+    Reads `_preview_by_scope`, which `_invalidate_preview` clears, so a stale
+    preview skips nothing — the counts have to belong to the current filters
+    or we would drop a scope on the strength of a number that no longer
+    applies.
+    """
+    return _scopes_to_submit_pure(_selected_scopes(),
+                                  wiz.get("_preview_by_scope"))[1]
+
+
+def _submit_scopes() -> list:
+    """The scopes this draft will actually submit: selected minus zero-row.
+
+    Can come back empty when EVERY scope previewed zero; the zero-rows gate
+    blocks Submit in that case, so no empty fan-out is ever dispatched.
+    """
+    return _scopes_to_submit_pure(_selected_scopes(),
+                                  wiz.get("_preview_by_scope"))[0]
 
 
 def _purge_filters_for(scopes: list) -> None:
@@ -4436,7 +4466,8 @@ with right:
             st.info("Filters changed since the last preview — run it again.")
         # Per-scope row counts: the summed total hides a scope that matched
         # nothing, and submitting that scope would create an adjustment that
-        # changes nothing. Show the split and block on ANY zero scope.
+        # changes nothing. Show the split, and SKIP those scopes at submit
+        # rather than blocking the whole draft.
         _by_scope = (wiz.get("_preview_by_scope") or {}) if preview_current else {}
         _zero_scopes = [sc for sc, cnt in _by_scope.items() if cnt == 0]
         # Multi-scope: the ticket's Impact preview shows ONE summed figure,
@@ -4471,9 +4502,12 @@ with right:
         # stays blocked until a NEW preview runs — merely editing a filter
         # (which invalidates the preview) must not unlock Submit, or the
         # "blocked until the preview finds matching rows" promise is a lie.
+        # Only an ALL-zero preview blocks. A single empty scope among several
+        # is skipped at submit (_submit_scopes) instead — blocking the whole
+        # draft for it meant deselecting the scope by hand, and getting that
+        # wrong silently cost the other scopes their adjustments.
         if preview_current:
-            wiz["_zero_preview"] = (_safe_int(s.get("ROWS_AFFECTED")) == 0
-                                    or bool(_zero_scopes))
+            wiz["_zero_preview"] = _safe_int(s.get("ROWS_AFFECTED")) == 0
         if wiz.get("_zero_preview"):
             zero_rows = True
         if not preview_current and wiz.get("_zero_preview"):
@@ -4488,10 +4522,16 @@ with right:
                 "Submission is blocked until the preview finds matching rows.")
         elif preview_current and _zero_scopes:
             _names = ", ".join(scope_label(sc) for sc in _zero_scopes)
+            _kept = [sc for sc in _selected_scopes() if sc not in _zero_scopes]
+            _kept_names = ", ".join(scope_label(sc) for sc in _kept)
+            _noun = "scope" if len(_zero_scopes) == 1 else "scopes"
             st.warning(
-                f"**{_names}** matches 0 rows at this COB — deselect it or fix "
-                f"the filters. Submission is blocked until every selected scope "
-                f"finds matching rows.")
+                f"**{_names}** matches 0 rows at this COB, so no adjustment "
+                f"will be created for {'it' if len(_zero_scopes) == 1 else 'them'}. "
+                f"Submitting still creates **{len(_kept)}** "
+                f"{'adjustment' if len(_kept) == 1 else 'adjustments'} "
+                f"({_kept_names}). Fix the filters first if that empty "
+                f"{_noun} was not expected.")
 
         # Transfer Book: trades with no version in the target book land on
         # the target's '<BOOK>/Adjustment' trade. They no longer collapse —
