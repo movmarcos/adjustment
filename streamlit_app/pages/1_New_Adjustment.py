@@ -28,6 +28,7 @@ from utils.styles import (scope_label, scope_meta, wide_kwargs,
 from utils.snowflake_conn import (run_query, call_sp_df, call_sp_df_async,
                                   current_user_name,
                                   signoff_access, can_sign_off,
+                                  submit_access, can_submit,
                                   safe_rerun, friendly_error)
 from utils.scope_filters import (FIELD_LABELS, MAIN_FIELDS_SINGLE,
                                  filter_layout, allowed_filter_keys)
@@ -4459,6 +4460,17 @@ with right:
     # ── Sign-off lifecycle (blocks submission while signed off) ─────────
     signoff_blocked = _render_signoff_panel()
 
+    # ── Submitter permission (ADJ_SUBMITTERS, Admin page) ───────────────
+    # Everyone may build a draft and run the impact preview; only listed
+    # users may submit. Empty list = everyone, so deploying the list does
+    # not lock the app. The gate that counts is in SP_SUBMIT_ADJUSTMENT —
+    # this just disables the button and says why, instead of letting the
+    # user fill a whole ticket and be refused at the end.
+    _sub_access = submit_access(current_user_name())
+    _sub_denied = [sc for sc in (_submit_scopes() or _selected_scopes())
+                   if not can_submit(_sub_access, sc)]
+    submit_blocked = bool(_sub_denied)
+
     # ── Impact preview trigger (Scaling, narrow scope only) ─────────────
     zero_rows = False
     if cat == "Scaling Adjustment" and preview_ready:
@@ -4647,7 +4659,7 @@ with right:
     if _btn("Submit Adjustment", icon_name=":material/send:", type="primary",
             **wide_kwargs(), key=_k("submit"),
             disabled=bool(missing) or not dup_ok or not eroll_ok or zero_rows
-                     or signoff_blocked or not fanout_ok):
+                     or signoff_blocked or submit_blocked or not fanout_ok):
         wiz["result"] = None
         with st.spinner(f"Submitting {_n_jobs} adjustments…" if _n_jobs > 1
                         else "Submitting adjustment…"):
@@ -4662,6 +4674,11 @@ with right:
         safe_rerun()
     if missing:
         st.caption("Submit unlocks when the ticket is complete.")
+    elif submit_blocked:
+        st.caption("Submit is blocked: you are not on the submitter list for "
+                   + ", ".join(scope_label(sc) for sc in _sub_denied)
+                   + ". You can still preview the impact — ask an admin to "
+                     "add you (Admin page › Authorized Submitters).")
     elif signoff_blocked:
         st.caption("Submit is blocked: this COB is signed off for "
                    + ("one of the selected scopes"

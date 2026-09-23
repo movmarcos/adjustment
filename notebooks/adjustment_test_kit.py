@@ -573,6 +573,21 @@ def ensure_bots(session, cfg):
     them too. Idempotent.
     """
     for user in (cfg.submitter, cfg.approver):
+        # ADJ_SUBMITTERS as well as ADJ_APPROVERS: once a real user is added
+        # to the submitter list the bootstrap rule stops applying, and every
+        # scenario the harness submits would be refused.
+        try:
+            session.sql("""
+                MERGE INTO """ + APP + """.ADJ_SUBMITTERS t
+                USING (SELECT '""" + sql_escape(user) + """' AS U) s
+                  ON UPPER(t.USERNAME) = UPPER(s.U)
+                WHEN MATCHED THEN UPDATE SET IS_ACTIVE = TRUE
+                WHEN NOT MATCHED THEN
+                  INSERT (USERNAME, PROCESS_TYPE, IS_ACTIVE, ADDED_BY)
+                  VALUES (s.U, NULL, TRUE, 'UAT_AUTOMATION')
+            """).collect()
+        except Exception:
+            pass    # table may predate this feature; bootstrap rule applies
         session.sql("""
             MERGE INTO """ + APP + """.ADJ_APPROVERS t
             USING (SELECT '""" + sql_escape(user) + """' AS U) s

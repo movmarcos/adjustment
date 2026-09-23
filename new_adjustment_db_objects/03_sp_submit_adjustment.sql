@@ -121,6 +121,44 @@ def find_blocking_adj(session, process_type, cobid, adj_values):
     return rows[0]["ADJ_ID"] if rows else None
 
 
+def _may_submit(session, username, process_type) -> bool:
+    """True when `username` may submit for `process_type`.
+
+    Bootstrap rule: an empty (or all-inactive) ADJ_SUBMITTERS means everyone
+    may submit, so deploying the list does not lock the app. A NULL
+    PROCESS_TYPE row allows every scope.
+
+    Fails OPEN if the table cannot be read. A permission table that is
+    missing or unreadable is a deployment problem, and blocking every
+    submission until someone notices is a worse failure than allowing them:
+    every submission is recorded with its username either way, so the audit
+    trail survives.
+    """
+    esc_user = str(username or "").replace("\\", "\\\\").replace("'", "''")
+    esc_scope = str(process_type or "").replace("\\", "\\\\").replace("'", "''")
+    try:
+        listed = session.sql("""
+            SELECT 1 FROM ADJUSTMENT_APP.ADJ_SUBMITTERS
+            WHERE IS_ACTIVE = TRUE LIMIT 1
+        """).collect()
+    except Exception:
+        return True
+    if not listed:
+        return True
+    try:
+        allowed = session.sql(f"""
+            SELECT 1 FROM ADJUSTMENT_APP.ADJ_SUBMITTERS
+            WHERE UPPER(USERNAME) = UPPER('{esc_user}')
+              AND IS_ACTIVE = TRUE
+              AND (PROCESS_TYPE IS NULL
+                   OR UPPER(PROCESS_TYPE) = UPPER('{esc_scope}'))
+            LIMIT 1
+        """).collect()
+    except Exception:
+        return True
+    return bool(allowed)
+
+
 def compute_scale_factor_adjusted(adj_type, scale_factor, cobid, source_cobid):
     """Derive the effective scale factor the processing engine multiplies by."""
     t = adj_type.lower()
@@ -410,6 +448,26 @@ def main(session, p_adjustment):
         if not settings:
             return {"adj_id": None, "status": "Error",
                     "message": f"Scope '{process_type}' is not active or not configured."}
+
+        # ── Submitter permission (ADJ_SUBMITTERS, Admin page) ────────────
+        # Gates SUBMIT only. Preview and the impact figures stay open to
+        # everyone — people check a number before asking someone else to
+        # submit it, and closing that off just pushes them to spreadsheets.
+        #
+        # Bootstrap rule, same as ADJ_SIGNOFF_USERS: while NO active row
+        # exists, everyone may submit. Adding the first user locks it down.
+        # Without it, deploying this would lock every user out at once.
+        #
+        # Checked HERE rather than only in the page, because the page gate
+        # is a convenience and this is the one path every submission takes
+        # (the wizard, the fan-out over scopes, and the Transfer Book fan-out
+        # over trades all call this procedure).
+        if not _may_submit(session, username, process_type):
+            return {"adj_id": None, "status": "Error",
+                    "message": (f"{username} is not on the submitter list for "
+                                f"scope {process_type}. You can still preview "
+                                f"the impact; ask an admin to add you on the "
+                                f"Admin page to submit.")}
 
         # ── Check sign-off (COB + entity + scope granularity) ────────────
         if check_signoff(session, process_type, cobid, adj.get("entity_code")):

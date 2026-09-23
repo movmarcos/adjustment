@@ -926,6 +926,34 @@ COMMENT = 'Users allowed to sign off a COB or request its re-open (Sign-Off page
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- 7a2. ADJ_SUBMITTERS — who may SUBMIT an adjustment (2026-09-23)
+-- Mirrors ADJ_APPROVERS / ADJ_SIGNOFF_USERS. Enforced in
+-- SP_SUBMIT_ADJUSTMENT (the one gate every path goes through) and reflected
+-- on the New Adjustment page, which disables Submit and says why.
+--
+-- Deliberately gates SUBMIT ONLY. Anyone may open New Adjustment, build a
+-- draft and run the impact preview — that is how people check a number
+-- before asking someone else to submit it, and taking it away would push
+-- them back to spreadsheets.
+--
+-- BOOTSTRAP RULE (same as ADJ_ADMINS / ADJ_SIGNOFF_USERS): while the table
+-- has no ACTIVE row, everyone may submit. Adding the first user locks it
+-- down. Without this a deploy would lock every user out of the app at once.
+-- ═══════════════════════════════════════════════════════════════════════════
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_SUBMITTERS (
+    SUBMITTER_ID                NUMBER(38,0) NOT NULL AUTOINCREMENT,
+    USERNAME                    VARCHAR(50)  NOT NULL,
+    PROCESS_TYPE                VARCHAR(30),            -- NULL = all scopes
+    IS_ACTIVE                   BOOLEAN      DEFAULT TRUE,
+    ADDED_BY                    VARCHAR(50),
+    ADDED_DATE                  TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+
+    CONSTRAINT PK_ADJ_SUBMITTERS PRIMARY KEY (SUBMITTER_ID)
+)
+COMMENT = 'Users allowed to SUBMIT an adjustment. Preview/impact stays open to everyone. NULL PROCESS_TYPE = any scope. Empty list = everyone may (bootstrap). Managed via Admin page.';
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- 7a2. ADJ_USER_PREFS — per-user display preferences
 --
 -- Timestamps are STORED as NTZ London wall-clock (the engine's convention);

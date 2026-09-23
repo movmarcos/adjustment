@@ -292,6 +292,50 @@ def can_sign_off(access, scope) -> bool:
     return str(scope or "").strip().upper() in access
 
 
+def submit_access(user: str):
+    """Who may SUBMIT an adjustment, from ADJ_SUBMITTERS (Admin page).
+
+    Same shape and same bootstrap rule as `signoff_access`: None while the
+    list has no active row, meaning everyone may submit; otherwise the set
+    of scope codes this user may submit for, with "*" for every scope. An
+    empty set means the user is listed nowhere and may not submit.
+
+    Gates SUBMIT only. Everyone keeps the New Adjustment page, the draft and
+    the impact preview — checking a number is not the same as booking it.
+
+    Best-effort: if the table cannot be read this returns None and the page
+    leaves Submit enabled, because SP_SUBMIT_ADJUSTMENT applies the very
+    same rule and is the gate that actually counts.
+    """
+    try:
+        rows_ = get_session().sql("""
+            SELECT UPPER(USERNAME) AS U, PROCESS_TYPE AS PT
+            FROM ADJUSTMENT_APP.ADJ_SUBMITTERS
+            WHERE IS_ACTIVE = TRUE
+        """).collect()
+    except Exception:
+        return None
+    if not rows_:
+        return None
+    me = str(user or "").strip().upper()
+    scopes = set()
+    for r in rows_:
+        if str(r["U"] or "").strip().upper() != me:
+            continue
+        pt = r["PT"]
+        if pt is None or not str(pt).strip():
+            return {"*"}
+        scopes.add(str(pt).strip().upper())
+    return scopes
+
+
+def can_submit(access, scope) -> bool:
+    """True when `access` (from submit_access) allows submitting `scope`."""
+    if access is None or "*" in access:
+        return True
+    return str(scope or "").strip().upper() in access
+
+
 def current_user_name() -> str:
     """Get the logged-in user identity.
 

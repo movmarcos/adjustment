@@ -106,6 +106,30 @@ def feed_table(session) -> str:
             else "BATCH.PUBLISH_SIGNOFF_STATUS").strip()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def submitters(session):
+    """Register the bots on ADJ_SUBMITTERS so their submissions are allowed.
+
+    Autouse, and separate from `approvers`: almost every test submits
+    something, and once a real user is added to the submitter list in an
+    environment the bootstrap rule stops applying and every UAT submission
+    would be refused. Removed by ADDED_BY tag in the session cleanup.
+    """
+    for u in (U_SUBMIT, U_APPROVE):
+        try:
+            session.sql(f"""
+                MERGE INTO ADJUSTMENT_APP.ADJ_SUBMITTERS t
+                USING (SELECT '{u}' AS USERNAME) s
+                ON UPPER(t.USERNAME) = s.USERNAME AND t.PROCESS_TYPE IS NULL
+                WHEN MATCHED THEN UPDATE SET IS_ACTIVE = TRUE
+                WHEN NOT MATCHED THEN INSERT (USERNAME, PROCESS_TYPE, IS_ACTIVE, ADDED_BY)
+                VALUES (s.USERNAME, NULL, TRUE, 'UAT_AUTOMATION')
+            """).collect()
+        except Exception as ex:
+            print(f"[submitters] skipped ({str(ex).splitlines()[0][:110]})")
+    return (U_SUBMIT, U_APPROVE)
+
+
 @pytest.fixture(scope="session")
 def approvers(session):
     """Register the two bot identities as universal approvers for the run.
@@ -146,6 +170,7 @@ def _cleanup(sess):
         f"DELETE FROM {feed} WHERE COBID = {FAKE_COB}",
         "DELETE FROM ADJUSTMENT_APP.ADJ_APPROVERS WHERE ADDED_BY = 'UAT_AUTOMATION'",
         "DELETE FROM ADJUSTMENT_APP.ADJ_SIGNOFF_USERS WHERE ADDED_BY = 'UAT_AUTOMATION'",
+        "DELETE FROM ADJUSTMENT_APP.ADJ_SUBMITTERS WHERE ADDED_BY = 'UAT_AUTOMATION'",
     ]
     for s in stmts:
         try:
