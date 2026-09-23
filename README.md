@@ -139,6 +139,10 @@ adjustment/
 │   ├── environment.yml              # authoritative SiS runtime pin (streamlit=1.50.0)
 │   ├── requirements.txt             # local-dev pip reference only — SiS does not install from it
 │   └── tests/                       # widget/form pytest suite (mocked Streamlit)
+├── notebooks/                       # Snowflake Notebook test harness
+│   ├── adjustment_test_kit.py       # harness logic (pure, takes an explicit session)
+│   ├── adjustment_test_harness.ipynb   # the Snowflake Notebook itself (thin, calls the kit)
+│   └── tests/                       # local pytest against a fake session
 ├── tests/                           # UAT automation pytest suite (live Snowflake, isolation COB)
 └── docs/                            # reviews/audits, specs (docs/superpowers/specs/), reference SQL
 ```
@@ -160,9 +164,10 @@ environment `config.py` currently targets (`ADJ_ENV` env var, default
 # the vendored wheel at the repo root; snowflake-snowpark-python comes from PyPI.
 pip install ./mufg_snowflakeconn-2.5.2-py3-none-any.whl snowflake-snowpark-python
 
-python deploy.py                  # full deploy: DB objects + Streamlit app
+python deploy.py                  # full deploy: DB objects + Streamlit app + Notebooks
 python deploy.py --db-only        # DB objects only
 python deploy.py --streamlit-only # Streamlit app only
+python deploy.py --notebooks-only # Snowflake Notebooks only
 python deploy.py --test-adj       # (opt-in) also submit one test VaR Flatten adjustment
 python deploy.py --validate-only  # run only the post-deploy schema validation, no deploy
 ```
@@ -181,7 +186,10 @@ A full run:
    `-1`/`NULL` are expected; any ❌ is a hard block.
 4. **PHASE 2 — Streamlit Application**: uploads `streamlit_app/` to the SiS
    stage and reports what stale files (if any) it removed.
-5. **PHASE 3 — Test adjustment** (only with `--test-adj`; off by default):
+5. **PHASE 2b — Snowflake Notebooks**: uploads `notebooks/` (the harness kit
+   + the `.ipynb`) to their own stage and creates/activates the
+   `ADJUSTMENT_TEST_HARNESS` notebook.
+6. **PHASE 3 — Test adjustment** (only with `--test-adj`; off by default):
    submits one test VaR Flatten adjustment.
 
 **Never deploy a single `new_adjustment_db_objects/*.sql` file
@@ -206,9 +214,10 @@ and calls `deploy.py` for you.
 
 ```powershell
 .\deploy_all.ps1                                   # auto: only what changed since last deploy
-.\deploy_all.ps1 -Mode all                          # force full deploy (DB + Streamlit)
+.\deploy_all.ps1 -Mode all                          # force full deploy (DB + Streamlit + Notebooks)
 .\deploy_all.ps1 -Mode db                           # force DB objects only
 .\deploy_all.ps1 -Mode streamlit                    # force Streamlit app only
+.\deploy_all.ps1 -Mode notebooks                    # force Snowflake Notebooks only
 .\deploy_all.ps1 -Branch my-branch                  # deploy from a feature branch (default: main)
 .\deploy_all.ps1 -PythonExe C:/path/to/python.exe   # override the interpreter (default: "python" on PATH, or $env:ADJ_DEPLOY_PYTHON)
 ```

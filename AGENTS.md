@@ -9,11 +9,16 @@ The same content may be copied to `AGENTS.md` or `CLAUDE.md` for other tools.
 A risk-adjustment engine for MUFG: non-technical risk analysts submit
 adjustments (scale / flatten / roll / direct upload / entity roll) against
 fact tables (VaR, Stress, FRTB, Sensitivity), with approval workflow,
-scheduled processing, and PowerBI refresh. Two halves:
+scheduled processing, and PowerBI refresh. Main parts:
 
 - `streamlit_app/` — Streamlit-in-Snowflake (SiS) UI. Entry `app.py`
   (dashboard), pages under `pages/`, shared design system in
   `utils/styles.py`, connection helpers in `utils/snowflake_conn.py`.
+- `notebooks/` — Snowflake Notebook end-to-end test harness. `adjustment_test_kit.py`
+  is the logic (pure, takes an explicit session, unit-tests locally against a
+  fake session); `adjustment_test_harness.ipynb` is the thin notebook that
+  calls it. `deploy.py`'s `deploy_notebooks()` stages both and creates/
+  activates the `ADJUSTMENT_TEST_HARNESS` notebook object.
 - `new_adjustment_db_objects/` — Snowflake DDL + stored procedures, numbered
   in deploy order (`01_tables.sql` … `15_direct_frtb_upload.sql`, incl.
   `05b`/`05c` which sort correctly between `05` and `06`). `deploy.py`

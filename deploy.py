@@ -2,9 +2,10 @@
 deploy.py — Deploy all Snowflake objects + Streamlit app (target set in config.py)
 ================================================================================
 Usage:
-    python deploy.py                      # Deploy everything (DB objects + Streamlit app)
+    python deploy.py                      # Deploy everything (DB objects + Streamlit app + Notebooks)
     python deploy.py --db-only            # Deploy DB objects only
     python deploy.py --streamlit-only     # Deploy Streamlit app only
+    python deploy.py --notebooks-only     # Deploy Snowflake Notebooks only
 
 Prerequisites:
     pip install mufg_snowflakeconn snowflake-snowpark-python
@@ -383,6 +384,190 @@ def deploy_streamlit_app(session):
     return True
 
 
+# ─── Deploy Notebooks ────────────────────────────────────────────────────────
+
+def deploy_notebooks(session):
+    """
+    Deploy the Snowflake Notebook test harness (notebooks/) to Snowflake.
+
+    Steps:
+      1. Create an internal stage for the notebook files
+      2. Upload the kit module (adjustment_test_kit.py) and the notebook
+         (adjustment_test_harness.ipynb) onto the stage root
+      3. Create the NOTEBOOK object and activate a live version
+
+    config.py is deliberately NOT uploaded here: adjustment_test_kit.py takes
+    an explicit `session` and reads everything scope-specific from
+    ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS at runtime — it imports nothing from
+    this repo's config module (see notebooks/adjustment_test_kit.py docstring
+    and docs/superpowers/specs/2026-09-23-adjustment-test-harness-design.md).
+    """
+    nb_dir = Path(__file__).parent / 'notebooks'
+    stage_name = 'ADJUSTMENT_APP.NOTEBOOK_STAGE'
+    notebook_name = 'ADJUSTMENT_APP.ADJUSTMENT_TEST_HARNESS'
+    main_file = 'adjustment_test_harness.ipynb'
+
+    print(f"\n  📦 Creating stage {stage_name}...")
+    try:
+        session.sql(f"CREATE STAGE IF NOT EXISTS {stage_name} ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE')").collect()
+        print(f"     ✅ Stage ready")
+    except Exception as e:
+        print(f"     ❌ Stage creation failed: {e}")
+        return False
+
+    # ── Upload files ─────────────────────────────────────────────────────
+    # Stage root only, no subdirectories — the notebook's first code cell is
+    # `import adjustment_test_kit as kit`, and Snowflake puts the notebook's
+    # own stage directory on sys.path, so the kit module must sit right next
+    # to the .ipynb. Top-level notebooks/*.py and notebooks/*.ipynb only —
+    # notebooks/tests/ is a local pytest suite, not shipped to the stage.
+    files_to_upload = []
+    for pattern in ('*.py', '*.ipynb'):
+        for fpath in sorted(nb_dir.glob(pattern)):
+            files_to_upload.append((fpath, ''))
+
+    if not files_to_upload:
+        print(f"     ❌ No files found in {nb_dir} — nothing to deploy")
+        return False
+
+    main_file_present = (nb_dir / main_file).exists()
+    if not main_file_present:
+        print(f"     ⚠️  {main_file} not found in {nb_dir} yet — uploading what "
+              f"exists; CREATE NOTEBOOK below will be skipped until it lands")
+
+    # ── Remove stale files from stage (files deleted/renamed locally) ────
+    print(f"\n  🧹 Checking for stale files on stage...")
+    try:
+        staged = session.sql(f"LIST @{stage_name}").collect()
+        expected_rel_paths = {fpath.name.lower() for fpath, _ in files_to_upload}
+
+        removed = 0
+        for row in staged:
+            # LIST name format: "stage_unqualified_name/path/to/file[.gz]"
+            raw = row['name']
+            slash_idx = raw.find('/')
+            rel_path = raw[slash_idx + 1:] if slash_idx != -1 else raw
+            # Strip .gz suffix if auto_compress produced it
+            rel_cmp = rel_path[:-3].lower() if rel_path.lower().endswith('.gz') else rel_path.lower()
+            if rel_cmp not in expected_rel_paths:
+                try:
+                    session.sql(f"REMOVE @{stage_name}/{rel_path}").collect()
+                    print(f"     🗑️  Removed stale: {rel_path}")
+                    removed += 1
+                except Exception as rm_err:
+                    print(f"     ⚠️  Could not remove {rel_path}: {rm_err}")
+        if removed == 0:
+            print(f"     ✅ No stale files found")
+    except Exception as e:
+        print(f"     ⚠️  Stage cleanup warning: {e}")
+
+    print(f"\n  📤 Uploading {len(files_to_upload)} files...")
+    upload_errors = 0
+
+    for fpath, subdir in files_to_upload:
+        stage_path = f'@{stage_name}/{subdir}' if subdir else f'@{stage_name}'
+        local_path = str(fpath).replace('\\', '/')
+        display_name = f"{subdir + '/' if subdir else ''}{fpath.name}"
+        try:
+            session.file.put(
+                local_path,
+                stage_path,
+                auto_compress=False,
+                overwrite=True,
+            )
+            print(f"     ✅ {display_name}")
+        except Exception as e:
+            print(f"     ❌ {display_name}: {e}")
+            upload_errors += 1
+
+    if upload_errors > 0:
+        print(f"  ⚠️ {upload_errors} files failed to upload")
+        return False
+
+    # ── Verify uploads ───────────────────────────────────────────────────
+    print(f"\n  🔍 Verifying staged files...")
+    try:
+        staged = session.sql(f"LIST @{stage_name}").collect()
+        for row in staged:
+            print(f"     📁 {row['name']}")
+    except Exception as e:
+        print(f"     ⚠️ Could not list stage: {e}")
+
+    if not main_file_present:
+        print(f"\n  ⚠️  Skipping CREATE NOTEBOOK — {main_file} is not present "
+              f"locally yet. Re-run this deploy once it exists.")
+        return False
+
+    success = True
+
+    # ── Create the Notebook object ───────────────────────────────────────
+    print(f"\n  🚀 Creating Notebook {notebook_name}...")
+    create_sql = f"""
+    CREATE OR REPLACE NOTEBOOK {notebook_name}
+        FROM '@{stage_name}'
+        MAIN_FILE       = '{main_file}'
+        QUERY_WAREHOUSE = '{config.WAREHOUSE}'
+        COMMENT         = 'Adjustment test harness — end-to-end scenario runner (seed/preview/submit/approve/wait/verify/cleanup).'
+    """
+    try:
+        session.sql(create_sql).collect()
+        print(f"     ✅ Notebook created successfully!")
+    except Exception as e:
+        print(f"     ❌ Notebook creation failed: {e}")
+        return False
+
+    # ── Activate a live version ──────────────────────────────────────────
+    # CREATE NOTEBOOK ... FROM stage registers the object, but it is the
+    # "ADD LIVE VERSION FROM LAST" step that makes the staged files runnable
+    # as the notebook's live version in Snowsight. This syntax is
+    # comparatively new — if this account's Snowflake release rejects it,
+    # print an actionable message rather than letting the exception kill the
+    # rest of the deploy; the notebook object still exists and can be
+    # activated by hand.
+    print(f"\n  🔄 Activating live version...")
+    try:
+        session.sql(f"ALTER NOTEBOOK {notebook_name} ADD LIVE VERSION FROM LAST").collect()
+        print(f"     ✅ Live version active")
+    except Exception as e:
+        err_msg = " ".join(str(e).split())[:300]
+        print(f"     ⚠️  Could not activate live version automatically: {err_msg}")
+        print(f"     ⚠️  ACTION: open the notebook in Snowsight and activate it "
+              f"manually (notebook page -> \"•••\" menu -> \"Add live version\"), "
+              f"or confirm this Snowflake account's release supports "
+              f"'ALTER NOTEBOOK ... ADD LIVE VERSION FROM LAST'.")
+        success = False
+
+    # ── Grant access ─────────────────────────────────────────────────────
+    print(f"\n  🔐 Granting USAGE on Notebook...")
+    try:
+        session.sql(f"GRANT USAGE ON NOTEBOOK {notebook_name} TO ROLE {config.ROLE_OWNER}").collect()
+        print(f"     ✅ USAGE granted to {config.ROLE_OWNER}")
+        session.sql(f"GRANT USAGE ON NOTEBOOK {notebook_name} TO ROLE {config.ROLE_RO}").collect()
+        print(f"     ✅ USAGE granted to {config.ROLE_RO}")
+    except Exception as e:
+        # May fail if role already owns it — that's fine
+        print(f"     ℹ️  Grant note: {str(e)[:100]}")
+
+    # ── Show details ─────────────────────────────────────────────────────
+    try:
+        info = session.sql(f"SHOW NOTEBOOKS LIKE 'ADJUSTMENT_TEST_HARNESS' IN SCHEMA ADJUSTMENT_APP").collect()
+        if info:
+            print(f"\n  🌐 Notebook details:")
+            for row in info:
+                for key in row.asDict():
+                    if key.upper() in ('NAME', 'DATABASE_NAME', 'SCHEMA_NAME', 'QUERY_WAREHOUSE'):
+                        print(f"     {key}: {row[key]}")
+    except Exception:
+        pass
+
+    if success:
+        print(f"\n  ✅ Notebook deployed successfully!")
+    else:
+        print(f"\n  ⚠️  Notebook staged and object created, but live-version "
+              f"activation needs manual follow-up — see ACTION above.")
+    return success
+
+
 # ─── Resume Tasks ────────────────────────────────────────────────────────────
 
 def resume_pipeline_tasks(session):
@@ -713,6 +898,7 @@ def main():
     parser = argparse.ArgumentParser(description='Deploy Adjustment Engine to Snowflake')
     parser.add_argument('--db-only', action='store_true', help='Deploy DB objects only')
     parser.add_argument('--streamlit-only', action='store_true', help='Deploy Streamlit app only')
+    parser.add_argument('--notebooks-only', action='store_true', help='Deploy Snowflake Notebooks only')
     parser.add_argument('--test-adj', action='store_true', help='Submit a test VaR Flatten adjustment after deploy')
     parser.add_argument('--rebuild', action='store_true',
                         help='DESTRUCTIVE: DROP all repo-managed ADJUSTMENT_APP objects '
@@ -724,12 +910,13 @@ def main():
                              'Roll invariant) and exit non-zero on failure. No deploy.')
     args = parser.parse_args()
 
-    deploy_db = not args.streamlit_only
-    deploy_st = not args.db_only
+    deploy_db = not (args.streamlit_only or args.notebooks_only)
+    deploy_st = not (args.db_only or args.notebooks_only)
+    deploy_nb = not (args.db_only or args.streamlit_only)
     if args.rebuild:
         deploy_db = True   # rebuild always reapplies DB objects after teardown
     if args.validate_only:
-        deploy_db = deploy_st = False
+        deploy_db = deploy_st = deploy_nb = False
 
     print("=" * 64)
     print("  Adjustment Engine — Snowflake Deployment")
@@ -787,6 +974,15 @@ def main():
         print("─" * 64)
         if not deploy_streamlit_app(session):
             print("\n  ⚠️  Streamlit deployment had errors — review above.")
+            success = False
+
+    # ── Deploy Notebooks ─────────────────────────────────────────────────
+    if deploy_nb:
+        print("\n" + "─" * 64)
+        print("  PHASE 2b: Snowflake Notebooks")
+        print("─" * 64)
+        if not deploy_notebooks(session):
+            print("\n  ⚠️  Notebook deployment had errors — review above.")
             success = False
 
     # ── Submit test adjustment ──────────────────────────────────────────
