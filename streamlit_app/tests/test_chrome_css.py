@@ -196,3 +196,61 @@ def test_no_blanket_rule_hides_every_header_child(css):
         assert "display:none" not in body, (
             "A blanket rule hides every child of the header, including the "
             "sidebar control. Name the elements to hide instead.")
+
+
+# ── No stray rules across the page ──────────────────────────────────────────
+# Reported twice on 2026-09-24: "a line in the middle of all pages", and it
+# showed up on pages a colleague had just created. The cause was
+# `.section-title { border-top: 1px solid }` — a full-width rule above every
+# section heading, 84 of them, added deliberately as a "chapter break". Every
+# page calls section_title(), so every page got one.
+#
+# The lesson is not "remove that one border". It is that a horizontal border
+# on a class used page-wide draws a line across the page, and nobody notices
+# at the time because each one looks intentional in isolation.
+
+#: Rules allowed to carry a horizontal border: each is scoped to a component
+#: that is narrower than the page. Adding to this list is a decision — the
+#: question to answer is "how wide is the thing this paints?"
+_BORDER_ALLOWED = {
+    ".sidebar-user-footer",   # divider above the user block, inside the menu
+    ".ticket .t-prog",        # inside the ticket panel
+    ".ticket .t-head",        # the ticket panel's own header divider
+    ".board-col",             # 3px coloured cap on a board column
+}
+
+
+def _rules_with_horizontal_borders(css):
+    out = []
+    stripped = re.sub(r"/\*.*?\*/", " ", css, flags=re.S)
+    for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", stripped):
+        selector = " ".join(match.group(1).split())
+        decl = _norm(match.group(2))
+        if not selector or selector.startswith("@"):
+            continue
+        if re.search(r"border-top:[^0n]", decl) or \
+           re.search(r"border-bottom:[^0n]", decl):
+            out.append((selector, decl))
+    return out
+
+
+def test_section_titles_do_not_draw_a_rule(css):
+    """section_title() is on every page, so its border is on every page."""
+    decl = _norm(_block_for(css, ".section-title"))
+    assert "border-top" not in decl, (
+        "section_title draws a full-width rule again. It is used on every "
+        "page and on any new page, which is exactly how this looked like a "
+        "stray line across the whole app. The red tick from ::before already "
+        "marks where a section starts.")
+
+
+def test_no_unreviewed_rule_paints_a_horizontal_border(css):
+    """Catches the next one before a user has to report it."""
+    unexpected = [sel for sel, _ in _rules_with_horizontal_borders(css)
+                  if sel not in _BORDER_ALLOWED]
+    assert not unexpected, (
+        "These rules paint a horizontal border and are not on the reviewed "
+        "list: " + repr(unexpected) + ". If the element is page-wide this "
+        "draws a line across every page that uses it. If it really is "
+        "component-scoped, add it to _BORDER_ALLOWED with a note saying how "
+        "wide it is.")

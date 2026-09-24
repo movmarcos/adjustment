@@ -695,11 +695,21 @@ def inject_css():
        together). A full-width rule ABOVE marks where the previous section
        ends, generous top spacing separates the blocks, a short brand-red
        tick anchors the eye, and the title reads at heading size. */
+    /* NO border-top. It used to draw a full-width rule above every section
+       title — 84 of them across the app — as a "chapter break". In practice
+       that reads as a stray horizontal line across the middle of every page,
+       including pages a colleague had just created, because every page uses
+       section_title() (reported 2026-09-24, twice).
+
+       The red tick from ::before already marks where a section starts, so
+       the rule was saying the same thing a second time and louder. Spacing
+       does the separating now: the padding that gave the rule room is gone
+       and the top margin carries it, which also takes ~1.4rem of height off
+       every section. */
     .section-title {{
         font-size: 1.05rem; font-weight: 700; color: var(--ink);
         letter-spacing: 0; text-transform: none;
-        margin: 2.2rem 0 0.85rem 0; padding-top: 1.15rem;
-        border-top: 1px solid var(--border);
+        margin: 2rem 0 0.85rem 0;
         display: flex; align-items: center; gap: 9px;
     }}
     .section-title::before {{
