@@ -834,10 +834,47 @@ def render_adj_card(row, expanded=False):
                                 """)
                 run_query("COMMIT")
                 txn = False
-                set_flash(_FLASH, "success",
-                          "Adjustment deleted."
-                          + (" Its rows were removed from the adjustment tables."
-                             if dim_adj_id is not None else ""))
+
+                # Tell the reporting side the data changed, the same way
+                # processing does — a PowerBI refresh action for VaR/Stress,
+                # a DUMMY_* trigger row for Sensitivity/FRTB. Without this the
+                # rows left the warehouse but reports kept showing them until
+                # some unrelated adjustment happened to trigger a rebuild
+                # (reported 2026-09-24).
+                #
+                # Only when the adjustment had actually been processed:
+                # DIMENSION_ADJ_ID is NULL for a ticket that never reached the
+                # fact tables, and deleting one of those publishes nothing, so
+                # there is nothing to refresh.
+                #
+                # AFTER the commit and outside the transaction, deliberately.
+                # The delete is done and durable; a hand-off that fails must
+                # not undo it. It is reported as a warning instead, because a
+                # silent failure here means stale reports and no clue why.
+                _handoff = None
+                if dim_adj_id is not None and process_type:
+                    try:
+                        _hr = run_query(
+                            f"CALL ADJUSTMENT_APP.SP_DOWNSTREAM_HANDOFF("
+                            f"'{sql_escape(process_type)}', "
+                            f"{int(row.get('COBID'))}, "
+                            f"'deleted adjustment {sql_escape(_aid)}')")
+                        _handoff = str(_hr[0][0]) if _hr else ""
+                    except Exception as _hx:
+                        _handoff = f"failed ({friendly_error(_hx)})"
+
+                _msg = ("Adjustment deleted."
+                        + (" Its rows were removed from the adjustment tables."
+                           if dim_adj_id is not None else ""))
+                if _handoff and _handoff.lower().startswith("failed"):
+                    set_flash(_FLASH, "warning",
+                              _msg + " The report refresh could NOT be queued, "
+                                     "so reports may still show these numbers: "
+                              + _handoff)
+                else:
+                    if _handoff and not _handoff.lower().startswith("skipped"):
+                        _msg += " A report refresh has been queued."
+                    set_flash(_FLASH, "success", _msg)
             except Exception as ex:
                 if txn:
                     try:

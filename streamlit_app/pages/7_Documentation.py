@@ -203,7 +203,9 @@ SP_SUBMIT_ADJUSTMENT, so every path is covered.
 
 Reports hand-off: VaR/Stress -> Power BI refresh (~5 min); Sensitivity/FRTB ->
 dbt rebuild trigger via Control-M. If hand-off fails the numbers are still
-applied but reports may be stale.
+applied but reports may be stale. DELETING a processed adjustment queues the
+same hand-off (since 2026-09-24), so removing data refreshes reports the way
+adding it does; deleting a ticket that never processed triggers nothing.
 
 Home / System Status: the System Status indicator follows the selected COB
 range. A Failed adjustment can be ACKNOWLEDGED on Home (Current Errors ->
@@ -1087,9 +1089,18 @@ with tab_processing:
     _html(_card(
         "Delete (Adjustments page, confirmation required) soft-deletes the "
         "ticket <em>and removes the adjustment's rows from the adjustment and "
-        "summary tables</em> in one transaction — reports stop including it "
-        "after the next refresh. If any part fails, nothing is removed and "
-        "the page says so. The audit history always survives."))
+        "summary tables</em> in one transaction, and flags its uploaded line "
+        "items deleted with it. If any part fails, nothing is removed and "
+        "the page says so. The audit history always survives.<br/><br/>"
+        "<strong>Reports are refreshed too.</strong> Once the delete commits, "
+        "the same hand-off that follows a processed adjustment is queued: a "
+        "Power BI refresh for VaR/Stress, a dbt rebuild trigger for "
+        "Sensitivity and the FRTB scopes. Deleting data updates reports the "
+        "same way adding it does. Only adjustments that actually reached the "
+        "fact tables trigger it — deleting a ticket that never processed "
+        "published nothing, so there is nothing to refresh. If the refresh "
+        "cannot be queued the delete still stands and the page warns, "
+        "because reports would otherwise stay stale with no clue why."))
 
     section_title("Timing & compute", "clock")
     _html(_table(["Setting", "Value", "Why"], [
