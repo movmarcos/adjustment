@@ -146,3 +146,52 @@ def test_the_adj_query_param_drives_find_by_id(monkeypatch):
     assert not at.exception, at.exception
     assert at.session_state["mw_find"] == "adj-0000", (
         "?adj= must populate the Find-by-ID box so the list narrows to it.")
+
+
+# ── The detail card (condensed 2026-09-24) ──────────────────────────────────
+# render_adj_card was rewritten: the 10-row meta dataframe became an
+# auto-fitting grid, the <br/> spacers went, and the timeline is capped. That
+# is ~110 lines of new code inside a branch that only runs when a row is
+# selected, so without this it would ship unrendered.
+
+def _open_one(monkeypatch):
+    """Render the page with a single matching row, which auto-opens it."""
+    _install(monkeypatch, total=1, rows=1)
+    at = AppTest.from_file(PAGE, default_timeout=120)
+    at.query_params["adj"] = "adj-0000"
+    at.run()
+    assert not at.exception, at.exception
+    return at
+
+
+def test_the_detail_card_renders(monkeypatch):
+    at = _open_one(monkeypatch)
+    body = " ".join(m.value for m in at.markdown)
+    assert "Adjustment Detail" in body or "ADJ" in body
+
+
+def test_the_meta_is_a_grid_not_a_dataframe(monkeypatch):
+    """The dataframe was ~400px of height for eleven short values."""
+    at = _open_one(monkeypatch)
+    body = " ".join(m.value for m in at.markdown)
+    assert "grid-template-columns:repeat(auto-fit" in body, (
+        "The meta panel is not the auto-fitting grid — if it went back to a "
+        "dataframe, the card is tall again.")
+
+
+def test_empty_meta_fields_are_omitted(monkeypatch):
+    """'Omit, then omit again' — a dash per empty field is pure height."""
+    at = _open_one(monkeypatch)
+    body = " ".join(m.value for m in at.markdown)
+    # The fixture leaves SOURCE_BOOK_CODE and START_DATE unset.
+    assert "From book" not in body, (
+        "An empty field is being rendered. Empty fields must be dropped, not "
+        "shown as a dash.")
+    assert "Target COB" in body, "populated fields must still render"
+
+
+def test_the_shareable_link_is_offered(monkeypatch):
+    at = _open_one(monkeypatch)
+    body = " ".join(str(c.value) for c in at.code)
+    assert "?adj=adj-0000" in body, (
+        "The detail card should offer the link to this adjustment.")

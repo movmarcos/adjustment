@@ -671,115 +671,126 @@ def render_adj_card(row, expanded=False):
         f'{type_lbl} · {run_status} · {record_cnt} rows',
         expanded=expanded,
     ):
-        col_info, col_meta = st.columns([2, 1])
+        # LAYOUT (condensed 2026-09-24 — the card was mostly whitespace).
+        # What changed and why:
+        #   • the meta panel was a 10-row st.dataframe in a third-width
+        #     column: ~400px of height for eleven short values, with a
+        #     toolbar nobody used. It is now a full-width auto-fitting grid
+        #     that spends WIDTH instead of HEIGHT, and empty fields are
+        #     dropped rather than rendered as "—".
+        #   • the <br/> spacers and one of the two <hr/> rules are gone;
+        #     spacing now comes from the grid, not from blank lines.
+        #   • Status History moved into its own collapsed expander. It is a
+        #     timeline that grows with every action, and it is not what you
+        #     open an adjustment to look at.
+        import html as _htmlmod
 
-        with col_info:
-            st.markdown(status_badge(run_status), unsafe_allow_html=True)
-            if run_status == "Pending" and not bool(row.get("IS_DELETED")):
-                st.caption("Queued — the pipeline picks this up within a minute. "
-                           "Delete it now if it should not run.")
+        st.markdown(status_badge(run_status), unsafe_allow_html=True)
+        if run_status == "Pending" and not bool(row.get("IS_DELETED")):
+            st.caption("Queued — the pipeline picks this up within a minute. "
+                       "Delete it now if it should not run.")
 
-            # Lifecycle progress bar
-            if not df_track.empty:
-                track_match = df_track[df_track["ADJ_ID"] == adj_id]
-                if not track_match.empty:
-                    render_lifecycle_bar(track_match.iloc[0].to_dict())
-                else:
-                    st.markdown("<br/>", unsafe_allow_html=True)
-            else:
-                st.markdown("<br/>", unsafe_allow_html=True)
+        if not df_track.empty:
+            track_match = df_track[df_track["ADJ_ID"] == adj_id]
+            if not track_match.empty:
+                render_lifecycle_bar(track_match.iloc[0].to_dict())
 
-            section_title("Filters Applied", "search")
+        def _fmt_ts(val):
+            if val is None or str(val) == "NaT":
+                return ""
+            if hasattr(val, "strftime"):
+                return fmt_user_dt(val) or ""
+            return str(val) if str(val) not in ("None", "") else ""
+
+        _scale = row.get("SCALE_FACTOR")
+        _scale_txt = (f'{_scale:.4f}×'
+                      if pd.notna(_scale) and _scale and float(_scale) != 1
+                      else "")
+
+        meta_rows = [
+            ("Target COB",  str(row.get("COBID") or "")),
+            ("Source COB",  str(row.get("SOURCE_COBID") or "")),
+            ("Records",     f"{record_cnt:,}" if record_cnt else ""),
+            ("Scale",       _scale_txt),
+            ("From book",   str(row.get("SOURCE_BOOK_CODE") or "")),
+            ("Occurrence",  {"ADHOC": "One-off"}.get(
+                                str(row.get("ADJUSTMENT_OCCURRENCE") or "").upper(), "")),
+            ("Created by",  str(row.get("SUBMITTED_BY") or "")),
+            ("Created",     _fmt_ts(row.get("SUBMITTED_AT"))),
+            ("Started",     _fmt_ts(row.get("START_DATE"))),
+            ("Ended",       _fmt_ts(row.get("PROCESS_DATE"))),
+        ]
+        _meta_val_col = {}
+
+        if run_status == "Processed" and not df_track.empty:
+            tr_match = df_track[df_track["ADJ_ID"] == adj_id]
+            if not tr_match.empty:
+                tr = tr_match.iloc[0]
+                _rs_status = str(tr.get("REPORT_STATUS", "") or "")
+                _rs_time = (tr.get("DBT_TRIGGER_TIME") or tr.get("PBI_COMPLETED_AT")
+                            or tr.get("PBI_STARTED_AT") or tr.get("PBI_QUEUED_AT"))
+                _rs_time_str = fmt_user_dt(_rs_time, "%d %b %H:%M")
+                _rs_messages = {
+                    "Reports Ready": f"Ready ({_rs_time_str})",
+                    "Refreshing": f"Refreshing ({_rs_time_str})",
+                    "Queued": "Queued — next scheduled rebuild (~5 min)",
+                    "Awaiting": "Awaiting refresh",
+                    "Rebuild Triggered": f"dbt triggered ({_rs_time_str})",
+                }
+                _rs_colors = {
+                    "Reports Ready": P["success"], "Refreshing": P["info"],
+                    "Queued": P["warning"], "Awaiting": "#64748B",
+                    "Rebuild Triggered": P["success"],
+                }
+                msg = _rs_messages.get(_rs_status, _rs_status)
+                if msg:
+                    meta_rows.append(("Reports", msg))
+                    _meta_val_col[msg] = _rs_colors.get(_rs_status, "#64748B")
+
+        # Auto-fitting grid: as many columns as the width allows, so the
+        # field count changes the WIDTH used, not the height.
+        _cells = []
+        for _k, _v in meta_rows:
+            if not _v or _v == "—":
+                continue                      # omit, then omit again
+            _col = _meta_val_col.get(_v, P["grey_900"])
+            _cells.append(
+                f'<div style="min-width:0">'
+                f'<div style="font-size:0.68rem;letter-spacing:0.04em;'
+                f'text-transform:uppercase;color:{P["grey_500"]}">'
+                f'{_htmlmod.escape(_k)}</div>'
+                f'<div style="font-size:0.85rem;color:{_col};'
+                f'overflow-wrap:anywhere">{_htmlmod.escape(str(_v))}</div>'
+                f'</div>')
+        if _cells:
+            st.markdown(
+                f'<div style="display:grid;gap:0.45rem 1.1rem;margin:0.5rem 0;'
+                f'grid-template-columns:repeat(auto-fit,minmax(135px,1fr))">'
+                + "".join(_cells) + '</div>', unsafe_allow_html=True)
+
+        col_filters, col_reason = st.columns([3, 2])
+        with col_filters:
+            st.markdown(
+                f'<div style="font-size:0.68rem;letter-spacing:0.04em;'
+                f'text-transform:uppercase;color:{P["grey_500"]}">'
+                f'Filters applied</div>', unsafe_allow_html=True)
             render_filter_chips(row)
-
-            import html as _htmlmod
+        with col_reason:
             reason = _htmlmod.escape(str(row.get("REASON", "") or ""))
             st.markdown(
-                f'<br/><div style="font-size:0.85rem"><strong>Business Reason:</strong><br/>'
-                f'<span style="color:{P["grey_700"]}">{reason or "—"}</span></div>',
-                unsafe_allow_html=True)
+                f'<div style="font-size:0.68rem;letter-spacing:0.04em;'
+                f'text-transform:uppercase;color:{P["grey_500"]}">'
+                f'Business reason</div>'
+                f'<div style="font-size:0.85rem;color:{P["grey_700"]}">'
+                f'{reason or "—"}</div>', unsafe_allow_html=True)
 
-            if row.get("ERRORMESSAGE"):
-                st.markdown(
-                    f'<div class="overlap-box" style="margin-top:0.5rem">'
-                    f'<h4>{icon("x-circle", size=13, color=P["danger"])} Error</h4>'
-                    f'<div style="font-size:0.82rem;font-family:monospace">'
-                    f'{_htmlmod.escape(str(row["ERRORMESSAGE"]))}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True)
-
-        with col_meta:
-            def _fmt_ts(val):
-                if val is None or str(val) == "NaT":
-                    return "—"
-                if hasattr(val, "strftime"):
-                    return fmt_user_dt(val) or "—"
-                return str(val) if str(val) not in ("None", "") else "—"
-
-            submitted_at = _fmt_ts(row.get("SUBMITTED_AT"))
-            start_date   = _fmt_ts(row.get("START_DATE"))
-            process_date = _fmt_ts(row.get("PROCESS_DATE"))
-
-            meta_rows = [
-                ("Target COB",   str(row.get("COBID", "—"))),
-                ("Records",      f"{record_cnt:,}" if record_cnt else "—"),
-                ("Created by",   str(row.get("SUBMITTED_BY", "—"))),
-                ("Created",      submitted_at),
-                ("Scale",        f'{row.get("SCALE_FACTOR", 1):.4f}×'
-                                 if pd.notna(row.get("SCALE_FACTOR"))
-                                 and row.get("SCALE_FACTOR")
-                                 and float(row.get("SCALE_FACTOR", 1)) != 1 else "—"),
-                ("Source COB",   str(row.get("SOURCE_COBID", "—")) if row.get("SOURCE_COBID") else "—"),
-                ("From book",    str(row.get("SOURCE_BOOK_CODE")) if row.get("SOURCE_BOOK_CODE") else "—"),
-                ("Started",      start_date),
-                ("Ended",        process_date),
-                ("Occurrence",   {"ADHOC": "One-off"}.get(
-                                     str(row.get("ADJUSTMENT_OCCURRENCE") or "").upper(),
-                                     str(row.get("ADJUSTMENT_OCCURRENCE") or "—"))),
-            ]
-            _meta_val_col = {}     # Value text → colour (Report Status only)
-            # Report status (for Processed adjustments)
-            if run_status == "Processed" and not df_track.empty:
-                tr_match = df_track[df_track["ADJ_ID"] == adj_id]
-                if not tr_match.empty:
-                    tr = tr_match.iloc[0]
-                    _rs_status = str(tr.get("REPORT_STATUS", "") or "")
-
-                    _pbi_completed = tr.get("PBI_COMPLETED_AT")
-                    _pbi_started = tr.get("PBI_STARTED_AT")
-                    _pbi_queued = tr.get("PBI_QUEUED_AT")
-                    _dbt_trigger = tr.get("DBT_TRIGGER_TIME")
-                    _rs_time = (_dbt_trigger or _pbi_completed
-                                or _pbi_started or _pbi_queued)
-                    _rs_time_str = fmt_user_dt(_rs_time, "%d %b %H:%M")
-
-                    _rs_messages = {
-                        "Reports Ready": f"Reports Ready ({_rs_time_str})",
-                        "Refreshing": f"Refreshing ({_rs_time_str})",
-                        "Queued": "Queued — picked up by the next scheduled rebuild (~5 min)",
-                        "Awaiting": "Awaiting report refresh",
-                        "Rebuild Triggered":
-                            f"dbt rebuild triggered ({_rs_time_str}) — "
-                            "reports refresh on the next scheduled rebuild",
-                    }
-                    _rs_colors = {
-                        "Reports Ready": P["success"],
-                        "Refreshing": P["info"],
-                        "Queued": P["warning"],
-                        "Awaiting": "#64748B",
-                        "Rebuild Triggered": P["success"],
-                    }
-                    color = _rs_colors.get(_rs_status, "#64748B")
-                    msg = _rs_messages.get(_rs_status, _rs_status)
-                    meta_rows.append(("Report Status", msg))
-                    _meta_val_col[msg] = color
-            df_meta = pd.DataFrame(
-                [(k, v) for k, v in meta_rows if v and v != "—"],
-                columns=["Field", "Value"])
-            with bordered_container():
-                render_df_table(df_meta, max_rows=len(df_meta),
-                                color_cols={"Value": lambda v: _meta_val_col.get(v, "")},
-                                key=f"adj_meta_{adj_id}")
+        if row.get("ERRORMESSAGE"):
+            st.markdown(
+                f'<div class="overlap-box" style="margin-top:0.5rem">'
+                f'<h4>{icon("x-circle", size=13, color=P["danger"])} Error</h4>'
+                f'<div style="font-size:0.82rem;font-family:monospace">'
+                f'{_htmlmod.escape(str(row["ERRORMESSAGE"]))}</div>'
+                f'</div>', unsafe_allow_html=True)
 
         # SQL literals for this adjustment — defined ONCE, here, so every
         # query below (status history included) interpolates the escaped
@@ -789,7 +800,13 @@ def render_adj_card(row, expanded=False):
         _st  = sql_escape(run_status)
         _usr = sql_escape(user)
 
-        # ── Status history ──────────────────────────────────────────────────
+        # ── Status history (most recent only) ───────────────────────────────
+        # Capped at _HISTORY_SHOWN. The timeline grows with every action, so
+        # a much-retried adjustment used to push the Actions row — the reason
+        # people open this card — hundreds of pixels down the page. It cannot
+        # go in its own expander: this card already IS one, and Streamlit
+        # refuses to nest them.
+        _HISTORY_SHOWN = 4
         st.markdown("---")
         section_title("Status History", "clock")
         try:
@@ -802,7 +819,11 @@ def render_adj_card(row, expanded=False):
             # Convert Row objects to dicts
             history_dicts = ([h.as_dict() if hasattr(h, "as_dict") else dict(h)
                               for h in history] if history else [])
-            render_status_timeline(history_dicts)
+            render_status_timeline(history_dicts[:_HISTORY_SHOWN])
+            if len(history_dicts) > _HISTORY_SHOWN:
+                st.caption(f"Showing the {_HISTORY_SHOWN} most recent of "
+                           f"{len(history_dicts)} transitions. The full trail "
+                           f"is on the Logs page.")
         except Exception:
             st.info("No history available.")
 
