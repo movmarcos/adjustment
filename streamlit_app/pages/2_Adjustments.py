@@ -232,12 +232,28 @@ user_opts   = [str(v) for v in _distinct("SUBMITTED_BY")]
 #   • a Home KPI button, which sets _home_status_filter and switches page
 #     (st.switch_page carries session_state, not query params);
 #   • ?status=... on the URL, for a pasted or bookmarked link.
-def _qp_status():
+def _qp(name):
     try:
-        raw = st.query_params.get("status")
+        raw = st.query_params.get(name)
         return raw if isinstance(raw, str) or raw is None else (raw[0] if raw else None)
     except Exception:
         return None
+
+
+def _qp_status():
+    return _qp("status")
+
+
+# ?adj=<ADJ_ID or #number> — a link to ONE adjustment, so a row can be sent
+# to a colleague instead of described ("the Stress one from Tuesday").
+# It drives the existing Find-by-ID filter rather than a second mechanism,
+# so the list narrows to it and the detail opens underneath.
+# Applied once per distinct value, so the user can clear the box afterwards
+# and the link does not keep re-applying itself on every rerun.
+_adj_param = _qp("adj")
+if _adj_param and st.session_state.get("_applied_adj_param") != _adj_param:
+    st.session_state["mw_find"] = str(_adj_param).strip()
+    st.session_state["_applied_adj_param"] = _adj_param
 
 # A fresh click always wins (and "" means "every status" — the Total card).
 _handoff = st.session_state.pop("_home_status_filter", None)
@@ -257,6 +273,14 @@ elif _status_param and st.session_state.get("_applied_status_param") != _status_
 # happen HERE, before the filter widgets are instantiated on this run.
 _FILTER_WIDGET_KEYS = ["mw_status", "mw_scope", "mw_type", "mw_cob",
                        "mw_entity", "mw_dept", "mw_user"]
+# The status-mix chips (rendered far below, after the filter widgets) cannot
+# write mw_status directly: Streamlit refuses a session_state write to a key
+# whose widget is already instantiated. They stash the wanted value here and
+# rerun; it is applied on the next run, before the widgets exist.
+_pending_status = st.session_state.pop("_adj_set_status", None)
+if _pending_status is not None:
+    st.session_state["mw_status"] = list(_pending_status)
+
 if st.session_state.pop("_adj_clear_filters", False):
     for _fk in _FILTER_WIDGET_KEYS:
         st.session_state[_fk] = []
@@ -311,7 +335,12 @@ with bordered_container():
     with f8:
         filter_user = st.multiselect("User", user_opts, key="mw_user")
 
-    f9, _f10 = st.columns([2, 2])
+    f9, _f10, f11 = st.columns([2, 1, 1])
+    with f11:
+        page_size = st.selectbox("Rows per page", [50, 100, 200, 500],
+                                 index=2, key="mw_page_size",
+                                 help="The list is paged; use the controls "
+                                      "under the grid to move between pages.")
     with f9:
         find_id = st.text_input(
             "Find by ID", key="mw_find", placeholder="paste an ADJ_ID or #number",
@@ -324,7 +353,7 @@ with bordered_container():
     fc1, fc2 = st.columns([5, 1])
     with fc1:
         st.caption(f"{_applied_n} filter(s) applied." if _applied_n else
-                   "No filters applied — showing the newest 200 adjustments.")
+                   "No filters applied — showing the newest adjustments first.")
     with fc2:
         if st.button("Clear filters", key="adj_clear_btn", **wide_kwargs(),
                      disabled=not _applied_n):
@@ -354,9 +383,13 @@ try:
     # The status/scope/type lists come from closed-enum multiselects, but they
     # are escaped like every other filter value: a future edit that turns one
     # into a text input must not silently reopen an injection path.
+    # Held back, not appended here: the status summary below needs the same
+    # filters WITHOUT the status one, or every chip but the selected status
+    # would read zero and the strip could never show you what else is there.
+    _status_clause = None
     if filter_status:
         in_list = ",".join(f"'{sql_escape(s)}'" for s in filter_status)
-        where_clauses.append(f"RUN_STATUS IN ({in_list})")
+        _status_clause = f"RUN_STATUS IN ({in_list})"
     if filter_scope:
         in_list = ",".join(f"'{sql_escape(s)}'" for s in filter_scope)
         where_clauses.append(f"PROCESS_TYPE IN ({in_list})")
@@ -376,16 +409,75 @@ try:
         in_list = ",".join(f"'{sql_escape(u)}'" for u in filter_user)
         where_clauses.append(f"SUBMITTED_BY IN ({in_list})")
 
+    # Deleted rows are excluded in SQL, not in pandas afterwards. Filtering
+    # them here is what lets the count be a real count and a page be a full
+    # page: hiding them after a LIMIT meant the total included rows nobody
+    # could see, and a page of 50 could render 12.
+    #
+    # Picking a soft-deleted status (Deleted / Replaced / Superseded) is an
+    # explicit request to see them, so it overrides the checkbox — otherwise
+    # the filter would match rows and then mask them out again.
+    _DELETEDISH = {"Deleted", "Replaced", "Superseded"}
+    _wants_deleted = bool(set(filter_status or []) & _DELETEDISH)
+    include_deleted = bool(show_deleted or _wants_deleted)
+    if not include_deleted:
+        where_clauses.append("COALESCE(IS_DELETED, FALSE) = FALSE")
+
+    # Everything except the status filter — the summary strip's base.
+    where_nostatus_sql = " AND ".join(where_clauses)
+    if _status_clause:
+        where_clauses.append(_status_clause)
     where_sql = " AND ".join(where_clauses)
+
+    # Counts per status for the CURRENT filters, so the strip shows the shape
+    # of the result set and doubles as a one-click narrow.
+    try:
+        df_status_mix = run_query_df_cached(f"""
+            SELECT RUN_STATUS, COUNT(*) AS N
+            FROM ADJUSTMENT_APP.VW_MY_WORK
+            WHERE {where_nostatus_sql}
+            GROUP BY RUN_STATUS
+            ORDER BY N DESC
+        """)
+    except Exception:
+        df_status_mix = pd.DataFrame()
+
+    # True total, from the server. The old header counted the fetched page,
+    # so "200" meant "at least 200" and there was no way to know how many
+    # more there were, or to reach them.
+    try:
+        _cnt = run_query_df_cached(f"""
+            SELECT COUNT(*) AS N
+            FROM ADJUSTMENT_APP.VW_MY_WORK
+            WHERE {where_sql}
+        """)
+        match_total = int(_cnt.iloc[0]["N"]) if not _cnt.empty else 0
+    except Exception:
+        match_total = None          # shown as "?" — never a misleading number
+
+    # Page state. Reset to the first page whenever the filters change, or you
+    # land on page 4 of a result set that now has one page.
+    _filter_sig = where_sql + f"|{page_size}"
+    if st.session_state.get("_adj_filter_sig") != _filter_sig:
+        st.session_state["_adj_filter_sig"] = _filter_sig
+        st.session_state["_adj_page"] = 0
+    page_count = (max(1, -(-match_total // page_size))
+                  if match_total is not None else 1)
+    page_no = min(int(st.session_state.get("_adj_page", 0)), page_count - 1)
+    st.session_state["_adj_page"] = page_no
+
     df_adjs = run_query_df_cached(f"""
         SELECT *
         FROM ADJUSTMENT_APP.VW_MY_WORK
         WHERE {where_sql}
         ORDER BY SUBMITTED_AT DESC
-        LIMIT 200
+        LIMIT {int(page_size)} OFFSET {int(page_no * page_size)}
     """)
 except Exception as e:
     df_adjs = pd.DataFrame()
+    df_status_mix = pd.DataFrame()
+    match_total, page_no, page_count = None, 0, 1
+    include_deleted = False
     st.warning(f"Could not load adjustments: {e}")
 
 # Lifecycle tracking — ONLY for the (≤200) adjustments actually shown.
@@ -1031,39 +1123,56 @@ def render_adj_card(row, expanded=False):
 if df_adjs.empty:
     view_df = df_adjs
 else:
-    is_del = df_adjs["IS_DELETED"].fillna(False).astype(bool)
-    # Selecting a soft-deleted status (Deleted / Replaced / Superseded) in the
-    # Status filter is an explicit request to see those rows — honour it even
-    # when "Include deleted" is unticked, otherwise the filter would load the
-    # rows and then silently mask them out again (showing 0 results).
-    _deletedish = {"Deleted", "Replaced", "Superseded"}
-    _wants_deleted = bool(set(filter_status or []) & _deletedish)
-    view_df = df_adjs if (show_deleted or _wants_deleted) else df_adjs[~is_del]
+    # Deleted rows were filtered out in SQL (see the query above), so what
+    # came back is exactly what to show.
+    view_df = df_adjs
 
 view_df = view_df.reset_index(drop=True)
 
-# `total` used to be len(df_adjs), which COUNTS SOFT-DELETED ROWS. The query
-# returns them and Python hides them, so deleting four of five left the
-# header reading "Results - 1 of 5" and people reasonably read the 5 as
-# "still five there" (reported 2026-09-24). The headline number is now what
-# you can actually see, and anything hidden is named rather than folded into
-# a denominator.
+# The header counts MATCHES, from the server — not the rows on this page.
+# It used to count the fetched frame, which included soft-deleted rows the
+# user had just removed ("Results - 1 of 5" right after deleting four), and
+# capped silently at 200 with no way to know or reach the rest.
 shown = len(view_df)
-hidden_deleted = len(df_adjs) - shown
+_total_txt = "?" if match_total is None else f"{match_total:,}"
+
+# ── Status mix for the current filters ──────────────────────────────────────
+# The shape of the result set without scrolling it, and a one-click narrow.
+# A chip toggles: clicking the status you are already filtered to clears it,
+# so the strip can undo itself and never traps you on one status.
+if (not df_status_mix.empty
+        and {"RUN_STATUS", "N"} <= set(df_status_mix.columns)):
+    _mix = [(str(r.get("RUN_STATUS") or "—"), int(r.get("N") or 0))
+            for _, r in df_status_mix.iterrows()]
+    _mix_cols = st.columns(min(len(_mix), 8))
+    for _mc, (_stat, _n) in zip(_mix_cols, _mix[:8]):
+        with _mc:
+            _on = _stat in (filter_status or [])
+            if st.button(f"{_stat} · {_n:,}", key=f"mix_{_stat}",
+                         **wide_kwargs(),
+                         type="primary" if _on else "secondary",
+                         help=("Clear this status filter" if _on
+                               else f"Show only {_stat}")):
+                st.session_state["_adj_set_status"] = [] if _on else [_stat]
+                st.session_state["_adj_page"] = 0
+                safe_rerun()
+    if len(_mix) > 8:
+        st.caption(f"{len(_mix) - 8} more status(es) — use the Status filter.")
+    st.markdown("<div style='height:0.4rem'></div>", unsafe_allow_html=True)
+
 with bordered_container():
     _rh1, _rh2 = st.columns([5, 1])
     with _rh1:
-        section_title(f"Results — {shown}", "table")
-        st.caption("Select a row to view its details and actions.")
-        if hidden_deleted > 0:
-            st.caption(f"{hidden_deleted} deleted "
-                       f"{'adjustment is' if hidden_deleted == 1 else 'adjustments are'} "
-                       f"hidden — tick **Show deleted** to include "
-                       f"{'it' if hidden_deleted == 1 else 'them'}.")
-        if len(df_adjs) >= 200:
-            st.caption("This is the newest 200 matching adjustments — there "
-                       "may be older ones. Narrow the filters, or use the COB "
-                       "filter, to see them.")
+        if match_total is not None and match_total > shown:
+            _first = page_no * page_size + 1
+            section_title(f"Results — {_first:,}\u2013{_first + shown - 1:,} "
+                          f"of {_total_txt}", "table")
+        else:
+            section_title(f"Results — {_total_txt}", "table")
+        st.caption("Select a row to view its details and actions."
+                   + ("" if include_deleted else
+                      "  Deleted adjustments are hidden — tick **Show "
+                      "deleted** to include them."))
     with _rh2:
         st.download_button(
             "⬇ Export CSV", view_df.to_csv(index=False).encode("utf-8-sig"),
@@ -1078,6 +1187,29 @@ with bordered_container():
 selected = render_activity_grid(
     view_df, selectable=True, key="adj_grid",
     empty_msg="No adjustments match the current filter.")
+
+# ── Paging ──────────────────────────────────────────────────────────────────
+# safe_rerun, not _rerun: turning a page changes no data, so there is nothing
+# to invalidate. The OFFSET is part of the cached query's key, so the next
+# page is fetched anyway and the other reads stay warm.
+if page_count > 1:
+    _pv, _pm, _pn = st.columns([1, 3, 1])
+    with _pv:
+        if st.button("‹ Previous", key="adj_prev", **wide_kwargs(),
+                     disabled=page_no <= 0):
+            st.session_state["_adj_page"] = page_no - 1
+            safe_rerun()
+    with _pm:
+        st.markdown(
+            f"<div style='text-align:center;padding-top:0.45rem;"
+            f"color:{P['grey_700']};font-size:0.86rem'>"
+            f"Page {page_no + 1} of {page_count}</div>",
+            unsafe_allow_html=True)
+    with _pn:
+        if st.button("Next ›", key="adj_next", **wide_kwargs(),
+                     disabled=page_no >= page_count - 1):
+            st.session_state["_adj_page"] = page_no + 1
+            safe_rerun()
 
 # Older Streamlit-in-Snowflake runtimes lack native row-selection; fall back to
 # a selectbox picker (same no-tabs single-grid design, just a different control).
@@ -1180,8 +1312,25 @@ if len(_failed_view) >= 2:
                 set_flash(_FLASH, "success" if _ok and not _skipped else "warning", msg)
                 _rerun()
 
+# Arriving by ?adj= link or Find-by-ID narrows the list to one row; open it
+# rather than making the user click the thing they just asked for. Gated on
+# something having narrowed it — with no filters at all, a one-row result is
+# a coincidence, not a request.
+if selected is None and len(view_df) == 1 and (find_id or "").strip():
+    selected = view_df.iloc[0].to_dict()
+
 if selected is not None:
     st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
     with bordered_container():
         section_title("Adjustment Detail", "file-text")
         render_adj_card(selected, expanded=True)
+
+        # A link to THIS adjustment, so it can be sent rather than described.
+        # The page deliberately does not write it into the address bar:
+        # ?adj= drives the Find-by-ID filter, so setting it on selection
+        # would silently re-filter the grid down to the row you just opened.
+        _sel_id = str(selected.get("ADJ_ID") or "").strip()
+        if _sel_id:
+            st.caption("Link to this adjustment — add this to the page URL "
+                       "to send it to someone:")
+            st.code(f"?adj={_sel_id}", language=None)

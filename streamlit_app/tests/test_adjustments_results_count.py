@@ -1,17 +1,26 @@
-"""The Adjustments grid header must count what you can actually see.
+"""The Adjustments grid must count and reach everything that matches.
 
-Reported 2026-09-24: filtered by Type, deleted four of five, and the header
-still read 5. It said "Results - 1 of 5", because the denominator was
-len(df_adjs) and the query RETURNS soft-deleted rows — Python hides them
-afterwards. So the four just deleted were still being counted, and the
-number people read as "how many are there" was the one number that had not
-changed.
+Two reports on 2026-09-24, from the same session:
 
-The headline is now what is on screen. Anything hidden is named in its own
-line instead of folded into a denominator nobody can decompose.
+  "I deleted 4 of 5 and it was still showing 5 in that top part of the grid."
+  "the grid is not good, there is limitation to show the grid."
+
+Both came from the same design. The query fetched 200 rows, pandas hid the
+soft-deleted ones afterwards, and the header counted the fetched frame. So
+the total included rows the user had just deleted, and "200" silently meant
+"at least 200" with no way to see how many more there were or to reach them.
+
+Now: deleted rows are excluded in SQL, the total is a server-side COUNT of
+everything matching, and the list is paged.
+
+The ordering matters and is asserted below. Filtering deleted rows in SQL is
+what lets the count be a real count and a page be a full page — hide them
+after a LIMIT and a page of 50 can render 12.
 """
 import os
 import re
+
+import pytest
 
 PAGE = os.path.join(os.path.dirname(__file__), "..", "pages",
                     "2_Adjustments.py")
@@ -25,58 +34,127 @@ def _source():
 def _rendered(text):
     """Join Python's implicit string concatenation.
 
-    Long captions are split across literals to fit the line, so a phrase the
-    USER sees ("use the COB filter") does not exist contiguously in the
-    source. Asserting on the source would then fail for a formatting reason,
-    or worse, pass only while the wrapping happens to line up.
+    Captions are split across literals to fit the line, so a phrase the USER
+    sees may not exist contiguously in the source. Asserting on the raw
+    source would fail for a formatting reason, or pass only while the
+    wrapping happens to line up.
     """
     return re.sub(r'"\s*\n\s*"', "", text)
 
 
-def test_the_headline_count_is_not_the_unfiltered_frame():
+# ── The count must mean what a person reads it to mean ──────────────────────
+
+def test_the_headline_is_not_the_fetched_frame():
     src = _source()
     assert "total = len(df_adjs)" not in src, (
-        "The header counts df_adjs, which still contains the rows the user "
-        "just deleted. That is the number they read as 'how many are left'.")
+        "The header counts the fetched page, which is capped and used to "
+        "include rows the user had just deleted.")
 
 
-def test_the_headline_shows_the_visible_count():
+def test_the_total_comes_from_a_server_side_count():
     src = _source()
-    assert 'section_title(f"Results — {shown}", "table")' in src, (
-        "The header should show the number of rows actually displayed.")
-    assert "shown = len(view_df)" in src
+    assert "SELECT COUNT(*) AS N" in src, (
+        "Without a COUNT over the same filter, the header can only ever "
+        "report the size of the page it fetched.")
+    assert "match_total" in src
 
 
-def test_hidden_deleted_rows_are_named_not_hidden_in_a_denominator():
+def test_an_unavailable_count_is_not_shown_as_a_number():
     src = _source()
-    assert "hidden_deleted = len(df_adjs) - shown" in src
-    assert "deleted" in src[src.index("hidden_deleted ="):][:600].lower()
-    assert "Show deleted" in src, (
-        "The caption must tell the user how to see the hidden rows, or the "
-        "count is just as opaque as before.")
+    assert 'match_total = None' in src and '"?" if match_total is None' in src, (
+        "A failed count must render as unknown, not as a confident 0 or as "
+        "the page size.")
 
 
-def test_the_hidden_line_only_appears_when_something_is_hidden():
+# ── Deleted rows leave in SQL, before the limit ─────────────────────────────
+
+def test_deleted_rows_are_excluded_in_sql():
     src = _source()
-    block = src[src.index("hidden_deleted = len(df_adjs) - shown"):]
-    block = block[:block.index("with _rh2:")]
-    assert "if hidden_deleted > 0:" in block, (
-        "A '0 deleted hidden' line on every normal page is noise.")
+    assert 'where_clauses.append("COALESCE(IS_DELETED, FALSE) = FALSE")' in src, (
+        "Deleted rows must be filtered by the query. Hiding them in pandas "
+        "after a LIMIT is what made the total wrong and pages short.")
 
 
-def test_the_row_cap_message_does_not_reuse_the_deleted_inflated_count():
-    """The cap is about the SQL LIMIT, so it reads the raw frame on purpose."""
+def test_pandas_no_longer_hides_rows_after_the_fetch():
     src = _source()
-    block = src[src.index("hidden_deleted = len(df_adjs) - shown"):]
-    block = block[:block.index("with _rh2:")]
-    assert "if len(df_adjs) >= 200:" in block, (
-        "The 200-row cap warns about the query limit, which applies to the "
-        "rows the query returned, deleted ones included.")
+    assert "df_adjs[~is_del]" not in src, (
+        "Rows are still being dropped after the fetch, so the page size and "
+        "the count disagree with what is rendered.")
 
 
-def test_the_cap_message_says_how_to_see_more():
+def test_choosing_a_deleted_status_still_shows_them():
+    """Filtering FOR deleted rows must override the checkbox."""
+    src = _source()
+    assert "_wants_deleted = bool(set(filter_status or []) & _DELETEDISH)" in src
+    assert "include_deleted = bool(show_deleted or _wants_deleted)" in src, (
+        "Picking the Deleted status would otherwise match rows and then have "
+        "them filtered straight back out, showing an empty grid.")
+
+
+def test_the_exclusion_is_applied_before_the_count_and_the_page():
+    src = _source()
+    excl = src.index('COALESCE(IS_DELETED, FALSE) = FALSE')
+    count = src.index("SELECT COUNT(*) AS N")
+    fetch = src.index("LIMIT {int(page_size)} OFFSET")
+    assert excl < count < fetch, (
+        "The deleted filter must be in place before the count and the page "
+        "query, or they measure and fetch different row sets.")
+
+
+# ── Everything must be reachable ────────────────────────────────────────────
+
+def test_the_query_is_paged_not_capped():
+    src = _source()
+    assert "LIMIT {int(page_size)} OFFSET {int(page_no * page_size)}" in src, (
+        "A bare LIMIT with no OFFSET means older adjustments cannot be "
+        "reached at all except by narrowing filters until they fit.")
+
+
+def test_there_are_controls_to_change_page():
+    src = _source()
+    for key in ('key="adj_prev"', 'key="adj_next"'):
+        assert key in src, "no " + key + " control"
+    assert "Page {page_no + 1} of {page_count}" in src, (
+        "Paging without telling the user where they are is worse than not "
+        "paging.")
+
+
+def test_the_page_resets_when_the_filters_change():
+    src = _source()
+    assert '_filter_sig' in src and 'st.session_state["_adj_page"] = 0' in src, (
+        "Changing a filter while on page 4 would otherwise show an empty "
+        "page and look like no results.")
+
+
+def test_the_page_is_clamped_to_the_last_page():
+    src = _source()
+    assert "min(int(st.session_state.get(\"_adj_page\", 0)), page_count - 1)" in src, (
+        "Deleting rows can shrink the result set below the current page; "
+        "without clamping the grid goes blank.")
+
+
+def test_the_page_size_is_the_users_choice():
+    src = _source()
+    assert 'key="mw_page_size"' in src
+
+
+def test_turning_a_page_does_not_throw_away_the_read_cache():
+    """Paging changes no data, so there is nothing to invalidate."""
+    src = _source()
+    block = src[src.index('key="adj_prev"'):src.index('key="adj_next"') + 400]
+    # Negative lookbehind: "safe_rerun()" contains "_rerun()" as a substring,
+    # so a plain `in` check can never tell the two apart.
+    assert not re.search(r"(?<!safe)_rerun\(\)", block), (
+        "Turning a page calls the cache-busting rerun, so every other read "
+        "on the page is re-queried for nothing.")
+    assert "safe_rerun()" in block
+
+
+# ── The user is told what is hidden ─────────────────────────────────────────
+
+def test_the_caption_says_deleted_rows_are_hidden():
     src = _rendered(_source())
-    assert "Narrow the filters" in src or "narrow the filters" in src
-    assert "COB filter" in src, (
-        "Telling someone the list is capped without telling them how to get "
-        "at the rest just moves the confusion.")
+    assert "Deleted adjustments are hidden" in src
+    assert "Show deleted" in src, (
+        "Saying rows are hidden without saying how to see them just moves "
+        "the confusion.")
