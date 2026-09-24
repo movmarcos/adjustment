@@ -49,8 +49,41 @@ app's iframe. Locally on 1.50.0 with the same theme there is no line.
 Round 5: T11 carries the engine theme as TOML dotted keys (theme.base = …)
 with no [theme] header — the same config to Streamlit, no header for
 Snowsight to see.
+
+Round 5 result: T11 has the line. Snowsight parses the TOML properly; any
+theme table in the file triggers it.
+
+Round 6: T12 has NO config file. The theme is set from the script (block at
+the top of this file, enabled by runtime_theme.flag). The reference app
+LINE_PROBE keeps the theme file.
 """
+import os
+
 import streamlit as st
+from streamlit import config as _st_config
+
+# Round 6: the engine theme set FROM THE SCRIPT, with no config file at all.
+# Streamlit rebuilds the theme message from the live config at the start of
+# every script run (runtime/app_session.py, SCRIPT_STARTED →
+# _create_new_session_message → _populate_theme_msg), so options set here
+# reach the front-end on the next run. The first run of the process sets
+# them and reruns once; every later session gets the theme from its first
+# message. Snowsight, which reads .streamlit/config.toml to pick a colour
+# scheme, has nothing to read. Enabled by a marker file the deploy uploads,
+# so the same app.py serves the reference app (theme file) and this one.
+_RUNTIME_THEME = os.path.exists(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "runtime_theme.flag"))
+_THEME = {
+    "theme.base": "light",
+    "theme.primaryColor": "#D50032",
+    "theme.backgroundColor": "#F6F7F9",
+    "theme.secondaryBackgroundColor": "#FFFFFF",
+    "theme.textColor": "#0F172A",
+}
+if _RUNTIME_THEME and _st_config.get_option("theme.base") != "light":
+    for _k, _v in _THEME.items():
+        _st_config.set_option(_k, _v)
+    st.rerun()
 
 # Layout must be chosen before set_page_config, so the "wide" choice is read
 # from the previous run's checkbox and takes effect on the rerun it triggers.

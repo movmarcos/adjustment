@@ -559,16 +559,22 @@ ENGINE_THEME_DOTTED = (
     'theme.secondaryBackgroundColor = "#FFFFFF"\n'
     'theme.textColor = "#0F172A"\n'
 )
-PROBE_VARIANTS = [
-    ('LINE_PROBE_T11_DOTTED', ENGINE_THEME_DOTTED),
-]
+# Round 5 result: T11 has the line — Snowsight parses the TOML properly.
+#
+# Round 6: NO config file. sample_app/app.py sets the same five theme
+# options from the script when runtime_theme.flag sits next to it (see the
+# block at the top of that file). Streamlit rebuilds its theme message from
+# the live config on every run, so the front-end gets the theme exactly as
+# it would from the file; Snowsight has no file to read.
+PROBE_VARIANTS = []
+PROBE_RUNTIME_THEME_APP = 'LINE_PROBE_T12_RUNTIME'
 # Settled variants from earlier rounds — dropped on the next --sample-app run.
 RETIRED_PROBES = [
     'LINE_PROBE_T1_BASE', 'LINE_PROBE_T2_PRIMARY', 'LINE_PROBE_T3_BG',
     'LINE_PROBE_T4_SECONDARY', 'LINE_PROBE_T5_TEXT',
     'LINE_PROBE_T6_FILE_ONLY', 'LINE_PROBE_T7_THEME_EMPTY',
     'LINE_PROBE_T8_CLIENT_ONLY', 'LINE_PROBE_T9_HIDETOPBAR',
-    'LINE_PROBE_T10_MINIMAL',
+    'LINE_PROBE_T10_MINIMAL', 'LINE_PROBE_T11_DOTTED',
 ]
 
 
@@ -617,10 +623,20 @@ def deploy_sample_app(session):
                              f'Line probe variant {name}. Delete when settled.'):
             return False
 
+    # Round 6: no .streamlit/ at all; the marker file switches the theme on.
+    flag_dir = tmp / PROBE_RUNTIME_THEME_APP
+    flag_dir.mkdir(parents=True, exist_ok=True)
+    flag = flag_dir / 'runtime_theme.flag'
+    flag.write_text("theme set from the script — see app.py\n", encoding='utf-8')
+    if not _deploy_probe(session, PROBE_RUNTIME_THEME_APP, base_files + [(flag, '')],
+                         'Line probe: NO config file, theme set from the script. Delete when settled.'):
+        return False
+
     print("\n  ✅ Line probes deployed. In Snowsight → Streamlit open each of:")
     print("     LINE_PROBE                 whole engine theme — the reference, shows the line")
     for name, body in PROBE_VARIANTS:
         print(f"     {name:<27}{body.strip().replace(chr(10), ' | ')}")
+    print(f"     {PROBE_RUNTIME_THEME_APP:<27}no config file — theme set from the script")
     return True
 
 

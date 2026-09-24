@@ -33,7 +33,7 @@ def _imports(path):
 
 def test_the_sample_imports_only_streamlit():
     for fname in ("app.py", os.path.join("pages", "2_Second_Page.py")):
-        assert _imports(os.path.join(SAMPLE, fname)) == {"streamlit"}, (
+        assert _imports(os.path.join(SAMPLE, fname)) <= {"streamlit", "os"}, (
             fname + " imports something other than streamlit. The control "
             "app must share no code with the engine or its result proves "
             "nothing.")
@@ -91,7 +91,7 @@ def test_the_powershell_mode_reaches_the_flag():
 
 
 _PROBE_CONSTANTS = ("ENGINE_THEME", "ENGINE_THEME_DOTTED", "PROBE_VARIANTS",
-                    "RETIRED_PROBES")
+                    "RETIRED_PROBES", "PROBE_RUNTIME_THEME_APP")
 
 
 def _constant(name):
@@ -144,3 +144,34 @@ def test_the_dotted_theme_is_the_same_config_without_the_header():
         "[theme] section, so a difference between T11 and LINE_PROBE could "
         "be a config difference rather than the header.")
     assert "[theme]" not in _constant("ENGINE_THEME_DOTTED")
+
+
+def test_the_runtime_theme_matches_the_engine_theme_file():
+    """Round 6 sets the theme from the script; the values must be the file's."""
+    import tomllib
+    src = _source(os.path.join(SAMPLE, "app.py"))
+    tree = ast.parse(src)
+    theme = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(tg, ast.Name) and tg.id == "_THEME" for tg in node.targets):
+            theme = ast.literal_eval(node.value)
+    assert theme, "_THEME is not a literal dict in sample_app/app.py"
+    file_theme = tomllib.loads(
+        _source(os.path.join(ROOT, "streamlit_app", ".streamlit", "config.toml")))["theme"]
+    assert {k.split(".", 1)[1]: v for k, v in theme.items()} == file_theme, (
+        "The runtime theme in sample_app/app.py differs from the engine's "
+        "config.toml, so T12 would not be testing the engine's theme.")
+    assert "st.rerun()" in src, (
+        "The first run must rerun once, or the theme only shows after the "
+        "user's first interaction.")
+    assert 'get_option("theme.base") != "light"' in src, (
+        "The rerun must be guarded, or every run reruns forever.")
+
+
+def test_the_runtime_theme_app_ships_no_config_file():
+    src = _source(DEPLOY)
+    body = src[src.index("    # Round 6: no .streamlit/ at all"):]
+    body = body[:body.index("_deploy_probe(") + 300]
+    assert "runtime_theme.flag" in body
+    assert ".toml" not in body, "T12 must not carry any config file"
