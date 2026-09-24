@@ -1042,16 +1042,28 @@ else:
 
 view_df = view_df.reset_index(drop=True)
 
-total = len(df_adjs)
+# `total` used to be len(df_adjs), which COUNTS SOFT-DELETED ROWS. The query
+# returns them and Python hides them, so deleting four of five left the
+# header reading "Results - 1 of 5" and people reasonably read the 5 as
+# "still five there" (reported 2026-09-24). The headline number is now what
+# you can actually see, and anything hidden is named rather than folded into
+# a denominator.
 shown = len(view_df)
+hidden_deleted = len(df_adjs) - shown
 with bordered_container():
     _rh1, _rh2 = st.columns([5, 1])
     with _rh1:
-        section_title(f"Results — {shown} of {total}", "table")
+        section_title(f"Results — {shown}", "table")
         st.caption("Select a row to view its details and actions.")
-        if total >= 200:
-            st.caption("Showing the newest 200 matching adjustments — narrow "
-                       "the filters to see older ones.")
+        if hidden_deleted > 0:
+            st.caption(f"{hidden_deleted} deleted "
+                       f"{'adjustment is' if hidden_deleted == 1 else 'adjustments are'} "
+                       f"hidden — tick **Show deleted** to include "
+                       f"{'it' if hidden_deleted == 1 else 'them'}.")
+        if len(df_adjs) >= 200:
+            st.caption("This is the newest 200 matching adjustments — there "
+                       "may be older ones. Narrow the filters, or use the COB "
+                       "filter, to see them.")
     with _rh2:
         st.download_button(
             "⬇ Export CSV", view_df.to_csv(index=False).encode("utf-8-sig"),
