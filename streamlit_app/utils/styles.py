@@ -379,31 +379,26 @@ def inject_css():
        z-index ~1e6. Page content scrolls UNDER it, which reads as a white
        block covering the grids — the recurring "white box" bug, independent
        of how any grid is rendered. Snowsight supplies its own chrome, so
-       Streamlit's is not wanted.
+       Streamlit's is not wanted, and it is removed outright.
 
-       It must NOT be display:none. The control that re-opens a COLLAPSED
-       sidebar (stSidebarCollapsedControl) is a child of this header, so
-       hiding the header removes the only way back to the menu: collapse the
-       sidebar once and it is gone until you reload the page. Neutralise the
-       bar instead — transparent, zero height, click-through — and leave its
-       children visible and clickable. */
-    header[data-testid="stHeader"] {{
-        background: transparent !important;
-        height: 0 !important;
-        min-height: 0 !important;
-        box-shadow: none !important;
-        border: none !important;
-        overflow: visible !important;
-        pointer-events: none !important;
-    }}
-    header[data-testid="stHeader"]::before,
-    header[data-testid="stHeader"]::after {{ display: none !important; }}
-    /* The bar swallows no clicks; anything inside it still works. */
-    header[data-testid="stHeader"] > * {{ pointer-events: auto !important; }}
+       HISTORY, because this flipped twice in a day and the reasoning
+       matters. It was display:none. That also hid the control which re-opens
+       a COLLAPSED sidebar, because that control is a CHILD of this header —
+       so collapsing the menu once left no way back. The first fix kept the
+       header in the layout (transparent, zero height, click-through) purely
+       to keep that control reachable. That left a hairline visible across
+       every page (reported 2026-09-24): a zero-height fixed element still
+       renders whatever borders and children Streamlit gives it.
 
-    /* The parts of the header we actually do want gone: the decoration
-       stripe and the Deploy / overflow toolbar. Named explicitly so the
-       sidebar control above is never caught by a blanket rule. */
+       display:none is correct again now, because the reason for keeping it
+       is gone: the sidebar is no longer collapsible at all (see below), so
+       there is no collapsed state to escape from and no control to preserve.
+       If the sidebar is ever made collapsible again, this must go back to
+       the neutralised form — or the menu becomes a one-way door. */
+    header[data-testid="stHeader"] {{ display: none !important; }}
+
+    /* Belt and braces: these are the parts that would still show if a future
+       Streamlit moves them out of the header. */
     [data-testid="stDecoration"] {{ display: none !important; }}
     [data-testid="stToolbar"] {{ display: none !important; }}
 

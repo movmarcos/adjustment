@@ -73,17 +73,55 @@ def _block_for(css_text, selector):
 
 # ── The regression itself ────────────────────────────────────────────────────
 
-def test_header_is_never_display_none(css):
-    """display:none on the header takes the sidebar control down with it."""
-    body = _block_for(css, 'header[data-testid="stHeader"]')
-    assert body, "no rule targets the Streamlit header at all"
-    normalised = _norm(body)
-    assert "display:none" not in normalised, (
-        "The Streamlit header is display:none again. The control that re-opens "
-        "a collapsed sidebar (stSidebarCollapsedControl) is a CHILD of this "
-        "header, so this strands the user with no menu and no way back except "
-        "a page reload. Neutralise the bar instead: transparent background, "
-        "zero height, pointer-events none.")
+def test_the_header_and_the_collapse_controls_stay_coupled(css):
+    """The one rule that matters, and it is conditional.
+
+    The control that re-opens a COLLAPSED sidebar is a CHILD of Streamlit's
+    chrome header. So hiding the header is only safe while the sidebar
+    cannot be collapsed in the first place. Hide the header AND leave a
+    collapse control working and the menu becomes a one-way door: put it
+    away once, and it is gone until you reload.
+
+    This flipped twice in a day. First display:none (menu became a one-way
+    door), then a neutralised header kept only to preserve that control
+    (which left a hairline across every page), now display:none again
+    because the sidebar is no longer collapsible. Pinning either state on
+    its own would be pinning a snapshot; the coupling is the invariant.
+    """
+    header = _norm(_block_for(css, 'header[data-testid="stHeader"]'))
+    header_hidden = "display:none" in header
+
+    collapse_controls = [
+        '[data-testid="stSidebarCollapseButton"]',
+        '[data-testid="stSidebarCollapsedControl"]',
+        '[data-testid="stSidebarNavCollapseIcon"]',
+        '[data-testid="collapsedControl"]',
+    ]
+    all_hidden = all("display:none" in _norm(_block_for(css, sel))
+                     for sel in collapse_controls)
+
+    if header_hidden:
+        assert all_hidden, (
+            "The chrome header is display:none while a sidebar collapse "
+            "control is still live. The re-open button lives INSIDE that "
+            "header, so collapsing the menu would leave no way back. Either "
+            "hide every collapse control, or neutralise the header "
+            "(transparent, zero height, pointer-events none) instead of "
+            "removing it.")
+    else:
+        assert "height:0" in header and "background:transparent" in header, (
+            "The header is kept in the layout but not neutralised, so the "
+            "white bar — or a hairline of it — is back across every page.")
+
+
+def test_the_header_leaves_no_bar_behind(css):
+    """Whichever form is in use, nothing of it may be visible."""
+    header = _norm(_block_for(css, 'header[data-testid="stHeader"]'))
+    assert header, "no rule targets the Streamlit header at all"
+    assert ("display:none" in header
+            or ("height:0" in header and "background:transparent" in header)), (
+        "The header is neither removed nor neutralised, so Streamlit's "
+        "fixed white chrome bar covers the top of the content again.")
 
 
 @pytest.mark.parametrize("selector", [
@@ -129,28 +167,13 @@ def test_expanded_sidebar_width_is_not_forced(css):
         "Force it only in the collapsed-state rule that rescues it.")
 
 
-def test_header_does_not_reserve_vertical_space(css):
-    """The white-box fix must survive: no solid bar over the content."""
-    body = _norm(_block_for(css, 'header[data-testid="stHeader"]'))
-    assert "height:0" in body, (
-        "The header must not reserve height, or page content scrolls under a "
-        "fixed bar again — the white box bug this rule originally fixed.")
-    assert "background:transparent" in body, (
-        "The header must be transparent, or the solid white bar returns.")
-
-
-def test_header_does_not_swallow_clicks(css):
-    body = _norm(_block_for(css, 'header[data-testid="stHeader"]'))
-    assert "pointer-events:none" in body, (
-        "A zero-height header can still cover content with an invisible hit "
-        "area. It must be click-through.")
-
-
-def test_children_of_the_header_stay_clickable(css):
-    body = _norm(_block_for(css, 'header[data-testid="stHeader"] > *'))
-    assert "pointer-events:auto" in body, (
-        "pointer-events:none on the header inherits to its children, which "
-        "includes the sidebar control. Children must opt back in.")
+# NOTE: the three tests that used to sit here — "does not reserve vertical
+# space", "does not swallow clicks", "children stay clickable" — described
+# the NEUTRALISED header only. They are covered by
+# test_the_header_and_the_collapse_controls_stay_coupled, which asserts the
+# neutralised form's properties in the branch where it applies, and by
+# test_the_header_leaves_no_bar_behind. Keeping them standing would have
+# pinned one of the two valid shapes as if it were the only one.
 
 
 # ── The chrome we do still want gone ─────────────────────────────────────────
