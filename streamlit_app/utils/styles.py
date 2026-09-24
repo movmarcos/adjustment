@@ -2392,28 +2392,51 @@ def render_css_probe():
     out.textContent = 'BLOCKED: cannot read the host page (' + e + ')'; return;
   }
   if (!d) { out.textContent = 'BLOCKED: no parent document'; return; }
+
+  function paints(s, r) {
+    // Anything that can render as a line: a thin filled strip, a border on
+    // any side, an outline, or a shadow.
+    var out = [];
+    if (r.height > 0 && r.height <= 6 &&
+        s.backgroundColor !== 'rgba(0, 0, 0, 0)') out.push('bg=' + s.backgroundColor);
+    ['Top','Bottom','Left','Right'].forEach(function (side) {
+      var w = parseFloat(s['border' + side + 'Width']) || 0;
+      if (w > 0 && s['border' + side + 'Style'] !== 'none')
+        out.push('border' + side + '=' + w + 'px ' + s['border' + side + 'Color']);
+    });
+    if ((parseFloat(s.outlineWidth) || 0) > 0 && s.outlineStyle !== 'none')
+      out.push('outline=' + s.outlineWidth + ' ' + s.outlineColor);
+    if (s.boxShadow && s.boxShadow !== 'none') out.push('shadow=' + s.boxShadow.slice(0, 40));
+    return out;
+  }
+
   var rows = [], all = d.querySelectorAll('*');
-  for (var i = 0; i < all.length && rows.length < 80; i++) {
-    var el = all[i], r = el.getBoundingClientRect(), s = getComputedStyle(el);
+  for (var i = 0; i < all.length && rows.length < 120; i++) {
+    var el = all[i], r = el.getBoundingClientRect();
     if (r.width < 400) continue;
-    var bt = parseFloat(s.borderTopWidth) || 0;
-    var bb = parseFloat(s.borderBottomWidth) || 0;
-    var thin = r.height > 0 && r.height <= 6 &&
-               s.backgroundColor !== 'rgba(0, 0, 0, 0)';
-    if (!thin && !bt && !bb) continue;
-    rows.push(
-      'y=' + Math.round(r.top) + ' h=' + Math.round(r.height) +
-      ' w=' + Math.round(r.width) + '  <' + el.tagName.toLowerCase() + '>' +
-      '  testid=' + (el.getAttribute('data-testid') || '-') +
-      '  class=' + (String(el.className || '').slice(0, 45) || '-') +
-      '  bg=' + s.backgroundColor +
-      '  bt=' + bt + 'px ' + s.borderTopColor + '  bb=' + bb + 'px');
+    var id = '<' + el.tagName.toLowerCase() + '> testid=' +
+             (el.getAttribute('data-testid') || '-') + ' class=' +
+             (String(el.className || '').slice(0, 40) || '-');
+    [['', getComputedStyle(el)],
+     ['::before', getComputedStyle(el, '::before')],
+     ['::after', getComputedStyle(el, '::after')]].forEach(function (pair) {
+      var tag = pair[0], s = pair[1];
+      if (!s) return;
+      if (tag && (s.content === 'none' || s.content === 'normal')) return;
+      var why = paints(s, tag ? { height: parseFloat(s.height) || 0 } : r);
+      if (!why.length) return;
+      rows.push('y=' + Math.round(r.top) + ' h=' + Math.round(r.height) +
+                ' w=' + Math.round(r.width) + '  ' + id + tag +
+                '  ' + why.join(' '));
+    });
   }
   out.textContent =
     'viewport ' + d.documentElement.clientWidth + 'x' +
-    d.documentElement.clientHeight + '\n' +
-    'thin strips and horizontal borders wider than 400px:\n\n' +
-    (rows.length ? rows.join('\n') : 'nothing matched');
+    d.documentElement.clientHeight +
+    '  scanned ' + all.length + ' elements\n' +
+    'anything wider than 400px that can paint a line ' +
+    '(element and its ::before/::after):\n\n' +
+    (rows.length ? rows.join('\n') : 'NOTHING MATCHED — the line is not in this page');
 })();
 </script>
 """

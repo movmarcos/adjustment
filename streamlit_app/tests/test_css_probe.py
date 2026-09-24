@@ -86,13 +86,32 @@ def test_it_reports_when_it_cannot_read_the_host_page(monkeypatch, captured):
         "opposite of the truth.")
 
 
-def test_it_looks_for_both_thin_strips_and_borders(monkeypatch, captured):
+def test_it_looks_for_every_way_a_line_can_be_painted(monkeypatch, captured):
+    """Widened after two rounds of the probe's first version finding nothing.
+
+    A line is not only a thin filled strip or a top border. It can be a
+    border on any side of a wide box, an outline, a box-shadow, or a
+    pseudo-element — and pseudo-elements do not appear in querySelectorAll,
+    so they have to be asked for by name.
+    """
     _set_params(monkeypatch, debug="css")
     styles.render_css_probe()
     js = captured["html"][0]
-    assert "borderTopWidth" in js and "borderBottomWidth" in js
-    assert "backgroundColor" in js
     assert "window.parent.document" in js
+    assert "backgroundColor" in js
+    assert "'border' + side + 'Width'" in js, "borders on all four sides"
+    assert "outlineWidth" in js and "boxShadow" in js
+    for pseudo in ("'::before'", "'::after'"):
+        assert pseudo in js, "pseudo-elements must be inspected explicitly"
+
+
+def test_it_says_so_when_nothing_matches(monkeypatch, captured):
+    """An empty list must read as a finding, not as a blank."""
+    _set_params(monkeypatch, debug="css")
+    styles.render_css_probe()
+    assert "NOTHING MATCHED" in captured["html"][0], (
+        "If nothing on the page can paint a line, the probe has to say that "
+        "out loud — it is the result that rules the app out entirely.")
 
 
 def test_it_reports_position_so_the_line_can_be_matched(monkeypatch, captured):
