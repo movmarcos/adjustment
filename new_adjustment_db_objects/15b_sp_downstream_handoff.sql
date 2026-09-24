@@ -84,21 +84,31 @@ def main(session, p_process_type, p_cobid, p_reason):
     # Mint and open a run log. The PowerBI proc looks its run up by the data
     # group in proc_parameters, so that column has to carry the same value
     # the proc is called with.
+    # BYTE-FOR-BYTE the call SP_PROCESS_ADJUSTMENT makes, including the
+    # process name and the empty trailing argument. FACT.UPDATE_POWERBI_FOR_
+    # ADJUSTMENTS lives outside this repo and cannot be inspected; the only
+    # thing known about how it finds a run log is that this exact shape
+    # works. An earlier revision put its own process name here and passed a
+    # reason string, for tidiness — deviating from a known-working call into
+    # a black box bought nothing and risked the hand-off finding no run.
+    # The reason lives in the return value instead.
     try:
         run_log_id = session.sql(
             "SELECT BATCH.SEQ_RUN_LOG.NEXTVAL AS X").collect()[0]["X"]
         session.sql(f"""
             CALL BATCH.LOAD_RUN_LOG(
-                {run_log_id}, {cobid},
-                'ADJUSTMENT_APP.SP_DOWNSTREAM_HANDOFF',
+                {run_log_id},
+                {cobid},
+                'FACT.SP_PROCESS_ADJUSTMENT',
                 '{_esc(data_group)}',
-                0, 0, 'false', '{reason}'
+                0, 0, 'false', ''
             )
         """).collect()
     except Exception as rl_err:
         return f"failed (could not open a run log: {rl_err})"
 
     outcome = ""
+    _why = f" [{reason}]" if reason else ""
     try:
         if pt in PBI_INSERT_SOURCE:
             res = session.sql(f"""
@@ -114,7 +124,7 @@ def main(session, p_process_type, p_cobid, p_reason):
             ret = str(res[0][0]) if res and res[0] is not None else ""
             if ret.strip().lower() != "success":
                 raise Exception(f"UPDATE_POWERBI_FOR_ADJUSTMENTS returned: {ret}")
-            outcome = f"powerbi: queued (run_log={run_log_id})"
+            outcome = f"powerbi: queued (run_log={run_log_id}){_why}"
         else:
             dataset = DBT_DUMMY_DATASET[pt]
             session.sql(f"""
@@ -129,7 +139,7 @@ def main(session, p_process_type, p_cobid, p_reason):
                     CURRENT_TIMESTAMP(),
                     CURRENT_TIMESTAMP()
             """).collect()
-            outcome = f"dbt: trigger written ({dataset})"
+            outcome = f"dbt: trigger written ({dataset}){_why}"
     except Exception as hand_err:
         outcome = f"failed ({hand_err})"
 

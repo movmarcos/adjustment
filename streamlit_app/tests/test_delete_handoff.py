@@ -211,3 +211,50 @@ def test_a_failed_handoff_warns_rather_than_claiming_success():
     assert "could NOT be queued" in block, (
         "A silent hand-off failure means stale reports and no clue why.")
     assert 'set_flash(_FLASH, "warning"' in block
+
+
+# ── The run-log call must match the engine's, field for field ───────────────
+# Reported 2026-09-24: a deleted VaR adjustment produced no pending Power BI
+# refresh. FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS is outside this repo and
+# cannot be inspected; the only thing known about how it finds a run log is
+# that the engine's exact call works. An earlier revision of the hand-off
+# used its own process name and passed a reason string, for tidiness. That
+# deviation bought nothing and could stop the proc finding the run.
+
+def _run_log_args(path):
+    """The arguments of the BATCH.LOAD_RUN_LOG call in a procedure body."""
+    body = _body(path)
+    i = body.index("CALL BATCH.LOAD_RUN_LOG(")
+    block = body[i:body.index(")", body.index("'false'", i))]
+    return [a.strip() for a in
+            block[block.index("(") + 1:].replace("\n", " ").split(",")]
+
+
+def test_the_run_log_uses_the_same_process_name_as_the_engine():
+    mine = _run_log_args(HANDOFF_SQL)
+    theirs = _run_log_args(ENGINE_SQL)
+    assert "'FACT.SP_PROCESS_ADJUSTMENT'" in mine, (
+        "The hand-off opens its run log under its own process name. The "
+        "Power BI procedure may key on it, and the engine's value is the "
+        "only one known to work.\n  mine:   " + repr(mine) +
+        "\n  engine: " + repr(theirs))
+    assert theirs[2] == mine[2], (
+        "Process name drifted from the engine's: " + repr(mine[2]) +
+        " vs " + repr(theirs[2]))
+
+
+def test_the_run_log_trailing_argument_matches_the_engine():
+    mine = _run_log_args(HANDOFF_SQL)
+    assert mine[-1] == "''", (
+        "The engine passes an empty trailing argument. Passing anything else "
+        "is an untested deviation into a procedure we cannot read.")
+
+
+def test_the_reason_is_reported_without_going_into_the_run_log():
+    """The context is still useful — it just belongs in the return value."""
+    out, issued = _run("VaR")
+    assert "deleted adjustment" in out, (
+        "The caller's reason should come back in the status string so the "
+        "page can show what the hand-off was for.")
+    log_call = [q for q in issued if "LOAD_RUN_LOG(" in q][0]
+    assert "deleted adjustment" not in log_call

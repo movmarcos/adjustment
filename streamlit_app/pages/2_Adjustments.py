@@ -1042,7 +1042,14 @@ def render_adj_card(row, expanded=False):
                     key=f"delcf_{adj_id}")
                 if st.button("Delete", key=f"del_{adj_id}", **wide_kwargs(),
                              disabled=not confirmed):
-                    _do_delete()
+                    # Every action on this page ran with NO feedback: the
+                    # button click just sat there until the rerun repainted.
+                    # Delete is the worst of them — a multi-statement
+                    # transaction plus the report hand-off procedure — so it
+                    # read as a page that had hung (reported 2026-09-24).
+                    with st.spinner("Deleting the adjustment and refreshing "
+                                    "reports…"):
+                        _do_delete()
                     _rerun()
 
         if run_status == "Pending":
@@ -1055,9 +1062,12 @@ def render_adj_card(row, expanded=False):
                 if st.button("Retry", key=f"retry_{adj_id}",
                              **wide_kwargs(), type="primary"):
                     try:
-                        if _transition("Pending",
-                                       extra_set=", ERRORMESSAGE = NULL, CLAIM_TOKEN = NULL",
-                                       comment="Retrying after failure"):
+                        with st.spinner("Queueing the retry…"):
+                            _ok = _transition(
+                                "Pending",
+                                extra_set=", ERRORMESSAGE = NULL, CLAIM_TOKEN = NULL",
+                                comment="Retrying after failure")
+                        if _ok:
                             set_flash(_FLASH, "success",
                                       "Queued for retry — the pipeline picks it up "
                                       "within a minute.")
@@ -1074,7 +1084,10 @@ def render_adj_card(row, expanded=False):
                 if st.button("Recall to Pending", key=f"recall_{adj_id}",
                              **wide_kwargs()):
                     try:
-                        if _transition("Pending", comment="Recalled by submitter"):
+                        with st.spinner("Recalling…"):
+                            _ok = _transition("Pending",
+                                              comment="Recalled by submitter")
+                        if _ok:
                             set_flash(_FLASH, "success", "Recalled to Pending.")
                         _rerun()
                     except Exception as ex:
@@ -1136,7 +1149,9 @@ def render_adj_card(row, expanded=False):
                 if st.button("Clone", key=f"clone_btn_{adj_id}",
                              **wide_kwargs(),
                              disabled=_clone_cob is None):
-                    _do_clone(adj_id, _clone_cob, requires_approval=_clone_appr)
+                    with st.spinner(f"Cloning to COB {_clone_cob}…"):
+                        _do_clone(adj_id, _clone_cob,
+                                  requires_approval=_clone_appr)
 
 
 # ── Browse + act ───────────────────────────────────────────────────────────────
@@ -1299,8 +1314,14 @@ if len(_failed_view) >= 2:
             if st.button("Retry all failed", key="bulk_retry_btn",
                          type="primary", **wide_kwargs(),
                          disabled=not _br_confirm):
+                # A progress bar, not a spinner: this is a loop of known
+                # length running two statements per row, so a 40-row bulk
+                # retry is 80 round trips. A spinner would say "working" for
+                # a minute with no sense of how far along it is.
                 _ok, _skipped = 0, 0
-                for _, _fr in _failed_view.iterrows():
+                _total = len(_failed_view)
+                _bar = st.progress(0.0, text=f"Re-queueing 0 of {_total}…")
+                for _i, (_, _fr) in enumerate(_failed_view.iterrows(), 1):
                     try:
                         _fid = sql_escape(_fr.get("ADJ_ID"))
                         rows = run_query(f"""
@@ -1325,6 +1346,9 @@ if len(_failed_view) >= 2:
                             _skipped += 1
                     except Exception:
                         _skipped += 1
+                    _bar.progress(_i / _total,
+                                  text=f"Re-queueing {_i} of {_total}…")
+                _bar.empty()
                 msg = (f"{_ok} adjustment(s) re-queued — the pipeline picks "
                        f"them up within a minute.")
                 if _skipped:
