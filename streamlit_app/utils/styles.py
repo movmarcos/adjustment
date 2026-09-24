@@ -2432,3 +2432,45 @@ def render_sidebar():
         # displayed — the user asked to remove it from the sidebar. It still
         # ships with each deploy, so which-commit-is-live stays verifiable in
         # one query: SELECT ... $1 FROM @STREAMLIT_ADJUSTMENT_STAGE/utils/build_info.py.
+
+    # Outside the sidebar block: the notice lands at the top of the main area.
+    render_dark_mode_notice()
+
+
+def render_dark_mode_notice():
+    """One line for Snowsight dark-mode users, on every page, until dismissed.
+
+    The app carries no theme of its own (see deploy.py and
+    tests/test_no_custom_theme.py: any custom theme makes Snowsight draw a
+    stray line across every page). The cost of that is borne by dark-mode
+    users: native grids and menus follow Snowsight and go dark against the
+    light cards, and Snowsight draws the line for its own dark theme too.
+    Without this notice that looks like a broken app with no explanation.
+
+    st.context.theme (Streamlit 1.46+) infers light/dark from the app's
+    background colour and can be wrong on the very first run of a session;
+    it corrects itself on the next run. Older runtimes and AppTest have no
+    theme context: the notice simply stays silent there.
+    """
+    try:
+        if st.session_state.get("_dark_notice_dismissed"):
+            return
+        if getattr(st.context.theme, "type", "light") != "dark":
+            return
+    except Exception:
+        return
+    from utils.snowflake_conn import safe_rerun
+    col_msg, col_btn = st.columns([6, 1])
+    with col_msg:
+        st.warning(
+            "Snowsight is in **dark mode**. This app is designed for light "
+            "mode: grids and menus turn dark and Snowsight draws a line "
+            "across the page. Switch it under your profile menu "
+            "(bottom-left) → **Appearance** → **Light**.",
+            icon="🌗")
+    with col_btn:
+        if st.button("Hide", key="_dark_notice_hide",
+                     help="Hide this for the rest of the session"):
+            st.session_state["_dark_notice_dismissed"] = True
+            safe_rerun()
+

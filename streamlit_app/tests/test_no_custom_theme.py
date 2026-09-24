@@ -97,3 +97,32 @@ def test_the_temporary_diagnostics_are_gone():
     styles = _source(os.path.join(APP, "utils", "styles.py"))
     for name in ("_debug_flag", "render_css_probe", "_dbg_nocss", "_dbg_probe"):
         assert name not in styles, name + " is still in utils/styles.py."
+
+
+# ── Dark-mode users are told, not left guessing ──────────────────────────────
+
+def test_dark_mode_users_get_a_notice_on_every_page():
+    styles = _source(os.path.join(APP, "utils", "styles.py"))
+    assert "def render_dark_mode_notice" in styles
+    body = styles[styles.index("def render_sidebar"):styles.index("def render_dark_mode_notice")]
+    assert "render_dark_mode_notice()" in body, (
+        "render_sidebar no longer calls the notice, so dark-mode users see "
+        "dark grids on light cards with no explanation.")
+    fn = styles[styles.index("def render_dark_mode_notice"):]
+    assert "st.context.theme" in fn
+    assert "Appearance" in fn and "Light" in fn, (
+        "The notice must say where to switch, or it is just a complaint.")
+
+
+def test_the_notice_is_silent_where_theme_context_is_unavailable():
+    """AppTest and older runtimes have no st.context.theme — pages must still render."""
+    styles = _source(os.path.join(APP, "utils", "styles.py"))
+    fn = styles[styles.index("def render_dark_mode_notice"):]
+    assert "except Exception:\n        return" in fn
+
+
+def test_the_notice_never_sets_a_theme():
+    """Tempting fix: force light in dark mode. That is exactly the line trigger."""
+    styles = _source(os.path.join(APP, "utils", "styles.py"))
+    fn = styles[styles.index("def render_dark_mode_notice"):]
+    assert "set_option" not in fn
