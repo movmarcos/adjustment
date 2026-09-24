@@ -33,6 +33,7 @@ USE SCHEMA ADJUSTMENT_APP;
 CREATE OR ALTER PROCEDURE ADJUSTMENT_APP.SP_DOWNSTREAM_HANDOFF(
     p_process_type VARCHAR,
     p_cobid        NUMBER,
+    p_run_log_id   NUMBER,
     p_reason       VARCHAR
 )
 RETURNS VARCHAR
@@ -40,7 +41,7 @@ LANGUAGE PYTHON
 RUNTIME_VERSION = '3.11'
 PACKAGES = ('snowflake-snowpark-python')
 HANDLER = 'main'
-COMMENT = 'Queue the reporting hand-off for a scope + COB: a PowerBI refresh action for VaR/Stress, a DUMMY_* trigger row in RAVEN.LOG_STAGE_ME_STATUS for Sensitivity/FRTB. Used by the Adjustments page after a delete, so removing data refreshes reports the same way adding it does.'
+COMMENT = 'THE reporting hand-off for a scope + COB: a PowerBI refresh action for VaR/Stress, a DUMMY_* trigger row in RAVEN.LOG_STAGE_ME_STATUS for Sensitivity/FRTB. Called by SP_PROCESS_ADJUSTMENT after processing (passing its own run log) and by the Adjustments page after a delete (passing NULL, so one is opened here). One implementation, both paths.'
 EXECUTE AS CALLER
 AS
 $$
@@ -71,7 +72,7 @@ def _esc(value):
     return str(value).replace("\\", "\\\\").replace("'", "''")
 
 
-def main(session, p_process_type, p_cobid, p_reason):
+def main(session, p_process_type, p_cobid, p_run_log_id, p_reason):
     pt = str(p_process_type or "").strip().upper()
     cobid = int(p_cobid)
     reason = _esc(str(p_reason or "")[:200])
@@ -84,28 +85,38 @@ def main(session, p_process_type, p_cobid, p_reason):
     # Mint and open a run log. The PowerBI proc looks its run up by the data
     # group in proc_parameters, so that column has to carry the same value
     # the proc is called with.
-    # BYTE-FOR-BYTE the call SP_PROCESS_ADJUSTMENT makes, including the
-    # process name and the empty trailing argument. FACT.UPDATE_POWERBI_FOR_
-    # ADJUSTMENTS lives outside this repo and cannot be inspected; the only
-    # thing known about how it finds a run log is that this exact shape
-    # works. An earlier revision put its own process name here and passed a
-    # reason string, for tidiness — deviating from a known-working call into
-    # a black box bought nothing and risked the hand-off finding no run.
-    # The reason lives in the return value instead.
+    # The caller's run log when it has one (SP_PROCESS_ADJUSTMENT passes its
+    # own), otherwise open one here (the delete path is not a pipeline run).
+    #
+    # The LOAD_RUN_LOG call below is BYTE-FOR-BYTE the one the engine makes,
+    # including the process name and the empty trailing argument.
+    # FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS lives outside this repo and cannot
+    # be inspected; the only thing known about how it finds a run log is that
+    # this exact shape works. An earlier revision used its own process name
+    # and passed a reason string, for tidiness — deviating from a
+    # known-working call into a black box bought nothing and risked the
+    # hand-off finding no run. The reason lives in the return value instead.
+    _opened_here = False
     try:
-        run_log_id = session.sql(
-            "SELECT BATCH.SEQ_RUN_LOG.NEXTVAL AS X").collect()[0]["X"]
-        session.sql(f"""
-            CALL BATCH.LOAD_RUN_LOG(
-                {run_log_id},
-                {cobid},
-                'FACT.SP_PROCESS_ADJUSTMENT',
-                '{_esc(data_group)}',
-                0, 0, 'false', ''
-            )
-        """).collect()
-    except Exception as rl_err:
-        return f"failed (could not open a run log: {rl_err})"
+        run_log_id = int(p_run_log_id) if p_run_log_id is not None else 0
+    except (TypeError, ValueError):
+        run_log_id = 0
+    if not run_log_id:
+        _opened_here = True
+        try:
+            run_log_id = session.sql(
+                "SELECT BATCH.SEQ_RUN_LOG.NEXTVAL AS X").collect()[0]["X"]
+            session.sql(f"""
+                CALL BATCH.LOAD_RUN_LOG(
+                    {run_log_id},
+                    {cobid},
+                    'FACT.SP_PROCESS_ADJUSTMENT',
+                    '{_esc(data_group)}',
+                    0, 0, 'false', ''
+                )
+            """).collect()
+        except Exception as rl_err:
+            return f"failed (could not open a run log: {rl_err})"
 
     outcome = ""
     _why = f" [{reason}]" if reason else ""
@@ -143,13 +154,16 @@ def main(session, p_process_type, p_cobid, p_reason):
     except Exception as hand_err:
         outcome = f"failed ({hand_err})"
 
-    try:
-        session.sql(f"""
-            CALL BATCH.LOAD_RUN_LOG_END_WITH_DETAIL(
-                {run_log_id}, '{{"status":"Processed"}}')
-        """).collect()
-    except Exception as close_err:
-        print(f"Warning: run log close failed: {close_err}")
+    # Close ONLY a run log opened here. The engine closes its own after its
+    # whole batch, and ending it early would cut that run short.
+    if _opened_here:
+        try:
+            session.sql(f"""
+                CALL BATCH.LOAD_RUN_LOG_END_WITH_DETAIL(
+                    {run_log_id}, '{{"status":"Processed"}}')
+            """).collect()
+        except Exception as close_err:
+            print(f"Warning: run log close failed: {close_err}")
 
     return outcome
 $$;

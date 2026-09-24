@@ -49,8 +49,12 @@ def _maps(path):
             ("PBI_INSERT_SOURCE", "PBI_DATA_GROUP", "DBT_DUMMY_DATASET")}
 
 
-def _run(process_type, cobid=20260420, pbi_returns="success"):
-    """Execute the procedure and return (result, [sql issued])."""
+def _run(process_type, cobid=20260420, pbi_returns="success", run_log_id=None):
+    """Execute the procedure and return (result, [sql issued]).
+
+    run_log_id=None is the delete path (the procedure opens one); a number
+    is the engine path (it passes its own).
+    """
     ns = {}
     exec(_body(HANDOFF_SQL), ns)
     issued = []
@@ -71,23 +75,54 @@ def _run(process_type, cobid=20260420, pbi_returns="success"):
                 return _Res([[pbi_returns]])
             return _Res([])
 
-    out = ns["main"](_Session(), process_type, cobid, "deleted adjustment abc")
+    out = ns["main"](_Session(), process_type, cobid, run_log_id,
+                     "deleted adjustment abc")
     return out, issued
 
 
 # ── The two maps must not drift from the engine's ───────────────────────────
 
-@pytest.mark.parametrize("name", ["PBI_INSERT_SOURCE", "PBI_DATA_GROUP",
-                                  "DBT_DUMMY_DATASET"])
-def test_the_scope_maps_match_the_engine(name):
-    """Two copies exist on purpose; this is what keeps them honest."""
-    mine = _maps(HANDOFF_SQL)[name]
-    theirs = _maps(ENGINE_SQL)[name]
-    assert mine == theirs, (
-        name + " differs between SP_DOWNSTREAM_HANDOFF and "
-        "SP_PROCESS_ADJUSTMENT. A delete would then hand off to a different "
-        "place than the insert did, or to nowhere.\n"
-        "  handoff: " + repr(mine) + "\n  engine : " + repr(theirs))
+@pytest.mark.parametrize("name", ["PBI_INSERT_SOURCE", "DBT_DUMMY_DATASET"])
+def test_the_engine_has_no_second_copy_of_the_routing(name):
+    """One implementation, not two kept in step by a test.
+
+    They were two, with a test comparing them. Within a day they had drifted
+    in the run-log call and a deleted VaR adjustment queued no refresh. The
+    fix is not a better drift test — it is having one copy.
+    """
+    assert name not in _source(ENGINE_SQL), (
+        "The engine has its own " + name + " again. The hand-off must live "
+        "only in SP_DOWNSTREAM_HANDOFF; duplicating it is what broke this.")
+    assert name in _source(HANDOFF_SQL), (
+        name + " is missing from the shared procedure.")
+
+
+def test_the_engine_calls_the_shared_procedure():
+    src = _source(ENGINE_SQL)
+    assert "CALL ADJUSTMENT_APP.SP_DOWNSTREAM_HANDOFF(" in src, (
+        "Processing no longer routes through the shared hand-off, so create "
+        "and delete can diverge again.")
+    for gone in ("def trigger_powerbi_refresh", "def trigger_dbt_handoff"):
+        assert gone not in src, (
+            "The engine reintroduced " + gone + " — that is the duplicate.")
+
+
+def test_the_engine_keeps_only_the_data_group_map():
+    """Its own run-log call has to stamp the data group into proc_parameters."""
+    src = _source(ENGINE_SQL)
+    assert "PBI_DATA_GROUP = {" in src and "def pbi_data_group" in src
+
+
+def test_the_engine_still_stamps_a_failure_on_the_header():
+    """Engine-specific, so it stays in the engine after the move."""
+    src = _source(ENGINE_SQL)
+    block = src[src.index("def trigger_downstream_handoff"):]
+    block = block[:block.index("\ndef ", 10)]
+    assert "SET ERRORMESSAGE" in block, (
+        "A failed hand-off must still be recorded on the header, or the "
+        "pipeline pages show a clean Processed adjustment with stale "
+        "reports behind it.")
+    assert "ADJ_ID IN ({adj_ids_str})" in block
 
 
 # ── Routing ─────────────────────────────────────────────────────────────────
@@ -258,3 +293,53 @@ def test_the_reason_is_reported_without_going_into_the_run_log():
         "page can show what the hand-off was for.")
     log_call = [q for q in issued if "LOAD_RUN_LOG(" in q][0]
     assert "deleted adjustment" not in log_call
+
+
+# ── One procedure, two callers, one run log ─────────────────────────────────
+# Processing already has a run log open for its batch; delete does not. The
+# procedure takes it as an argument so neither caller has to know what the
+# other does, and so a second run log is never opened for the same work.
+
+def test_the_engine_passes_its_own_run_log():
+    src = _source(ENGINE_SQL)
+    block = src[src.index("def trigger_downstream_handoff"):]
+    block = block[:block.index("\ndef ", 10)]
+    assert "{int(run_log_id)}" in block, (
+        "The engine must hand its run log to the procedure. Letting the "
+        "procedure open a second one for the same batch would split the "
+        "run in two.")
+
+
+def test_the_delete_passes_no_run_log():
+    with open(PAGE, encoding="utf-8") as fh:
+        page = fh.read()
+    block = page[page.index("SP_DOWNSTREAM_HANDOFF"):]
+    block = block[:block.index(")\")")]
+    assert "NULL" in block, (
+        "A delete is not a pipeline run and has no run log, so it must pass "
+        "NULL and let the procedure open one.")
+
+
+def test_a_supplied_run_log_is_reused_not_replaced():
+    _, issued = _run("VaR", run_log_id=987654)
+    assert not [q for q in issued if "SEQ_RUN_LOG.NEXTVAL" in q], (
+        "The procedure minted a new run log even though the caller supplied "
+        "one.")
+    pbi = [q for q in issued if "UPDATE_POWERBI_FOR_ADJUSTMENTS" in q][0]
+    assert "987654" in pbi, "the supplied run log must be the one used"
+
+
+def test_a_supplied_run_log_is_not_closed_here():
+    """The engine closes its own after the whole batch."""
+    _, issued = _run("VaR", run_log_id=987654)
+    assert not [q for q in issued if "LOAD_RUN_LOG_END_WITH_DETAIL" in q], (
+        "The procedure ended the caller's run log, cutting the engine's run "
+        "short halfway through its batch.")
+
+
+def test_a_run_log_opened_here_is_closed_here():
+    _, issued = _run("VaR", run_log_id=None)
+    assert [q for q in issued if "SEQ_RUN_LOG.NEXTVAL" in q]
+    assert [q for q in issued if "LOAD_RUN_LOG_END_WITH_DETAIL" in q], (
+        "A run log opened by this procedure must be closed by it, or it is "
+        "left open forever.")

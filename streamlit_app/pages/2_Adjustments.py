@@ -971,6 +971,10 @@ def render_adj_card(row, expanded=False):
                             f"CALL ADJUSTMENT_APP.SP_DOWNSTREAM_HANDOFF("
                             f"'{sql_escape(process_type)}', "
                             f"{int(row.get('COBID'))}, "
+                            # NULL run log: a delete is not a pipeline run, so
+                            # the procedure opens one. Processing passes its
+                            # own instead of opening a second.
+                            f"NULL, "
                             f"'deleted adjustment {sql_escape(_aid)}')")
                         _handoff = str(_hr[0][0]) if _hr else ""
                     except Exception as _hx:

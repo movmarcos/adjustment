@@ -19,9 +19,12 @@ import re
 import pytest
 
 APP = os.path.join(os.path.dirname(__file__), "..", "app.py")
-ENGINE = os.path.join(os.path.dirname(__file__), "..", "..",
-                      "new_adjustment_db_objects",
-                      "05_sp_process_adjustment.sql")
+# The dataset names moved out of the engine on 2026-09-24: the hand-off is
+# now one procedure shared by processing and delete. This test follows the
+# source of truth rather than pinning where it used to live.
+HANDOFF = os.path.join(os.path.dirname(__file__), "..", "..",
+                       "new_adjustment_db_objects",
+                       "15b_sp_downstream_handoff.sql")
 
 
 def _source(path):
@@ -90,17 +93,17 @@ def test_it_restricts_to_the_two_adjustment_datasets(query):
         assert name in query, "the query no longer filters on " + name
 
 
-def test_the_dataset_names_match_what_the_engine_writes(query):
+def test_the_dataset_names_match_what_the_handoff_writes(query):
     """The cross-file link that rots silently: the card would just read 0."""
-    engine = _source(ENGINE)
+    engine = _source(HANDOFF)
     block = engine[engine.index("DBT_DUMMY_DATASET = {"):]
     block = block[:block.index("}") + 1]
     written = set(re.findall(r"'(DUMMY_\w+)'", block))
     assert written, "could not read the engine's dataset mapping"
     for name in written:
         assert "'" + name + "'" in query, (
-            "The engine writes " + name + " but the Home card does not look "
-            "for it, so those rebuilds would never be counted.")
+            "The hand-off writes " + name + " but the Home card does not "
+            "look for it, so those rebuilds would never be counted.")
 
 
 # ── The card must not describe the old behaviour ─────────────────────────────
