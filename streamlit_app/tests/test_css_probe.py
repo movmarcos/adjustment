@@ -134,3 +134,58 @@ def test_the_sidebar_calls_it_last(monkeypatch):
             and getattr(last.value.func, "id", "") == "render_css_probe"), (
         "The probe must be the last statement of render_sidebar and outside "
         "the sidebar block, or its output is unreadable inside the menu.")
+
+
+# ── ?debug=nocss — the decisive test ────────────────────────────────────────
+# Three fixes aimed at the app's own CSS failed to shift the reported line,
+# and the app cannot be inspected: no Inspect entry in the corporate browser,
+# internal network, so no automation either. With every rule skipped, a line
+# that persists is not ours. It needs no output read back — the answer is
+# whether the line is still on screen.
+
+def test_nocss_ships_no_stylesheet(monkeypatch, captured):
+    _set_params(monkeypatch, debug="nocss")
+    monkeypatch.setattr(styles.st, "warning",
+                        lambda m, *a, **k: captured["markdown"].append(m))
+    styles.inject_css()
+    assert not any("<style>" in m for m in captured["markdown"]), (
+        "inject_css still emitted a stylesheet, so the test proves nothing.")
+
+
+def test_nocss_says_it_is_on(monkeypatch, captured):
+    """The app looks broken in this mode; that must be obviously deliberate."""
+    _set_params(monkeypatch, debug="nocss")
+    seen = []
+    monkeypatch.setattr(styles.st, "warning", lambda m, *a, **k: seen.append(m))
+    styles.inject_css()
+    assert seen and "debug=nocss" in seen[0], (
+        "Without a notice, an unstyled app reads as a broken deploy.")
+
+
+def test_the_stylesheet_ships_normally_without_the_flag(monkeypatch, captured):
+    _set_params(monkeypatch)
+    styles.inject_css()
+    assert any("<style>" in m for m in captured["markdown"]), (
+        "The debug flag has leaked into normal use and the app has no CSS.")
+
+
+@pytest.mark.parametrize("value", ["css", "other", ""])
+def test_other_flags_do_not_disable_styling(monkeypatch, captured, value):
+    _set_params(monkeypatch, debug=value)
+    styles.inject_css()
+    assert any("<style>" in m for m in captured["markdown"]), (
+        "debug=" + repr(value) + " switched the stylesheet off.")
+
+
+def test_both_flags_read_the_same_parameter(monkeypatch):
+    """One reader, so the two debug modes cannot drift apart."""
+    import ast
+    src = open(os.path.join(os.path.dirname(__file__), "..", "utils",
+                            "styles.py"), encoding="utf-8").read()
+    assert src.count("def _debug_flag(") == 1
+    for fn in ("inject_css", "render_css_probe"):
+        node = next(n for n in ast.parse(src).body
+                    if isinstance(n, ast.FunctionDef) and n.name == fn)
+        calls = [n for n in ast.walk(node) if isinstance(n, ast.Call)
+                 and getattr(n.func, "id", "") == "_debug_flag"]
+        assert calls, fn + " does not use the shared flag reader"

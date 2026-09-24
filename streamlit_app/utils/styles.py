@@ -349,7 +349,38 @@ CATEGORY_CONFIG = {
 # GLOBAL CSS
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _debug_flag():
+    """The ?debug= value, lowercased. '' when absent or unreadable."""
+    try:
+        raw = st.query_params.get("debug")
+        val = raw if isinstance(raw, str) else (raw[0] if raw else None)
+        return str(val or "").strip().lower()
+    except Exception:
+        return ""
+
+
 def inject_css():
+    # ?debug=nocss — ship NO app styling at all.
+    #
+    # A horizontal line has been reported across every page. Three fixes
+    # aimed at the app's own CSS did not shift it, and the app cannot be
+    # inspected: devtools has no Inspect entry in the corporate browser and
+    # the app sits on an internal network.
+    #
+    # This is the decisive test, and it needs no output read back. With every
+    # rule below skipped, the app renders in plain Streamlit. If the line is
+    # STILL there, it is not being drawn by anything in this file — which
+    # points at the browser isolation layer, the same thing that caused the
+    # white blocks in this app before. If it disappears, it IS ours and I can
+    # bisect the stylesheet from there.
+    #
+    # The app will look unstyled while this flag is on. That is the point.
+    if _debug_flag() == "nocss":
+        st.warning("Debug mode: ALL app styling is switched off "
+                   "(`?debug=nocss`). Remove the flag from the URL to get "
+                   "the normal app back.")
+        return
+
     st.markdown(f"""
     <style>
     :root {{
@@ -2372,12 +2403,7 @@ def render_css_probe():
     Renders ONLY with ?debug=css on the URL, so it costs normal users
     nothing. Delete this function and its call once the line is identified.
     """
-    try:
-        raw = st.query_params.get("debug")
-        want = raw if isinstance(raw, str) else (raw[0] if raw else None)
-    except Exception:
-        return
-    if str(want or "").strip().lower() != "css":
+    if _debug_flag() != "css":
         return
 
     import streamlit.components.v1 as _components
