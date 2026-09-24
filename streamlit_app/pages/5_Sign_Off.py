@@ -578,13 +578,79 @@ with tab_act:
                 "Source": _nz(r.get("SIGNOFF_SOURCE")) or "—",
                 "Comment": _entity_comment(r),
             })
-        render_df_table(
-            pd.DataFrame(_rows), max_rows=len(_rows), key="so_status",
-            color_cols={
-                "Status": _SIGNOFF_LABEL_COLORS,
-                "Scope": lambda v: scope_meta(str(v)).get("color", P["grey_700"]),
-            },
-            wrap_cols={"Comment": 420})
+        # BOARD vs TABLE (2026-09-24). The table is one line per COB x scope
+        # x entity across nine columns, so a normal COB is a wall of text and
+        # the four things people actually look for — scope, COB, entity,
+        # status — are spread across it. Sign-off is a matrix, so the default
+        # view is now a matrix: COB, then scope, then a coloured chip per
+        # entity. The table stays one click away for scanning columns,
+        # sorting, or exporting.
+        import html as _htmlmod
+
+        _view = st.radio(
+            "View", ["Board", "Table"], horizontal=True, key="so_view",
+            label_visibility="collapsed",
+            help="Board groups by COB and scope with one chip per entity. "
+                 "Table is the full detail, sortable and exportable.")
+
+        if _view == "Board":
+            def _chip(text, color, title):
+                return (f'<span title="{_htmlmod.escape(title)}" '
+                        f'style="background:{color}18;color:{color};'
+                        f'border:1px solid {color}55;border-radius:99px;'
+                        f'padding:1px 10px;font-size:0.75rem;font-weight:700;'
+                        f'white-space:nowrap;display:inline-block;'
+                        f'margin:0 4px 4px 0">{_htmlmod.escape(text)}</span>')
+
+            _html_parts = []
+            for _cob in sorted(df_grid["COBID"].astype(int).unique(), reverse=True):
+                _cob_rows = df_grid[df_grid["COBID"].astype(int) == _cob]
+                _lines = []
+                for _scope in [s for s in ALL_SCOPES
+                               if s.upper() in
+                               {str(x).upper() for x in _cob_rows["PROCESS_TYPE"]}]:
+                    _sc_rows = _cob_rows[
+                        _cob_rows["PROCESS_TYPE"].str.upper() == _scope.upper()]
+                    _chips = []
+                    for _, r in _sc_rows.iterrows():
+                        _su = str(r["_SU"])
+                        _label, _color, _blocks = _STATUS_META.get(
+                            _su, (_su, P["grey_700"], False))
+                        _ent = _nz(r.get("_ENT_LBL")) or "*"
+                        _tip = (f"{_ent} · {signoff_status_label(_su)} · "
+                                f"submissions "
+                                f"{'blocked' if _blocks else 'allowed'}")
+                        _cm = _entity_comment(r)
+                        if _cm:
+                            _tip += f" · {_cm}"
+                        _chips.append(_chip(_ent, _color, _tip))
+                    _lines.append(
+                        f'<div style="font-size:0.78rem;font-weight:700;'
+                        f'color:{scope_meta(_scope).get("color", P["grey_900"])};'
+                        f'padding-top:2px">{_htmlmod.escape(scope_label(_scope))}</div>'
+                        f'<div>{"".join(_chips)}</div>')
+                if _lines:
+                    _html_parts.append(
+                        f'<div style="margin-bottom:0.9rem">'
+                        f'<div style="font-size:0.7rem;letter-spacing:0.05em;'
+                        f'text-transform:uppercase;color:{P["grey_500"]};'
+                        f'margin-bottom:0.3rem">COB {_cob}</div>'
+                        f'<div style="display:grid;'
+                        f'grid-template-columns:130px 1fr;gap:0.3rem 0.8rem;'
+                        f'align-items:start">{"".join(_lines)}</div></div>')
+            st.markdown("".join(_html_parts), unsafe_allow_html=True)
+            st.caption("Each chip is one entity; '*' means the whole scope. "
+                       "Colour is the status — hover a chip for who, when and "
+                       "whether submissions are blocked.")
+        else:
+            render_df_table(
+                pd.DataFrame(_rows), max_rows=len(_rows), key="so_status",
+                color_cols={
+                    "Status": _SIGNOFF_LABEL_COLORS,
+                    "Scope": lambda v: scope_meta(str(v)).get("color", P["grey_700"]),
+                },
+                wrap_cols={"Comment": 420})
+
         st.caption(f"{len(_rows)} entity line(s) across "
                    f"{df_grid.groupby(['COBID', 'PROCESS_TYPE']).ngroups} "
                    f"COB/scope(s)")
