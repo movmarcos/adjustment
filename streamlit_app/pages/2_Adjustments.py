@@ -1380,6 +1380,11 @@ if selected is not None:
         # would silently re-filter the grid down to the row you just opened.
         _sel_id = str(selected.get("ADJ_ID") or "").strip()
         if _sel_id:
-            st.caption("Link to this adjustment — add this to the page URL "
-                       "to send it to someone:")
-            st.code(f"?adj={_sel_id}", language=None)
+            # NOTE: in Snowflake the app runs inside an iframe on Snowsight,
+            # so a parameter typed onto the Snowsight address may never reach
+            # st.query_params — the ?debug= flag added on 2026-09-24 did
+            # nothing for exactly that reason. The id itself is the reliable
+            # thing to send: paste it into Find by ID above.
+            st.caption("Send this id to a colleague — they can paste it into "
+                       "**Find by ID** above to open this adjustment:")
+            st.code(_sel_id, language=None)

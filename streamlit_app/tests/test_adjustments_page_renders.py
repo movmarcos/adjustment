@@ -190,8 +190,17 @@ def test_empty_meta_fields_are_omitted(monkeypatch):
     assert "Target COB" in body, "populated fields must still render"
 
 
-def test_the_shareable_link_is_offered(monkeypatch):
+def test_the_adjustment_id_is_offered_for_sharing(monkeypatch):
+    """The id, not a URL.
+
+    Snowflake serves this app in an iframe, so a parameter typed onto the
+    Snowsight address may never reach st.query_params — the ?debug= flag
+    proved exactly that. Handing someone an id they can paste into Find by
+    ID works regardless.
+    """
     at = _open_one(monkeypatch)
     body = " ".join(str(c.value) for c in at.code)
-    assert "?adj=adj-0000" in body, (
-        "The detail card should offer the link to this adjustment.")
+    assert "adj-0000" in body
+    assert "?adj=" not in body, (
+        "Offering a URL parameter as the way to share an adjustment may be "
+        "advice that cannot work in Snowflake.")

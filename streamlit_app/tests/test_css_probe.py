@@ -152,14 +152,62 @@ def test_nocss_ships_no_stylesheet(monkeypatch, captured):
         "inject_css still emitted a stylesheet, so the test proves nothing.")
 
 
-def test_nocss_says_it_is_on(monkeypatch, captured):
+def test_nocss_says_it_is_on_and_how_to_undo_it(monkeypatch, captured):
     """The app looks broken in this mode; that must be obviously deliberate."""
     _set_params(monkeypatch, debug="nocss")
     seen = []
     monkeypatch.setattr(styles.st, "warning", lambda m, *a, **k: seen.append(m))
     styles.inject_css()
-    assert seen and "debug=nocss" in seen[0], (
-        "Without a notice, an unstyled app reads as a broken deploy.")
+    assert seen, "Without a notice, an unstyled app reads as a broken deploy."
+    assert "Diagnostics" in seen[0] and "styling" in seen[0], (
+        "The notice must point at the control that turns it back off. It "
+        "used to name a URL parameter, which cannot be reached at all in "
+        "Snowflake — the app is in an iframe.")
+
+
+# ── The switches must be reachable inside the app ───────────────────────────
+# A ?debug= parameter typed onto the Snowsight URL never reaches this app:
+# Snowflake serves it inside an iframe, so st.query_params never sees it.
+# That cost a whole round trip to discover, so the flags are checkboxes now
+# and these tests pin that they are driven from session state.
+
+@pytest.mark.parametrize("key,expected", [("_dbg_nocss", "nocss"),
+                                          ("_dbg_probe", "css")])
+def test_the_sidebar_checkboxes_drive_the_flag(monkeypatch, key, expected):
+    monkeypatch.setattr(styles.st, "session_state", {key: True})
+    assert styles._debug_flag() == expected, (
+        "The " + key + " checkbox does not switch its mode on, so the only "
+        "reachable control does nothing.")
+
+
+def test_no_checkbox_means_no_diagnostics(monkeypatch):
+    monkeypatch.setattr(styles.st, "session_state", {})
+    _set_params(monkeypatch)
+    assert styles._debug_flag() == ""
+
+
+def test_the_checkboxes_live_in_the_sidebar(monkeypatch):
+    """They must keep working with styling off, which is the point of one."""
+    import ast
+    src = open(os.path.join(os.path.dirname(__file__), "..", "utils",
+                            "styles.py"), encoding="utf-8").read()
+    fn = next(n for n in ast.parse(src).body
+              if isinstance(n, ast.FunctionDef) and n.name == "render_sidebar")
+    withs = [n for n in ast.walk(fn) if isinstance(n, ast.With)]
+    in_sidebar = []
+    for w in withs:
+        for item in w.items:
+            call = item.context_expr
+            if getattr(getattr(call, "value", None), "attr", "") == "sidebar" \
+                    or getattr(call, "attr", "") == "sidebar":
+                in_sidebar.extend(
+                    [c for c in ast.walk(w) if isinstance(c, ast.Call)])
+    keys = [kw.value.value for c in in_sidebar for kw in c.keywords
+            if kw.arg == "key" and isinstance(kw.value, ast.Constant)]
+    assert "_dbg_nocss" in keys and "_dbg_probe" in keys, (
+        "The diagnostic checkboxes are not inside the sidebar block. With "
+        "styling disabled the main area is the thing under test; the "
+        "controls have to sit somewhere that still works.")
 
 
 def test_the_stylesheet_ships_normally_without_the_flag(monkeypatch, captured):

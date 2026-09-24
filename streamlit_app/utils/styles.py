@@ -350,7 +350,24 @@ CATEGORY_CONFIG = {
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _debug_flag():
-    """The ?debug= value, lowercased. '' when absent or unreadable."""
+    """Which diagnostic mode is on: 'nocss', 'css', or ''.
+
+    Driven by the CHECKBOXES in the sidebar's Diagnostics expander, not by
+    the URL. Streamlit in Snowflake runs the app inside an iframe on
+    Snowsight, so a ?debug= parameter typed onto the Snowsight address never
+    reaches st.query_params — the flag simply did nothing, which cost a
+    round trip to discover (2026-09-24).
+
+    The query parameter is still honoured underneath, for a browser that can
+    address the app frame directly.
+    """
+    try:
+        if st.session_state.get("_dbg_nocss"):
+            return "nocss"
+        if st.session_state.get("_dbg_probe"):
+            return "css"
+    except Exception:
+        pass
     try:
         raw = st.query_params.get("debug")
         val = raw if isinstance(raw, str) else (raw[0] if raw else None)
@@ -376,9 +393,9 @@ def inject_css():
     #
     # The app will look unstyled while this flag is on. That is the point.
     if _debug_flag() == "nocss":
-        st.warning("Debug mode: ALL app styling is switched off "
-                   "(`?debug=nocss`). Remove the flag from the URL to get "
-                   "the normal app back.")
+        st.warning("Diagnostics: ALL app styling is switched off. Untick "
+                   "**Disable all styling** in the sidebar's Diagnostics "
+                   "section to get the normal app back.")
         return
 
     st.markdown(f"""
@@ -2466,8 +2483,8 @@ def render_css_probe():
 })();
 </script>
 """
-    st.markdown("**CSS probe** — add `?debug=css` to the URL to see this. "
-                "Send me everything below.")
+    st.markdown("**CSS probe** — switched on in the sidebar's Diagnostics "
+                "section. Send me everything below.")
     _components.html(_js, height=460, scrolling=True)
 
 
@@ -2546,7 +2563,24 @@ def render_sidebar():
         # ships with each deploy, so which-commit-is-live stays verifiable in
         # one query: SELECT ... $1 FROM @STREAMLIT_ADJUSTMENT_STAGE/utils/build_info.py.
 
-    # Outside the `with st.sidebar:` block above, so the probe's output lands
-    # in the main area where it can actually be read. No-op without
-    # ?debug=css on the URL.
+    # TEMPORARY diagnostics (2026-09-24), for the horizontal line reported
+    # across every page. In the sidebar because a URL parameter cannot reach
+    # this app: Snowflake serves it in an iframe, so anything typed onto the
+    # Snowsight address is invisible to st.query_params.
+    #
+    # Inside `with st.sidebar:` so the checkboxes are always reachable — they
+    # have to keep working with styling switched off, which is the whole
+    # point of the first one.
+    with st.sidebar:
+        with st.expander("Diagnostics", expanded=False):
+            st.checkbox("Disable all styling", key="_dbg_nocss",
+                        help="Renders the app as plain Streamlit. If a "
+                             "visual problem survives this, nothing in the "
+                             "app's stylesheet is causing it.")
+            st.checkbox("Show CSS probe", key="_dbg_probe",
+                        help="Lists everything on the page that can paint a "
+                             "line, with its position and identity.")
+
+    # Outside the sidebar block, so the probe's output lands in the main area
+    # where it can be read. No-op unless the checkbox above is ticked.
     render_css_probe()
