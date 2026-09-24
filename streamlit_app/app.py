@@ -58,17 +58,41 @@ except Exception as e:
     st.warning(f"Could not load Power BI hand-off status: {e}")
 
 try:
+    # OUTSTANDING rebuilds, not triggers written (corrected 2026-09-24).
+    # The old query counted every DUMMY_* row in the last 24h, so a healthy
+    # day full of completed hand-offs lit the card up exactly like a backlog.
+    # This walks the chain Control-M actually uses: the trigger row maps to a
+    # batch action, the action to a condition per COB, and APPLIED_FLAG says
+    # whether Control-M has consumed it. Only unapplied ones are pending.
+    #
+    # NOTE: the LEFT JOIN plus "APPLIED_FLAG = FALSE" behaves as an inner
+    # join — a trigger with no condition row for its COB is NOT counted.
     df_dbt_kpi = run_query_df_cached("""
-        SELECT COALESCE(COUNT(*), 0) AS DBT_TRIGGERS
-        FROM RAVEN.LOG_STAGE_ME_STATUS
-        WHERE DATASET_NAME IN ('DUMMY_Sensitivity_Adjustment',
-                               'DUMMY_FRTB_Adjustment')
-          AND START_TIMESTAMP >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+        WITH LATEST_PROCESS AS (
+            SELECT S.RAVEN_COBID AS COBID,
+                   S.DATASET_NAME,
+                   M.BATCH_MAPPING_CODE,
+                   MAX(S.START_TIMESTAMP) AS START_TIMESTAMP
+            FROM RAVEN.LOG_STAGE_ME_STATUS S
+            INNER JOIN BATCH.BATCH_ACTION_MAPPING M
+               ON S.DATASET_NAME = SPLIT_PART(M.BATCH_ACTION_NAME, '.', 1)
+                  COLLATE 'utf8'
+            WHERE S.DATASET_NAME IN ('DUMMY_FRTB_Adjustment',
+                                     'DUMMY_Sensitivity_Adjustment')
+              AND S.START_TIMESTAMP >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+            GROUP BY ALL
+        )
+        SELECT COUNT(*) AS DBT_TRIGGERS
+        FROM LATEST_PROCESS L
+        LEFT JOIN BATCH.BATCH_CONDITIONS C
+               ON C.BATCH_MAPPING_CODE = L.BATCH_MAPPING_CODE
+              AND C.COBID = L.COBID
+        WHERE C.APPLIED_FLAG = FALSE
     """)
     dbt_triggers = int(df_dbt_kpi.iloc[0]["DBT_TRIGGERS"]) if not df_dbt_kpi.empty else 0
 except Exception as e:
     dbt_triggers = None         # rendered as "n/a" — never a misleading 0
-    st.warning(f"Could not load dbt rebuild-trigger status: {e}")
+    st.warning(f"Could not load dbt rebuild status: {e}")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # KPIs — loaded ONCE, scoped to the selected COB range (below, after the range
@@ -245,7 +269,7 @@ kpi_items = [
     ("Running",           int(kpis.get("RUNNING", 0)),          "Processing now",       P["info"],    "zap",             "Running"),
     ("Processed",         int(kpis.get("PROCESSED", 0)),        "In the data",          P["success"], "check-circle",    "Processed"),
     ("Power BI",          pbi_pending,                          "VaR/Stress refreshes pending", P["info"], "line-chart", None),
-    ("dbt Rebuild",       dbt_triggers,                         "Sens/FRTB triggers (24h)", P["purple"], "refresh-cw",   None),
+    ("dbt Rebuild",       dbt_triggers,                         "Sens/FRTB rebuilds pending", P["purple"], "refresh-cw", None),
     ("Overlaps",          int(kpis.get("OVERLAPS", 0)),         "Overlap alerts",       P["purple"],  "alert-triangle",  None),
 ]
 
