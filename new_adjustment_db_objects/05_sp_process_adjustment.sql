@@ -1179,6 +1179,30 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
             # ── Common post-processing ───────────────────────────────────
             _finish_counts(session, fact_adj_tbl_name, cobid, adj_ids_str,
                            dim_ids_str, dim_adj_map)
+            # A Direct/Upload run that wrote NOTHING is not a success.
+            # Every row can be filtered out before the insert — an empty or
+            # zero metric column in the file, or a payload field the scope's
+            # schema no longer carries — and the header used to be marked
+            # Processed anyway. The adjustment then looked complete, the fact
+            # table stayed empty, and there was no error to find. Fail it and
+            # say why. (Reported 2026-09-24.)
+            if not rows_count:
+                _zero_msg = (
+                    "No rows were written: every uploaded row was filtered out "
+                    "before the insert. The usual cause is the metric column "
+                    f"being empty or zero in the file ({metric_name}"
+                    + (f" / {metric_usd_name}" if metric_usd_name
+                       and metric_usd_name != metric_name else "")
+                    + "). Check the file against the scope's upload template. "
+                      "Marked Failed rather than Processed so an empty load is "
+                      "not mistaken for a successful one.")
+                update_header_status(session, df_adj_direct, cobid, "Failed",
+                                     _zero_msg)
+                log_status_history(session, adj_ids, "Running", "Failed")
+                result["rows_inserted"] = 0
+                result["message"] = _zero_msg
+                return json.dumps(result)
+
             update_header_status(session, df_adj_direct, cobid, "Processed")
             log_status_history(session, adj_ids, "Running", "Processed")
             result["rows_inserted"] = rows_count
@@ -1466,6 +1490,30 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                   AND RECORD_COUNT = 0
                   AND ERRORMESSAGE IS NULL
             """).collect()
+
+            # A Direct/Upload run that wrote NOTHING is not a success.
+            # Every row can be filtered out before the insert — an empty or
+            # zero metric column in the file, or a payload field the scope's
+            # schema no longer carries — and the header used to be marked
+            # Processed anyway. The adjustment then looked complete, the fact
+            # table stayed empty, and there was no error to find. Fail it and
+            # say why. (Reported 2026-09-24.)
+            if not rows_count:
+                _zero_msg = (
+                    "No rows were written: every uploaded row was filtered out "
+                    "before the insert. The usual cause is the metric column "
+                    f"being empty or zero in the file ({metric_name}"
+                    + (f" / {metric_usd_name}" if metric_usd_name
+                       and metric_usd_name != metric_name else "")
+                    + "). Check the file against the scope's upload template. "
+                      "Marked Failed rather than Processed so an empty load is "
+                      "not mistaken for a successful one.")
+                update_header_status(session, df_adj_direct, cobid, "Failed",
+                                     _zero_msg)
+                log_status_history(session, adj_ids, "Running", "Failed")
+                result["rows_inserted"] = 0
+                result["message"] = _zero_msg
+                return json.dumps(result)
 
             update_header_status(session, df_adj_direct, cobid, "Processed")
             log_status_history(session, adj_ids, "Running", "Processed")
