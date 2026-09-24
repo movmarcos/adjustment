@@ -32,6 +32,14 @@ Round 3: deploy.py now creates one sibling app per theme setting
 (LINE_PROBE_T1_BASE … T5_TEXT), each with a config.toml holding exactly one
 line of the engine's theme. The sidebar caption prints which settings the
 running app carries. The sibling that shows the line names the setting.
+
+Round 3 result: ALL FIVE siblings showed the line. No colour setting is the
+cause; having a theme (or a config file) at all is.
+
+Round 4: T6 a config file with no sections, T7 an empty [theme] section,
+T8 a [client] section only — these split "file present" from "theme
+present". T9 and T10 carry the whole engine theme plus one candidate fix
+each (ui.hideTopBar, client.toolbarMode = "minimal").
 """
 import streamlit as st
 

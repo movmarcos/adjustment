@@ -90,30 +90,44 @@ def test_the_powershell_mode_reaches_the_flag():
         "-Mode sample would exit before running deploy.py.")
 
 
-def test_the_round_three_variants_cover_every_theme_setting_exactly_once():
-    """A setting left out of the split could be the one that draws the line."""
-    # Read the constant from source: deploy.py imports the repo's config and
-    # snowflake libraries at module level, which a test must not need.
-    tree = ast.parse(_source(DEPLOY))
-    variants = None
-    for node in tree.body:
+_PROBE_CONSTANTS = ("ENGINE_THEME", "PROBE_VARIANTS", "RETIRED_PROBES")
+
+
+def _constant(name):
+    """A module-level constant from deploy.py, evaluated from source.
+
+    deploy.py imports the repo config and the Snowflake libraries at import
+    time, so only the three probe assignments are executed, in order (the
+    variants are built from ENGINE_THEME by concatenation, so a plain
+    literal_eval is not enough)."""
+    ns = {}
+    for node in ast.parse(_source(DEPLOY)).body:
         if isinstance(node, ast.Assign) and any(
-                isinstance(tg, ast.Name) and tg.id == "PROBE_THEME_VARIANTS"
+                isinstance(tg, ast.Name) and tg.id in _PROBE_CONSTANTS
                 for tg in node.targets):
-            variants = ast.literal_eval(node.value)
-    assert variants, "PROBE_THEME_VARIANTS is not a literal constant in deploy.py"
+            exec(compile(ast.Module([node], []), DEPLOY, "exec"), ns)
+    assert name in ns, name + " is not a module-level constant in deploy.py"
+    return ns[name]
 
-    class mod:  # keeps the assertions below unchanged
-        PROBE_THEME_VARIANTS = variants
 
+def test_the_engine_theme_constant_matches_the_theme_file():
+    """The fix-candidate variants must carry the REAL engine theme."""
     theme = _source(os.path.join(ROOT, "streamlit_app", ".streamlit", "config.toml"))
-    engine_lines = sorted(
-        ln.strip() for ln in theme.splitlines()
-        if "=" in ln and not ln.strip().startswith("#") and not ln.strip().startswith("["))
-    variant_lines = sorted(line for _, line in mod.PROBE_THEME_VARIANTS)
-    assert variant_lines == engine_lines, (
-        "PROBE_THEME_VARIANTS does not match the engine theme line for line. "
-        "Engine: " + repr(engine_lines) + " variants: " + repr(variant_lines))
-    names = [n for n, _ in mod.PROBE_THEME_VARIANTS]
-    assert len(set(names)) == len(names)
-    assert all(n.startswith("LINE_PROBE_T") for n in names)
+    engine_lines = [ln.strip() for ln in theme.splitlines()
+                    if ln.strip() and not ln.strip().startswith("#")]
+    const_lines = [ln.strip() for ln in _constant("ENGINE_THEME").splitlines()
+                   if ln.strip()]
+    assert const_lines == engine_lines, (
+        "ENGINE_THEME in deploy.py has drifted from "
+        "streamlit_app/.streamlit/config.toml.")
+
+
+def test_the_variants_are_distinct_and_the_retired_ones_are_gone():
+    live = [n for n, _ in _constant("PROBE_VARIANTS")]
+    retired = _constant("RETIRED_PROBES")
+    assert len(set(live)) == len(live)
+    assert not set(live) & set(retired), (
+        "A variant is both live and retired; the deploy would drop it and "
+        "then recreate it.")
+    assert all(n.startswith("LINE_PROBE_T") for n in live + retired)
+    assert "LINE_PROBE" not in retired, "never retire the reference app"

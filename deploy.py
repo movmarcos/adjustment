@@ -522,15 +522,34 @@ def _deploy_probe(session, name, files, comment):
     return True
 
 
-# Round 3 (2026-09-24): the theme file as a whole produces the line. One
-# sibling app per setting, so a single deploy tells which setting it is.
-# Each variant's config.toml holds exactly ONE line of the engine's theme.
-PROBE_THEME_VARIANTS = [
-    ('LINE_PROBE_T1_BASE',      'base = "light"'),
-    ('LINE_PROBE_T2_PRIMARY',   'primaryColor = "#D50032"'),
-    ('LINE_PROBE_T3_BG',        'backgroundColor = "#F6F7F9"'),
-    ('LINE_PROBE_T4_SECONDARY', 'secondaryBackgroundColor = "#FFFFFF"'),
-    ('LINE_PROBE_T5_TEXT',      'textColor = "#0F172A"'),
+# Line-probe variants. Each is a sibling control app whose ONLY difference
+# from the bare control is the .streamlit/config.toml body given here.
+#
+# Round 3 (2026-09-24): one app per engine theme setting → ALL FIVE showed
+# the line. So no single colour is the cause; the presence of a theme (or of
+# the file) is. Those five are retired below.
+#
+# Round 4: split "file present" from "theme present", and try two candidate
+# fixes alongside, so one deploy can give both the cause and the cure.
+ENGINE_THEME = (
+    '[theme]\n'
+    'base = "light"\n'
+    'primaryColor = "#D50032"\n'
+    'backgroundColor = "#F6F7F9"\n'
+    'secondaryBackgroundColor = "#FFFFFF"\n'
+    'textColor = "#0F172A"\n'
+)
+PROBE_VARIANTS = [
+    ('LINE_PROBE_T6_FILE_ONLY',   '# a config file with NO sections at all\n'),
+    ('LINE_PROBE_T7_THEME_EMPTY', '[theme]\n# section present, no settings\n'),
+    ('LINE_PROBE_T8_CLIENT_ONLY', '[client]\nshowErrorDetails = "full"\n'),
+    ('LINE_PROBE_T9_HIDETOPBAR',  ENGINE_THEME + '\n[ui]\nhideTopBar = true\n'),
+    ('LINE_PROBE_T10_MINIMAL',    ENGINE_THEME + '\n[client]\ntoolbarMode = "minimal"\n'),
+]
+# Settled variants from earlier rounds — dropped on the next --sample-app run.
+RETIRED_PROBES = [
+    'LINE_PROBE_T1_BASE', 'LINE_PROBE_T2_PRIMARY', 'LINE_PROBE_T3_BG',
+    'LINE_PROBE_T4_SECONDARY', 'LINE_PROBE_T5_TEXT',
 ]
 
 
@@ -544,7 +563,8 @@ def deploy_sample_app(session):
     sample_app/app.py). It ships only app.py, pages/ and the runtime pin:
     no config.py, no utils/. Round 1 also shipped no theme; round 2 added the
     engine's .streamlit/config.toml unchanged and the line appeared; round 3
-    splits that file one setting per app.
+    split that file one setting per app (all showed it); round 4 is
+    PROBE_VARIANTS.
     """
     import tempfile
     app_dir = Path(__file__).parent / 'sample_app'
@@ -558,23 +578,30 @@ def deploy_sample_app(session):
     if not ok:
         return False
 
-    # One app per theme setting.
+    # Retire settled variants so the Snowsight list only shows live ones.
+    for name in RETIRED_PROBES:
+        for stmt in (f"DROP STREAMLIT IF EXISTS ADJUSTMENT_APP.{name}",
+                     f"DROP STAGE IF EXISTS ADJUSTMENT_APP.{name}_STAGE"):
+            try:
+                session.sql(stmt).collect()
+            except Exception as e:
+                print(f"     ℹ️  {stmt}: {str(e)[:80]}")
+
     tmp = Path(tempfile.mkdtemp(prefix='line_probe_'))
-    for name, line in PROBE_THEME_VARIANTS:
+    for name, body in PROBE_VARIANTS:
         vdir = tmp / name / '.streamlit'
         vdir.mkdir(parents=True)
         (vdir / 'config.toml').write_text(
-            f"# Round 3 line-probe variant: ONE setting from the engine theme.\n"
-            f"[theme]\n{line}\n", encoding='utf-8')
+            f"# Line-probe variant {name}\n" + body, encoding='utf-8')
         files = base_files + [(vdir / 'config.toml', '.streamlit')]
         if not _deploy_probe(session, name, files,
-                             f'Line probe variant: theme has only  {line}  . Delete when settled.'):
+                             f'Line probe variant {name}. Delete when settled.'):
             return False
 
     print("\n  ✅ Line probes deployed. In Snowsight → Streamlit open each of:")
-    print("     LINE_PROBE              (whole theme — the reference, shows the line)")
-    for name, line in PROBE_THEME_VARIANTS:
-        print(f"     {name:<24}(only  {line})")
+    print("     LINE_PROBE                 whole engine theme — the reference, shows the line")
+    for name, body in PROBE_VARIANTS:
+        print(f"     {name:<27}{body.strip().replace(chr(10), ' | ')}")
     return True
 
 
