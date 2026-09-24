@@ -789,6 +789,19 @@ def render_adj_card(row, expanded=False):
                         (ADJ_ID, OLD_STATUS, NEW_STATUS, CHANGED_BY, COMMENT)
                     VALUES ('{_aid}', '{_st}', 'Deleted', '{_usr}', 'Adjustment deleted')
                 """)
+                # File-flow uploads (VaR Upload, FRTB Direct) keep their rows
+                # in ADJ_LINE_ITEM_JSON. Deleting the header used to leave
+                # those rows ACTIVE (reported 2026-09-24): they outlived the
+                # adjustment, still counted as live line items, and the
+                # enriched views — which filter on IS_DELETED = FALSE — would
+                # read them again if the id were ever reprocessed. Soft-delete
+                # them in the SAME transaction, so the header and its rows can
+                # never disagree about whether the adjustment exists.
+                run_query(f"""
+                    UPDATE ADJUSTMENT_APP.ADJ_LINE_ITEM_JSON
+                    SET IS_DELETED = TRUE
+                    WHERE ADJ_ID = '{_aid}' AND IS_DELETED = FALSE
+                """)
                 # Processed adjustments have a dimension row + fact rows keyed
                 # by DIMENSION_ADJ_ID — remove them in the same transaction.
                 if dim_adj_id is not None:
