@@ -598,9 +598,10 @@ with tab_act:
                 return (f'<span title="{_htmlmod.escape(title)}" '
                         f'style="background:{color}18;color:{color};'
                         f'border:1px solid {color}55;border-radius:99px;'
-                        f'padding:1px 10px;font-size:0.75rem;font-weight:700;'
+                        f'padding:5px 14px;font-size:0.88rem;font-weight:700;'
                         f'white-space:nowrap;display:inline-block;'
-                        f'margin:0 4px 4px 0">{_htmlmod.escape(text)}</span>')
+                        f'margin:0 6px 6px 0;line-height:1.35">'
+                        f'{_htmlmod.escape(text)}</span>')
 
             _html_parts = []
             for _cob in sorted(df_grid["COBID"].astype(int).unique(), reverse=True):
@@ -625,18 +626,20 @@ with tab_act:
                             _tip += f" · {_cm}"
                         _chips.append(_chip(_ent, _color, _tip))
                     _lines.append(
-                        f'<div style="font-size:0.78rem;font-weight:700;'
+                        f'<div style="font-size:0.92rem;font-weight:700;'
                         f'color:{scope_meta(_scope).get("color", P["grey_900"])};'
-                        f'padding-top:2px">{_htmlmod.escape(scope_label(_scope))}</div>'
+                        f'padding-top:6px">{_htmlmod.escape(scope_label(_scope))}</div>'
                         f'<div>{"".join(_chips)}</div>')
                 if _lines:
                     _html_parts.append(
-                        f'<div style="margin-bottom:0.9rem">'
-                        f'<div style="font-size:0.7rem;letter-spacing:0.05em;'
+                        f'<div style="margin-bottom:1.6rem">'
+                        f'<div style="font-size:0.82rem;letter-spacing:0.05em;'
                         f'text-transform:uppercase;color:{P["grey_500"]};'
-                        f'margin-bottom:0.3rem">COB {_cob}</div>'
+                        f'font-weight:700;margin-bottom:0.55rem;'
+                        f'padding-bottom:0.35rem;'
+                        f'border-bottom:1px solid {P["border"]}">COB {_cob}</div>'
                         f'<div style="display:grid;'
-                        f'grid-template-columns:130px 1fr;gap:0.3rem 0.8rem;'
+                        f'grid-template-columns:165px 1fr;gap:0.55rem 1.1rem;'
                         f'align-items:start">{"".join(_lines)}</div></div>')
             st.markdown("".join(_html_parts), unsafe_allow_html=True)
             st.caption("Each chip is one entity; '*' means the whole scope. "

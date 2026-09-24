@@ -111,7 +111,10 @@ def test_the_board_labels_the_cob_group(monkeypatch):
     assert "COB 20260420" in body, (
         "Each COB must be its own labelled group, or the board is just "
         "another undifferentiated list.")
-    assert "grid-template-columns:130px 1fr" in body, (
+    # The column width is a taste parameter and has already been tuned once.
+    # Assert the two-column shape, not the pixels.
+    import re as _re
+    assert _re.search(r"grid-template-columns:\d+px 1fr", body), (
         "The scope-label / chips grid is missing, so the board collapsed "
         "back into a flat run of chips.")
 
