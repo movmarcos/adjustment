@@ -539,17 +539,36 @@ ENGINE_THEME = (
     'secondaryBackgroundColor = "#FFFFFF"\n'
     'textColor = "#0F172A"\n'
 )
+# Round 4 result: T6 (file, no sections) and T8 ([client] only) → NO line.
+# T7 (EMPTY [theme] section) → line. In Streamlit 1.50 an empty theme
+# section sends nothing to the front-end (app_session._populate_theme_msg
+# returns early), so Streamlit ran T7 exactly like the bare control. The only
+# thing that reacts to the [theme] header itself is Snowsight, which reads
+# the file to pick the app's colour scheme. The line is Snowsight's, outside
+# the iframe — which is why it is fixed to the window, crosses the sidebar,
+# shows while the app is still loading and is invisible to any in-app probe.
+# Locally on 1.50.0 with the same theme file there is no line at all.
+#
+# Round 5: the same five settings written as TOML dotted keys, with no
+# [theme] header. Streamlit's parser produces the identical config; if
+# Snowsight keys on the header text it will not react.
+ENGINE_THEME_DOTTED = (
+    'theme.base = "light"\n'
+    'theme.primaryColor = "#D50032"\n'
+    'theme.backgroundColor = "#F6F7F9"\n'
+    'theme.secondaryBackgroundColor = "#FFFFFF"\n'
+    'theme.textColor = "#0F172A"\n'
+)
 PROBE_VARIANTS = [
-    ('LINE_PROBE_T6_FILE_ONLY',   '# a config file with NO sections at all\n'),
-    ('LINE_PROBE_T7_THEME_EMPTY', '[theme]\n# section present, no settings\n'),
-    ('LINE_PROBE_T8_CLIENT_ONLY', '[client]\nshowErrorDetails = "full"\n'),
-    ('LINE_PROBE_T9_HIDETOPBAR',  ENGINE_THEME + '\n[ui]\nhideTopBar = true\n'),
-    ('LINE_PROBE_T10_MINIMAL',    ENGINE_THEME + '\n[client]\ntoolbarMode = "minimal"\n'),
+    ('LINE_PROBE_T11_DOTTED', ENGINE_THEME_DOTTED),
 ]
 # Settled variants from earlier rounds — dropped on the next --sample-app run.
 RETIRED_PROBES = [
     'LINE_PROBE_T1_BASE', 'LINE_PROBE_T2_PRIMARY', 'LINE_PROBE_T3_BG',
     'LINE_PROBE_T4_SECONDARY', 'LINE_PROBE_T5_TEXT',
+    'LINE_PROBE_T6_FILE_ONLY', 'LINE_PROBE_T7_THEME_EMPTY',
+    'LINE_PROBE_T8_CLIENT_ONLY', 'LINE_PROBE_T9_HIDETOPBAR',
+    'LINE_PROBE_T10_MINIMAL',
 ]
 
 

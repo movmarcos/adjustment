@@ -40,6 +40,15 @@ Round 4: T6 a config file with no sections, T7 an empty [theme] section,
 T8 a [client] section only — these split "file present" from "theme
 present". T9 and T10 carry the whole engine theme plus one candidate fix
 each (ui.hideTopBar, client.toolbarMode = "minimal").
+
+Round 4 result: T6 and T8 no line; T7 (empty [theme]) line; T9/T10 line.
+An empty [theme] section changes nothing inside Streamlit 1.50, so the line
+is Snowsight's reaction to the [theme] header in the file, drawn outside the
+app's iframe. Locally on 1.50.0 with the same theme there is no line.
+
+Round 5: T11 carries the engine theme as TOML dotted keys (theme.base = …)
+with no [theme] header — the same config to Streamlit, no header for
+Snowsight to see.
 """
 import streamlit as st
 

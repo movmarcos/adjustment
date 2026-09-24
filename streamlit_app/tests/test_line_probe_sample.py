@@ -90,7 +90,8 @@ def test_the_powershell_mode_reaches_the_flag():
         "-Mode sample would exit before running deploy.py.")
 
 
-_PROBE_CONSTANTS = ("ENGINE_THEME", "PROBE_VARIANTS", "RETIRED_PROBES")
+_PROBE_CONSTANTS = ("ENGINE_THEME", "ENGINE_THEME_DOTTED", "PROBE_VARIANTS",
+                    "RETIRED_PROBES")
 
 
 def _constant(name):
@@ -131,3 +132,15 @@ def test_the_variants_are_distinct_and_the_retired_ones_are_gone():
         "then recreate it.")
     assert all(n.startswith("LINE_PROBE_T") for n in live + retired)
     assert "LINE_PROBE" not in retired, "never retire the reference app"
+
+
+def test_the_dotted_theme_is_the_same_config_without_the_header():
+    """Round 5 rests on the two forms being identical to Streamlit."""
+    import tomllib
+    sectioned = tomllib.loads(_constant("ENGINE_THEME"))
+    dotted = tomllib.loads(_constant("ENGINE_THEME_DOTTED"))
+    assert dotted == sectioned, (
+        "The dotted-key theme does not parse to the same table as the "
+        "[theme] section, so a difference between T11 and LINE_PROBE could "
+        "be a config difference rather than the header.")
+    assert "[theme]" not in _constant("ENGINE_THEME_DOTTED")
