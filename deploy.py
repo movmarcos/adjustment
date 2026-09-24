@@ -491,8 +491,8 @@ def deploy_sample_app(session):
 
     It exists to settle where the horizontal line comes from (see
     sample_app/app.py). It ships only app.py, pages/ and the runtime pin:
-    no config.py, no utils/, no .streamlit/ theme, so the only thing it
-    shares with the engine is the platform and the Streamlit version.
+    no config.py, no utils/. Round 1 also shipped no theme; round 2 adds the
+    engine's .streamlit/config.toml, unchanged, as the next bisection step.
     """
     app_dir = Path(__file__).parent / 'sample_app'
     stage_name = 'ADJUSTMENT_APP.LINE_PROBE_STAGE'
@@ -507,6 +507,11 @@ def deploy_sample_app(session):
 
     files_to_upload = [(app_dir / 'app.py', ''), (app_dir / 'environment.yml', '')]
     files_to_upload += [(f, 'pages') for f in sorted((app_dir / 'pages').glob('*.py'))]
+    # Round 2 (2026-09-24): the engine's theme file, byte-identical. The
+    # bare control showed no line, and the engine's line is visible before
+    # its script has drawn anything — the theme is the one thing Streamlit
+    # applies to its shell before the script runs.
+    files_to_upload += [(f, '.streamlit') for f in sorted((app_dir / '.streamlit').glob('*.toml'))]
 
     print(f"\n  📤 Uploading {len(files_to_upload)} files...")
     for fpath, subdir in files_to_upload:

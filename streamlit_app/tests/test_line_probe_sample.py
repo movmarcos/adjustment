@@ -52,10 +52,13 @@ def test_the_sample_pins_the_same_runtime_as_the_engine():
         "the code.")
 
 
-def test_the_sample_ships_no_theme_and_no_config():
-    assert not os.path.exists(os.path.join(SAMPLE, ".streamlit")), (
-        "sample_app/.streamlit exists. The theme file is one of the engine's "
-        "variables; the control must not carry it.")
+def test_the_sample_ships_the_engine_theme_unchanged():
+    """Round 2 adds the theme. A diverged copy would prove nothing."""
+    engine = _source(os.path.join(ROOT, "streamlit_app", ".streamlit", "config.toml"))
+    sample = _source(os.path.join(SAMPLE, ".streamlit", "config.toml"))
+    assert engine == sample, (
+        "sample_app/.streamlit/config.toml differs from the engine's. The "
+        "round-2 control must carry the engine's theme byte for byte.")
     assert not os.path.exists(os.path.join(SAMPLE, "config.py"))
 
 
@@ -68,7 +71,6 @@ def test_the_deploy_path_uploads_only_the_sample_files():
         "deploy_sample_app uploads config.py — the control must not carry "
         "the engine's config.")
     assert "utils" not in body.split('"""')[2]
-    assert ".streamlit" not in body.split('"""')[2]
     assert "LINE_PROBE" in body
 
 

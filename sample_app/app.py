@@ -17,6 +17,14 @@ browser:
                                              the next step is to bisect there.
 
 Each box adds ONE thing the engine also does. Nothing else changes.
+
+Round 1 result (2026-09-24): NO line, under every box. Platform, runtime,
+dark sidebar, wide layout and hidden header are all cleared.
+
+Round 2: the engine's theme file (.streamlit/config.toml) is now shipped with
+this app, byte-identical. It is the one thing Streamlit applies to its shell
+BEFORE the script runs, and the engine's line is visible during start-up
+before anything has been drawn. Nothing else was added.
 """
 import streamlit as st
 
@@ -33,6 +41,7 @@ st.set_page_config(
 with st.sidebar:
     st.header("Line probe")
     st.caption(f"Streamlit {st.__version__}")
+    st.caption("Round 2: engine theme file included")
     st.write("Tick one box at a time. Note when the line appears.")
     dark = st.checkbox("1 · Dark sidebar", key="probe_dark",
                        help="The engine's sidebar is dark. A faint line is "
