@@ -131,6 +131,44 @@ def build_direct_extract_sql(cfg, adj_ids_str):
                f" AND {_payload_expr(metric_pf, 'number')} <> 0"
 
 
+def _mark_line_items(session, adj_ids_str, status,
+                     metric_field=None, metric_usd_field=None):
+    """Stamp ADJ_LINE_ITEM_JSON.RUN_STATUS for a file upload's rows.
+
+    The column defaulted to 'Pending' and NOTHING ever updated it, so every
+    uploaded row read as still queued forever, including rows that had been
+    processed months earlier (reported 2026-09-24). It is now the per-row
+    answer to "what happened to my file".
+
+    On success each row is 'Processed', except rows the insert filtered out
+    for having a zero (or blank) metric, which become 'Skipped - zero'. That
+    is the one exclusion that can be judged from the row itself, with no join
+    and no duplicated logic: the writers drop a row when its metric is zero,
+    and for the FRTB scopes the local amount is derived from the USD figure,
+    so a zero USD value means a zero local one too.
+
+    Best-effort: a failure here must not fail an adjustment whose numbers are
+    already written. The status is reporting, not state.
+    """
+    fields = [f for f in (metric_usd_field, metric_field) if f]
+    if status == "Processed" and fields:
+        zero_test = " AND ".join(
+            "COALESCE(TRY_TO_NUMBER(TO_VARCHAR(PAYLOAD:\"" + f + "\"), 38, 10), 0) = 0"
+            for f in dict.fromkeys(fields))
+        set_expr = ("CASE WHEN " + zero_test +
+                    " THEN 'Skipped - zero' ELSE 'Processed' END")
+    else:
+        set_expr = "'" + str(status).replace("'", "''") + "'"
+    try:
+        session.sql(f"""
+            UPDATE ADJUSTMENT_APP.ADJ_LINE_ITEM_JSON
+            SET RUN_STATUS = {set_expr}
+            WHERE ADJ_ID IN ({adj_ids_str}) AND IS_DELETED = FALSE
+        """).collect()
+    except Exception as _e:
+        print(f"Warning: line-item status update failed: {_e}")
+
+
 def _write_direct_frtb_enriched(session, adj_ids_str, cobid, dim_ids_str,
                                 fact_adj_tbl_name, view_name,
                                 metric_name, metric_usd_name):
@@ -1199,12 +1237,15 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 update_header_status(session, df_adj_direct, cobid, "Failed",
                                      _zero_msg)
                 log_status_history(session, adj_ids, "Running", "Failed")
+                _mark_line_items(session, adj_ids_str, "Failed")
                 result["rows_inserted"] = 0
                 result["message"] = _zero_msg
                 return json.dumps(result)
 
             update_header_status(session, df_adj_direct, cobid, "Processed")
             log_status_history(session, adj_ids, "Running", "Processed")
+            _mark_line_items(session, adj_ids_str, "Processed",
+                             metric_name, metric_usd_name)
             result["rows_inserted"] = rows_count
             result["message"] = "Upload adjustments processed successfully"
             try:
@@ -1511,12 +1552,15 @@ def main(session, process_type, adjustment_action, cobid, claim_token=None):
                 update_header_status(session, df_adj_direct, cobid, "Failed",
                                      _zero_msg)
                 log_status_history(session, adj_ids, "Running", "Failed")
+                _mark_line_items(session, adj_ids_str, "Failed")
                 result["rows_inserted"] = 0
                 result["message"] = _zero_msg
                 return json.dumps(result)
 
             update_header_status(session, df_adj_direct, cobid, "Processed")
             log_status_history(session, adj_ids, "Running", "Processed")
+            _mark_line_items(session, adj_ids_str, "Processed",
+                             metric_name, metric_usd_name)
             result["rows_inserted"] = rows_count
             result["message"] = "Direct adjustments processed successfully"
             try:

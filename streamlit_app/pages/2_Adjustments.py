@@ -799,7 +799,7 @@ def render_adj_card(row, expanded=False):
                 # never disagree about whether the adjustment exists.
                 run_query(f"""
                     UPDATE ADJUSTMENT_APP.ADJ_LINE_ITEM_JSON
-                    SET IS_DELETED = TRUE
+                    SET IS_DELETED = TRUE, RUN_STATUS = 'Deleted'
                     WHERE ADJ_ID = '{_aid}' AND IS_DELETED = FALSE
                 """)
                 # Processed adjustments have a dimension row + fact rows keyed
