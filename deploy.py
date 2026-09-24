@@ -484,37 +484,17 @@ def deploy_streamlit_app(session):
 
 # ─── Deploy the line-probe control app ───────────────────────────────────────
 
-def deploy_sample_app(session):
-    """
-    Deploy sample_app/ — a bare Streamlit app with NO code from this repo —
-    as ADJUSTMENT_APP.LINE_PROBE, next to the engine.
-
-    It exists to settle where the horizontal line comes from (see
-    sample_app/app.py). It ships only app.py, pages/ and the runtime pin:
-    no config.py, no utils/. Round 1 also shipped no theme; round 2 adds the
-    engine's .streamlit/config.toml, unchanged, as the next bisection step.
-    """
-    app_dir = Path(__file__).parent / 'sample_app'
-    stage_name = 'ADJUSTMENT_APP.LINE_PROBE_STAGE'
-    streamlit_name = 'ADJUSTMENT_APP.LINE_PROBE'
-
-    print(f"\n  📦 Creating stage {stage_name}...")
+def _deploy_probe(session, name, files, comment):
+    """One control app: `files` is a list of (local Path, stage subdir)."""
+    stage_name = f'ADJUSTMENT_APP.{name}_STAGE'
+    streamlit_name = f'ADJUSTMENT_APP.{name}'
+    print(f"\n  📦 {streamlit_name}")
     try:
         session.sql(f"CREATE STAGE IF NOT EXISTS {stage_name} ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE')").collect()
     except Exception as e:
         print(f"     ❌ Stage creation failed: {e}")
         return False
-
-    files_to_upload = [(app_dir / 'app.py', ''), (app_dir / 'environment.yml', '')]
-    files_to_upload += [(f, 'pages') for f in sorted((app_dir / 'pages').glob('*.py'))]
-    # Round 2 (2026-09-24): the engine's theme file, byte-identical. The
-    # bare control showed no line, and the engine's line is visible before
-    # its script has drawn anything — the theme is the one thing Streamlit
-    # applies to its shell before the script runs.
-    files_to_upload += [(f, '.streamlit') for f in sorted((app_dir / '.streamlit').glob('*.toml'))]
-
-    print(f"\n  📤 Uploading {len(files_to_upload)} files...")
-    for fpath, subdir in files_to_upload:
+    for fpath, subdir in files:
         stage_path = f'@{stage_name}/{subdir}' if subdir else f'@{stage_name}'
         try:
             session.file.put(str(fpath).replace('\\', '/'), stage_path,
@@ -523,36 +503,78 @@ def deploy_sample_app(session):
         except Exception as e:
             print(f"     ❌ {fpath.name}: {e}")
             return False
-
-    print(f"\n  🚀 Creating Streamlit app {streamlit_name}...")
     try:
         session.sql(f"""
         CREATE OR REPLACE STREAMLIT {streamlit_name}
             ROOT_LOCATION   = '@{stage_name}'
             MAIN_FILE       = 'app.py'
             QUERY_WAREHOUSE = '{config.WAREHOUSE}'
-            COMMENT         = 'Line probe — bare control app, no engine code. Delete when the horizontal-line question is settled.'
+            COMMENT         = '{comment}'
         """).collect()
     except Exception as e:
         print(f"     ❌ Streamlit creation failed: {e}")
         return False
-
     for role in (config.ROLE_OWNER, config.ROLE_RO):
         try:
             session.sql(f"GRANT USAGE ON STREAMLIT {streamlit_name} TO ROLE {role}").collect()
         except Exception as e:
             print(f"     ℹ️  Grant note ({role}): {str(e)[:100]}")
+    return True
 
-    try:
-        info = session.sql("SHOW STREAMLITS LIKE 'LINE_PROBE' IN SCHEMA ADJUSTMENT_APP").collect()
-        for row in info:
-            for key in row.asDict():
-                if key.upper() in ('NAME', 'DATABASE_NAME', 'SCHEMA_NAME', 'URL_ID'):
-                    print(f"     {key}: {row[key]}")
-    except Exception:
-        pass
 
-    print(f"\n  ✅ Line probe deployed. Open it from Snowsight → Streamlit → LINE_PROBE.")
+# Round 3 (2026-09-24): the theme file as a whole produces the line. One
+# sibling app per setting, so a single deploy tells which setting it is.
+# Each variant's config.toml holds exactly ONE line of the engine's theme.
+PROBE_THEME_VARIANTS = [
+    ('LINE_PROBE_T1_BASE',      'base = "light"'),
+    ('LINE_PROBE_T2_PRIMARY',   'primaryColor = "#D50032"'),
+    ('LINE_PROBE_T3_BG',        'backgroundColor = "#F6F7F9"'),
+    ('LINE_PROBE_T4_SECONDARY', 'secondaryBackgroundColor = "#FFFFFF"'),
+    ('LINE_PROBE_T5_TEXT',      'textColor = "#0F172A"'),
+]
+
+
+def deploy_sample_app(session):
+    """
+    Deploy sample_app/ — a bare Streamlit app with NO code from this repo —
+    as ADJUSTMENT_APP.LINE_PROBE, next to the engine, plus one sibling per
+    theme setting (PROBE_THEME_VARIANTS).
+
+    It exists to settle where the horizontal line comes from (see
+    sample_app/app.py). It ships only app.py, pages/ and the runtime pin:
+    no config.py, no utils/. Round 1 also shipped no theme; round 2 added the
+    engine's .streamlit/config.toml unchanged and the line appeared; round 3
+    splits that file one setting per app.
+    """
+    import tempfile
+    app_dir = Path(__file__).parent / 'sample_app'
+    base_files = [(app_dir / 'app.py', ''), (app_dir / 'environment.yml', '')]
+    base_files += [(f, 'pages') for f in sorted((app_dir / 'pages').glob('*.py'))]
+
+    # The reference: whole theme, byte-identical to the engine's.
+    full = base_files + [(f, '.streamlit') for f in sorted((app_dir / '.streamlit').glob('*.toml'))]
+    ok = _deploy_probe(session, 'LINE_PROBE', full,
+                       'Line probe — bare control app + the engine theme file. Delete when settled.')
+    if not ok:
+        return False
+
+    # One app per theme setting.
+    tmp = Path(tempfile.mkdtemp(prefix='line_probe_'))
+    for name, line in PROBE_THEME_VARIANTS:
+        vdir = tmp / name / '.streamlit'
+        vdir.mkdir(parents=True)
+        (vdir / 'config.toml').write_text(
+            f"# Round 3 line-probe variant: ONE setting from the engine theme.\n"
+            f"[theme]\n{line}\n", encoding='utf-8')
+        files = base_files + [(vdir / 'config.toml', '.streamlit')]
+        if not _deploy_probe(session, name, files,
+                             f'Line probe variant: theme has only  {line}  . Delete when settled.'):
+            return False
+
+    print("\n  ✅ Line probes deployed. In Snowsight → Streamlit open each of:")
+    print("     LINE_PROBE              (whole theme — the reference, shows the line)")
+    for name, line in PROBE_THEME_VARIANTS:
+        print(f"     {name:<24}(only  {line})")
     return True
 
 

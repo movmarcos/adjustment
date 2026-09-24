@@ -25,6 +25,13 @@ Round 2: the engine's theme file (.streamlit/config.toml) is now shipped with
 this app, byte-identical. It is the one thing Streamlit applies to its shell
 BEFORE the script runs, and the engine's line is visible during start-up
 before anything has been drawn. Nothing else was added.
+
+Round 2 result: the line APPEARED. The theme file is the cause.
+
+Round 3: deploy.py now creates one sibling app per theme setting
+(LINE_PROBE_T1_BASE … T5_TEXT), each with a config.toml holding exactly one
+line of the engine's theme. The sidebar caption prints which settings the
+running app carries. The sibling that shows the line names the setting.
 """
 import streamlit as st
 
@@ -41,7 +48,13 @@ st.set_page_config(
 with st.sidebar:
     st.header("Line probe")
     st.caption(f"Streamlit {st.__version__}")
-    st.caption("Round 2: engine theme file included")
+    # Which theme settings THIS deployment carries — so the round-3 sibling
+    # apps (one setting each) identify themselves on screen.
+    _keys = ("base", "primaryColor", "backgroundColor",
+             "secondaryBackgroundColor", "textColor")
+    _set = [f"{k}={st.get_option('theme.' + k)}" for k in _keys
+            if st.get_option("theme." + k) is not None]
+    st.caption("Theme: " + (", ".join(_set) or "none (bare)"))
     st.write("Tick one box at a time. Note when the line appears.")
     dark = st.checkbox("1 · Dark sidebar", key="probe_dark",
                        help="The engine's sidebar is dark. A faint line is "

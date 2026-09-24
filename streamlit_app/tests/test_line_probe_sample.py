@@ -88,3 +88,32 @@ def test_the_powershell_mode_reaches_the_flag():
     assert "-and -not $deploySample" in src, (
         "The 'Nothing to deploy' guard does not know about sample mode, so "
         "-Mode sample would exit before running deploy.py.")
+
+
+def test_the_round_three_variants_cover_every_theme_setting_exactly_once():
+    """A setting left out of the split could be the one that draws the line."""
+    # Read the constant from source: deploy.py imports the repo's config and
+    # snowflake libraries at module level, which a test must not need.
+    tree = ast.parse(_source(DEPLOY))
+    variants = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(tg, ast.Name) and tg.id == "PROBE_THEME_VARIANTS"
+                for tg in node.targets):
+            variants = ast.literal_eval(node.value)
+    assert variants, "PROBE_THEME_VARIANTS is not a literal constant in deploy.py"
+
+    class mod:  # keeps the assertions below unchanged
+        PROBE_THEME_VARIANTS = variants
+
+    theme = _source(os.path.join(ROOT, "streamlit_app", ".streamlit", "config.toml"))
+    engine_lines = sorted(
+        ln.strip() for ln in theme.splitlines()
+        if "=" in ln and not ln.strip().startswith("#") and not ln.strip().startswith("["))
+    variant_lines = sorted(line for _, line in mod.PROBE_THEME_VARIANTS)
+    assert variant_lines == engine_lines, (
+        "PROBE_THEME_VARIANTS does not match the engine theme line for line. "
+        "Engine: " + repr(engine_lines) + " variants: " + repr(variant_lines))
+    names = [n for n, _ in mod.PROBE_THEME_VARIANTS]
+    assert len(set(names)) == len(names)
+    assert all(n.startswith("LINE_PROBE_T") for n in names)
