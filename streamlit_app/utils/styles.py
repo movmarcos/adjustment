@@ -2346,6 +2346,72 @@ def render_df_table(df, max_rows=200, height=None, highlight=None,
         st.caption(f"Showing first {max_rows:,} of {len(df):,} rows.")
 
 
+def render_css_probe():
+    """TEMPORARY diagnostic (2026-09-24): name whatever is drawing a line.
+
+    A horizontal line appeared across every page, over the menu as well as
+    the content. Devtools is unavailable in the corporate browser and the
+    app is on an internal network, so the page has to report on itself.
+
+    st.components.v1.html renders into a srcdoc iframe, which is same-origin
+    with the host page, so JS inside it can walk `window.parent.document`.
+    It lists every element wider than 400px that is either a thin coloured
+    strip or carries a horizontal border, with its position, testid and
+    class. Whatever is drawing the line is in that list.
+
+    Renders ONLY with ?debug=css on the URL, so it costs normal users
+    nothing. Delete this function and its call once the line is identified.
+    """
+    try:
+        raw = st.query_params.get("debug")
+        want = raw if isinstance(raw, str) else (raw[0] if raw else None)
+    except Exception:
+        return
+    if str(want or "").strip().lower() != "css":
+        return
+
+    import streamlit.components.v1 as _components
+    _js = """
+<div id="out" style="font:12px/1.5 ui-monospace,Menlo,monospace;
+     white-space:pre-wrap;padding:8px;background:#fff;color:#111">scanning...</div>
+<script>
+(function () {
+  var out = document.getElementById('out');
+  var d;
+  try { d = window.parent.document; } catch (e) {
+    out.textContent = 'BLOCKED: cannot read the host page (' + e + ')'; return;
+  }
+  if (!d) { out.textContent = 'BLOCKED: no parent document'; return; }
+  var rows = [], all = d.querySelectorAll('*');
+  for (var i = 0; i < all.length && rows.length < 80; i++) {
+    var el = all[i], r = el.getBoundingClientRect(), s = getComputedStyle(el);
+    if (r.width < 400) continue;
+    var bt = parseFloat(s.borderTopWidth) || 0;
+    var bb = parseFloat(s.borderBottomWidth) || 0;
+    var thin = r.height > 0 && r.height <= 6 &&
+               s.backgroundColor !== 'rgba(0, 0, 0, 0)';
+    if (!thin && !bt && !bb) continue;
+    rows.push(
+      'y=' + Math.round(r.top) + ' h=' + Math.round(r.height) +
+      ' w=' + Math.round(r.width) + '  <' + el.tagName.toLowerCase() + '>' +
+      '  testid=' + (el.getAttribute('data-testid') || '-') +
+      '  class=' + (String(el.className || '').slice(0, 45) || '-') +
+      '  bg=' + s.backgroundColor +
+      '  bt=' + bt + 'px ' + s.borderTopColor + '  bb=' + bb + 'px');
+  }
+  out.textContent =
+    'viewport ' + d.documentElement.clientWidth + 'x' +
+    d.documentElement.clientHeight + '\n' +
+    'thin strips and horizontal borders wider than 400px:\n\n' +
+    (rows.length ? rows.join('\n') : 'nothing matched');
+})();
+</script>
+"""
+    st.markdown("**CSS probe** — add `?debug=css` to the URL to see this. "
+                "Send me everything below.")
+    _components.html(_js, height=460, scrolling=True)
+
+
 def render_sidebar():
     """Render the branded sidebar: MUFG logo, compact nav, user at bottom."""
     import html as _htmlmod
@@ -2420,3 +2486,8 @@ def render_sidebar():
         # displayed — the user asked to remove it from the sidebar. It still
         # ships with each deploy, so which-commit-is-live stays verifiable in
         # one query: SELECT ... $1 FROM @STREAMLIT_ADJUSTMENT_STAGE/utils/build_info.py.
+
+    # Outside the `with st.sidebar:` block above, so the probe's output lands
+    # in the main area where it can actually be read. No-op without
+    # ?debug=css on the URL.
+    render_css_probe()
