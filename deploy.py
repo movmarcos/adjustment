@@ -324,12 +324,19 @@ def deploy_streamlit_app(session):
     if cfg_path.exists():
         files_to_upload.append((cfg_path, ''))
 
-    # .streamlit/ directory (theme config — pins the light theme so the app
-    # stays readable when the viewer's browser/Snowsight is in dark mode)
-    st_cfg_dir = app_dir / '.streamlit'
-    if st_cfg_dir.exists():
-        for fpath in st_cfg_dir.glob('*.toml'):
-            files_to_upload.append((fpath, '.streamlit'))
+    # NO .streamlit/config.toml — deliberately. The app used to ship a
+    # [theme] section pinning the light palette (so st.dataframe canvases
+    # and native widget internals stayed light for Snowsight dark-mode
+    # users). Snowsight draws a faint horizontal line across the whole
+    # window — over the sidebar too, fixed while the page scrolls, visible
+    # while the app is still loading — whenever an app carries ANY custom
+    # theme: a config file with an empty [theme] section reproduces it, and
+    # so does a theme set from the script with no file at all. Found by
+    # bisection with bare control apps on 2026-09-24 (six rounds; git log
+    # "line-probe"). A Snowflake defect; nothing app-side removes the line
+    # except having no custom theme, so the app follows Snowsight's own
+    # theme and the Documentation page says it is designed for light mode.
+    # streamlit_app/tests/test_no_custom_theme.py guards this.
 
     # utils/ directory
     utils_dir = app_dir / 'utils'
@@ -478,166 +485,41 @@ def deploy_streamlit_app(session):
     except Exception:
         pass
 
+    drop_line_probes(session)
+
     print(f"\n  ✅ Streamlit app deployed successfully!")
     return True
 
 
-# ─── Deploy the line-probe control app ───────────────────────────────────────
+# ─── Retire the line-probe control apps ─────────────────────────────────────
 
-def _deploy_probe(session, name, files, comment):
-    """One control app: `files` is a list of (local Path, stage subdir)."""
-    stage_name = f'ADJUSTMENT_APP.{name}_STAGE'
-    streamlit_name = f'ADJUSTMENT_APP.{name}'
-    print(f"\n  📦 {streamlit_name}")
-    try:
-        session.sql(f"CREATE STAGE IF NOT EXISTS {stage_name} ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE')").collect()
-    except Exception as e:
-        print(f"     ❌ Stage creation failed: {e}")
-        return False
-    for fpath, subdir in files:
-        stage_path = f'@{stage_name}/{subdir}' if subdir else f'@{stage_name}'
-        try:
-            session.file.put(str(fpath).replace('\\', '/'), stage_path,
-                             auto_compress=False, overwrite=True)
-            print(f"     ✅ {subdir + '/' if subdir else ''}{fpath.name}")
-        except Exception as e:
-            print(f"     ❌ {fpath.name}: {e}")
-            return False
-    try:
-        session.sql(f"""
-        CREATE OR REPLACE STREAMLIT {streamlit_name}
-            ROOT_LOCATION   = '@{stage_name}'
-            MAIN_FILE       = 'app.py'
-            QUERY_WAREHOUSE = '{config.WAREHOUSE}'
-            COMMENT         = '{comment}'
-        """).collect()
-    except Exception as e:
-        print(f"     ❌ Streamlit creation failed: {e}")
-        return False
-    for role in (config.ROLE_OWNER, config.ROLE_RO):
-        try:
-            session.sql(f"GRANT USAGE ON STREAMLIT {streamlit_name} TO ROLE {role}").collect()
-        except Exception as e:
-            print(f"     ℹ️  Grant note ({role}): {str(e)[:100]}")
-    return True
-
-
-# Line-probe variants. Each is a sibling control app whose ONLY difference
-# from the bare control is the .streamlit/config.toml body given here.
-#
-# Round 3 (2026-09-24): one app per engine theme setting → ALL FIVE showed
-# the line. So no single colour is the cause; the presence of a theme (or of
-# the file) is. Those five are retired below.
-#
-# Round 4: split "file present" from "theme present", and try two candidate
-# fixes alongside, so one deploy can give both the cause and the cure.
-ENGINE_THEME = (
-    '[theme]\n'
-    'base = "light"\n'
-    'primaryColor = "#D50032"\n'
-    'backgroundColor = "#F6F7F9"\n'
-    'secondaryBackgroundColor = "#FFFFFF"\n'
-    'textColor = "#0F172A"\n'
-)
-# Round 4 result: T6 (file, no sections) and T8 ([client] only) → NO line.
-# T7 (EMPTY [theme] section) → line. In Streamlit 1.50 an empty theme
-# section sends nothing to the front-end (app_session._populate_theme_msg
-# returns early), so Streamlit ran T7 exactly like the bare control. The only
-# thing that reacts to the [theme] header itself is Snowsight, which reads
-# the file to pick the app's colour scheme. The line is Snowsight's, outside
-# the iframe — which is why it is fixed to the window, crosses the sidebar,
-# shows while the app is still loading and is invisible to any in-app probe.
-# Locally on 1.50.0 with the same theme file there is no line at all.
-#
-# Round 5: the same five settings written as TOML dotted keys, with no
-# [theme] header. Streamlit's parser produces the identical config; if
-# Snowsight keys on the header text it will not react.
-ENGINE_THEME_DOTTED = (
-    'theme.base = "light"\n'
-    'theme.primaryColor = "#D50032"\n'
-    'theme.backgroundColor = "#F6F7F9"\n'
-    'theme.secondaryBackgroundColor = "#FFFFFF"\n'
-    'theme.textColor = "#0F172A"\n'
-)
-# Round 5 result: T11 has the line — Snowsight parses the TOML properly.
-#
-# Round 6: NO config file. sample_app/app.py sets the same five theme
-# options from the script when runtime_theme.flag sits next to it (see the
-# block at the top of that file). Streamlit rebuilds its theme message from
-# the live config on every run, so the front-end gets the theme exactly as
-# it would from the file; Snowsight has no file to read.
-PROBE_VARIANTS = []
-PROBE_RUNTIME_THEME_APP = 'LINE_PROBE_T12_RUNTIME'
-# Settled variants from earlier rounds — dropped on the next --sample-app run.
-RETIRED_PROBES = [
-    'LINE_PROBE_T1_BASE', 'LINE_PROBE_T2_PRIMARY', 'LINE_PROBE_T3_BG',
-    'LINE_PROBE_T4_SECONDARY', 'LINE_PROBE_T5_TEXT',
+# Bare control apps used on 2026-09-24 to locate the horizontal line (see the
+# theme note in deploy_streamlit_app). Settled; dropped on every Streamlit
+# deploy until this list is removed.
+LINE_PROBE_APPS = [
+    'LINE_PROBE', 'LINE_PROBE_T1_BASE', 'LINE_PROBE_T2_PRIMARY',
+    'LINE_PROBE_T3_BG', 'LINE_PROBE_T4_SECONDARY', 'LINE_PROBE_T5_TEXT',
     'LINE_PROBE_T6_FILE_ONLY', 'LINE_PROBE_T7_THEME_EMPTY',
     'LINE_PROBE_T8_CLIENT_ONLY', 'LINE_PROBE_T9_HIDETOPBAR',
     'LINE_PROBE_T10_MINIMAL', 'LINE_PROBE_T11_DOTTED',
+    'LINE_PROBE_T12_RUNTIME',
 ]
 
 
-def deploy_sample_app(session):
-    """
-    Deploy sample_app/ — a bare Streamlit app with NO code from this repo —
-    as ADJUSTMENT_APP.LINE_PROBE, next to the engine, plus one sibling per
-    theme setting (PROBE_THEME_VARIANTS).
-
-    It exists to settle where the horizontal line comes from (see
-    sample_app/app.py). It ships only app.py, pages/ and the runtime pin:
-    no config.py, no utils/. Round 1 also shipped no theme; round 2 added the
-    engine's .streamlit/config.toml unchanged and the line appeared; round 3
-    split that file one setting per app (all showed it); round 4 is
-    PROBE_VARIANTS.
-    """
-    import tempfile
-    app_dir = Path(__file__).parent / 'sample_app'
-    base_files = [(app_dir / 'app.py', ''), (app_dir / 'environment.yml', '')]
-    base_files += [(f, 'pages') for f in sorted((app_dir / 'pages').glob('*.py'))]
-
-    # The reference: whole theme, byte-identical to the engine's.
-    full = base_files + [(f, '.streamlit') for f in sorted((app_dir / '.streamlit').glob('*.toml'))]
-    ok = _deploy_probe(session, 'LINE_PROBE', full,
-                       'Line probe — bare control app + the engine theme file. Delete when settled.')
-    if not ok:
-        return False
-
-    # Retire settled variants so the Snowsight list only shows live ones.
-    for name in RETIRED_PROBES:
+def drop_line_probes(session):
+    """Drop the control apps and their stages. Idempotent; never fatal."""
+    dropped = 0
+    for name in LINE_PROBE_APPS:
         for stmt in (f"DROP STREAMLIT IF EXISTS ADJUSTMENT_APP.{name}",
                      f"DROP STAGE IF EXISTS ADJUSTMENT_APP.{name}_STAGE"):
             try:
-                session.sql(stmt).collect()
+                res = session.sql(stmt).collect()
+                if res and 'successfully dropped' in str(res[0][0]):
+                    dropped += 1
             except Exception as e:
                 print(f"     ℹ️  {stmt}: {str(e)[:80]}")
-
-    tmp = Path(tempfile.mkdtemp(prefix='line_probe_'))
-    for name, body in PROBE_VARIANTS:
-        vdir = tmp / name / '.streamlit'
-        vdir.mkdir(parents=True)
-        (vdir / 'config.toml').write_text(
-            f"# Line-probe variant {name}\n" + body, encoding='utf-8')
-        files = base_files + [(vdir / 'config.toml', '.streamlit')]
-        if not _deploy_probe(session, name, files,
-                             f'Line probe variant {name}. Delete when settled.'):
-            return False
-
-    # Round 6: no .streamlit/ at all; the marker file switches the theme on.
-    flag_dir = tmp / PROBE_RUNTIME_THEME_APP
-    flag_dir.mkdir(parents=True, exist_ok=True)
-    flag = flag_dir / 'runtime_theme.flag'
-    flag.write_text("theme set from the script — see app.py\n", encoding='utf-8')
-    if not _deploy_probe(session, PROBE_RUNTIME_THEME_APP, base_files + [(flag, '')],
-                         'Line probe: NO config file, theme set from the script. Delete when settled.'):
-        return False
-
-    print("\n  ✅ Line probes deployed. In Snowsight → Streamlit open each of:")
-    print("     LINE_PROBE                 whole engine theme — the reference, shows the line")
-    for name, body in PROBE_VARIANTS:
-        print(f"     {name:<27}{body.strip().replace(chr(10), ' | ')}")
-    print(f"     {PROBE_RUNTIME_THEME_APP:<27}no config file — theme set from the script")
-    return True
+    if dropped:
+        print(f"     🗑️  Line-probe control apps removed ({dropped} objects)")
 
 
 # ─── Deploy Notebooks ────────────────────────────────────────────────────────
@@ -1180,8 +1062,6 @@ def main():
     parser.add_argument('--db-only', action='store_true', help='Deploy DB objects only')
     parser.add_argument('--streamlit-only', action='store_true', help='Deploy Streamlit app only')
     parser.add_argument('--notebooks-only', action='store_true', help='Deploy Snowflake Notebooks only')
-    parser.add_argument('--sample-app', action='store_true',
-                        help='Deploy ONLY sample_app/ (the bare line-probe control app) as ADJUSTMENT_APP.LINE_PROBE. Touches nothing else.')
     parser.add_argument('--test-adj', action='store_true', help='Submit a test VaR Flatten adjustment after deploy')
     parser.add_argument('--rebuild', action='store_true',
                         help='DESTRUCTIVE: DROP all repo-managed ADJUSTMENT_APP objects '
@@ -1199,8 +1079,6 @@ def main():
     if args.rebuild:
         deploy_db = True   # rebuild always reapplies DB objects after teardown
     if args.validate_only:
-        deploy_db = deploy_st = deploy_nb = False
-    if args.sample_app:
         deploy_db = deploy_st = deploy_nb = False
 
     print("=" * 64)
@@ -1228,12 +1106,6 @@ def main():
     # ── Validate-only mode ───────────────────────────────────────────────
     if args.validate_only:
         ok = validate_schema(session)
-        session.close()
-        return 0 if ok else 1
-
-    # ── Line-probe control app only ──────────────────────────────────────
-    if args.sample_app:
-        ok = deploy_sample_app(session)
         session.close()
         return 0 if ok else 1
 

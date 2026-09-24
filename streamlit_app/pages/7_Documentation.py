@@ -225,6 +225,13 @@ download of max 5,000 rows whose columns are exactly the FRTB upload template �
 edit the file and re-upload it as a Direct adjustment), Admin (config,
 approvers, admins), Logs (runs, activity, errors, sign-off audit), Tasks & Cost
 (task health + serverless cost). Approvers never approve their own requests.
+
+Appearance: the app is designed for Snowsight LIGHT mode and follows
+Snowsight's theme for native grids and menus. In Snowsight dark mode those
+parts go dark against the light cards; the fix is Snowsight -> profile ->
+Appearance -> Light. The app deliberately sets no theme of its own, because
+any custom theme makes Snowsight draw a stray horizontal line across every
+page (Snowflake-side, found 2026-09-24).
 """.strip()
 
 
@@ -1209,6 +1216,13 @@ with tab_trouble:
          "A VaR Upload with the same COB + Reference already existed.",
          "The replacement needs an explicit confirmation tick. Use a new "
          "Reference if it is genuinely a different adjustment."],
+        ["Grids or menus look <strong>dark</strong> against the light cards",
+         "Snowsight is in dark mode. The app is designed for Snowsight's "
+         "<strong>light</strong> mode and follows Snowsight's theme for "
+         "native grids and menus.",
+         "Snowsight → your profile (bottom-left) → <em>Appearance</em> → "
+         "Light. The app itself sets no theme: doing so makes Snowsight "
+         "draw a stray line across every page."],
         ["Reports don't show my processed adjustment",
          "Refresh still queued/running, or refresh queueing failed (error "
          "shown on the ticket), or the COB is older than the ~3-business-day "

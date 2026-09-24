@@ -6,7 +6,6 @@
 #   .\deploy_all.ps1 -Mode db          # force DB objects only
 #   .\deploy_all.ps1 -Mode streamlit   # force Streamlit app only
 #   .\deploy_all.ps1 -Mode notebooks   # force Snowflake Notebooks only
-#   .\deploy_all.ps1 -Mode sample      # ONLY the bare line-probe control app (sample_app\)
 #   .\deploy_all.ps1 -Branch my-branch # deploy from a feature branch instead of main
 #   .\deploy_all.ps1 -PythonExe C:/path/to/python.exe   # override the interpreter
 #
@@ -19,7 +18,7 @@
 #   NOT advanced, so the next run retries the same scope.
 
 param(
-    [ValidateSet("auto", "db", "streamlit", "notebooks", "sample", "all")]
+    [ValidateSet("auto", "db", "streamlit", "notebooks", "all")]
     [string]$Mode = "auto",
     # Git branch to deploy from. Default: main.
     # Point it at a feature branch with -Branch while testing one.
@@ -61,14 +60,12 @@ $head = (git rev-parse HEAD).Trim()
 $deployDb = $false
 $deployStreamlit = $false
 $deployNotebooks = $false
-$deploySample = $false
 
 switch ($Mode) {
     "all"       { $deployDb = $true; $deployStreamlit = $true; $deployNotebooks = $true }
     "db"        { $deployDb = $true }
     "streamlit" { $deployStreamlit = $true }
     "notebooks" { $deployNotebooks = $true }
-    "sample"    { $deploySample = $true }
     default {
         # auto — diff against the last deployed commit
         $baseline = $null
@@ -109,13 +106,12 @@ switch ($Mode) {
 }
 
 Write-Host ""
-Write-Host ("Deploy plan  ->  DB objects: {0}   Streamlit app: {1}   Notebooks: {2}   Line probe: {3}" -f `
+Write-Host ("Deploy plan  ->  DB objects: {0}   Streamlit app: {1}   Notebooks: {2}" -f `
             $(if ($deployDb) {"YES"} else {"skip"}),
             $(if ($deployStreamlit) {"YES"} else {"skip"}),
-            $(if ($deployNotebooks) {"YES"} else {"skip"}),
-            $(if ($deploySample) {"YES"} else {"skip"})) -ForegroundColor Cyan
+            $(if ($deployNotebooks) {"YES"} else {"skip"})) -ForegroundColor Cyan
 
-if (-not $deployDb -and -not $deployStreamlit -and -not $deployNotebooks -and -not $deploySample) {
+if (-not $deployDb -and -not $deployStreamlit -and -not $deployNotebooks) {
     Write-Host "Nothing to deploy for this change set." -ForegroundColor Green
     Set-Content -Path $markerFile -Value $head -NoNewline
     exit 0
@@ -123,8 +119,7 @@ if (-not $deployDb -and -not $deployStreamlit -and -not $deployNotebooks -and -n
 
 # Map the flags to deploy.py arguments.
 $deployArgs = @()
-if ($deploySample) { $deployArgs = @("--sample-app") }
-elseif ($deployDb -and -not $deployStreamlit -and -not $deployNotebooks)        { $deployArgs = @("--db-only") }
+if ($deployDb -and -not $deployStreamlit -and -not $deployNotebooks)        { $deployArgs = @("--db-only") }
 elseif ($deployStreamlit -and -not $deployDb -and -not $deployNotebooks)    { $deployArgs = @("--streamlit-only") }
 elseif ($deployNotebooks -and -not $deployDb -and -not $deployStreamlit)    { $deployArgs = @("--notebooks-only") }
 # any other combination (incl. all three) -> no flag = full deploy.py run

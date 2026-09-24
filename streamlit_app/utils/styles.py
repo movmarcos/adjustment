@@ -349,55 +349,7 @@ CATEGORY_CONFIG = {
 # GLOBAL CSS
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _debug_flag():
-    """Which diagnostic mode is on: 'nocss', 'css', or ''.
-
-    Driven by the CHECKBOXES in the sidebar's Diagnostics expander, not by
-    the URL. Streamlit in Snowflake runs the app inside an iframe on
-    Snowsight, so a ?debug= parameter typed onto the Snowsight address never
-    reaches st.query_params — the flag simply did nothing, which cost a
-    round trip to discover (2026-09-24).
-
-    The query parameter is still honoured underneath, for a browser that can
-    address the app frame directly.
-    """
-    try:
-        if st.session_state.get("_dbg_nocss"):
-            return "nocss"
-        if st.session_state.get("_dbg_probe"):
-            return "css"
-    except Exception:
-        pass
-    try:
-        raw = st.query_params.get("debug")
-        val = raw if isinstance(raw, str) else (raw[0] if raw else None)
-        return str(val or "").strip().lower()
-    except Exception:
-        return ""
-
-
 def inject_css():
-    # ?debug=nocss — ship NO app styling at all.
-    #
-    # A horizontal line has been reported across every page. Three fixes
-    # aimed at the app's own CSS did not shift it, and the app cannot be
-    # inspected: devtools has no Inspect entry in the corporate browser and
-    # the app sits on an internal network.
-    #
-    # This is the decisive test, and it needs no output read back. With every
-    # rule below skipped, the app renders in plain Streamlit. If the line is
-    # STILL there, it is not being drawn by anything in this file — which
-    # points at the browser isolation layer, the same thing that caused the
-    # white blocks in this app before. If it disappears, it IS ours and I can
-    # bisect the stylesheet from there.
-    #
-    # The app will look unstyled while this flag is on. That is the point.
-    if _debug_flag() == "nocss":
-        st.warning("Diagnostics: ALL app styling is switched off. Untick "
-                   "**Disable all styling** in the sidebar's Diagnostics "
-                   "section to get the normal app back.")
-        return
-
     st.markdown(f"""
     <style>
     :root {{
@@ -1409,7 +1361,9 @@ def inject_css():
     }}
     .stCheckbox p, .stRadio p {{ color: var(--ink) !important; }}
 
-    /* Dataframe wrapper (the grid itself is themed via .streamlit/config.toml) */
+    /* Dataframe wrapper. The grid canvas takes its colours from the Streamlit
+       theme, which follows Snowsight (light/dark) — see the note on the
+       theme file in deploy.py. */
     [data-testid="stDataFrame"] {{
         background-color: var(--card) !important;
         border-radius: var(--r-sm);
@@ -2404,90 +2358,6 @@ def render_df_table(df, max_rows=200, height=None, highlight=None,
         st.caption(f"Showing first {max_rows:,} of {len(df):,} rows.")
 
 
-def render_css_probe():
-    """TEMPORARY diagnostic (2026-09-24): name whatever is drawing a line.
-
-    A horizontal line appeared across every page, over the menu as well as
-    the content. Devtools is unavailable in the corporate browser and the
-    app is on an internal network, so the page has to report on itself.
-
-    st.components.v1.html renders into a srcdoc iframe, which is same-origin
-    with the host page, so JS inside it can walk `window.parent.document`.
-    It lists every element wider than 400px that is either a thin coloured
-    strip or carries a horizontal border, with its position, testid and
-    class. Whatever is drawing the line is in that list.
-
-    Renders ONLY with ?debug=css on the URL, so it costs normal users
-    nothing. Delete this function and its call once the line is identified.
-    """
-    if _debug_flag() != "css":
-        return
-
-    import streamlit.components.v1 as _components
-    _js = """
-<div id="out" style="font:12px/1.5 ui-monospace,Menlo,monospace;
-     white-space:pre-wrap;padding:8px;background:#fff;color:#111">scanning...</div>
-<script>
-(function () {
-  var out = document.getElementById('out');
-  var d;
-  try { d = window.parent.document; } catch (e) {
-    out.textContent = 'BLOCKED: cannot read the host page (' + e + ')'; return;
-  }
-  if (!d) { out.textContent = 'BLOCKED: no parent document'; return; }
-
-  function paints(s, r) {
-    // Anything that can render as a line: a thin filled strip, a border on
-    // any side, an outline, or a shadow.
-    var out = [];
-    if (r.height > 0 && r.height <= 6 &&
-        s.backgroundColor !== 'rgba(0, 0, 0, 0)') out.push('bg=' + s.backgroundColor);
-    ['Top','Bottom','Left','Right'].forEach(function (side) {
-      var w = parseFloat(s['border' + side + 'Width']) || 0;
-      if (w > 0 && s['border' + side + 'Style'] !== 'none')
-        out.push('border' + side + '=' + w + 'px ' + s['border' + side + 'Color']);
-    });
-    if ((parseFloat(s.outlineWidth) || 0) > 0 && s.outlineStyle !== 'none')
-      out.push('outline=' + s.outlineWidth + ' ' + s.outlineColor);
-    if (s.boxShadow && s.boxShadow !== 'none') out.push('shadow=' + s.boxShadow.slice(0, 40));
-    return out;
-  }
-
-  var rows = [], all = d.querySelectorAll('*');
-  for (var i = 0; i < all.length && rows.length < 120; i++) {
-    var el = all[i], r = el.getBoundingClientRect();
-    if (r.width < 400) continue;
-    var id = '<' + el.tagName.toLowerCase() + '> testid=' +
-             (el.getAttribute('data-testid') || '-') + ' class=' +
-             (String(el.className || '').slice(0, 40) || '-');
-    [['', getComputedStyle(el)],
-     ['::before', getComputedStyle(el, '::before')],
-     ['::after', getComputedStyle(el, '::after')]].forEach(function (pair) {
-      var tag = pair[0], s = pair[1];
-      if (!s) return;
-      if (tag && (s.content === 'none' || s.content === 'normal')) return;
-      var why = paints(s, tag ? { height: parseFloat(s.height) || 0 } : r);
-      if (!why.length) return;
-      rows.push('y=' + Math.round(r.top) + ' h=' + Math.round(r.height) +
-                ' w=' + Math.round(r.width) + '  ' + id + tag +
-                '  ' + why.join(' '));
-    });
-  }
-  out.textContent =
-    'viewport ' + d.documentElement.clientWidth + 'x' +
-    d.documentElement.clientHeight +
-    '  scanned ' + all.length + ' elements\n' +
-    'anything wider than 400px that can paint a line ' +
-    '(element and its ::before/::after):\n\n' +
-    (rows.length ? rows.join('\n') : 'NOTHING MATCHED — the line is not in this page');
-})();
-</script>
-"""
-    st.markdown("**CSS probe** — switched on in the sidebar's Diagnostics "
-                "section. Send me everything below.")
-    _components.html(_js, height=460, scrolling=True)
-
-
 def render_sidebar():
     """Render the branded sidebar: MUFG logo, compact nav, user at bottom."""
     import html as _htmlmod
@@ -2562,25 +2432,3 @@ def render_sidebar():
         # displayed — the user asked to remove it from the sidebar. It still
         # ships with each deploy, so which-commit-is-live stays verifiable in
         # one query: SELECT ... $1 FROM @STREAMLIT_ADJUSTMENT_STAGE/utils/build_info.py.
-
-    # TEMPORARY diagnostics (2026-09-24), for the horizontal line reported
-    # across every page. In the sidebar because a URL parameter cannot reach
-    # this app: Snowflake serves it in an iframe, so anything typed onto the
-    # Snowsight address is invisible to st.query_params.
-    #
-    # Inside `with st.sidebar:` so the checkboxes are always reachable — they
-    # have to keep working with styling switched off, which is the whole
-    # point of the first one.
-    with st.sidebar:
-        with st.expander("Diagnostics", expanded=False):
-            st.checkbox("Disable all styling", key="_dbg_nocss",
-                        help="Renders the app as plain Streamlit. If a "
-                             "visual problem survives this, nothing in the "
-                             "app's stylesheet is causing it.")
-            st.checkbox("Show CSS probe", key="_dbg_probe",
-                        help="Lists everything on the page that can paint a "
-                             "line, with its position and identity.")
-
-    # Outside the sidebar block, so the probe's output lands in the main area
-    # where it can be read. No-op unless the checkbox above is ticked.
-    render_css_probe()
