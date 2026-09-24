@@ -482,6 +482,75 @@ def deploy_streamlit_app(session):
     return True
 
 
+# ─── Deploy the line-probe control app ───────────────────────────────────────
+
+def deploy_sample_app(session):
+    """
+    Deploy sample_app/ — a bare Streamlit app with NO code from this repo —
+    as ADJUSTMENT_APP.LINE_PROBE, next to the engine.
+
+    It exists to settle where the horizontal line comes from (see
+    sample_app/app.py). It ships only app.py, pages/ and the runtime pin:
+    no config.py, no utils/, no .streamlit/ theme, so the only thing it
+    shares with the engine is the platform and the Streamlit version.
+    """
+    app_dir = Path(__file__).parent / 'sample_app'
+    stage_name = 'ADJUSTMENT_APP.LINE_PROBE_STAGE'
+    streamlit_name = 'ADJUSTMENT_APP.LINE_PROBE'
+
+    print(f"\n  📦 Creating stage {stage_name}...")
+    try:
+        session.sql(f"CREATE STAGE IF NOT EXISTS {stage_name} ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE')").collect()
+    except Exception as e:
+        print(f"     ❌ Stage creation failed: {e}")
+        return False
+
+    files_to_upload = [(app_dir / 'app.py', ''), (app_dir / 'environment.yml', '')]
+    files_to_upload += [(f, 'pages') for f in sorted((app_dir / 'pages').glob('*.py'))]
+
+    print(f"\n  📤 Uploading {len(files_to_upload)} files...")
+    for fpath, subdir in files_to_upload:
+        stage_path = f'@{stage_name}/{subdir}' if subdir else f'@{stage_name}'
+        try:
+            session.file.put(str(fpath).replace('\\', '/'), stage_path,
+                             auto_compress=False, overwrite=True)
+            print(f"     ✅ {subdir + '/' if subdir else ''}{fpath.name}")
+        except Exception as e:
+            print(f"     ❌ {fpath.name}: {e}")
+            return False
+
+    print(f"\n  🚀 Creating Streamlit app {streamlit_name}...")
+    try:
+        session.sql(f"""
+        CREATE OR REPLACE STREAMLIT {streamlit_name}
+            ROOT_LOCATION   = '@{stage_name}'
+            MAIN_FILE       = 'app.py'
+            QUERY_WAREHOUSE = '{config.WAREHOUSE}'
+            COMMENT         = 'Line probe — bare control app, no engine code. Delete when the horizontal-line question is settled.'
+        """).collect()
+    except Exception as e:
+        print(f"     ❌ Streamlit creation failed: {e}")
+        return False
+
+    for role in (config.ROLE_OWNER, config.ROLE_RO):
+        try:
+            session.sql(f"GRANT USAGE ON STREAMLIT {streamlit_name} TO ROLE {role}").collect()
+        except Exception as e:
+            print(f"     ℹ️  Grant note ({role}): {str(e)[:100]}")
+
+    try:
+        info = session.sql("SHOW STREAMLITS LIKE 'LINE_PROBE' IN SCHEMA ADJUSTMENT_APP").collect()
+        for row in info:
+            for key in row.asDict():
+                if key.upper() in ('NAME', 'DATABASE_NAME', 'SCHEMA_NAME', 'URL_ID'):
+                    print(f"     {key}: {row[key]}")
+    except Exception:
+        pass
+
+    print(f"\n  ✅ Line probe deployed. Open it from Snowsight → Streamlit → LINE_PROBE.")
+    return True
+
+
 # ─── Deploy Notebooks ────────────────────────────────────────────────────────
 
 def deploy_notebooks(session):
@@ -1022,6 +1091,8 @@ def main():
     parser.add_argument('--db-only', action='store_true', help='Deploy DB objects only')
     parser.add_argument('--streamlit-only', action='store_true', help='Deploy Streamlit app only')
     parser.add_argument('--notebooks-only', action='store_true', help='Deploy Snowflake Notebooks only')
+    parser.add_argument('--sample-app', action='store_true',
+                        help='Deploy ONLY sample_app/ (the bare line-probe control app) as ADJUSTMENT_APP.LINE_PROBE. Touches nothing else.')
     parser.add_argument('--test-adj', action='store_true', help='Submit a test VaR Flatten adjustment after deploy')
     parser.add_argument('--rebuild', action='store_true',
                         help='DESTRUCTIVE: DROP all repo-managed ADJUSTMENT_APP objects '
@@ -1039,6 +1110,8 @@ def main():
     if args.rebuild:
         deploy_db = True   # rebuild always reapplies DB objects after teardown
     if args.validate_only:
+        deploy_db = deploy_st = deploy_nb = False
+    if args.sample_app:
         deploy_db = deploy_st = deploy_nb = False
 
     print("=" * 64)
@@ -1066,6 +1139,12 @@ def main():
     # ── Validate-only mode ───────────────────────────────────────────────
     if args.validate_only:
         ok = validate_schema(session)
+        session.close()
+        return 0 if ok else 1
+
+    # ── Line-probe control app only ──────────────────────────────────────
+    if args.sample_app:
+        ok = deploy_sample_app(session)
         session.close()
         return 0 if ok else 1
 

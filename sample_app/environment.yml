@@ -1,0 +1,9 @@
+name: line-probe
+channels:
+  - snowflake
+dependencies:
+  # The SAME runtime pin as streamlit_app/environment.yml. Deliberate: this
+  # app exists to find out whether the horizontal line comes from the
+  # Adjustment Engine's code or from the platform, and the runtime version is
+  # the one thing shared with the engine that is not code.
+  - streamlit=1.50.0
