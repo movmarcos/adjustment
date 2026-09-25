@@ -4,6 +4,22 @@ Guidance for AI assistants (GitHub Copilot, Claude Opus 4.x, or any coding
 agent) working in this repository. Read this fully before changing code.
 The same content may be copied to `AGENTS.md` or `CLAUDE.md` for other tools.
 
+## Layout (restructured 2026-09-25)
+
+`streamlit/` is the deployable package: copying that one folder gives a
+complete, deployable solution. It holds the deploy engine (`deploy.py`), the
+environment map (`config.py`) and one folder per app — `adjustment_engine/`,
+which carries its own `sql/`. Everything else in the repo is development
+kit: `tests/app/` (unit tests, no Snowflake), `tests/live/` (UAT against a
+real environment), `notebooks/`, `docs/`.
+
+Two deploy entry points, and they must stay distinct:
+
+| From | Script | Behaviour |
+|---|---|---|
+| `streamlit/` | `deploy.ps1 -DbTarget <db>` | hand-over: no git, the database names the environment (first four letters) |
+| repo root | `deploy_all.ps1` | development: pulls from git, deploys only what changed |
+
 ## What this is
 
 A risk-adjustment engine for MUFG: non-technical risk analysts submit
@@ -11,17 +27,17 @@ adjustments (scale / flatten / roll / direct upload / entity roll) against
 fact tables (VaR, Stress, FRTB, Sensitivity), with approval workflow,
 scheduled processing, and PowerBI refresh. Main parts:
 
-- `streamlit_app/` — Streamlit-in-Snowflake (SiS) UI. Entry `app.py`
+- `streamlit/adjustment_engine/` — Streamlit-in-Snowflake (SiS) UI. Entry `app.py`
   (dashboard), pages under `pages/`, shared design system in
   `utils/styles.py`, connection helpers in `utils/snowflake_conn.py`.
 - `notebooks/` — Snowflake Notebook end-to-end test harness. `adjustment_test_kit.py`
   is the logic (pure, takes an explicit session, unit-tests locally against a
   fake session); `adjustment_test_harness.ipynb` is the thin notebook that
-  calls it. `deploy.py`'s `deploy_notebooks()` stages both and creates/
+  calls it. `streamlit/deploy.py`'s `deploy_notebooks()` stages both and creates/
   activates the `ADJUSTMENT_TEST_HARNESS` notebook object.
-- `new_adjustment_db_objects/` — Snowflake DDL + stored procedures, numbered
+- `streamlit/adjustment_engine/sql/` — Snowflake DDL + stored procedures, numbered
   in deploy order (`01_tables.sql` … `15_direct_frtb_upload.sql`, incl.
-  `05b`/`05c` which sort correctly between `05` and `06`). `deploy.py`
+  `05b`/`05c` which sort correctly between `05` and `06`). `streamlit/deploy.py`
   deploys the whole directory in filename-sorted order.
   Old prototypes were removed from the tree (2026-09-17); they remain in git history only.
 
@@ -33,7 +49,7 @@ scheduled processing, and PowerBI refresh. Main parts:
   at `CREATE OR ALTER PROCEDURE` time — a hand-pasted single-file "hotfix"
   against an environment missing an earlier file's change will succeed
   silently and only fail later, at first invocation, deep in a pipeline
-  run. Full-directory deploys via `python deploy.py` (or `deploy.py
+  run. Full-directory deploys via `python streamlit/deploy.py` (or `deploy.py
   --db-only`, which still deploys everything) only. If a hotfix to one
   procedure is operationally necessary, re-run `01_tables.sql` first — it's
   `CREATE OR ALTER`, so idempotent/safe.
@@ -159,7 +175,7 @@ features. Anything ambiguous in the UI is a bug.
   combined view; deleting the adjustment restores the entity. Type renamed
   to `EROL` end-to-end (UI payload, `ACTION_MAP` keeps `entity_roll` as a
   legacy alias). Next step: deploy `03`+`05`, run
-  `new_adjustment_db_objects/tests/test_entity_roll_adjustment.sql` on a
+  `streamlit/adjustment_engine/sql/tests/test_entity_roll_adjustment.sql` on a
   test COB, and verify assertions (a)-(d) pass.
 - A concurrency redesign for the pipeline was audited and is pending
   approval — do not assume single-writer.
@@ -172,9 +188,9 @@ features. Anything ambiguous in the UI is a bug.
   `docs:`), imperative subject, body explains the why.
 - Verification: two pytest suites exist and should be run first, before
   falling back to manual click-through.
-  - `streamlit_app/tests/` — widget/form/page logic against a mocked
+  - `tests/app/` — widget/form/page logic against a mocked
     Streamlit (`streamlit.testing.v1.AppTest`), no Snowflake connection:
-    `pytest streamlit_app/tests -v`.
+    `pytest tests/app -v`.
   - `tests/` (repo root) — UAT automation: drives the real stored
     procedures against a live Snowflake environment (`config.py`) with a
     far-future isolation COB, writes `docs/UAT_AUTOMATION_REPORT.md`:
@@ -182,7 +198,7 @@ features. Anything ambiguous in the UI is a bug.
   Minimum bar for every touched file regardless: `python3 -m py_compile`,
   then run the relevant suite(s) above, then deploy to SiS and click
   through the affected flow. SQL-side integration tests also live in
-  `new_adjustment_db_objects/tests/`. Snowflake behaviour that no local
+  `streamlit/adjustment_engine/sql/tests/`. Snowflake behaviour that no local
   suite reaches (literal escaping edge cases, SiS-runtime-only bugs) cannot
   be fully verified locally — say so in the commit/PR instead of claiming
   verification.
@@ -195,40 +211,40 @@ features. Anything ambiguous in the UI is a bug.
 
 ## Quick file map
 
-Regenerate this table (and keep it current) from `ls streamlit_app/pages/`
-and `ls new_adjustment_db_objects/*.sql` in the same PR that adds/renames a
+Regenerate this table (and keep it current) from `ls streamlit/adjustment_engine/pages/`
+and `ls streamlit/adjustment_engine/sql/*.sql` in the same PR that adds/renames a
 page or SQL file.
 
 | Area | File |
 |---|---|
-| Dashboard / KPIs | `streamlit_app/app.py` |
-| New Adjustment (order ticket) | `streamlit_app/pages/1_New_Adjustment.py` |
-| Browse/manage + delete + history | `streamlit_app/pages/2_Adjustments.py` |
-| Approval queue | `streamlit_app/pages/3_Approval_Queue.py` |
-| Sign-Off (sign off / request re-open / sync) | `streamlit_app/pages/5_Sign_Off.py` |
-| Admin (settings, sign-off users, approvers, admins) | `streamlit_app/pages/6_Admin.py` |
-| Documentation (in-app AI assistant / how-it-works) | `streamlit_app/pages/7_Documentation.py` |
-| FRTB Explore (browse official FRTB fact tables) | `streamlit_app/pages/8_FRTB_Explore.py` |
-| Logs (runs, activity, errors, sign-off audit) | `streamlit_app/pages/9_Logs.py` |
-| Tasks & Cost (task health + serverless cost) | `streamlit_app/pages/10_Tasks_Cost.py` |
-| Design tokens, icons, components | `streamlit_app/utils/styles.py` |
-| Session/queries | `streamlit_app/utils/snowflake_conn.py` |
-| Tables + settings seed | `new_adjustment_db_objects/01_tables.sql` |
-| Streams (CDC on adjustment tables) | `new_adjustment_db_objects/02_streams.sql` |
-| Submit SP (validation, ACTION_MAP, blocking) | `new_adjustment_db_objects/03_sp_submit_adjustment.sql` |
-| Preview SP (summary/breakdown/sample modes) | `new_adjustment_db_objects/04_sp_preview_adjustment.sql` |
-| Process SP (Direct/Scale/EntityRoll/Transfer paths) | `new_adjustment_db_objects/05_sp_process_adjustment.sql` |
-| Pipeline runner SP | `new_adjustment_db_objects/05b_sp_run_pipeline.sql` |
-| Force-process SP | `new_adjustment_db_objects/05c_sp_force_process.sql` |
-| Scheduled tasks (5 pipeline tasks) | `new_adjustment_db_objects/06_tasks.sql` |
-| Dynamic tables | `new_adjustment_db_objects/07_dynamic_tables.sql` |
-| Views (combined/adjusted, tracking) | `new_adjustment_db_objects/08_views.sql` |
-| Entity Roll debug SP | `new_adjustment_db_objects/09_sp_debug_entity_roll.sql` |
-| Sign-off feed sync SP | `new_adjustment_db_objects/10_sp_signoff_sync.sql` |
-| Notification SP | `new_adjustment_db_objects/11_sp_notify.sql` |
-| Workflow SP | `new_adjustment_db_objects/12_sp_workflow.sql` |
-| Direct-upload validation | `new_adjustment_db_objects/13_direct_validation.sql` |
-| Direct batch submit SP | `new_adjustment_db_objects/14_sp_submit_direct_batch.sql` |
-| Direct FRTB upload SP | `new_adjustment_db_objects/15_direct_frtb_upload.sql` |
+| Dashboard / KPIs | `streamlit/adjustment_engine/app.py` |
+| New Adjustment (order ticket) | `streamlit/adjustment_engine/pages/1_New_Adjustment.py` |
+| Browse/manage + delete + history | `streamlit/adjustment_engine/pages/2_Adjustments.py` |
+| Approval queue | `streamlit/adjustment_engine/pages/3_Approval_Queue.py` |
+| Sign-Off (sign off / request re-open / sync) | `streamlit/adjustment_engine/pages/5_Sign_Off.py` |
+| Admin (settings, sign-off users, approvers, admins) | `streamlit/adjustment_engine/pages/6_Admin.py` |
+| Documentation (in-app AI assistant / how-it-works) | `streamlit/adjustment_engine/pages/7_Documentation.py` |
+| FRTB Explore (browse official FRTB fact tables) | `streamlit/adjustment_engine/pages/8_FRTB_Explore.py` |
+| Logs (runs, activity, errors, sign-off audit) | `streamlit/adjustment_engine/pages/9_Logs.py` |
+| Tasks & Cost (task health + serverless cost) | `streamlit/adjustment_engine/pages/10_Tasks_Cost.py` |
+| Design tokens, icons, components | `streamlit/adjustment_engine/utils/styles.py` |
+| Session/queries | `streamlit/adjustment_engine/utils/snowflake_conn.py` |
+| Tables + settings seed | `streamlit/adjustment_engine/sql/01_tables.sql` |
+| Streams (CDC on adjustment tables) | `streamlit/adjustment_engine/sql/02_streams.sql` |
+| Submit SP (validation, ACTION_MAP, blocking) | `streamlit/adjustment_engine/sql/03_sp_submit_adjustment.sql` |
+| Preview SP (summary/breakdown/sample modes) | `streamlit/adjustment_engine/sql/04_sp_preview_adjustment.sql` |
+| Process SP (Direct/Scale/EntityRoll/Transfer paths) | `streamlit/adjustment_engine/sql/05_sp_process_adjustment.sql` |
+| Pipeline runner SP | `streamlit/adjustment_engine/sql/05b_sp_run_pipeline.sql` |
+| Force-process SP | `streamlit/adjustment_engine/sql/05c_sp_force_process.sql` |
+| Scheduled tasks (5 pipeline tasks) | `streamlit/adjustment_engine/sql/06_tasks.sql` |
+| Dynamic tables | `streamlit/adjustment_engine/sql/07_dynamic_tables.sql` |
+| Views (combined/adjusted, tracking) | `streamlit/adjustment_engine/sql/08_views.sql` |
+| Entity Roll debug SP | `streamlit/adjustment_engine/sql/09_sp_debug_entity_roll.sql` |
+| Sign-off feed sync SP | `streamlit/adjustment_engine/sql/10_sp_signoff_sync.sql` |
+| Notification SP | `streamlit/adjustment_engine/sql/11_sp_notify.sql` |
+| Workflow SP | `streamlit/adjustment_engine/sql/12_sp_workflow.sql` |
+| Direct-upload validation | `streamlit/adjustment_engine/sql/13_direct_validation.sql` |
+| Direct batch submit SP | `streamlit/adjustment_engine/sql/14_sp_submit_direct_batch.sql` |
+| Direct FRTB upload SP | `streamlit/adjustment_engine/sql/15_direct_frtb_upload.sql` |
 | Entity Roll v2 spec | `docs/superpowers/specs/2026-06-11-entity-roll-flatten-design.md` |
 | Transfer Book / multi-scope spec | `docs/superpowers/specs/2026-09-17-transfer-book-multi-scope-design.md` |

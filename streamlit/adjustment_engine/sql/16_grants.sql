@@ -1,0 +1,181 @@
+-- =============================================================================
+-- 16_GRANTS.SQL
+-- Establishes the privileges the engine and the read-only app role need.
+-- Before this file, `grep GRANT sql/*.sql` returned only
+-- two comment lines (01:15, 01:936) and deploy.py granted USAGE ON STREAMLIT
+-- and nothing else — a fresh environment failed at the first write because
+-- nothing had ever established the underlying table/procedure privileges.
+--
+-- ── EXECUTION MODEL (settled; every grant below follows from it) ────────────
+-- Streamlit in Snowflake runs with OWNER'S RIGHTS. Every query a page issues
+-- through get_active_session() executes as the role that owns the STREAMLIT
+-- object — {{ROLE_OWNER}}, which is the role deploy.py uses for CREATE OR
+-- REPLACE STREAMLIT (deploy.py:28, :346) and therefore the owner of every
+-- object 01-15 create. The viewer's own role is NOT the query role.
+--
+-- Three independent confirmations, so this is not a guess:
+--   • docs/REVIEW_2026-08-19_GO_LIVE.md B2 — force-process fails in the app
+--     with "Unsupported statement type" on CREATE TEMPORARY TABLE. That
+--     error is the owner's-rights SiS restriction exactly; a caller's-rights
+--     session would have run it.
+--   • deploy.py grants {{ROLE_RO}} nothing but USAGE ON STREAMLIT
+--     (deploy.py:364) and the app has been live against real data with only
+--     that. Under viewer's rights every page would fail on its first SELECT.
+--   • The app calls EXECUTE AS CALLER procedures that write to FACT and
+--     BATCH; those succeed, which they could not do under a read-only role.
+--
+-- Consequences, and they are what makes this file short:
+--   • {{ROLE_OWNER}} needs NO grants inside ADJUSTMENT_APP — it owns it.
+--   • {{ROLE_RO}} needs NO object grants for the app to work. It needs only
+--     what SiS itself requires of a viewer: USAGE on the database, the
+--     schema, the STREAMLIT object (deploy.py) and the query warehouse.
+--   • The cross-schema grants (DIMENSION / FACT / BATCH / RAVEN / METADATA)
+--     are the ones that actually matter, and they are needed by
+--     {{ROLE_OWNER}}, not by {{ROLE_RO}} — see the PREREQUISITE block.
+-- An earlier revision of this file granted {{ROLE_RO}} SELECT on all tables
+-- and views "because Streamlit queries run under the viewer's own role".
+-- That reason was wrong. The grants are retained below, re-justified and
+-- completed (dynamic tables included), as ad-hoc read access — not as
+-- something the app depends on.
+--
+-- deploy.py runs files in filename-sorted order (glob.glob + sorted()), so
+-- this file — 16 — runs AFTER 01-15 have created every object in
+-- ADJUSTMENT_APP. Two consequences of that ordering, both handled below:
+--
+--   1. Every statement in the AUTO-EXECUTED section only touches the
+--      ADJUSTMENT_APP schema, which 01_tables.sql has already created and
+--      {{ROLE_OWNER}} owns. GRANT ... ON ALL TABLES/VIEWS therefore covers
+--      everything this same deploy just created, which is why no FUTURE
+--      grant is needed — and FUTURE could not be used anyway, because it
+--      requires the global MANAGE GRANTS privilege that {{ROLE_OWNER}} does
+--      not hold. Re-running this file on every later deploy is a no-op
+--      (GRANT is idempotent).
+--   2. The engine and the workflow procedures (03, 04, 05, 12) ALSO read and
+--      write tables/sequences/procedures in the DIMENSION, FACT, BATCH,
+--      RAVEN and METADATA schemas (see the table in the audit this file
+--      implements — C-db-objects.md I13). Those schemas are NOT created by
+--      this repo (grep CREATE SCHEMA sql/*.sql — only
+--      ADJUSTMENT_APP appears) and {{ROLE_OWNER}} does not own them, so the
+--      deploy role most likely lacks GRANT authority there. Rather than emit
+--      statements that fail on every deploy — deploy.py keeps going after a
+--      failed statement but COUNTS it and exits non-zero, so a "harmless"
+--      failure still reports the whole deploy as failed — those grants are
+--      documented below as a PREREQUISITE to be run ONCE by whoever owns
+--      those schemas (or ACCOUNTADMIN) — the same pattern already used for
+--      the READ SESSION prerequisite in 01_tables.sql:13-18.
+-- =============================================================================
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- PREREQUISITE (run ONCE, by the owner of DIMENSION / FACT / BATCH / RAVEN /
+-- METADATA, or ACCOUNTADMIN — {{ROLE_OWNER}} does not own those schemas and
+-- this deploy role cannot be relied on to have GRANT authority over them):
+--
+--   -- DIMENSION.ADJUSTMENT is written by SP_SUBMIT_ADJUSTMENT (soft-delete)
+--   -- and by the engine when it registers a processed adjustment.
+--   GRANT SELECT, INSERT, UPDATE ON TABLE {{DATABASE}}.DIMENSION.ADJUSTMENT TO ROLE {{ROLE_OWNER}};
+--   -- Every other DIMENSION table (ENTITY, BOOK, TRADE, ...) the engine and
+--   -- the Direct/FRTB validation views resolve codes against — read-only.
+--   -- FUTURE TABLES covers a dimension added later with no repo DDL change.
+--   GRANT SELECT ON ALL TABLES IN SCHEMA {{DATABASE}}.DIMENSION TO ROLE {{ROLE_OWNER}};
+--   GRANT SELECT ON FUTURE TABLES IN SCHEMA {{DATABASE}}.DIMENSION TO ROLE {{ROLE_OWNER}};
+--
+--   -- The engine's write targets: one *_ADJUSTMENT (+ *_ADJUSTMENT_SUMMARY
+--   -- where the scope has one) table per ADJUSTMENTS_SETTINGS row. Table-
+--   -- level, not schema-wide — FACT also holds the official *_MEASURES /
+--   -- *_COMBINED / *_ADJUSTED tables the engine must only ever SELECT from,
+--   -- never write to. Adding a new scope's ADJUSTMENTS_SETTINGS row (the
+--   -- "no code changes" promise at 01_tables.sql's SEED DATA section) does
+--   -- need one GRANT added here alongside it.
+--   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {{DATABASE}}.FACT.VAR_MEASURES_ADJUSTMENT            TO ROLE {{ROLE_OWNER}};
+--   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {{DATABASE}}.FACT.VAR_MEASURES_ADJUSTMENT_SUMMARY    TO ROLE {{ROLE_OWNER}};
+--   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {{DATABASE}}.FACT.STRESS_MEASURES_ADJUSTMENT         TO ROLE {{ROLE_OWNER}};
+--   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {{DATABASE}}.FACT.STRESS_MEASURES_ADJUSTMENT_SUMMARY TO ROLE {{ROLE_OWNER}};
+--   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {{DATABASE}}.FACT.SENSITIVITY_MEASURES_ADJUSTMENT         TO ROLE {{ROLE_OWNER}};
+--   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {{DATABASE}}.FACT.SENSITIVITY_MEASURES_ADJUSTMENT_SUMMARY TO ROLE {{ROLE_OWNER}};
+--   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {{DATABASE}}.FACT.FRTBSA_SENSITIVITY_MEASURES_ADJUSTMENT  TO ROLE {{ROLE_OWNER}};
+--   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {{DATABASE}}.FACT.FRTBSA_DRC_MEASURES_ADJUSTMENT           TO ROLE {{ROLE_OWNER}};
+--   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {{DATABASE}}.FACT.FRTBSA_RRAO_MEASURES_ADJUSTMENT          TO ROLE {{ROLE_OWNER}};
+--   -- Read-only access to the official/combined/adjusted fact tables the
+--   -- engine and the Preview procedure join against (FUTURE covers a new
+--   -- scope's base table with no repo DDL change).
+--   GRANT SELECT ON ALL TABLES IN SCHEMA {{DATABASE}}.FACT TO ROLE {{ROLE_OWNER}};
+--   GRANT SELECT ON FUTURE TABLES IN SCHEMA {{DATABASE}}.FACT TO ROLE {{ROLE_OWNER}};
+--   -- The Scale leg stages its delta in a transient table inside FACT
+--   -- (05_sp_process_adjustment.sql _scale_temp — see audit item I17; still
+--   -- FACT-schema as of this batch, I17 is tracked separately).
+--   GRANT CREATE TABLE ON SCHEMA {{DATABASE}}.FACT TO ROLE {{ROLE_OWNER}};
+--
+--   -- Run-log plumbing the engine calls into on every processing run.
+--   GRANT USAGE ON SEQUENCE {{DATABASE}}.BATCH.SEQ_RUN_LOG TO ROLE {{ROLE_OWNER}};
+--   -- Exact signatures are owned by the BATCH team and not visible from this
+--   -- repo — confirm with them before running (a wrong signature just fails
+--   -- the GRANT harmlessly; it does not grant the wrong thing).
+--   GRANT USAGE ON PROCEDURE {{DATABASE}}.BATCH.LOAD_RUN_LOG(<signature>) TO ROLE {{ROLE_OWNER}};
+--   GRANT USAGE ON PROCEDURE {{DATABASE}}.BATCH.LOAD_RUN_LOG_END_WITH_DETAIL(<signature>) TO ROLE {{ROLE_OWNER}};
+--
+--   -- Sensitivity/FRTB dbt hand-off trigger row (05:335 INSERT; also read
+--   -- back by VW_REPORT_REFRESH_STATUS / VW_ADJUSTMENT_TRACK in 08_views.sql,
+--   -- which is why SELECT is included here too, alongside the INSERT I13
+--   -- itself calls out).
+--   GRANT SELECT, INSERT ON TABLE {{DATABASE}}.RAVEN.LOG_STAGE_ME_STATUS TO ROLE {{ROLE_OWNER}};
+--
+--   -- VaR/Stress PowerBI hand-off: the trigger procedure, and the action
+--   -- table VW_REPORT_REFRESH_STATUS reads back to report refresh status.
+--   GRANT USAGE ON PROCEDURE {{DATABASE}}.FACT.UPDATE_POWERBI_FOR_ADJUSTMENTS(<signature>) TO ROLE {{ROLE_OWNER}};
+--   GRANT SELECT ON TABLE {{DATABASE}}.METADATA.POWERBI_ACTION TO ROLE {{ROLE_OWNER}};
+--
+--   -- Sign-off feed (12_sp_workflow.sql SP_REQUEST_SIGNOFF_CHANGE /
+--   -- SP_DECIDE_SIGNOFF_CHANGE / SP_PROPAGATE_SIGNOFF_FEED; 10_sp_signoff_
+--   -- sync.sql SP_SYNC_SIGNOFF_STATUS). Table name is configurable via
+--   -- ADJ_APP_CONFIG.SIGNOFF_FEED_TABLE — this is the default.
+--   GRANT SELECT, INSERT, UPDATE ON TABLE {{DATABASE}}.BATCH.PUBLISH_SIGNOFF_STATUS TO ROLE {{ROLE_OWNER}};
+--
+--   -- OPTIONAL, and the reason this file no longer runs first.
+--   -- A FUTURE grant may only be issued by a role holding the global MANAGE
+--   -- GRANTS privilege (SECURITYADMIN by default). OWNING the schema is NOT
+--   -- enough, which is why {{ROLE_OWNER}} cannot issue these and an earlier
+--   -- revision failed the deploy on exactly these two statements.
+--   -- They are not needed for the app: this file now runs LAST, so the
+--   -- GRANT ... ON ALL TABLES/VIEWS below already covers everything 01-15
+--   -- just created. Add these only if you also want objects created OUTSIDE
+--   -- a deploy to be readable by {{ROLE_RO}} without waiting for the next one.
+--   GRANT SELECT ON FUTURE TABLES IN SCHEMA {{DATABASE}}.ADJUSTMENT_APP TO ROLE {{ROLE_RO}};
+--   GRANT SELECT ON FUTURE VIEWS  IN SCHEMA {{DATABASE}}.ADJUSTMENT_APP TO ROLE {{ROLE_RO}};
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- AUTO-EXECUTED — runs on every deploy, as {{ROLE_OWNER}} (deploy.py's
+-- session role). Touches ONLY the ADJUSTMENT_APP schema, which {{ROLE_OWNER}}
+-- owns (it is the role that creates every object in 01-15), so no cross-
+-- schema GRANT authority is required.
+--
+-- WHY THIS FILE IS NUMBERED 16 AND NOT 00. deploy.py runs the .sql files in
+-- filename order, so this one runs LAST, after every object exists. That is
+-- deliberate:
+--   • GRANT ... ON ALL TABLES/VIEWS then covers everything 01-15 created in
+--     THIS deploy. Running first, it could only ever grant on the previous
+--     deploy's objects, which is what FUTURE grants were compensating for.
+--   • FUTURE grants require the global MANAGE GRANTS privilege, which
+--     {{ROLE_OWNER}} does not hold — owning the schema is not sufficient.
+--     Issuing them here failed the deploy. They now live in the PREREQUISITE
+--     block above as an optional DBA step, and nothing depends on them.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- {{ROLE_RO}} — read-only app viewers (granted USAGE ON STREAMLIT by
+-- deploy.py's deploy_streamlit_app()). Streamlit pages query several
+-- ADJUSTMENT_APP tables directly as well as the VW_* views (e.g. ADJ_HEADER,
+-- ADJ_SIGNOFF_STATUS, ADJ_APP_CONFIG, ADJ_ADMINS, DIRECT_SCOPE_SCHEMA), and
+-- those queries run under the viewer's own role — not EXECUTE AS CALLER
+-- procedure context — so SELECT is needed on both tables and views.
+GRANT USAGE ON DATABASE {{DATABASE}} TO ROLE {{ROLE_RO}};
+GRANT USAGE ON SCHEMA {{DATABASE}}.ADJUSTMENT_APP TO ROLE {{ROLE_RO}};
+-- ALL (not FUTURE) on purpose — see the ordering note above. Re-run on every
+-- deploy, so each deploy re-grants over whatever 01-15 has just (re)created.
+GRANT SELECT ON ALL TABLES         IN SCHEMA {{DATABASE}}.ADJUSTMENT_APP TO ROLE {{ROLE_RO}};
+GRANT SELECT ON ALL VIEWS          IN SCHEMA {{DATABASE}}.ADJUSTMENT_APP TO ROLE {{ROLE_RO}};
+GRANT SELECT ON ALL DYNAMIC TABLES IN SCHEMA {{DATABASE}}.ADJUSTMENT_APP TO ROLE {{ROLE_RO}};
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- VERIFY
+-- ═══════════════════════════════════════════════════════════════════════════
+SHOW GRANTS TO ROLE {{ROLE_RO}};

@@ -1,0 +1,28 @@
+# Streamlit app manifest — read by deploy.py.
+#
+# One folder under streamlit/ = one app. Everything deploy.py needs to know
+# about this app lives here, so adding a second app is a new folder, not a
+# change to the deploy script.
+#
+# The folder holds everything this app needs to be deployed and nothing else:
+# app.py, pages/, utils/, the two dependency files and sql/ (the database
+# objects, deployed in filename order). Its unit tests live in tests/app/, so
+# copying this folder copies the deployable app and not the development kit.
+
+[app]
+# Snowflake object name (ADJUSTMENT_APP.<name>). Changing it creates a NEW
+# app at a new URL and orphans the old one — keep it stable.
+name = "ADJUSTMENT_ENGINE"
+
+# What Snowsight shows in its Streamlit list and on the app's own header.
+# This is the human-readable name; change it freely.
+title = "MRM Adjustment Engine"
+
+main_file = "app.py"
+
+# Stage holding the app files. Named explicitly rather than derived from
+# `name` because this stage already exists in every environment — deriving
+# it would leave the old one behind, full of orphaned copies of the app.
+stage = "STREAMLIT_ADJUSTMENT_STAGE"
+
+comment = "MRM Adjustment Engine — unified adjustment management for VaR, Stress, FRTB and Sensitivity."

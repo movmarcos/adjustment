@@ -1,4 +1,7 @@
-# Pull latest changes and deploy ONLY what changed.
+# DEVELOPMENT deploy: pull the latest changes and deploy ONLY what changed.
+#
+# For a hand-over or a named environment use deploy.ps1 instead — it takes
+# -DbTarget, touches no git and keeps no marker file.
 #
 # Usage:
 #   .\deploy_all.ps1            # auto: deploy only the parts changed since last deploy
@@ -7,12 +10,13 @@
 #   .\deploy_all.ps1 -Mode streamlit   # force Streamlit app only
 #   .\deploy_all.ps1 -Mode notebooks   # force Snowflake Notebooks only
 #   .\deploy_all.ps1 -Branch my-branch # deploy from a feature branch instead of main
+#   .\deploy_all.ps1 -DbTarget TEST_RAPTOR_NEWADJ_4     # target another database
 #   .\deploy_all.ps1 -PythonExe C:/path/to/python.exe   # override the interpreter
 #
 # How "auto" decides (the flag is computed from git, so it can never drift):
-#   - a change under  new_adjustment_db_objects\  (or config.py / deploy.py) -> deploy DB
-#   - a change under  streamlit_app\              (or config.py)             -> deploy Streamlit
-#   - a change under  notebooks\                  (or deploy.py)             -> deploy Notebooks
+#   - a change under  streamlit\<app>\sql\   (or streamlit\config.py|deploy.py) -> DB
+#   - a change elsewhere under streamlit\   (or streamlit\config.py)          -> Streamlit
+#   - a change under  notebooks\             (or streamlit\deploy.py)          -> Notebooks
 #   config.py touches DB and Streamlit. The last successfully-deployed commit is stored
 #   in .last_deploy_commit (gitignored, local). On a failed deploy the marker is
 #   NOT advanced, so the next run retries the same scope.
@@ -23,6 +27,9 @@ param(
     # Git branch to deploy from. Default: main.
     # Point it at a feature branch with -Branch while testing one.
     [string]$Branch = "main",
+    # Optional: deploy to a named database instead of config.py's default.
+    # The first four letters are the environment (see deploy.ps1).
+    [string]$DbTarget = "",
     # Python interpreter to run deploy.py with. Defaults to "python" resolved
     # via PATH, or $env:ADJ_DEPLOY_PYTHON when set — never hardcode a
     # personal machine path here (config.py's whole premise is nothing else
@@ -30,8 +37,19 @@ param(
     [string]$PythonExe = $(if ($env:ADJ_DEPLOY_PYTHON) { $env:ADJ_DEPLOY_PYTHON } else { "python" })
 )
 
+if ($DbTarget) {
+    $db = $DbTarget.Trim().ToUpper()
+    $env4 = $db.Substring(0, [Math]::Min(4, $db.Length))
+    if (@("DVLP","TEST","RLSE","PROD") -notcontains $env4) {
+        Write-Host "Database '$db' does not name an environment (first four letters: '$env4')." -ForegroundColor Red
+        exit 1
+    }
+    $env:ADJ_DB = $db
+    Write-Host "Target database: $db  (environment $env4)" -ForegroundColor Cyan
+}
+
 $pythonExe   = $PythonExe
-$deployScript = "deploy.py"
+$deployScript = "streamlit/deploy.py"
 $markerFile  = ".last_deploy_commit"
 
 # ── [1/3] Pull ───────────────────────────────────────────────────────────────
@@ -91,13 +109,13 @@ switch ($Mode) {
             Write-Host "Changed files since last deploy:" -ForegroundColor Cyan
             $changed | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
             foreach ($f in $changed) {
-                if ($f -like "new_adjustment_db_objects/*" -or $f -eq "config.py" -or $f -eq "deploy.py") {
+                if ($f -like "streamlit/*/sql/*" -or $f -eq "streamlit/config.py" -or $f -eq "streamlit/deploy.py") {
                     $deployDb = $true
                 }
-                if ($f -like "streamlit_app/*" -or $f -eq "config.py") {
+                if (($f -like "streamlit/*" -and $f -notlike "streamlit/*/sql/*") -or $f -eq "streamlit/config.py") {
                     $deployStreamlit = $true
                 }
-                if ($f -like "notebooks/*" -or $f -eq "deploy.py") {
+                if ($f -like "notebooks/*" -or $f -eq "streamlit/deploy.py") {
                     $deployNotebooks = $true
                 }
             }

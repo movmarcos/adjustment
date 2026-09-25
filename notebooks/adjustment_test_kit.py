@@ -52,7 +52,7 @@ ALL_TYPES = SCALING_TYPES + ("EROL", "Direct", "Upload")
 DIRECT_ROW_SCOPES = ("VaR", "Stress", "Sensitivity")
 DIRECT_FILE_SCOPES = ("FRTB", "FRTBDRC", "FRTBRRAO")
 
-#: Mirror of streamlit_app/utils/scope_filters.py. A unit test asserts the two
+#: Mirror of streamlit/adjustment_engine/utils/scope_filters.py. A unit test asserts the two
 #: stay in step, so a filter added to the app cannot silently go untested here.
 _COMMON_FILTERS = frozenset({
     "entity_code", "source_system_code", "department_code", "book_code",
@@ -85,7 +85,7 @@ def sql_escape(value) -> str:
 
     Backslashes are doubled FIRST, then quotes — the reverse order would
     re-escape the backslashes this function just inserted. Matches
-    streamlit_app/utils/snowflake_conn.sql_escape exactly.
+    streamlit/adjustment_engine/utils/snowflake_conn.sql_escape exactly.
     """
     if value is None:
         return ""
@@ -982,7 +982,7 @@ def _verify_by_type(session, scenario, scope_cfg, head, pv, written, result,
 def cleanup(session, adj_id, scope_cfg, cfg):
     """Replay the app's own delete transaction for one adjustment.
 
-    Mirrors streamlit_app/pages/2_Adjustments.py `_do_delete`: soft-delete the
+    Mirrors streamlit/adjustment_engine/pages/2_Adjustments.py `_do_delete`: soft-delete the
     header, record the transition, soft-delete the dimension row, remove the
     fact adjustment and summary rows — all inside one transaction, so a
     failure leaves nothing half-deleted. Using the app's path means cleanup

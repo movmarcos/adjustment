@@ -3,7 +3,7 @@ channels:
   - snowflake
 dependencies:
   # For local dev only — deploy.py never imports streamlit and does not
-  # read this file. streamlit_app/environment.yml is authoritative for the
+  # read this file. streamlit/adjustment_engine/environment.yml is authoritative for the
   # Streamlit-in-Snowflake runtime; keep this pin matching it (1.50.0 since
   # 2026-09-08) so a local dev environment doesn't drift from what SiS runs.
   - python=3.11

@@ -3,8 +3,8 @@
 No network, no Snowflake, no real sleeping anywhere: every test drives `kit`
 through a hand-rolled FakeSession (records every query, answers from
 substring rules, can be told to raise on a query) — the same shape the app's
-own tests use for Snowpark, see streamlit_app/tests/test_transfer_form.py and
-streamlit_app/tests/test_sql_escape.py.
+own tests use for Snowpark, see streamlit/adjustment_engine/tests/test_transfer_form.py and
+streamlit/adjustment_engine/tests/test_sql_escape.py.
 """
 import json
 
@@ -157,7 +157,7 @@ def test_scope_filter_fields_matches_the_app_exactly():
     app_keys = set(APP_SCOPE_FILTER_FIELDS)
     assert kit_keys == app_keys, (
         "kit's vendored SCOPE_FILTER_FIELDS covers a different set of scopes "
-        "than streamlit_app/utils/scope_filters.py: only in kit=" +
+        "than streamlit/adjustment_engine/utils/scope_filters.py: only in kit=" +
         repr(kit_keys - app_keys) + " only in app=" + repr(app_keys - kit_keys))
 
     for scope in app_keys:
@@ -169,7 +169,7 @@ def test_scope_filter_fields_matches_the_app_exactly():
             repr(app_set - kit_set) + " and has extra " +
             repr(kit_set - app_set) + ". Update the vendored copy in "
             "notebooks/adjustment_test_kit.py to match "
-            "streamlit_app/utils/scope_filters.py.")
+            "streamlit/adjustment_engine/utils/scope_filters.py.")
 
 
 # ══════════════════════════════════════════════════════════════════════════

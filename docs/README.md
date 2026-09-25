@@ -8,7 +8,7 @@ adjusted numbers to downstream reporting. Base fact data is **never**
 modified; adjustments live in separate delta tables and reports read a
 combined view.
 
-**End users are non-technical risk analysts.** The UI (`streamlit_app/`)
+**End users are non-technical risk analysts.** The UI (`streamlit/adjustment_engine/`)
 prioritises error prevention and plain-English messaging over feature
 count; anything ambiguous in the UI is treated as a bug. See `AGENTS.md`
 for the full set of engineering conventions and invariants — this README
@@ -36,7 +36,7 @@ covers the solution as built, for a human reader.
 
 ---
 
-## Pages (`streamlit_app/pages/`)
+## Pages (`streamlit/adjustment_engine/pages/`)
 
 | Page | Purpose |
 |---|---|
@@ -124,15 +124,15 @@ adjustment/
 ├── config.py                        # environment-derived Snowflake names (DVLP/TEST/RLSE/PROD)
 ├── deploy.py                        # the only supported deploy entry point
 ├── deploy_all.ps1                   # Windows wrapper: git pull + auto-scoped deploy.py call
-├── environment.yml                  # local-dev conda env (mirrors streamlit_app/environment.yml)
+├── environment.yml                  # local-dev conda env (mirrors streamlit/adjustment_engine/environment.yml)
 ├── mufg_snowflakeconn-2.5.2-py3-none-any.whl   # vendored private connector wheel
 ├── drivers/                         # JDBC driver, split into git-trackable parts (see drivers/README.md)
-├── new_adjustment_db_objects/       # Snowflake DDL + stored procedures, deploy-ordered
+├── streamlit/adjustment_engine/sql/       # Snowflake DDL + stored procedures, deploy-ordered
 │   ├── 01_tables.sql … 08_views.sql          # core schema, SPs, tasks, views
 │   ├── 05b_sp_run_pipeline.sql, 05c_sp_force_process.sql
 │   ├── 09_sp_debug_entity_roll.sql … 15_direct_frtb_upload.sql
 │   └── tests/                       # SQL-level integration tests (test_entity_roll_adjustment.sql etc.)
-├── streamlit_app/                   # Streamlit-in-Snowflake (SiS) application
+├── streamlit/adjustment_engine/                   # Streamlit-in-Snowflake (SiS) application
 │   ├── app.py                       # Home dashboard
 │   ├── pages/                       # 1, 2, 3, 5, 6, 7, 8, 9, 10 — see Pages above
 │   ├── utils/                       # styles.py (design system), snowflake_conn.py, scope_filters.py, transfer_book.py, submit_fanout.py
@@ -155,7 +155,7 @@ Old prototype trees (an earlier design with different page numbering and a
 
 ## Deploy
 
-The **only** supported deploy path is `python deploy.py`, run against the
+The **only** supported deploy path is `python streamlit/deploy.py`, run against the
 environment `config.py` currently targets (`ADJ_ENV` env var, default
 `DVLP`; valid values `DVLP | TEST | RLSE | PROD`).
 
@@ -164,18 +164,18 @@ environment `config.py` currently targets (`ADJ_ENV` env var, default
 # the vendored wheel at the repo root; snowflake-snowpark-python comes from PyPI.
 pip install ./mufg_snowflakeconn-2.5.2-py3-none-any.whl snowflake-snowpark-python
 
-python deploy.py                  # full deploy: DB objects + Streamlit app + Notebooks
-python deploy.py --db-only        # DB objects only
-python deploy.py --streamlit-only # Streamlit app only
-python deploy.py --notebooks-only # Snowflake Notebooks only
-python deploy.py --test-adj       # (opt-in) also submit one test VaR Flatten adjustment
-python deploy.py --validate-only  # run only the post-deploy schema validation, no deploy
+python streamlit/deploy.py                  # full deploy: DB objects + Streamlit app + Notebooks
+python streamlit/deploy.py --db-only        # DB objects only
+python streamlit/deploy.py --streamlit-only # Streamlit app only
+python streamlit/deploy.py --notebooks-only # Snowflake Notebooks only
+python streamlit/deploy.py --test-adj       # (opt-in) also submit one test VaR Flatten adjustment
+python streamlit/deploy.py --validate-only  # run only the post-deploy schema validation, no deploy
 ```
 
 A full run:
 
 1. **PHASE 1 — Database Objects**: deploys every file under
-   `new_adjustment_db_objects/*.sql` in **filename-sorted order**
+   `streamlit/adjustment_engine/sql/*.sql` in **filename-sorted order**
    (`01` → `15`; `05b`/`05c` sort correctly between `05` and `06`). All
    tables use `CREATE OR ALTER TABLE`, so redeploys do not drop data.
 2. **PHASE 1b — Resume pipeline tasks**: `CREATE OR REPLACE TASK` always
@@ -184,7 +184,7 @@ A full run:
    objects (metric columns, `FACT_TABLE_PK`) against the live fact/adjusted
    tables. Warnings about Roll defaulting missing combined-view columns to
    `-1`/`NULL` are expected; any ❌ is a hard block.
-4. **PHASE 2 — Streamlit Application**: uploads `streamlit_app/` to the SiS
+4. **PHASE 2 — Streamlit Application**: uploads `streamlit/adjustment_engine/` to the SiS
    stage and reports what stale files (if any) it removed.
 5. **PHASE 2b — Snowflake Notebooks**: uploads `notebooks/` (the harness kit
    + the `.ipynb`) to their own stage and creates/activates the
@@ -192,7 +192,7 @@ A full run:
 6. **PHASE 3 — Test adjustment** (only with `--test-adj`; off by default):
    submits one test VaR Flatten adjustment.
 
-**Never deploy a single `new_adjustment_db_objects/*.sql` file
+**Never deploy a single `streamlit/adjustment_engine/sql/*.sql` file
 individually, out of that numeric order.** Later files reference columns
 added by earlier ones unconditionally — e.g. `05_sp_process_adjustment.sql`
 and `08_views.sql` both reference `ADJ_HEADER.SOURCE_BOOK_CODE`, added in
@@ -201,7 +201,7 @@ against live table schemas at `CREATE OR ALTER PROCEDURE` time, only at
 first invocation — a hand-pasted single-file "hotfix" against an
 environment that hasn't received an earlier file's change will succeed
 silently and only fail later, deep inside a live pipeline run. Full-
-directory deploys via `python deploy.py` only (`--db-only` still deploys
+directory deploys via `python streamlit/deploy.py` only (`--db-only` still deploys
 every DB file, not one). If a hotfix to a single procedure is operationally
 necessary, re-run `01_tables.sql` first — it's `CREATE OR ALTER`, so
 idempotent/safe.
@@ -210,7 +210,7 @@ idempotent/safe.
 
 Pulls the target branch, diffs it against the last successfully-deployed
 commit (`.last_deploy_commit`, gitignored/local) to auto-scope the deploy,
-and calls `deploy.py` for you.
+and calls `streamlit/deploy.py` for you.
 
 ```powershell
 .\deploy_all.ps1                                   # auto: only what changed since last deploy
@@ -240,13 +240,13 @@ the automated suites do and do not cover).
 
 Two independent pytest suites; run both before trusting a change.
 
-### `streamlit_app/tests/` — widget/form logic (mocked Streamlit)
+### `tests/app/` — widget/form logic (mocked Streamlit)
 
 No Snowflake connection; uses `streamlit.testing.v1.AppTest` plus direct
 unit tests of pure helper modules.
 
 ```bash
-pytest streamlit_app/tests -v
+pytest tests/app -v
 ```
 
 Covers: activity-grid row shaping, the three grid renderers, the New
