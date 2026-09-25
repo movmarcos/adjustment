@@ -116,7 +116,7 @@ def test_apply_identity_blocks_on_missing_many_or_none(src):
 
 def test_per_row_file_mode_refuses_to_stage_a_mixed_entity_batch(src):
     body = _fn(src, "render_direct_form")
-    assert 'cob_bad = bool(wiz.get("_cob_bad") or wiz.get("_entity_bad"))' in body
+    assert 'cob_bad = bool(wiz.get("_cob_bad") or wiz.get("_entity_bad")' in body
     assert "if unknown_cols or missing_cols or cob_bad or not len(ndf):" in body
 
 
@@ -155,3 +155,43 @@ def test_the_payload_carries_the_derived_entity_for_frtb_direct(src):
     frtb = body[body.index('if cat == "VaR Upload" or _is_frtb_file_direct():'):]
     frtb = frtb[:frtb.index('if cat == "Entity Roll"')]
     assert '"entity_code":           wiz.get("entity_code", "")' in frtb
+
+
+# ── Double paste and duplicate rows (2026-09-25) ─────────────────────────────
+
+def test_every_paste_box_strips_a_repeated_paste(src):
+    """A slow paste made a user paste again; the second copy must not count."""
+    assert src.count("repeated_paste(csv_text.strip())") == 3, (
+        "all three paste boxes (per-row, VaR Upload, FRTB) must go through "
+        "repeated_paste")
+    assert "_read_csv(StringIO(csv_text.strip()))" not in src, (
+        "a paste box still parses the raw text — a double paste would go in twice")
+
+
+@pytest.mark.parametrize("flow,fn", FLOWS.items())
+def test_every_direct_flow_blocks_on_duplicate_rows(src, flow, fn):
+    body = _fn(src, fn)
+    assert "_guard_duplicates(" in body, flow + " never checks for duplicate rows"
+
+
+def test_file_uploads_reset_the_paste_count(src):
+    """A file after a double paste must not inherit the 'pasted twice' warning."""
+    assert src.count('wiz["_paste_copies"] = 1\n') >= 4   # 3 file sites + clear
+
+
+def test_the_per_row_flow_refuses_to_stage_duplicates(src):
+    body = _fn(src, "render_direct_form")
+    assert "or _dups_blocked)" in body
+
+
+def test_the_guard_offers_a_one_click_fix_scoped_to_the_content(src):
+    body = _fn(src, "_guard_duplicates")
+    assert "Remove duplicate rows (keep first)" in body
+    assert 'wiz["_dedupe_sig"] = sig' in body
+    assert 'if wiz.get("_dedupe_sig") == sig:' in body, (
+        "a de-dupe must apply to this content only; a new paste starts clean")
+
+
+def test_every_direct_checklist_has_the_duplicate_check(src):
+    body = _fn(src, "_completion_checks")
+    assert body.count('not wiz.get("_dups_bad")') == 3

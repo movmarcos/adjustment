@@ -36,6 +36,7 @@ from utils.submit_fanout import (scopes_to_submit as _scopes_to_submit_pure,
                                  submit_fanout as _submit_fanout_pure,
                                  first_scope as _first_scope)
 from utils.upload_identity import file_identity, identity_message, single_value
+from utils.paste_guard import repeated_paste
 from utils.transfer_book import (transfer_jobs, book_entity,
                                  submit_jobs as _submit_jobs_pure)
 
@@ -1079,6 +1080,7 @@ def _completion_checks() -> list:
             ("COB date (from file)", bool(wiz.get("cobid"))),
             ("Single ENTITY_CODE in file", not wiz.get("_entity_bad")),
             ("Entity code (from file)", bool((wiz.get("entity_code") or "").strip())),
+            ("No duplicate rows",    not wiz.get("_dups_bad")),
             ("Reference",           bool((wiz.get("global_reference") or "").strip())),
             ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
             ("Reason",              bool((wiz.get("reason") or "").strip())),
@@ -1095,6 +1097,7 @@ def _completion_checks() -> list:
                                      and wiz.get("cobid") == wiz.get("_frtb_file_cob")),
             ("Single ENTITY_CODE in file", not wiz.get("_entity_bad")),
             ("Entity code (from file)", bool((wiz.get("entity_code") or "").strip())),
+            ("No duplicate rows",    not wiz.get("_dups_bad")),
             ("Reference",           bool((wiz.get("global_reference") or "").strip())),
             ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
             ("Reason",              bool((wiz.get("reason") or "").strip())),
@@ -1118,6 +1121,7 @@ def _completion_checks() -> list:
             ("COB date",            bool(wiz.get("cobid"))),
             ("Single ENTITY_CODE",  not wiz.get("_entity_bad")),
             ("Entity code",         bool((wiz.get("entity_code") or "").strip())),
+            ("No duplicate rows",   not wiz.get("_dups_bad")),
             ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
             ("Reason",              bool((wiz.get("reason") or "").strip())),
         ]
@@ -1550,8 +1554,47 @@ def _apply_identity(ident: dict, noun: str = "upload") -> None:
 def _clear_identity() -> None:
     for k in ("cobid", "entity_code", "_cob_msg", "_entity_msg"):
         wiz[k] = None
-    for k in ("_cob_bad", "_entity_bad", "_var_cob_bad", "_frtb_cob_bad"):
+    for k in ("_cob_bad", "_entity_bad", "_var_cob_bad", "_frtb_cob_bad", "_dups_bad"):
         wiz[k] = False
+    wiz["_paste_copies"] = 1
+
+
+def _guard_duplicates(df, sig: str):
+    """Block on rows that repeat an earlier row; one-click fix per content.
+
+    Marcos, 2026-09-25: a slow paste made a user paste again and every row
+    went in twice. The repeated header of a double paste is already
+    stripped at the paste site (repeated_paste) — this is the general net:
+    exact duplicates in any input mode, file uploads included. Returns
+    (df, blocked). `sig` is the content token, so a de-dupe applies to
+    this content only and a new paste starts clean.
+    """
+    from utils.paste_guard import dedupe, duplicate_message, duplicate_rows
+    copies = int(wiz.get("_paste_copies") or 1)
+    if copies > 1:
+        st.warning(f"The content appears to have been pasted **{copies} times** "
+                   f"(the header line repeats) — only the first copy is used.")
+    if df is None or not len(df):
+        wiz["_dups_bad"] = False
+        return df, False
+    if wiz.get("_dedupe_sig") == sig:
+        kept = dedupe(df)
+        if len(kept) < len(df):
+            st.caption(f"✓ {len(df) - len(kept)} duplicate row(s) removed — "
+                       f"first occurrence kept.")
+        wiz["_dups_bad"] = False
+        return kept, False
+    dups = duplicate_rows(df)
+    wiz["_dups_bad"] = bool(dups)
+    if not dups:
+        return df, False
+    st.error(duplicate_message(dups))
+    if st.button("Remove duplicate rows (keep first)", key=_k("dedupe_btn"),
+                 help="Keeps the first occurrence of each repeated row and "
+                      "drops the rest, for this content only."):
+        wiz["_dedupe_sig"] = sig
+        safe_rerun()
+    return df, True
 
 
 def _render_identity_fields(has_data: bool) -> None:
@@ -2528,6 +2571,7 @@ def render_direct_form() -> None:
                         except UnicodeDecodeError:
                             _text = _raw.decode("latin-1")
                         df = _read_csv(StringIO(_text))
+                        wiz["_paste_copies"] = 1
                         _src_token = f"file:{up_file.name}:{len(_raw)}:{delim_choice}"
                     except Exception as exc:
                         _parse_err = exc
@@ -2538,7 +2582,8 @@ def render_direct_form() -> None:
                 if csv_text.strip():
                     try:
                         from io import StringIO
-                        df = _read_csv(StringIO(csv_text.strip()))
+                        _txt, wiz["_paste_copies"] = repeated_paste(csv_text.strip())
+                        df = _read_csv(StringIO(_txt))
                         _src_token = f"paste:{hash(csv_text)}:{delim_choice}"
                     except Exception as exc:
                         _parse_err = exc
@@ -2561,6 +2606,7 @@ def render_direct_form() -> None:
                          f"wrong, try selecting the delimiter explicitly above.")
             elif df is not None:
                 ndf, unknown_cols, missing_cols = _parse_direct_df(df, scope)
+                ndf, _dups_blocked = _guard_duplicates(ndf, _src_token)
 
                 # The header must match the scope template exactly (any
                 # order): extra columns usually mean a file exported for a
@@ -2587,7 +2633,8 @@ def render_direct_form() -> None:
                 # (the header takes the derived value); the entity is what
                 # sign-off is checked against, per scope and COB.
                 _apply_identity(file_identity(ndf), noun="batch")
-                cob_bad = bool(wiz.get("_cob_bad") or wiz.get("_entity_bad"))
+                cob_bad = bool(wiz.get("_cob_bad") or wiz.get("_entity_bad")
+                               or _dups_blocked)
                 wiz["_direct_file_cob"] = wiz.get("cobid")
                 _render_identity_fields(True)
 
@@ -2880,6 +2927,7 @@ def render_var_upload_form() -> None:
                     _text = _raw.decode("latin-1")
                 df = _read_csv(StringIO(_text))
                 wiz["uploaded_file_name"] = up_file.name
+                wiz["_paste_copies"] = 1
                 _src_token = f"file:{up_file.name}:{len(_raw)}:{delim_choice}"
             except Exception as exc:
                 _parse_err = exc
@@ -2890,7 +2938,8 @@ def render_var_upload_form() -> None:
         if csv_text.strip():
             try:
                 from io import StringIO
-                df = _read_csv(StringIO(csv_text.strip()))
+                _txt, wiz["_paste_copies"] = repeated_paste(csv_text.strip())
+                df = _read_csv(StringIO(_txt))
                 wiz["uploaded_file_name"] = f"CSV_Pasted_{len(df)}_rows.csv"
                 _src_token = f"paste:{hash(csv_text)}:{delim_choice}"
             except Exception as exc:
@@ -2909,6 +2958,7 @@ def render_var_upload_form() -> None:
             st.warning(f"Only ONE column was detected ({df.columns[0]}) but "
                        f"{len(expected_cols)} are expected — the delimiter is "
                        f"probably wrong. Pick it explicitly above.")
+        df, _dups_blocked = _guard_duplicates(df, _src_token)
         wiz["uploaded_df"] = df
 
         extra_cols = [c for c in df.columns if c not in expected_cols]
@@ -3144,6 +3194,7 @@ def _render_frtb_direct_body(scope: str) -> None:
                     _text = _raw.decode("latin-1")
                 df = _read_csv(StringIO(_text))
                 wiz["uploaded_file_name"] = up_file.name
+                wiz["_paste_copies"] = 1
                 _src_token = f"file:{up_file.name}:{len(_raw)}:{delim_choice}"
             except Exception as exc:
                 _parse_err = exc
@@ -3154,7 +3205,8 @@ def _render_frtb_direct_body(scope: str) -> None:
         if csv_text.strip():
             try:
                 from io import StringIO
-                df = _read_csv(StringIO(csv_text.strip()))
+                _txt, wiz["_paste_copies"] = repeated_paste(csv_text.strip())
+                df = _read_csv(StringIO(_txt))
                 wiz["uploaded_file_name"] = f"CSV_Pasted_{len(df)}_rows.csv"
                 _src_token = f"paste:{hash(csv_text)}:{delim_choice}"
             except Exception as exc:
@@ -3177,6 +3229,7 @@ def _render_frtb_direct_body(scope: str) -> None:
             df = df.rename(columns=_renamed)
             st.caption("Renamed business headers: "
                        + ", ".join(f"{a} → {b}" for a, b in _renamed.items()))
+        df, _dups_blocked = _guard_duplicates(df, _src_token)
         wiz["uploaded_df"] = df
 
         missing_req = sorted(required - set(df.columns))

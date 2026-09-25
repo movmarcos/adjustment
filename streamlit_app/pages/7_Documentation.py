@@ -182,6 +182,11 @@ Adjustment categories:
   view's DDL hash. An admin refreshes it (Admin › Business Rules; only views
   whose definition changed are re-described) and marks it reviewed; until
   then it shows DRAFT, and STALE when the view changed after it was written.
+  DOUBLE PASTE / DUPLICATE ROWS (2026-09-25): a paste whose header line
+  repeats (content pasted twice because the page was slow) is cut to its
+  first copy with a warning. Rows identical to an earlier row (ignoring case
+  and spacing) BLOCK submission in every input mode, listing the row numbers;
+  the "Remove duplicate rows (keep first)" button drops them.
 - VaR Upload: one CSV in VaR legacy layout = one adjustment; re-upload with the
   same COB+Reference replaces the previous one.
 - Entity Roll: destructive replace of an entity's figures at a COB; always
@@ -859,6 +864,15 @@ with tab_create:
         f'entity and the COB exactly as it is for a Scaling adjustment, and it '
         f'is why the row grid sits directly under the upload panel: the rows '
         f'that failed are the first thing you see.', P["info"]))
+    _html(_card(
+        f'{icon("copy", size=13, color=P["warning"])} <strong>Pasted twice? '
+        f'Duplicate rows?</strong> If the page is slow after a paste and the '
+        f'content is pasted again, the header line repeats: the app keeps only '
+        f'the first copy and says so. Separately, in every input mode, rows '
+        f'that repeat an earlier row exactly (ignoring case and spacing) '
+        f'<strong>block</strong> submission — each row becomes its own '
+        f'adjustment, so a duplicate would book the same value twice. One '
+        f'button removes them, keeping the first occurrence.', P["warning"]))
     _html(_card(
         "<strong>VaR, Stress, Sensitivity — per row.</strong> Paste or upload "
         "a CSV of exact values (the expected columns are shown on the page). "
