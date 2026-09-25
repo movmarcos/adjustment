@@ -1356,6 +1356,117 @@ with tab_notify:
                 except Exception as ex:
                     st.error(f"{label} model {mdl}: NOT available — {ex}")
 
+    # ── Business rules for Direct uploads (New Adjustment › What will be checked)
+    # The SQL validation views described in English by Cortex, cached in
+    # ADJ_RULE_DOCS by DDL hash: Refresh only re-generates views whose
+    # definition changed; new text is DRAFT until an admin marks it reviewed.
+    # (Marcos, 2026-09-25.)
+    st.markdown("<br/>", unsafe_allow_html=True)
+    section_title("Business Rules — Direct uploads", "book-open")
+    st.markdown(
+        f'<span style="font-size:0.85rem;color:{P["grey_700"]}">'
+        f'The <strong>What will be checked</strong> panel on the New Adjustment '
+        f'page describes each scope\'s upload rules in plain English. The column '
+        f'contract and the "required when" rules are rendered from the scope '
+        f'configuration directly. The checks inside the SQL views '
+        f'(<code>VW_DIRECT_VALIDATE</code>, <code>VW_DIRECT_*_ENRICHED</code>) '
+        f'are written by the AI assistant\'s model from the view definition and '
+        f'stored here. <strong>Refresh</strong> asks the model only for views '
+        f'whose definition changed since the text was written (a changed view '
+        f'shows as <em>stale</em> until then). New text is a <strong>draft</strong> '
+        f'until you read it and mark it reviewed — a wrong rule description is '
+        f'worse than none.'
+        f'</span>', unsafe_allow_html=True)
+    try:
+        df_rules = run_query_df("""
+            SELECT PROCESS_TYPE, OBJECT_NAME, IS_STALE, IS_REVIEWED, REVIEWED_BY,
+                   GENERATED_AT, MODEL, DESCRIPTION
+            FROM ADJUSTMENT_APP.VW_RULE_DOCS
+            ORDER BY PROCESS_TYPE, OBJECT_NAME
+        """)
+    except Exception as ex:
+        df_rules = pd.DataFrame()
+        st.warning(f"Could not read the business-rule descriptions "
+                   f"(deploy 15c_sp_refresh_rule_docs.sql?): {ex}")
+
+    _rules_model = (ai_smart.strip() or ai_quick.strip() or "llama3.1-70b")
+    rb1, rb2, _ = st.columns([1.4, 1.4, 2.2])
+    with rb1:
+        if st.button("Refresh business rules", key="rules_refresh", type="primary",
+                     **wide_kwargs(),
+                     help=f"Uses the larger model ({_rules_model}). Only views "
+                          f"whose definition changed are re-described."):
+            try:
+                with st.spinner("Reading the views and writing the descriptions…"):
+                    _r = run_query(f"CALL ADJUSTMENT_APP.SP_REFRESH_RULE_DOCS("
+                                   f"'{_esc(_rules_model)}', FALSE, '{_esc(user)}')")
+                from utils.rule_docs import forget_rule_docs
+                forget_rule_docs()
+                _res = _r[0][0] if _r else ""
+                set_flash("admin", "success", f"Business rules refreshed: {_res}")
+                safe_rerun()
+            except Exception as ex:
+                st.error(f"Refresh failed: {ex}")
+    with rb2:
+        if st.button("Re-write ALL (force)", key="rules_force", **wide_kwargs(),
+                     help="Regenerates every description even if the view did "
+                          "not change. Clears every review."):
+            try:
+                with st.spinner("Re-writing every description…"):
+                    _r = run_query(f"CALL ADJUSTMENT_APP.SP_REFRESH_RULE_DOCS("
+                                   f"'{_esc(_rules_model)}', TRUE, '{_esc(user)}')")
+                from utils.rule_docs import forget_rule_docs
+                forget_rule_docs()
+                set_flash("admin", "success", f"Business rules re-written: "
+                                              f"{_r[0][0] if _r else ''}")
+                safe_rerun()
+            except Exception as ex:
+                st.error(f"Re-write failed: {ex}")
+
+    if df_rules.empty:
+        st.info("No descriptions written yet — click **Refresh business rules**.")
+    else:
+        _n_stale = int(df_rules["IS_STALE"].fillna(False).astype(bool).sum())
+        _n_draft = int((~df_rules["IS_REVIEWED"].fillna(False).astype(bool)).sum())
+        st.markdown(
+            f'<span style="font-size:0.85rem">'
+            f'<strong>{len(df_rules)}</strong> descriptions · '
+            f'<strong style="color:{P["warning"]}">{_n_stale} stale</strong> · '
+            f'<strong style="color:{P["grey_700"]}">{_n_draft} draft</strong>'
+            f'</span>', unsafe_allow_html=True)
+        _show = df_rules[["PROCESS_TYPE", "OBJECT_NAME", "IS_STALE", "IS_REVIEWED",
+                          "REVIEWED_BY", "GENERATED_AT", "MODEL"]].copy()
+        _show["PROCESS_TYPE"] = _show["PROCESS_TYPE"].map(lambda v: scope_label(str(v)))
+        render_df_table(_show, max_rows=50, height=280)
+
+        for _, r in df_rules.iterrows():
+            _flags = []
+            if bool(r["IS_STALE"]):
+                _flags.append("stale")
+            _flags.append("reviewed" if bool(r["IS_REVIEWED"]) else "draft")
+            with st.expander(f"{scope_label(str(r['PROCESS_TYPE']))} · "
+                             f"{r['OBJECT_NAME']} — {', '.join(_flags)}"):
+                st.markdown(str(r["DESCRIPTION"] or "_(empty)_"))
+                if not bool(r["IS_REVIEWED"]):
+                    if st.button("Mark reviewed — the wording is right",
+                                 key=f"rules_ok_{r['PROCESS_TYPE']}_{r['OBJECT_NAME']}"):
+                        try:
+                            run_query(f"""
+                                UPDATE ADJUSTMENT_APP.ADJ_RULE_DOCS
+                                SET REVIEWED_BY = '{_esc(user)}',
+                                    REVIEWED_AT = CURRENT_TIMESTAMP()
+                                WHERE PROCESS_TYPE = '{_esc(str(r['PROCESS_TYPE']))}'
+                                  AND OBJECT_NAME = '{_esc(str(r['OBJECT_NAME']))}'
+                            """)
+                            from utils.rule_docs import forget_rule_docs
+                            forget_rule_docs()
+                            set_flash("admin", "success",
+                                      f"{r['OBJECT_NAME']} for "
+                                      f"{scope_label(str(r['PROCESS_TYPE']))} marked reviewed.")
+                            safe_rerun()
+                        except Exception as ex:
+                            st.error(f"Could not mark reviewed: {ex}")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 5 — SCHEMA REFERENCE
@@ -1369,6 +1480,7 @@ with tab_schema:
         ("ADJUSTMENT_APP.ADJ_LINE_ITEM",         "TABLE",         "Explicit row-level values for Upload/Direct adjustments"),
         ("ADJUSTMENT_APP.ADJ_LINE_ITEM_JSON",    "TABLE",         "Direct Adjustment uploads — one row per CSV line, raw fields in PAYLOAD (VARIANT)"),
         ("ADJUSTMENT_APP.ADJ_STATUS_HISTORY",    "TABLE",         "Append-only audit log of every status change"),
+        ("ADJUSTMENT_APP.ADJ_RULE_DOCS",         "TABLE",         "Business-English description of the Direct validation views (Cortex), cached by DDL hash; DRAFT until reviewed"),
         ("ADJUSTMENT_APP.ADJUSTMENTS_SETTINGS",  "TABLE",         "Config: scope → fact table mapping, PK columns, metrics"),
         ("ADJUSTMENT_APP.ADJ_RECURRING_TEMPLATE","TABLE",         "Templates for automatically recurring adjustments (not scheduled yet)"),
         # (Streams retired — the pipeline POLLS; tasks fire every minute

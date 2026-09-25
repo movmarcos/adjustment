@@ -169,6 +169,19 @@ Adjustment categories:
   A USD row needs no rate. A non-USD row with no matching rate FAILS the
   whole adjustment and names the COB and currency, rather than writing a
   blank local amount — check REGION_AREA_CODE in the file first.
+  ONE UPLOAD = ONE COB AND ONE ENTITY_CODE (since 2026-09-25): both are read
+  from the data (COBID / ENTITY_CODE; the VaR layout's COBId / EntityCode are
+  the same fields), shown read-only under the upload, never typed. A file
+  mixing two COBs or two entities is blocked, listing the values. Sign-off is
+  then checked per scope + entity + COB, as for Scaling. The row grid sits
+  right under the upload panel so failed rows are seen first.
+  WHAT WILL BE CHECKED panel: every Direct upload card opens with a collapsed
+  panel describing the scope's rules in English — columns and "required when"
+  rules from the scope config (rendered by code), plus the checks in the SQL
+  validation views written by the AI model and cached in ADJ_RULE_DOCS by the
+  view's DDL hash. An admin refreshes it (Admin › Business Rules; only views
+  whose definition changed are re-described) and marks it reviewed; until
+  then it shows DRAFT, and STALE when the view changed after it was written.
 - VaR Upload: one CSV in VaR legacy layout = one adjustment; re-upload with the
   same COB+Reference replaces the previous one.
 - Entity Roll: destructive replace of an entity's figures at a COB; always
@@ -824,6 +837,29 @@ with tab_create:
 
     section_title("Direct Adjustment (paste or upload CSV)", "list")
     _html(_card(
+        f'{icon("book-open", size=13, color=P["info"])} <strong>Read the rules '
+        f'first.</strong> Every Direct upload card opens with a collapsed '
+        f'<em>What will be checked</em> panel for the selected scope: the '
+        f'columns (which are always required, which are accepted under a '
+        f'business name), the <em>required depending on the row</em> rules '
+        f'(e.g. CCY1 when Risk Class is FX or GIRR), and the checks every row '
+        f'must pass (numeric value, known codes, USD conversion). The first two '
+        f'come straight from the scope configuration; the last is written from '
+        f'the validation views by the AI assistant and kept by an admin — it '
+        f'shows <em>draft</em> until reviewed and <em>rules changed</em> if the '
+        f'view moved since it was written.', P["info"]))
+    _html(_card(
+        f'{icon("user", size=13, color=P["info"])} <strong>One upload = one COB '
+        f'and one ENTITY_CODE.</strong> Both are read from the data itself '
+        f'(<code>COBID</code> and <code>ENTITY_CODE</code> columns; the legacy '
+        f'VaR layout\'s <code>COBId</code> / <code>EntityCode</code> are the '
+        f'same fields) and shown read-only right under the upload. A file that '
+        f'mixes two COBs or two entities is blocked with the values listed — '
+        f'split it. This is what lets sign-off be checked for the scope, the '
+        f'entity and the COB exactly as it is for a Scaling adjustment, and it '
+        f'is why the row grid sits directly under the upload panel: the rows '
+        f'that failed are the first thing you see.', P["info"]))
+    _html(_card(
         "<strong>VaR, Stress, Sensitivity — per row.</strong> Paste or upload "
         "a CSV of exact values (the expected columns are shown on the page). "
         "Each row is validated independently and becomes its own adjustment "
@@ -1281,6 +1317,11 @@ with tab_reference:
          "scope; gates Submit only), sign-off user list, Admin-page access "
          "list, managed business-category list. Each is empty-means-everyone "
          "until its first active row is added."],
+        ["<code>ADJ_RULE_DOCS</code> / <code>VW_RULE_DOCS</code>",
+         "Business-English description of each Direct validation view per "
+         "scope, written by Cortex (<code>SP_REFRESH_RULE_DOCS</code>) and "
+         "cached by the view's DDL hash; the view adds IS_STALE / IS_REVIEWED. "
+         "Feeds the New Adjustment 'What will be checked' panel."],
         ["<code>FACT.EXCHANGE_RATE</code>",
          "Source of the USD rate used to derive the local-currency amount on "
          "FRTB Direct uploads (matched on COB, region area and currency; "

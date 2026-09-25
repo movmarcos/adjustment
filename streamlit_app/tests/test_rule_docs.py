@@ -148,3 +148,46 @@ def test_the_session_cache_is_used_and_can_be_forgotten(patched):
     assert rd.load_rule_docs("VaR") == first   # … but the cache still answers
     rd.forget_rule_docs()
     assert rd.load_rule_docs("VaR") is None
+
+
+# ── Admin page + docs ────────────────────────────────────────────────────────
+
+def _page(name):
+    with open(os.path.join(os.path.dirname(__file__), "..", "pages", name),
+              encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_admin_refreshes_only_changed_views_by_default_and_can_force():
+    src = _page("6_Admin.py")
+    sect = src[src.index('section_title("Business Rules — Direct uploads"'):]
+    sect = sect[:sect.index("# TAB 5 — SCHEMA REFERENCE")]
+    assert "SP_REFRESH_RULE_DOCS(" in sect
+    assert "FALSE, '{_esc(user)}')" in sect, "the default refresh must not force"
+    assert "TRUE, '{_esc(user)}')" in sect, "a force re-write must exist for a bad model run"
+
+
+def test_admin_marks_reviewed_and_forgets_the_page_cache():
+    src = _page("6_Admin.py")
+    sect = src[src.index('section_title("Business Rules — Direct uploads"'):]
+    sect = sect[:sect.index("# TAB 5 — SCHEMA REFERENCE")]
+    assert "SET REVIEWED_BY = '{_esc(user)}'" in sect
+    assert sect.count("forget_rule_docs()") == 3, (
+        "every write (refresh, force, review) must drop the per-session cache "
+        "or the New Adjustment panel keeps showing the old text")
+
+
+def test_admin_uses_the_larger_model_for_descriptions():
+    """Accuracy over speed: a wrong rule description is worse than none."""
+    src = _page("6_Admin.py")
+    assert '_rules_model = (ai_smart.strip() or ai_quick.strip()' in src
+
+
+def test_the_docs_describe_the_panel_and_the_one_entity_rule():
+    docs = _page("7_Documentation.py")
+    assert "What will be checked" in docs
+    assert "one ENTITY_CODE" in docs or "ONE ENTITY_CODE" in docs
+    start = docs.index('_KNOWLEDGE = """'); end = docs.index('""".strip()', start)
+    k = docs[start:end]
+    assert "ONE UPLOAD = ONE COB AND ONE ENTITY_CODE" in k
+    assert "ADJ_RULE_DOCS" in k
