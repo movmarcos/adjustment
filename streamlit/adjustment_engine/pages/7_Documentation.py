@@ -1005,7 +1005,10 @@ with tab_approval:
         "consumers — the first sign-off always comes from there (a unified "
         "file feed the engine syncs every 30 minutes, and also checks live at "
         "submit time). Sign-off granularity is <strong>COB + entity + "
-        "scope</strong> (one FRTB entry covers FRTBDRC and FRTBRRAO). Once "
+        "scope</strong>. FRTB (shown as FRTBSBM), FRTBDRC and FRTBRRAO are "
+         "signed off <strong>separately</strong> — since 2026-09-25 they "
+         "each have their own sign-off process, so signing off FRTB does "
+         "not sign off DRC or RRAO. Once "
         "signed off, <strong>no new adjustments can be submitted</strong> for "
         "that entity — an adjustment with no entity filter is blocked by any "
         "signed-off entity it would touch."))
