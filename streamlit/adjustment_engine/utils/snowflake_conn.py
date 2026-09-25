@@ -336,6 +336,122 @@ def can_submit(access, scope) -> bool:
     return str(scope or "").strip().upper() in access
 
 
+# ── Direct adjustments in production ────────────────────────────────────────
+# Marcos, 2026-09-25: "if it is running in the PROD_RAPTOR database, the
+# Direct adjustment should be disabled. I will wait for the user sign-off."
+#
+# So this is a temporary, reversible gate, not a permanent rule: once the
+# business signs Direct adjustments off, an admin sets
+# ADJ_APP_CONFIG.DIRECT_ADJUSTMENT_ENABLED = true and it opens, with no
+# redeploy and no code change.
+
+DIRECT_ENABLED_KEY = "DIRECT_ADJUSTMENT_ENABLED"
+_PROD_PREFIX = "PROD"
+
+
+def current_database() -> str:
+    """The database this app is ACTUALLY running in, upper-cased.
+
+    Asked of Snowflake rather than read from config, and that matters here:
+    config.ENV is baked in at deploy time, so a copy deployed by an older
+    deploy.py (no deploy_target.py) would claim to be DVLP while running in
+    production. Cached per session — an app cannot change database under
+    itself. Falls back to config.DATABASE only if the query fails.
+    """
+    try:
+        if st.session_state.get("_current_database"):
+            return st.session_state["_current_database"]
+    except Exception:
+        pass
+    db = ""
+    try:
+        rows = get_session().sql("SELECT CURRENT_DATABASE() AS D").collect()
+        db = str(rows[0]["D"] or "").strip().upper() if rows else ""
+    except Exception:
+        db = ""
+    if not db:
+        try:
+            import config
+            db = str(getattr(config, "DATABASE", "") or "").strip().upper()
+        except Exception:
+            db = ""
+    try:
+        if db:
+            st.session_state["_current_database"] = db
+    except Exception:
+        pass
+    return db
+
+
+def is_production() -> bool:
+    """True when the app runs in a PROD_* database.
+
+    Either signal is enough: the live database name, or the environment
+    baked in at deploy time. A gate that protects production must not be
+    opened by one of them being unavailable.
+    """
+    if current_database().startswith(_PROD_PREFIX):
+        return True
+    try:
+        import config
+        return str(getattr(config, "ENV", "")).strip().upper() == _PROD_PREFIX
+    except Exception:
+        return False
+
+
+def forget_direct_gate() -> None:
+    """Drop the cached answer (after an admin changes the setting)."""
+    try:
+        st.session_state.pop("_direct_gate", None)
+    except Exception:
+        pass
+
+
+def direct_adjustment_gate():
+    """(enabled, reason) for the Direct Adjustment category.
+
+    Outside production: always enabled. In production: disabled until
+    ADJ_APP_CONFIG.DIRECT_ADJUSTMENT_ENABLED is exactly 'true'.
+
+    FAILS CLOSED in production — an unreadable config table leaves Direct
+    off. That is the opposite of the submitter list, which fails open, and
+    deliberately so: an unreadable permission table should not stop the
+    day's work, but an unreadable feature switch must not open a gate whose
+    whole purpose is to stay shut until somebody decides otherwise.
+
+    The gate that counts is in SP_SUBMIT_ADJUSTMENT and
+    SP_SUBMIT_DIRECT_BATCH; this one disables the category and says why.
+    """
+    if not is_production():
+        return True, ""
+    try:
+        cached = st.session_state.get("_direct_gate")
+        if cached is not None:
+            return cached
+    except Exception:
+        pass
+    enabled = False
+    try:
+        rows = get_session().sql(f"""
+            SELECT CONFIG_VALUE FROM ADJUSTMENT_APP.ADJ_APP_CONFIG
+            WHERE CONFIG_KEY = '{DIRECT_ENABLED_KEY}'
+        """).collect()
+        enabled = bool(rows) and str(rows[0][0] or "").strip().lower() == "true"
+    except Exception:
+        enabled = False
+    answer = (True, "") if enabled else (False, (
+        "Direct adjustments are switched off in production while they wait "
+        "for user sign-off. Everything else on this page works as usual. "
+        "Once the business has signed them off, an admin enables them on "
+        "the Admin page (Scope Configuration › Direct adjustments in "
+        "production) — no redeploy needed."))
+    try:
+        st.session_state["_direct_gate"] = answer
+    except Exception:
+        pass
+    return answer
+
+
 def current_user_name() -> str:
     """Get the logged-in user identity.
 

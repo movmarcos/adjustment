@@ -121,6 +121,45 @@ def find_blocking_adj(session, process_type, cobid, adj_values):
     return rows[0]["ADJ_ID"] if rows else None
 
 
+# ── Direct adjustments in production ────────────────────────────────────────
+# Marcos, 2026-09-25: Direct adjustments stay switched OFF in the PROD_RAPTOR
+# database until the business signs them off. Reversible without a redeploy:
+# an admin sets ADJUSTMENT_APP.ADJ_APP_CONFIG.DIRECT_ADJUSTMENT_ENABLED to
+# 'true' (Admin page › Scope Configuration) and the gate opens.
+#
+# Checked HERE and not only in the page, because the page gate is a
+# convenience and this procedure is the one path every submission takes.
+# CURRENT_DATABASE() is the authority — the procedure runs inside the
+# database it is protecting, so there is nothing to configure and nothing
+# that can go stale.
+#
+# FAILS CLOSED: if the config table cannot be read in production, Direct
+# stays off. A feature switch whose purpose is to stay shut must not be
+# opened by an error.
+def _direct_blocked_reason(session):
+    """A refusal message while Direct is off in production, else None."""
+    try:
+        rows = session.sql("SELECT CURRENT_DATABASE() AS D").collect()
+        db = str(rows[0]["D"] or "").strip().upper() if rows else ""
+    except Exception:
+        db = ""
+    if not db.startswith("PROD"):
+        return None
+    try:
+        rows = session.sql("""
+            SELECT CONFIG_VALUE FROM ADJUSTMENT_APP.ADJ_APP_CONFIG
+            WHERE CONFIG_KEY = 'DIRECT_ADJUSTMENT_ENABLED'
+        """).collect()
+        if rows and str(rows[0][0] or "").strip().lower() == "true":
+            return None
+    except Exception:
+        pass
+    return ("Direct adjustments are switched off in production while they "
+            "wait for user sign-off. Once the business has signed them off, "
+            "an admin enables them on the Admin page (Scope Configuration › "
+            "Direct adjustments in production).")
+
+
 def _may_submit(session, username, process_type) -> bool:
     """True when `username` may submit for `process_type`.
 
@@ -462,6 +501,15 @@ def main(session, p_adjustment):
         # is a convenience and this is the one path every submission takes
         # (the wizard, the fan-out over scopes, and the Transfer Book fan-out
         # over trades all call this procedure).
+        # ── Direct adjustments in production (see _direct_blocked_reason) ─
+        # The FRTB file flow submits through here as adjustment_type
+        # 'Direct'; the per-row flow goes to SP_SUBMIT_DIRECT_BATCH, which
+        # applies the same gate.
+        if str(adjustment_type or "").strip().upper() == "DIRECT":
+            _blocked = _direct_blocked_reason(session)
+            if _blocked:
+                return {"adj_id": None, "status": "Error", "message": _blocked}
+
         if not _may_submit(session, username, process_type):
             return {"adj_id": None, "status": "Error",
                     "message": (f"{username} is not on the submitter list for "

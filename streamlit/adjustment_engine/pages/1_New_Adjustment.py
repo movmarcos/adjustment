@@ -25,7 +25,8 @@ from utils.styles import (scope_label, scope_meta, wide_kwargs,
     render_data_grid, fmt_adj_id, icon, bordered_container,
     ALL_SCOPES, _st_version, type_label,
 )
-from utils.snowflake_conn import (run_query, call_sp_df, call_sp_df_async,
+from utils.snowflake_conn import (direct_adjustment_gate,
+                                  run_query, call_sp_df, call_sp_df_async,
                                   current_user_name,
                                   signoff_access, can_sign_off,
                                   submit_access, can_submit,
@@ -772,22 +773,26 @@ def _btn(label, *, icon_name=None, **kwargs):
     return st.button(label, **kwargs)
 
 
-def _pill_row(options, selected, key_prefix, fmt=None, icons=None, descs=None):
+def _pill_row(options, selected, key_prefix, fmt=None, icons=None, descs=None,
+              disabled=None):
     """One-click segmented selector built from small buttons.
 
     Buttons are used instead of st.radio/st.pills: the selection is driven
     purely by wiz state (selected → primary red), so there is no widget
     default-vs-state fight and a single click always takes effect.
     `descs` adds a small caption under each option (two-line card look).
+    `disabled` is a set of options that cannot be picked (shown greyed).
     Returns the clicked option, or None."""
     cols = st.columns(len(options))
     clicked = None
+    _off = set(disabled or ())
     for i, opt in enumerate(options):
         with cols[i]:
             if _btn(fmt(opt) if fmt else str(opt),
                     icon_name=(icons or {}).get(opt),
                     key=_k(f"{key_prefix}_{opt}"),
                     **wide_kwargs(),
+                    disabled=opt in _off,
                     type="primary" if opt == selected else "secondary"):
                 clicked = opt
             if descs and descs.get(opt):
@@ -4413,8 +4418,18 @@ with left:
         # Descriptions are NOT shown per-button (four captions crowd the row
         # for users who already know the categories) — only the selected
         # category's one-liner renders below the buttons.
+        # Direct adjustments are switched off in production until the
+        # business signs them off (Marcos, 2026-09-25). The category is
+        # disabled rather than hidden: a user who expects it should see
+        # that it exists and why it is unavailable, not wonder where it
+        # went. The gate that counts is server-side, in
+        # SP_SUBMIT_ADJUSTMENT / SP_SUBMIT_DIRECT_BATCH.
+        _direct_ok, _direct_why = direct_adjustment_gate()
         cat = _pill_row(list(CATEGORY_UI_DESCS.keys()), wiz.get("category"),
-                        "cat", icons=CATEGORY_BTN_ICONS)
+                        "cat", icons=CATEGORY_BTN_ICONS,
+                        disabled=() if _direct_ok else {"Direct Adjustment"})
+        if not _direct_ok:
+            st.info(_direct_why, icon="🔒")
         if cat and cat != wiz.get("category"):
             if wiz.get("direct_batch_id"):  # leaving Direct Adjustment — drop its stage rows
                 try:
@@ -4475,7 +4490,12 @@ with left:
     if not wiz.get("category"):
         st.info("Select an adjustment category to continue.")
     elif wiz["category"] == "Direct Adjustment":
-        render_direct_form()
+        if _direct_ok:
+            render_direct_form()
+        else:
+            # A draft begun before the switch was thrown (or restored state)
+            # must not keep a usable Direct form open.
+            st.error(_direct_why, icon="🔒")
     elif wiz["category"] == "VaR Upload":
         render_var_upload_form()
     elif wiz["category"] == "Entity Roll":
@@ -4506,6 +4526,9 @@ with right:
     _sub_denied = [sc for sc in (_submit_scopes() or _selected_scopes())
                    if not can_submit(_sub_access, sc)]
     submit_blocked = bool(_sub_denied)
+
+    # Direct switched off in production (see the category picker above).
+    direct_blocked = (not _direct_ok) and cat == "Direct Adjustment"
 
     # ── Impact preview trigger (Scaling, narrow scope only) ─────────────
     zero_rows = False
@@ -4695,7 +4718,8 @@ with right:
     if _btn("Submit Adjustment", icon_name=":material/send:", type="primary",
             **wide_kwargs(), key=_k("submit"),
             disabled=bool(missing) or not dup_ok or not eroll_ok or zero_rows
-                     or signoff_blocked or submit_blocked or not fanout_ok):
+                     or signoff_blocked or submit_blocked or direct_blocked
+                     or not fanout_ok):
         wiz["result"] = None
         with st.spinner(f"Submitting {_n_jobs} adjustments…" if _n_jobs > 1
                         else "Submitting adjustment…"):
@@ -4708,7 +4732,10 @@ with right:
             # must re-read them, not quote the pre-roll numbers.
             st.session_state.pop("_eroll_recon_cache", None)
         safe_rerun()
-    if missing:
+    if direct_blocked:
+        st.caption("Submit is blocked: Direct adjustments are switched off in "
+                   "production until the business signs them off.")
+    elif missing:
         st.caption("Submit unlocks when the ticket is complete.")
     elif submit_blocked:
         st.caption("Submit is blocked: you are not on the submitter list for "

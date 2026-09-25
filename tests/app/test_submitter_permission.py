@@ -207,7 +207,7 @@ def test_the_refusal_explains_what_to_do():
 
 def test_the_submit_button_is_gated():
     src = _source(PAGE)
-    assert "or signoff_blocked or submit_blocked or not fanout_ok)" in src, (
+    assert "or signoff_blocked or submit_blocked or direct_blocked" in src, (
         "submit_blocked is not wired into the Submit button's disabled flag.")
 
 

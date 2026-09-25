@@ -75,6 +75,45 @@ def _app_cfg(session, key, default=""):
     return str(v) if v is not None else default
 
 
+# ── Direct adjustments in production ────────────────────────────────────────
+# Marcos, 2026-09-25: Direct adjustments stay switched OFF in the PROD_RAPTOR
+# database until the business signs them off. Reversible without a redeploy:
+# an admin sets ADJUSTMENT_APP.ADJ_APP_CONFIG.DIRECT_ADJUSTMENT_ENABLED to
+# 'true' (Admin page › Scope Configuration) and the gate opens.
+#
+# Checked HERE and not only in the page, because the page gate is a
+# convenience and this procedure is the one path every submission takes.
+# CURRENT_DATABASE() is the authority — the procedure runs inside the
+# database it is protecting, so there is nothing to configure and nothing
+# that can go stale.
+#
+# FAILS CLOSED: if the config table cannot be read in production, Direct
+# stays off. A feature switch whose purpose is to stay shut must not be
+# opened by an error.
+def _direct_blocked_reason(session):
+    """A refusal message while Direct is off in production, else None."""
+    try:
+        rows = session.sql("SELECT CURRENT_DATABASE() AS D").collect()
+        db = str(rows[0]["D"] or "").strip().upper() if rows else ""
+    except Exception:
+        db = ""
+    if not db.startswith("PROD"):
+        return None
+    try:
+        rows = session.sql("""
+            SELECT CONFIG_VALUE FROM ADJUSTMENT_APP.ADJ_APP_CONFIG
+            WHERE CONFIG_KEY = 'DIRECT_ADJUSTMENT_ENABLED'
+        """).collect()
+        if rows and str(rows[0][0] or "").strip().lower() == "true":
+            return None
+    except Exception:
+        pass
+    return ("Direct adjustments are switched off in production while they "
+            "wait for user sign-off. Once the business has signed them off, "
+            "an admin enables them on the Admin page (Scope Configuration › "
+            "Direct adjustments in production).")
+
+
 def check_signoff(session, process_type, cobid, entity_code=None):
     """Same rules as SP_SUBMIT_ADJUSTMENT.check_signoff — see 03 for the full
     lifecycle documentation. Called once per DISTINCT entity in the batch."""
@@ -159,6 +198,13 @@ def main(session, p_batch):
         if not username or not str(username).strip():
             return {"status": "Error", "created": 0,
                     "message": "username could not be resolved."}
+
+        # ── Direct adjustments in production (see _direct_blocked_reason) ─
+        # Every row submitted through this procedure is a Direct adjustment,
+        # so the gate applies to the whole batch, before anything is read.
+        _blocked = _direct_blocked_reason(session)
+        if _blocked:
+            return {"status": "Error", "created": 0, "message": _blocked}
 
         reason            = str(req.get("reason") or "")
         requires_approval = bool(req.get("requires_approval", False))

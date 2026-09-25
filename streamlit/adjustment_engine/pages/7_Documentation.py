@@ -182,6 +182,14 @@ Adjustment categories:
   view's DDL hash. An admin refreshes it (Admin › Business Rules; only views
   whose definition changed are re-described) and marks it reviewed; until
   then it shows DRAFT, and STALE when the view changed after it was written.
+  NOT YET LIVE IN PRODUCTION (2026-09-25): Direct adjustments are switched
+  OFF in the PROD database until the business signs them off. The category
+  cannot be selected there and both SP_SUBMIT_ADJUSTMENT and
+  SP_SUBMIT_DIRECT_BATCH refuse a Direct submission, so no route gets round
+  it. Other environments are unaffected, and every other category works in
+  production as normal. After sign-off an admin flips
+  ADJ_APP_CONFIG.DIRECT_ADJUSTMENT_ENABLED to true (Admin › Scope
+  Configuration) — no redeploy.
   DOUBLE PASTE / DUPLICATE ROWS (2026-09-25): a paste whose header line
   repeats (content pasted twice because the page was slow) is cut to its
   first copy with a warning. Rows identical to an earlier row (ignoring case
@@ -841,6 +849,15 @@ with tab_create:
     ]))
 
     section_title("Direct Adjustment (paste or upload CSV)", "list")
+    _html(_card(
+        f'{icon("lock", size=13, color=P["warning"])} <strong>Not yet '
+        f'available in production.</strong> Direct adjustments are switched '
+        f'off in the production database until the business has signed them '
+        f'off; the category is visible but cannot be selected there, and a '
+        f'submission is refused by the engine as well as by the page. Every '
+        f'other category works normally. After sign-off an admin turns them '
+        f'on (Admin › Scope Configuration › Direct adjustments in '
+        f'production) — no new release is needed.', P["warning"]))
     _html(_card(
         f'{icon("book-open", size=13, color=P["info"])} <strong>Read the rules '
         f'first.</strong> Every Direct upload card opens with a collapsed '

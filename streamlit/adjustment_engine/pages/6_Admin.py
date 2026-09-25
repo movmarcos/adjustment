@@ -13,7 +13,9 @@ from utils.styles import (scope_label, scope_meta, wide_kwargs, inject_css, rend
                           SCOPE_CONFIG, SCOPE_LABEL_HELP, icon, render_df_table,
                           kpi_card, fmt_user_dt, set_flash, render_flash,
                           confirm_gate)
-from utils.snowflake_conn import (run_query, run_query_df, current_user_name,
+from utils.snowflake_conn import (current_database, direct_adjustment_gate,
+                                  forget_direct_gate, is_production,
+                                  run_query, run_query_df, current_user_name,
                                   safe_rerun, sql_escape)
 
 # The one escape for SQL literals lives in utils.snowflake_conn (this page used
@@ -475,6 +477,66 @@ with tab_scopes:
         f'No Streamlit code changes required.'
         f'</div>',
         unsafe_allow_html=True)
+
+    # ── Direct adjustments in production ────────────────────────────────────
+    # Off in PROD until the business signs them off (Marcos, 2026-09-25).
+    # A switch rather than a code change, so lifting it after sign-off needs
+    # no redeploy. The server-side gate (SP_SUBMIT_ADJUSTMENT and
+    # SP_SUBMIT_DIRECT_BATCH) reads this same key.
+    st.markdown("<br/>", unsafe_allow_html=True)
+    section_title("Direct adjustments in production", "lock")
+    _in_prod = is_production()
+    _direct_on, _ = direct_adjustment_gate()
+    st.markdown(
+        f'<span style="font-size:0.85rem;color:{P["grey_700"]}">'
+        f'Direct adjustments (paste/upload exact values, per row or per FRTB '
+        f'file) are switched <strong>off in production</strong> until the '
+        f'business has signed them off. Every other category is unaffected. '
+        f'This switch only has an effect in a <code>PROD_*</code> database; '
+        f'elsewhere Direct adjustments are always available.'
+        f'</span>', unsafe_allow_html=True)
+
+    if not _in_prod:
+        st.info(f"This environment is **{current_database() or 'not production'}**, "
+                f"not production — Direct adjustments are available here "
+                f"regardless of this setting.")
+    elif _direct_on:
+        st.success("Direct adjustments are **enabled** in production.")
+    else:
+        st.warning("Direct adjustments are **disabled** in production, waiting "
+                   "for user sign-off.")
+
+    _dcol1, _dcol2 = st.columns([1, 3])
+    with _dcol1:
+        _direct_toggle = st.toggle("Allow in production", key="direct_prod_toggle",
+                                   value=_direct_on)
+    with _dcol2:
+        if st.button("Save", key="direct_prod_save", type="primary"):
+            try:
+                run_query(f"""
+                    MERGE INTO ADJUSTMENT_APP.ADJ_APP_CONFIG t
+                    USING (SELECT 'DIRECT_ADJUSTMENT_ENABLED' AS CONFIG_KEY,
+                                  '{"true" if _direct_toggle else "false"}' AS CONFIG_VALUE) s
+                    ON t.CONFIG_KEY = s.CONFIG_KEY
+                    WHEN MATCHED THEN UPDATE SET
+                        CONFIG_VALUE = s.CONFIG_VALUE,
+                        UPDATED_BY = '{_esc(user)}',
+                        UPDATED_AT = CURRENT_TIMESTAMP()
+                    WHEN NOT MATCHED THEN INSERT (CONFIG_KEY, CONFIG_VALUE,
+                        DESCRIPTION, UPDATED_BY, UPDATED_AT)
+                    VALUES (s.CONFIG_KEY, s.CONFIG_VALUE,
+                        'Direct adjustments allowed in a PROD database (awaiting user sign-off until true)',
+                        '{_esc(user)}', CURRENT_TIMESTAMP())
+                """)
+                forget_direct_gate()
+                set_flash("admin", "success",
+                          "Direct adjustments are now "
+                          + ("ENABLED" if _direct_toggle else "DISABLED")
+                          + " in production. Users must reload the app to see the change.")
+                safe_rerun()
+            except Exception as ex:
+                st.error(f"Could not save the setting: {ex}")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — APPROVERS MANAGEMENT
