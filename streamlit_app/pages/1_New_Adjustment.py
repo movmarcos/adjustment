@@ -35,6 +35,7 @@ from utils.scope_filters import (FIELD_LABELS, MAIN_FIELDS_SINGLE,
 from utils.submit_fanout import (scopes_to_submit as _scopes_to_submit_pure,
                                  submit_fanout as _submit_fanout_pure,
                                  first_scope as _first_scope)
+from utils.upload_identity import file_identity, identity_message, single_value
 from utils.transfer_book import (transfer_jobs, book_entity,
                                  submit_jobs as _submit_jobs_pure)
 
@@ -1076,7 +1077,8 @@ def _completion_checks() -> list:
                                     and _upload_validation_ok()),
             ("Single COB in file",  not wiz.get("_var_cob_bad")),
             ("COB date (from file)", bool(wiz.get("cobid"))),
-            ("Entity code",         bool((wiz.get("entity_code") or "").strip())),
+            ("Single ENTITY_CODE in file", not wiz.get("_entity_bad")),
+            ("Entity code (from file)", bool((wiz.get("entity_code") or "").strip())),
             ("Reference",           bool((wiz.get("global_reference") or "").strip())),
             ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
             ("Reason",              bool((wiz.get("reason") or "").strip())),
@@ -1091,6 +1093,8 @@ def _completion_checks() -> list:
             ("Single COB in file",  not wiz.get("_frtb_cob_bad")),
             ("COB date (from file)", bool(wiz.get("cobid"))
                                      and wiz.get("cobid") == wiz.get("_frtb_file_cob")),
+            ("Single ENTITY_CODE in file", not wiz.get("_entity_bad")),
+            ("Entity code (from file)", bool((wiz.get("entity_code") or "").strip())),
             ("Reference",           bool((wiz.get("global_reference") or "").strip())),
             ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
             ("Reason",              bool((wiz.get("reason") or "").strip())),
@@ -1112,8 +1116,8 @@ def _completion_checks() -> list:
         checks += [
             ("At least 1 valid row", _n_valid > 0),
             ("COB date",            bool(wiz.get("cobid"))),
-            ("COB matches the file", wiz.get("_direct_file_cob") is None
-                                     or wiz.get("cobid") == wiz["_direct_file_cob"]),
+            ("Single ENTITY_CODE",  not wiz.get("_entity_bad")),
+            ("Entity code",         bool((wiz.get("entity_code") or "").strip())),
             ("Adjustment Category", bool((wiz.get("adjustment_category") or "").strip())),
             ("Reason",              bool((wiz.get("reason") or "").strip())),
         ]
@@ -1496,6 +1500,83 @@ def _accepted_columns(scope: str):
         ((str(r[1]).strip().upper(), r[3]) for r in rows if r[3] is not None),
         key=lambda t: t[1])
     return alias_map, required, ordered_cols
+
+
+def _render_rules_panel(scope: str, columns=None) -> None:
+    """Collapsed "What will be checked" panel at the top of every Direct
+    upload card (Marcos, 2026-09-25: the rules in English, where business
+    can read them, before they upload).
+
+    Columns and the conditional rules are rendered from the scope's config
+    by utils.direct_rules — no model, so they cannot drift. The generic SQL
+    checks come from ADJ_RULE_DOCS (Cortex-written, cached by DDL hash,
+    labelled DRAFT / stale by the loader). `columns` lets the per-row flow
+    pass its DIRECT_ACCEPTED_COLUMNS contract instead of DIRECT_SCOPE_SCHEMA.
+    """
+    from utils.direct_rules import describe_columns, describe_rules, rules_html
+    from utils.rule_docs import load_rule_docs
+    schema = _direct_schema(scope)
+    if columns is None:
+        columns = describe_columns(schema.get("expected") or [],
+                                   schema.get("aliases") or {})
+    groups = describe_rules(schema.get("validation_rules") or [])
+    with st.expander(f"What will be checked — {scope_label(scope)}", expanded=False):
+        st.markdown(rules_html(scope_label(scope), columns, groups,
+                               load_rule_docs(scope)),
+                    unsafe_allow_html=True)
+
+
+def _apply_identity(ident: dict, noun: str = "upload") -> None:
+    """Copy the file's single COB / ENTITY_CODE into the draft, or block.
+
+    wiz["cobid"] and wiz["entity_code"] are ONLY ever set from the data
+    here (never typed), so the header, the sign-off check (scope + entity +
+    COB, as for Scaling) and the rows can never disagree. The *_bad flags
+    feed the completion checklist; the messages are shown by
+    _render_identity_fields right under the upload widget.
+    """
+    cob, ent = ident.get("cob"), ident.get("entity")
+    wiz["cobid"] = cob.value if (cob is not None and not cob.error) else None
+    wiz["_cob_bad"] = cob is None or bool(cob.error)
+    wiz["_cob_msg"] = identity_message("cob", cob, noun)
+    wiz["entity_code"] = ent.value if (ent is not None and not ent.error) else None
+    wiz["_entity_bad"] = ent is None or bool(ent.error)
+    wiz["_entity_msg"] = identity_message("entity", ent, noun)
+    # Legacy flags still read by older checks
+    wiz["_var_cob_bad"] = bool(cob is not None and cob.error == "many")
+    wiz["_frtb_cob_bad"] = wiz["_var_cob_bad"]
+
+
+def _clear_identity() -> None:
+    for k in ("cobid", "entity_code", "_cob_msg", "_entity_msg"):
+        wiz[k] = None
+    for k in ("_cob_bad", "_entity_bad", "_var_cob_bad", "_frtb_cob_bad"):
+        wiz[k] = False
+
+
+def _render_identity_fields(has_data: bool) -> None:
+    """Read-only COB + ENTITY_CODE, inline in the upload card, right under
+    the data (the separate "Upload Details" step is gone — one panel)."""
+    st.markdown(
+        f'<div style="font-size:0.78rem;font-weight:700;text-transform:uppercase;'
+        f'letter-spacing:.04em;color:{P["grey_700"]};margin:0.6rem 0 0.1rem">'
+        f'This upload is for</div>', unsafe_allow_html=True)
+    g1, g2 = st.columns(2)
+    with g1:
+        st.text_input("COB (from the data)", value=str(wiz.get("cobid") or ""),
+                      disabled=True, placeholder="read from the COBID column",
+                      help="Every row must carry the same COB (YYYYMMDD). To "
+                           "change it, change the data.")
+    with g2:
+        st.text_input("ENTITY_CODE (from the data)", value=wiz.get("entity_code") or "",
+                      disabled=True, placeholder="read from the ENTITY_CODE column",
+                      help="One upload is for exactly one entity — sign-off is "
+                           "checked for this scope, entity and COB. To change "
+                           "it, change the data.")
+    if has_data:
+        for msg in (wiz.get("_cob_msg"), wiz.get("_entity_msg")):
+            if msg:
+                st.error(msg)
 
 
 def _render_field_chips(cols, required=None, note="* required · column order and case don't matter · common aliases accepted"):
@@ -2334,7 +2415,7 @@ def render_direct_form() -> None:
             wiz["_frtb_file_cob"]     = None
             wiz["_frtb_cob_bad"]      = False
             wiz["_direct_file_cob"]   = None
-            wiz["cobid"]              = None   # FRTB: COB comes from the file
+            _clear_identity()                  # COB / entity come from the data
             safe_rerun()
     if not wiz.get("process_type"):
         st.info("Select a data scope to continue.")
@@ -2368,6 +2449,9 @@ def render_direct_form() -> None:
             _sec(3, f"CSV Data — {scope_label(scope)}",
                  "Paste or upload rows — one row = one adjustment. Column order and case don't matter.")
         _ordered_chip_cols = [c for c, _ in _accepted_columns(scope)[2]]
+        _render_rules_panel(scope, columns=[
+            {"name": c, "required": c in required, "type": "string", "alias": ""}
+            for c in _ordered_chip_cols])
         if _ordered_chip_cols:
             _render_field_chips(
                 _ordered_chip_cols, required,
@@ -2403,6 +2487,7 @@ def render_direct_form() -> None:
             wiz["_direct_sig"]     = None
             wiz["direct_rows"]     = None
             wiz["_direct_file_cob"] = None   # file-COB gate must not survive
+            _clear_identity()
         wiz["_direct_in_mode"] = _in_mode
 
         if _in_mode in ("Paste content", "Upload file"):
@@ -2496,37 +2581,15 @@ def render_direct_form() -> None:
                                f"but the header must be there). Download the "
                                f"CSV template above for the full list.")
 
-                # ── COB in the file vs COB on the page ───────────────────
-                # The file must carry ONE COBID on every row; the user still
-                # enters the COB in Batch Details and the two must match —
-                # a stale file aimed at the wrong COB dies here, not in a
-                # report. COBID itself is never staged (header takes the
-                # page value).
-                cob_bad = False
-                wiz["_direct_file_cob"] = None
-                if "COBID" in ndf.columns:
-                    _cob_num = pd.to_numeric(ndf["COBID"], errors="coerce")
-                    _cobs = sorted(_cob_num.dropna().astype(int).unique().tolist())
-                    if _cob_num.isna().any():
-                        cob_bad = True
-                        st.error("Some rows have a blank or non-numeric COBID "
-                                 "— every row must carry the file's COB "
-                                 "(YYYYMMDD).")
-                    if len(_cobs) > 1:
-                        cob_bad = True
-                        st.error(f"The file mixes {len(_cobs)} different "
-                                 f"COBIDs ({', '.join(map(str, _cobs[:5]))}…) "
-                                 f"— one batch covers exactly one COB.")
-                    elif len(_cobs) == 1:
-                        wiz["_direct_file_cob"] = int(_cobs[0])
-                        if wiz.get("cobid") and wiz["cobid"] != _cobs[0]:
-                            cob_bad = True
-                            st.error(f"The file says COB {_cobs[0]} but the "
-                                     f"page says COB {wiz['cobid']} — they "
-                                     f"must match. Fix whichever one is wrong.")
-                        elif not wiz.get("cobid"):
-                            st.info(f"File COB is {_cobs[0]} — enter the same "
-                                    f"COB in Batch Details below to confirm.")
+                # ── COB and ENTITY_CODE in the file ──────────────────────
+                # Both are read from the rows: exactly one value each, or
+                # the batch is not staged. COBID itself is never staged
+                # (the header takes the derived value); the entity is what
+                # sign-off is checked against, per scope and COB.
+                _apply_identity(file_identity(ndf), noun="batch")
+                cob_bad = bool(wiz.get("_cob_bad") or wiz.get("_entity_bad"))
+                wiz["_direct_file_cob"] = wiz.get("cobid")
+                _render_identity_fields(True)
 
                 if unknown_cols or missing_cols or cob_bad or not len(ndf):
                     # Can't stage this parse — drop any previously staged batch so a
@@ -2586,7 +2649,7 @@ def render_direct_form() -> None:
                # squeezes its canvas; plain widgets are the proven path).
             ordered = _accepted_columns(scope)[2]     # [(stage_col, ord), ...]
             # Virtual columns (COBID) are CSV-template-only — the row builder
-            # takes the COB from Batch Details, never per row.
+            # takes the COB typed below the rows, never per row.
             row_cols = [c for c, _ in ordered if c not in _DIRECT_VIRTUAL_COLS]
             if not row_cols:
                 st.info("No entry fields configured for this scope yet — "
@@ -2648,10 +2711,17 @@ def render_direct_form() -> None:
                     if _btn("Add row to batch", icon_name=":material/playlist_add:",
                             key=_k("dr_add"), type="primary",
                             **wide_kwargs()):
-                        if not (vals.get("ENTITY_CODE") or "").strip() \
-                                or not vals.get("VALUE_USD"):
+                        _new_ent = (vals.get("ENTITY_CODE") or "").strip().upper()
+                        _have_ent = {str(r.get("ENTITY_CODE") or "").strip().upper()
+                                     for r in rows if r.get("ENTITY_CODE")}
+                        if not _new_ent or not vals.get("VALUE_USD"):
                             _add_err = ("Entity Code and Value (USD) are "
                                         "required for every row.")
+                        elif _have_ent and _new_ent not in _have_ent:
+                            _add_err = (f"This batch is for entity "
+                                        f"{sorted(_have_ent)[0]} — one batch "
+                                        f"covers exactly one ENTITY_CODE. Start "
+                                        f"a new adjustment for {_new_ent}.")
                         else:
                             wiz["direct_rows"] = rows + [
                                 {c: (vals.get(c) or None) for c in row_cols}]
@@ -2676,8 +2746,17 @@ def render_direct_form() -> None:
                 _already_submitted = (rows and
                                       wiz.get("_direct_submitted_sig") == _rows_sig)
 
+                # Entity from the rows (one per batch, enforced on Add);
+                # COB typed here — the row builder has no COBID column.
+                _ent_sv = single_value(pd.Series([r.get("ENTITY_CODE") for r in rows]))
+                wiz["entity_code"] = _ent_sv.value if not _ent_sv.error else None
+                wiz["_entity_bad"] = bool(rows) and bool(_ent_sv.error)
+                wiz["_entity_msg"] = identity_message("entity", _ent_sv, "batch") if rows else ""
+                wiz["cobid"] = _int_input("COB Date (YYYYMMDD) *", "dadj_cobid", wiz.get("cobid"))
+                wiz["_cob_bad"] = not wiz.get("cobid")
                 if rows:
-                    st.caption(f"{len(rows)} row(s) in this batch:")
+                    st.caption(f"{len(rows)} row(s) in this batch for entity "
+                               f"**{wiz.get('entity_code') or '—'}**:")
                     render_df_table(pd.DataFrame(rows, columns=row_cols),
                                     max_rows=50, height=220)
                     if _already_submitted:
@@ -2720,9 +2799,12 @@ def render_direct_form() -> None:
                                 "validation — click **Validate rows** to "
                                 "refresh before submitting.")
 
-    with _card():
-        _sec(4, "Batch Details", "COB applies to every row submitted from this batch.")
-        wiz["cobid"] = _int_input("COB Date (YYYYMMDD) *", "dadj_cobid", wiz.get("cobid"))
+    # Verdict grid right after the data panel, outside every card (see
+    # _grid_after above) — a user missed failed rows when it sat last.
+    if _grid_after is not None:
+        _sec(4, "Staged Rows", "Every row with its validation verdict — "
+                               "invalid rows are excluded from submission.")
+        render_data_grid(_grid_after, height=380)
 
     with _card():
         _sec(5, "Business Context", "Why is this adjustment needed?")
@@ -2738,11 +2820,6 @@ def render_direct_form() -> None:
                                      value=wiz.get("reason", ""), height=70,
                                      key=_k("dadj_reason"))
 
-    # Verdict grid LAST, outside every card (see _grid_after above).
-    if _grid_after is not None:
-        _sec(6, "Staged Rows", "Every row with its validation verdict — "
-                               "invalid rows are excluded from submission.")
-        render_data_grid(_grid_after, height=380)
 
 
 def render_var_upload_form() -> None:
@@ -2755,6 +2832,7 @@ def render_var_upload_form() -> None:
     _preview_after = None
     _sec(2, f"CSV Upload — {scope_label(wiz['process_type'])}",
          "Paste exact adjustment values.")
+    _render_rules_panel(wiz["process_type"])
     if expected_cols:
         _info_banner('Provide a CSV of exact adjustment values — paste the '
                      'content or upload the file. Expected columns:')
@@ -2823,8 +2901,7 @@ def render_var_upload_form() -> None:
         # submittable behind the error message.
         wiz["uploaded_df"] = None
         wiz["_upval"] = None
-        wiz["cobid"] = None
-        wiz["_var_cob_bad"] = False
+        _clear_identity()
         st.error(f"Failed to read the CSV: {_parse_err}. If the columns look "
                  f"wrong, try selecting the delimiter explicitly above.")
     elif df is not None:
@@ -2858,84 +2935,28 @@ def render_var_upload_form() -> None:
         # users' environment (grid grows unbounded, page locks).
         _preview_after = df
 
-        # COB comes ONLY from the file and is re-derived on every parse
-        # (same rule as the FRTB file flow): the file's single COBId, or
-        # nothing. Never user-editable — an edited COB used to disagree with
-        # the rows and mis-target the upload.
-        wiz["cobid"] = None
-        wiz["_var_cob_bad"] = False
-        if "COBId" in df.columns and len(df):
-            _cobs = sorted(pd.to_numeric(df["COBId"], errors="coerce")
-                           .dropna().astype(int).unique().tolist())
-            if len(_cobs) == 1:
-                wiz["cobid"] = int(_cobs[0])
-            elif len(_cobs) > 1:
-                wiz["_var_cob_bad"] = True
-                st.error(f"The file mixes {len(_cobs)} different COBIds "
-                         f"({', '.join(map(str, _cobs[:5]))}…) — one upload "
-                         f"covers exactly one COB. Submission is blocked.")
-            else:
-                st.error("COBId has no valid value in the file — every row "
-                         "must carry the COB as YYYYMMDD. Submission is "
-                         "blocked.")
-        else:
-            st.error("The file has no COBId column — the COB is taken from "
-                     "the file, so submission is blocked until it is added.")
-
-        # Entity is SEEDED from the file once per new parse, then the box
-        # below owns it — so the user can correct or clear it without the
-        # file value snapping back on the next rerun.
-        _file_sig = f'{len(df)}|{",".join(map(str, df.columns))}|{_src_token}'
-        if "EntityCode" in df.columns and len(df):
-            _ents = sorted({str(e).strip() for e in df["EntityCode"].dropna()
-                            if str(e).strip() and str(e).strip().upper() != "NAN"})
-            if len(_ents) > 1:
-                st.warning(f"The file contains {len(_ents)} different "
-                           f"EntityCodes ({', '.join(_ents[:5])}"
-                           f"{'…' if len(_ents) > 5 else ''}) — one upload is "
-                           f"normally one entity. Entity Code below is set to "
-                           f"the first; check it before submitting.")
-            if _ents and wiz.get("_var_entity_sig") != _file_sig:
-                wiz["entity_code"] = _ents[0]
-        wiz["_var_entity_sig"] = _file_sig
+        # COB and ENTITY_CODE come ONLY from the file and are re-derived on
+        # every parse: one value each, or submission is blocked. Never
+        # user-editable — an edited value used to disagree with the rows.
+        _apply_identity(file_identity(df))
+        _render_identity_fields(True)
     else:
         # CSV cleared (paste box emptied / file removed): the previously
         # parsed upload must NOT stay submittable behind an empty input, and
-        # the file-derived COB goes with it.
+        # the file-derived COB / entity go with it.
         wiz["uploaded_df"] = None
         wiz["_upval"] = None
-        wiz["cobid"] = None
-        wiz["_var_cob_bad"] = False
+        _clear_identity()
+        _render_identity_fields(False)
 
     _csv_card.__exit__(None, None, None)
 
-    with _card():
-        _sec(3, "Upload Details",
-             "COB is read from the file's COBId column and cannot be edited; "
-             "Entity is pre-filled from the file and can be corrected.")
-        g1, g2 = st.columns(2)
-        with g1:
-            # Read-only: the value is whatever the current parse derived
-            # (no key on purpose — a keyed widget would hold on to the
-            # previous file's COB after the data changed).
-            st.text_input("COB Date (from file) *", value=str(wiz.get("cobid") or ""),
-                          disabled=True,
-                          placeholder="derived from the file's COBId",
-                          help="Taken from the COBId column of the CSV. To "
-                               "change it, change the file — every row must "
-                               "carry the same COB.")
-            if wiz.get("_var_cob_bad"):
-                st.caption("⚠ The file has more than one COBId — fix the "
-                           "file to set the COB.")
-            elif wiz.get("uploaded_df") is not None and not wiz.get("cobid"):
-                st.caption("⚠ No valid COBId found in the file.")
-        with g2:
-            ev = st.text_input("Entity Code *", key=_k("var_entity"),
-                               value=wiz.get("entity_code") or "",
-                               help="Pre-filled from the file's EntityCode "
-                                    "column. Clear or change it if the file "
-                                    "value is wrong.")
-            wiz["entity_code"] = ev.strip() or None
+    # Grid right after the upload panel (Marcos, 2026-09-25: a user missed
+    # failed rows when the grid sat at the bottom). Outside the card — a
+    # dataframe inside the styled card loops the resize observer.
+    if _preview_after is not None:
+        _sec(3, "Uploaded Data", "The rows exactly as they will be submitted.")
+        render_data_grid(_preview_after, height=440)
 
     with _card():
         _sec(4, "Business Context", "Why is this adjustment needed?")
@@ -2982,11 +3003,6 @@ def render_var_upload_form() -> None:
     else:
         wiz["_dup_adj_ids"] = []
 
-    # Preview grid LAST (user request): details/context sections above, the
-    # data below — many rows welcome (internal scroll).
-    if _preview_after is not None:
-        _sec(5, "Uploaded Data", "The rows exactly as they will be submitted.")
-        render_data_grid(_preview_after, height=440)
 
 
 def _frtb_required_errors(df, schema) -> pd.DataFrame:
@@ -3081,6 +3097,7 @@ def _render_frtb_direct_body(scope: str) -> None:
     _sec(3, f"CSV Upload — {_FRTB_LABELS[scope]}",
          "One file = one adjustment. Column order and case don't matter; "
          "business header names (e.g. EVALUATION_DATE, TRADE_ID) are accepted.")
+    _render_rules_panel(scope)
     if expected:
         _render_field_chips(
             expected, required,
@@ -3148,8 +3165,7 @@ def _render_frtb_direct_body(scope: str) -> None:
         wiz["_upval"] = None
         wiz["_frtb_rule_errs"] = None
         wiz["_frtb_file_cob"] = None
-        wiz["_frtb_cob_bad"] = False
-        wiz["cobid"] = None
+        _clear_identity()
         st.error(f"Failed to read the CSV: {_parse_err}. If the columns look "
                  f"wrong, pick the delimiter explicitly above.")
     elif df is not None:
@@ -3173,28 +3189,13 @@ def _render_frtb_direct_body(scope: str) -> None:
                        f"{_FRTB_LABELS[scope]} layout (stored with the upload, "
                        "not processed): " + ", ".join(unknown[:15]))
 
-        # COB comes ONLY from the file and is re-derived on every parse: the
-        # header COB is the file's single COBID, or nothing. It is never
-        # user-editable (a stale COB from a previous paste used to survive a
-        # data change and mis-target the adjustment).
-        wiz["_frtb_file_cob"] = None
-        wiz["_frtb_cob_bad"] = False
-        wiz["cobid"] = None
-        if "COBID" in df.columns and len(df):
-            _cobs = sorted(pd.to_numeric(df["COBID"], errors="coerce")
-                           .dropna().astype(int).unique().tolist())
-            if len(_cobs) == 1:
-                wiz["_frtb_file_cob"] = int(_cobs[0])
-                wiz["cobid"] = int(_cobs[0])
-            elif len(_cobs) > 1:
-                wiz["_frtb_cob_bad"] = True
-                st.error(f"The file mixes {len(_cobs)} different COBIDs "
-                         f"({_cobs[:5]}…) — one upload covers exactly one COB. "
-                         f"Submission is blocked.")
-            else:
-                st.error("COBID has no valid value in the file — every row "
-                         "must carry the COB as YYYYMMDD. Submission is "
-                         "blocked.")
+        # COB and ENTITY_CODE come ONLY from the file and are re-derived on
+        # every parse: one value each, or submission is blocked. Never
+        # user-editable (a stale COB from a previous paste used to survive
+        # a data change and mis-target the adjustment; the entity is what
+        # sign-off is checked against, as for Scaling).
+        _apply_identity(file_identity(df))
+        wiz["_frtb_file_cob"] = wiz.get("cobid")
 
         # Reference-data validation (codes vs dimensions) — same engine as
         # VaR Upload, config-driven via RESOLUTIONS.
@@ -3257,6 +3258,7 @@ def _render_frtb_direct_body(scope: str) -> None:
         # Rendered AFTER the card closes (see _csv_card.__exit__ below) —
         # dataframe-inside-card loops in the users' environment.
         _frtb_preview_after = _prev
+        _render_identity_fields(True)
     else:
         # CSV cleared: the previous parse must not stay submittable, and the
         # rules gate must not report clean for a file that no longer exists.
@@ -3264,31 +3266,17 @@ def _render_frtb_direct_body(scope: str) -> None:
         wiz["_upval"] = None
         wiz["_frtb_rule_errs"] = None
         wiz["_frtb_file_cob"] = None
-        wiz["_frtb_cob_bad"] = False
-        wiz["cobid"] = None
+        _clear_identity()
+        _render_identity_fields(False)
 
     _csv_card.__exit__(None, None, None)
 
-    with _card():
-        _sec(4, "Upload Details",
-             "COB is read from the file's COBID column and cannot be edited.")
-        g1, _g2 = st.columns(2)
-        with g1:
-            # Read-only: the value is whatever the current parse derived
-            # (no key on purpose — a keyed widget would hold on to the
-            # previous file's COB after the data changed).
-            _cob_show = str(wiz.get("cobid") or "")
-            st.text_input("COB Date (from file) *", value=_cob_show,
-                          disabled=True,
-                          placeholder="derived from the file's COBID",
-                          help="Taken from the COBID column of the CSV. To "
-                               "change it, change the file — every row must "
-                               "carry the same COB.")
-            if wiz.get("_frtb_cob_bad"):
-                st.caption("⚠ The file has more than one COBID — fix the "
-                           "file to set the COB.")
-            elif wiz.get("uploaded_df") is not None and not wiz.get("cobid"):
-                st.caption("⚠ No valid COBID found in the file.")
+    # Grid right after the upload panel (Marcos, 2026-09-25: a user missed
+    # failed rows when the grid sat at the bottom). Outside the card — a
+    # dataframe inside the styled card loops the resize observer.
+    if _frtb_preview_after is not None:
+        _sec(4, "Uploaded Data", "Every row with its validation verdict.")
+        render_data_grid(_frtb_preview_after, height=440)
 
     with _card():
         _sec(5, "Business Context", "Why is this adjustment needed?")
@@ -3324,11 +3312,6 @@ def _render_frtb_direct_body(scope: str) -> None:
     else:
         wiz["_dup_adj_ids"] = []
 
-    # Preview grid LAST (user request): details/context sections above, the
-    # data below — many rows welcome (internal scroll, ✓/✗ + Errors first).
-    if _frtb_preview_after is not None:
-        _sec(6, "Uploaded Data", "Every row with its validation verdict.")
-        render_data_grid(_frtb_preview_after, height=440)
 
 
 def render_entity_roll_form() -> None:
