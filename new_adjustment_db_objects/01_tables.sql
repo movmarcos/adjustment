@@ -953,6 +953,35 @@ CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_SUBMITTERS (
 COMMENT = 'Users allowed to SUBMIT an adjustment. Preview/impact stays open to everyone. NULL PROCESS_TYPE = any scope. Empty list = everyone may (bootstrap). Managed via Admin page.';
 
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- ADJ_RULE_DOCS — business-English description of the SQL validation rules
+-- for Direct uploads (VW_DIRECT_VALIDATE and the VW_DIRECT_*_ENRICHED views),
+-- one row per (scope, view). Written by SP_REFRESH_RULE_DOCS (Cortex), shown
+-- in the New Adjustment page's "What will be checked" panel.
+--
+-- DDL_HASH is SHA2(GET_DDL(view)) at the time the text was written. The page
+-- compares it with the live hash and labels the text "rules changed since
+-- this was written" when they differ, and the refresh only re-generates rows
+-- whose hash moved — the model is never asked to describe a view that has
+-- not changed. REVIEWED_BY/AT: an admin's confirmation that the wording is
+-- right; until then the page labels it DRAFT. (Marcos, 2026-09-25.)
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE OR ALTER TABLE ADJUSTMENT_APP.ADJ_RULE_DOCS (
+    PROCESS_TYPE                VARCHAR(30)   NOT NULL,
+    OBJECT_NAME                 VARCHAR(200)  NOT NULL,   -- view name, no schema
+    DDL_HASH                    VARCHAR(64),
+    DESCRIPTION                 VARCHAR(16000),
+    MODEL                       VARCHAR(100),
+    GENERATED_AT                TIMESTAMP_NTZ,
+    GENERATED_BY                VARCHAR(50),
+    REVIEWED_BY                 VARCHAR(50),
+    REVIEWED_AT                 TIMESTAMP_NTZ,
+
+    CONSTRAINT PK_ADJ_RULE_DOCS PRIMARY KEY (PROCESS_TYPE, OBJECT_NAME)
+)
+COMMENT = 'Cortex-written business description of the SQL validation views per Direct scope, cached by DDL hash; DRAFT until REVIEWED_BY is set. Refreshed from the Admin page (SP_REFRESH_RULE_DOCS).';
+
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 7a2. ADJ_USER_PREFS — per-user display preferences
 --
