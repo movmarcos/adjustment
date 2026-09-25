@@ -114,26 +114,6 @@ def _direct_blocked_reason(session):
             "Direct adjustments in production).")
 
 
-# ── Sign-off scope spellings ────────────────────────────────────────────────
-# FRTB and FRTBSBM are two spellings of ONE scope; FRTBDRC and FRTBRRAO are
-# scopes of their OWN and never inherit an FRTB sign-off — they now have
-# their own sign-off process (Marcos, 2026-09-25). Widened by spelling only:
-# nothing here may make one scope's sign-off block a different scope.
-#
-# Mirror of streamlit/adjustment_engine/utils/signoff_scopes.py; a test
-# asserts every copy agrees (tests/app/test_signoff_scope_split.py).
-SCOPE_ALIASES = {
-    'FRTB':    ('FRTB', 'FRTBSBM'),
-    'FRTBSBM': ('FRTB', 'FRTBSBM'),
-}
-
-
-def _scope_in_list(scope):
-    """The scope's spellings as a SQL IN-list body: "'FRTB', 'FRTBSBM'"."""
-    s = str(scope or '').strip().upper()
-    return ", ".join("'" + n + "'" for n in SCOPE_ALIASES.get(s, (s,)))
-
-
 def check_signoff(session, process_type, cobid, entity_code=None):
     """Same rules as SP_SUBMIT_ADJUSTMENT.check_signoff — see 03 for the full
     lifecycle documentation. Called once per DISTINCT entity in the batch."""
@@ -144,8 +124,7 @@ def check_signoff(session, process_type, cobid, entity_code=None):
     app_rows = session.sql(f"""
         SELECT UPPER(COALESCE(ENTITY_CODE, '*')) AS E, UPPER(SIGN_OFF_STATUS) AS S
         FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-        WHERE COBID = {int(cobid)}
-          AND UPPER(PROCESS_TYPE) IN ({_scope_in_list(pt_esc)})
+        WHERE COBID = {int(cobid)} AND UPPER(PROCESS_TYPE) = '{pt_esc}'
     """).collect()
     # One entity can carry SEVERAL rows (one per SUB_TYPE): any blocked
     # sub-type blocks the entity; REOPENED opens it only when nothing is
@@ -175,9 +154,9 @@ def check_signoff(session, process_type, cobid, entity_code=None):
         return False
     feed = _app_cfg(session, "SIGNOFF_FEED_TABLE",
                     "BATCH.PUBLISH_SIGNOFF_STATUS").strip()
-    # Spelling only (SCOPE_ALIASES): FRTB == FRTBSBM, and DRC/RRAO stand
-    # alone — an FRTB sign-off must not block a DRC or RRAO adjustment.
-    pt_match = f"UPPER(u.PROCESS_TYPE) IN ({_scope_in_list(pt_esc)})"
+    # Exact match — the feed's 'FRTB' row is SBM only; DRC/RRAO have their
+    # own feed rows when the publish process carries them.
+    pt_match = f"UPPER(u.PROCESS_TYPE) = '{pt_esc}'"
     ent_pred = (f"AND UPPER(u.ENTITY_CODE) = UPPER('{_esc(ent)}')"
                 if ent else "")
     upstream = session.sql(f"""
@@ -190,7 +169,7 @@ def check_signoff(session, process_type, cobid, entity_code=None):
           AND NOT EXISTS (
               SELECT 1 FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS a
               WHERE a.COBID = u.COBID
-                AND UPPER(a.PROCESS_TYPE) IN ({_scope_in_list(pt_esc)})
+                AND UPPER(a.PROCESS_TYPE) = '{pt_esc}'
                 AND UPPER(a.SIGN_OFF_STATUS) = 'REOPENED'
                 AND (UPPER(a.ENTITY_CODE) = UPPER(u.ENTITY_CODE)
                      OR a.ENTITY_CODE = '*')

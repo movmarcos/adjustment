@@ -33,7 +33,6 @@ from utils.snowflake_conn import (direct_adjustment_gate,
                                   safe_rerun, friendly_error)
 from utils.scope_filters import (FIELD_LABELS, MAIN_FIELDS_SINGLE,
                                  filter_layout, allowed_filter_keys)
-from utils.signoff_scopes import sql_in_list as _signoff_in_list
 from utils.submit_fanout import (scopes_to_submit as _scopes_to_submit_pure,
                                  submit_fanout as _submit_fanout_pure,
                                  first_scope as _first_scope)
@@ -4020,12 +4019,13 @@ def _signoff_state(scope, cobid, entity=None):
     upstream feed is checked live (SUB_TYPE NULL/'' or NonCVA counts; app
     REOPENED overrides).
 
-    Scope matching is EXACT, widened only by spelling: FRTB and FRTBSBM are
-    one scope, FRTBDRC and FRTBRRAO are scopes of their own (Marcos,
-    2026-09-25 — this used to treat an upstream FRTB row as covering all
-    three, so a signed-off SBM blocked a DRC adjustment nobody had signed
-    off). utils/signoff_scopes.py is the one place that decides; the engine
-    and the sync procedure carry the same map."""
+    Scope matching is EXACT — the same match the engine makes. Every scope
+    code in the database is its own: FRTB, FRTBDRC and FRTBRRAO each sign
+    off separately (FRTBSBM is only how the UI spells FRTB; nothing stores
+    it). This used to match IN ('FRTB', <scope>), so a signed-off FRTB made
+    the page report DRC and RRAO as signed off too, and the page then
+    disagreed with SP_SUBMIT_ADJUSTMENT, which had always matched exactly
+    (Marcos, 2026-09-25)."""
     esc_scope = str(scope).replace("\\", "\\\\").replace("'", "''").upper()
     ent = str(entity).strip() if entity and str(entity).strip() else None
     try:
@@ -4035,8 +4035,7 @@ def _signoff_state(scope, cobid, entity=None):
                    REOPEN_REQUESTED_BY, REOPEN_REQUESTED_AT, REOPEN_REASON,
                    REOPEN_APPROVED_BY, REOPEN_APPROVED_AT
             FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS
-            WHERE COBID = {int(cobid)}
-              AND UPPER(PROCESS_TYPE) IN ({_signoff_in_list(esc_scope)})
+            WHERE COBID = {int(cobid)} AND UPPER(PROCESS_TYPE) = '{esc_scope}'
         """) or []
     except Exception:
         return None    # can't read sign-off state — submit still enforces it
@@ -4088,7 +4087,7 @@ def _signoff_state(scope, cobid, entity=None):
     if not cfg["enabled"]:
         return None
     try:
-        pt_match = f"UPPER(u.PROCESS_TYPE) IN ({_signoff_in_list(esc_scope)})"
+        pt_match = f"UPPER(u.PROCESS_TYPE) = '{esc_scope}'"
         ent_pred = ("AND UPPER(u.ENTITY_CODE) = UPPER('"
                     + ent.replace("\\", "\\\\").replace("'", "''") + "')") if ent else ""
         up = run_query(f"""
@@ -4102,7 +4101,7 @@ def _signoff_state(scope, cobid, entity=None):
               AND NOT EXISTS (
                   SELECT 1 FROM ADJUSTMENT_APP.ADJ_SIGNOFF_STATUS a
                   WHERE a.COBID = u.COBID
-                    AND UPPER(a.PROCESS_TYPE) IN ({_signoff_in_list(esc_scope)})
+                    AND UPPER(a.PROCESS_TYPE) = '{esc_scope}'
                     AND UPPER(a.SIGN_OFF_STATUS) = 'REOPENED'
                     AND (UPPER(a.ENTITY_CODE) = UPPER(TRIM(u.ENTITY_CODE))
                          OR a.ENTITY_CODE = '*')

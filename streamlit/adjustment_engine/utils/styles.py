@@ -1645,8 +1645,9 @@ def signoff_status_label(code: str) -> str:
 
 
 # Admin page: scope pills tooltip
-SCOPE_LABEL_HELP = ("FRTB is shown as FRTBSBM; FRTBDRC and FRTBRRAO are "
-                    "separate scopes with their own sign-off")
+SCOPE_LABEL_HELP = ("FRTBSBM is how this app spells the FRTB scope; "
+                    "FRTBDRC and FRTBRRAO are separate scopes with their "
+                    "own sign-off")
 
 
 def render_filter_chips(row: dict):

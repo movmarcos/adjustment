@@ -41,7 +41,7 @@ LANGUAGE PYTHON
 RUNTIME_VERSION = '3.11'
 PACKAGES = ('snowflake-snowpark-python')
 HANDLER = 'main'
-COMMENT = 'Materialises the unified upstream publish sign-off feed into ADJ_SIGNOFF_STATUS as SIGNED_OFF/EXTERNAL rows per COB + scope + entity (EXACT process-type match, spelling aliases only (FRTB=FRTBSBM) — no FRTB family fan-out). Never overwrites the in-app re-open lifecycle.'
+COMMENT = 'Materialises the unified upstream publish sign-off feed into ADJ_SIGNOFF_STATUS as SIGNED_OFF/EXTERNAL rows per COB + scope + entity (EXACT process-type match — no FRTB fan-out). Never overwrites the in-app re-open lifecycle.'
 EXECUTE AS CALLER
 AS
 $$
@@ -50,29 +50,16 @@ import json
 LOOKBACK_DAYS = 180
 
 # app scope → predicate on the feed's PROCESS_TYPE.
-# EXACT match per scope, widened by SPELLING only: FRTB and FRTBSBM are two
-# spellings of one scope, while FRTBDRC and FRTBRRAO are scopes of their own
-# and never inherit an FRTB sign-off — they have their own sign-off process
-# (Marcos, 2026-08, refined 2026-09-25). No family fan-out, ever.
-#
-# Mirror of streamlit/adjustment_engine/utils/signoff_scopes.py; a test
-# asserts every copy agrees (tests/app/test_signoff_scope_split.py).
-SCOPE_ALIASES = {
-    'FRTB':    ('FRTB', 'FRTBSBM'),
-    'FRTBSBM': ('FRTB', 'FRTBSBM'),
-}
-
-
-def _scope_in_list(scope):
-    """The scope's spellings as a SQL IN-list body: "'FRTB', 'FRTBSBM'"."""
-    s = str(scope or '').strip().upper()
-    return ", ".join("'" + n + "'" for n in SCOPE_ALIASES.get(s, (s,)))
-
-
-# Built from SCOPE_ALIASES so the two cannot disagree inside this file.
+# EXACT match per scope (Marcos, 2026-08): the feed's 'FRTB' row means SBM
+# only — FRTBDRC/FRTBRRAO appear in the app ONLY when the publish table
+# carries those process types itself. No fan-out.
 SCOPE_MATCH = {
-    s: f"UPPER(u.PROCESS_TYPE) IN ({_scope_in_list(s)})"
-    for s in ('VaR', 'Stress', 'Sensitivity', 'FRTB', 'FRTBDRC', 'FRTBRRAO')
+    'VaR':         "UPPER(u.PROCESS_TYPE) = 'VAR'",
+    'Stress':      "UPPER(u.PROCESS_TYPE) = 'STRESS'",
+    'Sensitivity': "UPPER(u.PROCESS_TYPE) = 'SENSITIVITY'",
+    'FRTB':        "UPPER(u.PROCESS_TYPE) = 'FRTB'",
+    'FRTBDRC':     "UPPER(u.PROCESS_TYPE) = 'FRTBDRC'",
+    'FRTBRRAO':    "UPPER(u.PROCESS_TYPE) = 'FRTBRRAO'",
 }
 
 
